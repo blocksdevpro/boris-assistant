@@ -1,5 +1,3 @@
-use boris_core::error::BorisResult;
-
-fn main() -> BorisResult<()> {
-    Ok(())
+fn main() {
+    // code here
 }

@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 rubato = "3.0.0"
+
+
+boris-core = { path = "../boris-core" }
+cpal = "0.18.1"

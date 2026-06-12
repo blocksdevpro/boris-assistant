@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hound = "3.5.1"
+
 boris-core = { path = "./crates/boris-core" }
 boris-audio = { path = "./crates/boris-audio" }
-hound = "3.5.1"

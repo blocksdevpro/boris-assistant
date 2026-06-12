@@ -14,6 +14,7 @@ impl AudioSlidingBuffer {
             capacity,
         }
     }
+
     pub fn push(&mut self, value: &[AudioSample]) {
         for &sample in value {
             if self.buffer.len() == self.capacity {

@@ -8,8 +8,6 @@ use cpal::{
 };
 use std::sync::mpsc::Sender;
 
-use crate::AUDIO_CHUNK_SIZE;
-
 pub struct AudioCapture {
     _stream: Stream,
     pub sample_rate: u32,
@@ -31,7 +29,7 @@ impl AudioCapture {
         let stream_config = StreamConfig {
             channels: channels as u16,
             sample_rate: sample_rate,
-            buffer_size: BufferSize::Fixed(AUDIO_CHUNK_SIZE),
+            buffer_size: BufferSize::Default,
         };
 
         let stream = match config.sample_format() {

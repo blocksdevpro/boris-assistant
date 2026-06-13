@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 boris-core = { path = "../boris-core" }
+boris-audio = { path = "../boris-audio" }
+
 
 livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }

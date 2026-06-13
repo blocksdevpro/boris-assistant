@@ -1,37 +1,28 @@
-use std::{sync::mpsc, time::Instant};
+use std::sync::mpsc;
 
-use boris_audio::{AUDIO_TARGET_RATE, buffer::AudioSlidingBuffer, pipeline::AudioPipeline};
-use boris_core::AudioSampleBuffer;
-use boris_inference::{WakeWordDetector, wakeword::BorisWakeWord};
+use boris_audio::{AUDIO_TARGET_RATE, pipeline::AudioPipeline, processor::AudioProcessor};
+use boris_core::{AudioSampleBuffer, event::BorisEvent};
+use boris_inference::wakeword::{BorisWakeWord, BorisWakeWordProcessor};
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
 fn main() {
     let (audio_tx, audio_rx) = mpsc::channel::<AudioSampleBuffer>();
+    let (event_tx, event_rx) = mpsc::channel::<BorisEvent>();
 
-    let _pipeline = AudioPipeline::spawn(audio_tx);
-    let mut wakeword = BorisWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
-    let mut sliding_buffer = AudioSlidingBuffer::new(AUDIO_TARGET_RATE as usize * 2);
+    let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<AudioSampleBuffer>();
 
-    let mut last_processed = Instant::now();
+    let _audio_pipeline = AudioPipeline::spawn(audio_tx);
+    let wakeword = BorisWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
+    let _audio_processor = AudioProcessor::spawn(audio_rx, vec![wakeword_audio_tx]);
+    let _wakeword_processor = BorisWakeWordProcessor::spawn(wakeword_audio_rx, event_tx, wakeword);
+
     loop {
-        if let Ok(audio) = audio_rx.recv() {
-            sliding_buffer.push(&audio);
-            if last_processed.elapsed() >= std::time::Duration::from_millis(80)
-                && sliding_buffer.ready()
-            {
-                last_processed = Instant::now();
-                let audio = sliding_buffer.read();
-
-                if let Ok(result) = wakeword.predict(&audio) {
-                    if result > 0.5 {
-                        println!("[BORIS] wakeword detected, score: {}", result);
-                    }
+        if let Ok(event) = event_rx.recv() {
+            match event {
+                BorisEvent::WakeWordDetected => {
+                    println!("[BORIS] wakeword detected");
                 }
-                println!(
-                    "[DEBUG] took {} ms to process wakeword.",
-                    last_processed.elapsed().as_millis()
-                )
             }
         }
     }

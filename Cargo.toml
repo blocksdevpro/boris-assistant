@@ -8,3 +8,4 @@ hound = "3.5.1"
 
 boris-core = { path = "./crates/boris-core" }
 boris-audio = { path = "./crates/boris-audio" }
+boris-inference = { path = "./crates/boris-inference" }

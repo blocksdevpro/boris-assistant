@@ -1,0 +1,9 @@
+[package]
+name = "boris-inference"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+boris-core = { path = "../boris-core" }
+
+livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }

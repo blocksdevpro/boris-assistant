@@ -8,4 +8,7 @@ boris-core = { path = "../boris-core" }
 boris-audio = { path = "../boris-audio" }
 
 
+
+
 livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }
+webrtc-vad = "0.4.0"

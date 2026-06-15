@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE, WakeWordDetector,
+    f32_to_pcm16_samples,
 };
 use boris_audio::buffer::AudioSlidingBuffer;
 use livekit_wakeword::WakeWordModel;
@@ -14,6 +15,11 @@ use boris_core::{AudioSample, AudioSampleBuffer, error::BorisResult, event::Bori
 
 pub struct BorisWakeWord {
     model: WakeWordModel,
+}
+
+pub enum WakeWordCommand {
+    StartListening,
+    StopListening,
 }
 
 impl BorisWakeWord {
@@ -27,8 +33,8 @@ impl BorisWakeWord {
 impl WakeWordDetector for BorisWakeWord {
     fn predict(&mut self, audio: &[AudioSample]) -> BorisResult<f32> {
         // convert the f32 audio to i16 audio;
-        let audio_i16: Vec<i16> = audio.iter().map(|&x| (x * 32767.0) as i16).collect();
-        let result = self.model.predict(&audio_i16).unwrap();
+        let pcm_samples = f32_to_pcm16_samples(audio);
+        let result = self.model.predict(&pcm_samples).unwrap();
 
         Ok(result.values().copied().next().unwrap_or(0.0))
     }
@@ -44,16 +50,28 @@ pub struct BorisWakeWordProcessor {
 impl BorisWakeWordProcessor {
     pub fn spawn(
         audio_rx: Receiver<AudioSampleBuffer>,
+        control_rx: Receiver<WakeWordCommand>,
         event_tx: Sender<BorisEvent>,
         mut detector: impl WakeWordDetector + 'static,
     ) -> Self {
         let handle = std::thread::spawn(move || {
+            let mut is_listening = true;
             let mut last_processing_time = Instant::now();
             let mut audio_buffer = AudioSlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
 
             loop {
+                while let Ok(command) = control_rx.try_recv() {
+                    match command {
+                        WakeWordCommand::StartListening => is_listening = true,
+                        WakeWordCommand::StopListening => is_listening = false,
+                    }
+                }
                 if let Ok(audio) = audio_rx.recv() {
                     audio_buffer.push(&audio);
+
+                    if !is_listening {
+                        continue;
+                    }
 
                     if last_processing_time.elapsed().as_millis()
                         >= WAKEWORD_PROCESSING_INTERVAL.as_millis()

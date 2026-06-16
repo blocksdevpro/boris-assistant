@@ -5,15 +5,15 @@ use std::{
 };
 
 use crate::{
-    WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE, WakeWordDetector,
+    WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE, WakeWord,
     f32_to_pcm16_samples,
 };
 use boris_audio::buffer::AudioSlidingBuffer;
 use livekit_wakeword::WakeWordModel;
 
-use boris_core::{AudioSample, error::BorisResult, event::BorisEvent, types::ArcAudioBuffer};
+use boris_core::{AudioSample, error::Result, event::Event, types::ArcAudioBuffer};
 
-pub struct BorisWakeWord {
+pub struct LivekitWakeWord {
     model: WakeWordModel,
 }
 
@@ -22,7 +22,7 @@ pub enum WakeWordCommand {
     StopListening,
 }
 
-impl BorisWakeWord {
+impl LivekitWakeWord {
     pub fn new(model_name: &str, model_bytes: &[u8], sample_rate: u32) -> Self {
         Self {
             model: WakeWordModel::with_bytes(model_name, model_bytes, sample_rate).unwrap(),
@@ -30,8 +30,8 @@ impl BorisWakeWord {
     }
 }
 
-impl WakeWordDetector for BorisWakeWord {
-    fn predict(&mut self, audio: &[AudioSample]) -> BorisResult<f32> {
+impl WakeWord for LivekitWakeWord {
+    fn predict(&mut self, audio: &[AudioSample]) -> Result<f32> {
         // convert the f32 audio to i16 audio;
         let pcm_samples = f32_to_pcm16_samples(audio);
         let result = self.model.predict(&pcm_samples).unwrap();
@@ -40,19 +40,19 @@ impl WakeWordDetector for BorisWakeWord {
     }
 }
 
-pub struct BorisWakeWordProcessor {
+pub struct WakeWordWorker {
     _handle: JoinHandle<()>,
 }
 //
 //
 //
 //
-impl BorisWakeWordProcessor {
+impl WakeWordWorker {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<WakeWordCommand>,
-        event_tx: Sender<BorisEvent>,
-        mut detector: impl WakeWordDetector + 'static,
+        event_tx: Sender<Event>,
+        mut detector: impl WakeWord + 'static,
     ) -> Self {
         let handle = std::thread::spawn(move || {
             let mut is_listening = true;
@@ -89,7 +89,7 @@ impl BorisWakeWordProcessor {
                         last_processing_time.elapsed().as_millis()
                     );
                     if result >= WAKEWORD_THRESHOLD {
-                        event_tx.send(BorisEvent::WakeWordDetected).unwrap();
+                        event_tx.send(Event::WakeWordDetected).unwrap();
                     }
                     last_processing_time = Instant::now();
                 }

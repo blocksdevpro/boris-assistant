@@ -1,6 +1,6 @@
 use crate::AudioBuffer;
 
-pub enum BorisEvent {
+pub enum Event {
     WakeWordDetected,
     SpeechEnded,
     RecordingFinished(AudioBuffer),

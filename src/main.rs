@@ -2,15 +2,15 @@ use std::sync::mpsc;
 
 use boris_audio::{
     AUDIO_TARGET_RATE,
-    pipeline::AudioPipeline,
+    pipeline::Pipeline,
     processor::AudioProcessor,
-    recorder::{AudioRecorder, RecordCommand},
+    recorder::{RecordCommand, Recorder},
 };
-use boris_core::{AudioBuffer, event::BorisEvent, types::ArcAudioBuffer};
+use boris_core::{AudioBuffer, event::Event, types::ArcAudioBuffer};
 use boris_inference::{
     f32_to_pcm16_samples,
-    vad::{BorisVad, BorisVadProcessor, VadCommand},
-    wakeword::{BorisWakeWord, BorisWakeWordProcessor, WakeWordCommand},
+    vad::{VadCommand, VadWorker, WebRtcVad},
+    wakeword::{LivekitWakeWord, WakeWordCommand, WakeWordWorker},
 };
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
@@ -29,7 +29,7 @@ fn save_pcm_to_wav(audio: &[i16], filename: &str) {
     let mut writer = WavWriter::create(filename, spec).unwrap();
 
     for sample in audio {
-        writer.write_sample(*sample as i16).unwrap();
+        writer.write_sample(*sample).unwrap();
     }
 
     writer.finalize().unwrap();
@@ -37,7 +37,7 @@ fn save_pcm_to_wav(audio: &[i16], filename: &str) {
 
 fn main() {
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
-    let (event_tx, event_rx) = mpsc::channel::<BorisEvent>();
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
 
     let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
@@ -47,24 +47,23 @@ fn main() {
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<RecordCommand>();
     let (vad_control_tx, vad_control_rx) = mpsc::channel::<VadCommand>();
 
-    let wakeword = BorisWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
-    let vad = BorisVad::new();
+    let wakeword = LivekitWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
+    let vad = WebRtcVad::new();
 
-    let _audio_pipeline = AudioPipeline::spawn(audio_tx);
+    let _audio_pipeline = Pipeline::spawn(audio_tx);
     let _audio_processor = AudioProcessor::spawn(
         audio_rx,
         vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
     );
-    let _wakeword_processor = BorisWakeWordProcessor::spawn(
+    let _wakeword_processor = WakeWordWorker::spawn(
         wakeword_audio_rx,
         wakeword_control_rx,
         event_tx.clone(),
         wakeword,
     );
-    let _vad_processor =
-        BorisVadProcessor::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
+    let _vad_processor = VadWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
     let _recorder_processor =
-        AudioRecorder::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
+        Recorder::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     wakeword_control_tx
         .send(WakeWordCommand::StartListening)
@@ -73,7 +72,7 @@ fn main() {
     loop {
         if let Ok(event) = event_rx.recv() {
             match event {
-                BorisEvent::WakeWordDetected => {
+                Event::WakeWordDetected => {
                     println!("[BORIS] wakeword detected");
                     wakeword_control_tx
                         .send(WakeWordCommand::StopListening)
@@ -81,12 +80,12 @@ fn main() {
                     vad_control_tx.send(VadCommand::StartListening).ok();
                     recorder_control_tx.send(RecordCommand::StartRecording).ok();
                 }
-                BorisEvent::SpeechEnded => {
+                Event::SpeechEnded => {
                     println!("[BORIS] speech ended");
                     vad_control_tx.send(VadCommand::StopListening).ok();
                     recorder_control_tx.send(RecordCommand::StopRecording).ok();
                 }
-                BorisEvent::RecordingFinished(audio_chunk) => {
+                Event::RecordingFinished(audio_chunk) => {
                     save_pcm_to_wav(&f32_to_pcm16_samples(&audio_chunk), "output.wav");
                     println!("[BORIS] recording finished");
                     wakeword_control_tx

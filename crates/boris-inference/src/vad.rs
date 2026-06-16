@@ -5,18 +5,18 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use boris_audio::AUDIO_TARGET_RATE;
-use boris_core::event::BorisEvent;
+use boris_core::event::Event;
 
 use boris_core::types::ArcAudioBuffer;
 use webrtc_vad::SampleRate;
-use webrtc_vad::Vad;
+use webrtc_vad::Vad as WebVad;
 
 use crate::AudioSample;
-use crate::BorisResult;
+use crate::Result;
 use crate::VAD_INITIAL_TIMEOUT;
 use crate::VAD_SILENCE_WINDOW;
 use crate::VAD_WINDOW_SIZE;
-use crate::VoiceActivityDetector;
+use crate::Vad;
 use crate::f32_to_pcm16_samples;
 
 pub enum VadResult {
@@ -29,23 +29,23 @@ pub enum VadCommand {
     StopListening,
 }
 
-pub struct BorisVad {
-    model: Vad,
+pub struct WebRtcVad {
+    model: WebVad,
 }
 
-unsafe impl Send for BorisVad {}
+unsafe impl Send for WebRtcVad {}
 
-impl BorisVad {
+impl WebRtcVad {
     pub fn new() -> Self {
         let sample_rate =
             SampleRate::try_from(AUDIO_TARGET_RATE as i32).expect("[ERROR] invalid sample_rate");
-        let model = Vad::new_with_rate(sample_rate);
+        let model = WebVad::new_with_rate(sample_rate);
         Self { model }
     }
 }
 
-impl VoiceActivityDetector for BorisVad {
-    fn predict(&mut self, audio: &[AudioSample]) -> BorisResult<bool> {
+impl Vad for WebRtcVad {
+    fn predict(&mut self, audio: &[AudioSample]) -> Result<bool> {
         let pcm_samples = f32_to_pcm16_samples(audio);
         let result = self
             .model
@@ -55,16 +55,16 @@ impl VoiceActivityDetector for BorisVad {
     }
 }
 
-pub struct BorisVadProcessor {
+pub struct VadWorker {
     _handle: JoinHandle<()>,
 }
 
-impl BorisVadProcessor {
+impl VadWorker {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<VadCommand>,
-        event_tx: Sender<BorisEvent>,
-        mut detector: impl VoiceActivityDetector + 'static,
+        event_tx: Sender<Event>,
+        mut detector: impl Vad + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
             let mut is_listening = false;
@@ -111,7 +111,7 @@ impl BorisVadProcessor {
                             if last_speech_time.elapsed().as_millis() >= threshold {
                                 is_listening = false;
                                 audio_buffer.clear();
-                                event_tx.send(BorisEvent::SpeechEnded).ok();
+                                event_tx.send(Event::SpeechEnded).ok();
                             }
                         }
                     }

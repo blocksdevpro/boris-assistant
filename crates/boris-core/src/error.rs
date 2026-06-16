@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum BorisError {
+pub enum Error {
     #[error("config error: {0}")]
     ConfigError(String),
 
@@ -9,4 +9,4 @@ pub enum BorisError {
     AudioError(String),
 }
 
-pub type BorisResult<T> = std::result::Result<T, BorisError>;
+pub type Result<T> = std::result::Result<T, Error>;

@@ -3,9 +3,9 @@ use std::{
     thread::JoinHandle,
 };
 
-use boris_core::{event::BorisEvent, types::ArcAudioBuffer};
+use boris_core::{event::Event, types::ArcAudioBuffer};
 
-pub struct AudioRecorder {
+pub struct Recorder {
     _handle: JoinHandle<()>,
 }
 pub enum RecordCommand {
@@ -13,11 +13,11 @@ pub enum RecordCommand {
     StopRecording,
 }
 
-impl AudioRecorder {
+impl Recorder {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<RecordCommand>,
-        event_tx: Sender<BorisEvent>,
+        event_tx: Sender<Event>,
     ) -> Self {
         let handle = std::thread::spawn(move || {
             let mut buffer: Vec<f32> = Vec::new();
@@ -35,7 +35,7 @@ impl AudioRecorder {
                             println!("buffer_len: {}", buffer.len());
                             if !buffer.is_empty() {
                                 let audio = std::mem::take(&mut buffer);
-                                event_tx.send(BorisEvent::RecordingFinished(audio)).ok();
+                                event_tx.send(Event::RecordingFinished(audio)).ok();
                             }
                         }
                     }

@@ -3,21 +3,21 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use boris_core::AudioSample;
-use boris_core::{AudioBuffer, error::BorisResult};
+use boris_core::{AudioBuffer, error::Result};
 
 use crate::AUDIO_CHUNK_SIZE;
-use crate::{AUDIO_TARGET_RATE, capture::AudioCapture, resampler::AudioResampler};
+use crate::{AUDIO_TARGET_RATE, capture::Capture, resampler::AudioResampler};
 
-pub struct AudioPipeline {
+pub struct Pipeline {
     _handle: JoinHandle<()>,
-    _capture: AudioCapture,
+    _capture: Capture,
 }
 
-impl AudioPipeline {
-    pub fn spawn(audio_tx: Sender<AudioBuffer>) -> BorisResult<Self> {
+impl Pipeline {
+    pub fn spawn(audio_tx: Sender<AudioBuffer>) -> Result<Self> {
         let (raw_audio_tx, raw_audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(100);
 
-        let capture = AudioCapture::new(raw_audio_tx)?;
+        let capture = Capture::new(raw_audio_tx)?;
         let mut resampler = AudioResampler::new(1, capture.sample_rate, AUDIO_TARGET_RATE);
 
         let handle = thread::spawn(move || {

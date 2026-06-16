@@ -1,7 +1,7 @@
-use boris_core::error::BorisResult;
+use boris_core::error::Result;
 use boris_core::{AudioBuffer, AudioSample};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Fft, FixedSync, Resampler};
+use rubato::{Fft, FixedSync, Resampler as RubatoResampler};
 
 pub struct AudioResampler {
     resampler: Option<Fft<AudioSample>>,
@@ -20,7 +20,7 @@ impl AudioResampler {
         }
     }
 
-    pub fn resample(&mut self, input: &[AudioSample]) -> BorisResult<AudioBuffer> {
+    pub fn resample(&mut self, input: &[AudioSample]) -> Result<AudioBuffer> {
         let input_length = input.len();
         let resampler = self.resampler.get_or_insert_with(|| {
             Fft::<AudioSample>::new(

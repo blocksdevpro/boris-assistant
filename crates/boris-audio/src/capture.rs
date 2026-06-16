@@ -1,26 +1,26 @@
 use boris_core::{
     AudioBuffer, AudioSample,
-    error::{BorisError, BorisResult},
+    error::{Error, Result},
 };
 use cpal::{
     BufferSize, Device, SampleFormat, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use crossbeam_channel::Sender;
-pub struct AudioCapture {
+pub struct Capture {
     _stream: Stream,
     pub sample_rate: u32,
 }
 
-impl AudioCapture {
-    pub fn new(audio_tx: Sender<AudioBuffer>) -> BorisResult<Self> {
+impl Capture {
+    pub fn new(audio_tx: Sender<AudioBuffer>) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
-            .ok_or_else(|| BorisError::AudioError("no input device found!".to_string()))?;
+            .ok_or_else(|| Error::AudioError("no input device found!".to_string()))?;
         let config = device
             .default_input_config()
-            .map_err(|err| BorisError::AudioError(err.to_string()))?;
+            .map_err(|err| Error::AudioError(err.to_string()))?;
 
         let channels = config.channels() as usize;
         let sample_rate = config.sample_rate();
@@ -42,14 +42,14 @@ impl AudioCapture {
                 build_input_stream::<u16>(&device, stream_config, channels, audio_tx)?
             }
             _ => {
-                return Err(BorisError::AudioError(
+                return Err(Error::AudioError(
                     "[Boris.AudioCapture] unsupported sample format".into(),
                 ));
             }
         };
 
         stream.play().map_err(|err| {
-            BorisError::AudioError(
+            Error::AudioError(
                 "[Boris.AudioCapture] failed to play the stream: ".to_string() + &err.to_string(),
             )
         })?;
@@ -66,7 +66,7 @@ fn build_input_stream<T>(
     config: StreamConfig,
     channels: usize,
     audio_tx: Sender<AudioBuffer>,
-) -> BorisResult<Stream>
+) -> Result<Stream>
 where
     T: cpal::Sample + cpal::SizedSample + Into<AudioSample> + 'static,
 {
@@ -89,9 +89,7 @@ where
             |err| eprintln!("[ERROR] [Boris.AudioCapture] capture error: {err}"),
             None,
         )
-        .map_err(|err| {
-            BorisError::AudioError("[Boris.AudioCapture] ".to_string() + &err.to_string())
-        })?;
+        .map_err(|err| Error::AudioError("[Boris.AudioCapture] ".to_string() + &err.to_string()))?;
 
     Ok(stream)
 }

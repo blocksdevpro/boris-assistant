@@ -1,9 +1,9 @@
-use crate::AudioSampleBuffer;
+use crate::AudioBuffer;
 
 pub enum BorisEvent {
     WakeWordDetected,
     SpeechEnded,
-    RecordingFinished(AudioSampleBuffer),
+    RecordingFinished(AudioBuffer),
 }
 
 pub enum InferenceEvent {}

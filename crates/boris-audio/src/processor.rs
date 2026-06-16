@@ -1,9 +1,12 @@
 use std::{
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender},
+    },
     thread::JoinHandle,
 };
 
-use boris_core::AudioSampleBuffer;
+use boris_core::{AudioBuffer, AudioSample};
 
 pub struct AudioProcessor {
     _handle: JoinHandle<()>,
@@ -11,15 +14,14 @@ pub struct AudioProcessor {
 
 impl AudioProcessor {
     pub fn spawn(
-        audio_rx: Receiver<AudioSampleBuffer>,
-        audio_txs: Vec<Sender<AudioSampleBuffer>>,
+        audio_rx: Receiver<AudioBuffer>,
+        audio_txs: Vec<Sender<Arc<[AudioSample]>>>,
     ) -> Self {
         let handle = std::thread::spawn(move || {
-            loop {
-                if let Ok(audio) = audio_rx.recv() {
-                    for tx in &audio_txs {
-                        tx.send(audio.clone()).ok();
-                    }
+            while let Ok(audio) = audio_rx.recv() {
+                let shared_audio: Arc<[AudioSample]> = Arc::from(audio);
+                for tx in &audio_txs {
+                    tx.send(shared_audio.clone()).ok();
                 }
             }
         });

@@ -3,7 +3,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use boris_core::{AudioSampleBuffer, event::BorisEvent};
+use boris_core::{event::BorisEvent, types::ArcAudioBuffer};
 
 pub struct AudioRecorder {
     _handle: JoinHandle<()>,
@@ -15,7 +15,7 @@ pub enum RecordCommand {
 
 impl AudioRecorder {
     pub fn spawn(
-        audio_rx: Receiver<AudioSampleBuffer>,
+        audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<RecordCommand>,
         event_tx: Sender<BorisEvent>,
     ) -> Self {

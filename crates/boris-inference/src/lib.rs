@@ -3,7 +3,7 @@ pub mod wakeword;
 
 use std::time::Duration;
 
-use boris_core::{AudioSample, AudioSampleBuffer, error::BorisResult};
+use boris_core::{AudioBuffer, AudioSample, error::BorisResult};
 
 pub const WAKEWORD_THRESHOLD: f32 = 0.5;
 pub const WAKEWORD_WINDOW_SIZE: usize = 32_000; // 2 sec audio, 16 kHz
@@ -28,7 +28,7 @@ pub trait SpeechToText: Send {
 }
 
 pub trait TextToSpeech: Send {
-    fn synthesize(&mut self, text: &str) -> BorisResult<AudioSampleBuffer>;
+    fn synthesize(&mut self, text: &str) -> BorisResult<AudioBuffer>;
 }
 
 /// Converts a normalized &[f32] audio sample (-1.0..1.0) into PCM16 Vec<i16>.

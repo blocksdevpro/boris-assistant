@@ -11,7 +11,7 @@ use crate::{
 use boris_audio::buffer::AudioSlidingBuffer;
 use livekit_wakeword::WakeWordModel;
 
-use boris_core::{AudioSample, AudioSampleBuffer, error::BorisResult, event::BorisEvent};
+use boris_core::{AudioSample, error::BorisResult, event::BorisEvent, types::ArcAudioBuffer};
 
 pub struct BorisWakeWord {
     model: WakeWordModel,
@@ -49,7 +49,7 @@ pub struct BorisWakeWordProcessor {
 //
 impl BorisWakeWordProcessor {
     pub fn spawn(
-        audio_rx: Receiver<AudioSampleBuffer>,
+        audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<WakeWordCommand>,
         event_tx: Sender<BorisEvent>,
         mut detector: impl WakeWordDetector + 'static,
@@ -66,30 +66,32 @@ impl BorisWakeWordProcessor {
                         WakeWordCommand::StopListening => is_listening = false,
                     }
                 }
-                if let Ok(audio) = audio_rx.recv() {
-                    audio_buffer.push(&audio);
+                //Break if the channel closes.
+                let Ok(audio) = audio_rx.recv() else {
+                    break;
+                };
+                audio_buffer.push(&audio);
 
-                    if !is_listening {
-                        continue;
+                if !is_listening {
+                    continue;
+                }
+
+                if last_processing_time.elapsed().as_millis()
+                    >= WAKEWORD_PROCESSING_INTERVAL.as_millis()
+                    && audio_buffer.ready()
+                {
+                    let audio = audio_buffer.read();
+
+                    let result = detector.predict(&audio).unwrap();
+
+                    println!(
+                        "[BORIS] score: {result}, took {}ms",
+                        last_processing_time.elapsed().as_millis()
+                    );
+                    if result >= WAKEWORD_THRESHOLD {
+                        event_tx.send(BorisEvent::WakeWordDetected).unwrap();
                     }
-
-                    if last_processing_time.elapsed().as_millis()
-                        >= WAKEWORD_PROCESSING_INTERVAL.as_millis()
-                        && audio_buffer.ready()
-                    {
-                        let audio = audio_buffer.read();
-
-                        let result = detector.predict(&audio).unwrap();
-
-                        println!(
-                            "[BORIS] score: {result}, took {}ms",
-                            last_processing_time.elapsed().as_millis()
-                        );
-                        if result >= WAKEWORD_THRESHOLD {
-                            event_tx.send(BorisEvent::WakeWordDetected).unwrap();
-                        }
-                        last_processing_time = Instant::now();
-                    }
+                    last_processing_time = Instant::now();
                 }
             }
         });

@@ -6,7 +6,7 @@ use boris_audio::{
     processor::AudioProcessor,
     recorder::{AudioRecorder, RecordCommand},
 };
-use boris_core::{AudioSampleBuffer, event::BorisEvent};
+use boris_core::{AudioBuffer, event::BorisEvent, types::ArcAudioBuffer};
 use boris_inference::{
     f32_to_pcm16_samples,
     vad::{BorisVad, BorisVadProcessor, VadCommand},
@@ -36,12 +36,12 @@ fn save_pcm_to_wav(audio: &[i16], filename: &str) {
 }
 
 fn main() {
-    let (audio_tx, audio_rx) = mpsc::channel::<AudioSampleBuffer>();
+    let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
     let (event_tx, event_rx) = mpsc::channel::<BorisEvent>();
 
-    let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<AudioSampleBuffer>();
-    let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<AudioSampleBuffer>();
-    let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<AudioSampleBuffer>();
+    let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
+    let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
+    let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
 
     let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<WakeWordCommand>();
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<RecordCommand>();

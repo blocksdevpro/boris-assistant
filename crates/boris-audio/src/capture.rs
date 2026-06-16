@@ -1,20 +1,19 @@
 use boris_core::{
-    AudioSample, AudioSampleBuffer,
+    AudioBuffer, AudioSample,
     error::{BorisError, BorisResult},
 };
 use cpal::{
     BufferSize, Device, SampleFormat, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use std::sync::mpsc::Sender;
-
+use crossbeam_channel::Sender;
 pub struct AudioCapture {
     _stream: Stream,
     pub sample_rate: u32,
 }
 
 impl AudioCapture {
-    pub fn new(audio_tx: Sender<AudioSampleBuffer>) -> BorisResult<Self> {
+    pub fn new(audio_tx: Sender<AudioBuffer>) -> BorisResult<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -66,7 +65,7 @@ fn build_input_stream<T>(
     device: &Device,
     config: StreamConfig,
     channels: usize,
-    audio_tx: Sender<AudioSampleBuffer>,
+    audio_tx: Sender<AudioBuffer>,
 ) -> BorisResult<Stream>
 where
     T: cpal::Sample + cpal::SizedSample + Into<AudioSample> + 'static,
@@ -85,7 +84,7 @@ where
                             / channels as AudioSample
                     })
                     .collect();
-                audio_tx.send(mono_samples).ok();
+                audio_tx.try_send(mono_samples).ok();
             },
             |err| eprintln!("[ERROR] [Boris.AudioCapture] capture error: {err}"),
             None,

@@ -5,16 +5,15 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use boris_audio::AUDIO_TARGET_RATE;
-use boris_core::AudioSampleBuffer;
 use boris_core::event::BorisEvent;
 
+use boris_core::types::ArcAudioBuffer;
 use webrtc_vad::SampleRate;
 use webrtc_vad::Vad;
 
 use crate::AudioSample;
 use crate::BorisResult;
 use crate::VAD_INITIAL_TIMEOUT;
-use crate::VAD_PROCESSING_INTERVAL;
 use crate::VAD_SILENCE_WINDOW;
 use crate::VAD_WINDOW_SIZE;
 use crate::VoiceActivityDetector;
@@ -62,16 +61,17 @@ pub struct BorisVadProcessor {
 
 impl BorisVadProcessor {
     pub fn spawn(
-        audio_rx: Receiver<AudioSampleBuffer>,
+        audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<VadCommand>,
         event_tx: Sender<BorisEvent>,
         mut detector: impl VoiceActivityDetector + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
-            let mut last_processing_time = Instant::now();
             let mut is_listening = false;
             let mut last_speech_time = Instant::now();
             let mut has_spoken = false;
+
+            let mut audio_buffer: Vec<f32> = Vec::new();
             loop {
                 // should i clear all pending commands here?
                 while let Ok(command) = control_rx.try_recv() {
@@ -84,30 +84,35 @@ impl BorisVadProcessor {
                         VadCommand::StopListening => is_listening = false,
                     }
                 }
-                if let Ok(audio) = audio_rx.recv() {
-                    if audio.len() >= VAD_WINDOW_SIZE as usize && is_listening {
-                        if last_processing_time.elapsed().as_millis()
-                            >= VAD_PROCESSING_INTERVAL.as_millis()
-                        {
-                            // Predict whether the audio is voice or silence
-                            if let Ok(result) = detector.predict(&audio[..VAD_WINDOW_SIZE]) {
-                                if result == true {
-                                    has_spoken = true;
-                                    last_speech_time = Instant::now();
-                                } else if result == false {
-                                    let threshold = if has_spoken {
-                                        VAD_SILENCE_WINDOW.as_millis()
-                                    } else {
-                                        VAD_INITIAL_TIMEOUT.as_millis()
-                                    };
 
-                                    if last_speech_time.elapsed().as_millis() >= threshold {
-                                        is_listening = false;
-                                        event_tx.send(BorisEvent::SpeechEnded).ok();
-                                    }
-                                }
+                // If the channel is closed (returns Err), break the loop!
+                let Ok(audio) = audio_rx.recv() else {
+                    break;
+                };
+                if !is_listening {
+                    continue;
+                }
+
+                audio_buffer.extend_from_slice(&audio);
+                while audio_buffer.len() >= VAD_WINDOW_SIZE as usize {
+                    let chunk: Vec<f32> = audio_buffer.drain(..VAD_WINDOW_SIZE as usize).collect();
+
+                    if let Ok(result) = detector.predict(&chunk) {
+                        if result {
+                            has_spoken = true;
+                            last_speech_time = Instant::now();
+                        } else {
+                            let threshold = if has_spoken {
+                                VAD_SILENCE_WINDOW.as_millis()
+                            } else {
+                                VAD_INITIAL_TIMEOUT.as_millis()
+                            };
+
+                            if last_speech_time.elapsed().as_millis() >= threshold {
+                                is_listening = false;
+                                audio_buffer.clear();
+                                event_tx.send(BorisEvent::SpeechEnded).ok();
                             }
-                            last_processing_time = Instant::now();
                         }
                     }
                 }

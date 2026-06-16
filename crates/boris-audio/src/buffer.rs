@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use boris_core::{AudioSample, AudioSampleBuffer};
+use boris_core::{AudioBuffer, AudioSample};
 
 pub struct AudioSlidingBuffer {
     buffer: VecDeque<AudioSample>,
@@ -28,7 +28,7 @@ impl AudioSlidingBuffer {
         self.buffer.len() >= self.capacity
     }
 
-    pub fn read(&self) -> AudioSampleBuffer {
+    pub fn read(&self) -> AudioBuffer {
         let size = self.capacity.min(self.buffer.len());
         let start = self.buffer.len() - size;
         self.buffer.range(start..).copied().collect()

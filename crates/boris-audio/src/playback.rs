@@ -1,7 +1,7 @@
 use std::sync::mpsc::Receiver;
 
 use boris_core::{
-    AudioSampleBuffer,
+    AudioBuffer,
     error::{BorisError, BorisResult},
 };
 use cpal::{
@@ -14,7 +14,7 @@ pub struct AudioPlayback {
 }
 
 impl AudioPlayback {
-    pub fn new(audio_rx: Receiver<AudioSampleBuffer>) -> BorisResult<Self> {
+    pub fn new(audio_rx: Receiver<AudioBuffer>) -> BorisResult<Self> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()

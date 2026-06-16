@@ -1,9 +1,9 @@
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::{sync::mpsc, thread::JoinHandle};
+use std::thread::JoinHandle;
 
 use boris_core::AudioSample;
-use boris_core::{AudioSampleBuffer, error::BorisResult};
+use boris_core::{AudioBuffer, error::BorisResult};
 
 use crate::AUDIO_CHUNK_SIZE;
 use crate::{AUDIO_TARGET_RATE, capture::AudioCapture, resampler::AudioResampler};
@@ -14,8 +14,8 @@ pub struct AudioPipeline {
 }
 
 impl AudioPipeline {
-    pub fn spawn(audio_tx: Sender<AudioSampleBuffer>) -> BorisResult<Self> {
-        let (raw_audio_tx, raw_audio_rx) = mpsc::channel::<AudioSampleBuffer>();
+    pub fn spawn(audio_tx: Sender<AudioBuffer>) -> BorisResult<Self> {
+        let (raw_audio_tx, raw_audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(100);
 
         let capture = AudioCapture::new(raw_audio_tx)?;
         let mut resampler = AudioResampler::new(1, capture.sample_rate, AUDIO_TARGET_RATE);

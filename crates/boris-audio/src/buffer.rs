@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 
 use boris_core::{AudioBuffer, AudioSample};
 
-pub struct AudioSlidingBuffer {
+pub struct SlidingBuffer {
     buffer: VecDeque<AudioSample>,
     capacity: usize,
 }
 
-impl AudioSlidingBuffer {
+impl SlidingBuffer {
     pub fn new(capacity: usize) -> Self {
         Self {
             buffer: VecDeque::with_capacity(capacity),

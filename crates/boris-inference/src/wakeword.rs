@@ -8,7 +8,7 @@ use crate::{
     WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE, WakeWord,
     f32_to_pcm16_samples,
 };
-use boris_audio::buffer::AudioSlidingBuffer;
+use boris_audio::buffer::SlidingBuffer;
 use livekit_wakeword::WakeWordModel;
 
 use boris_core::{AudioSample, error::Result, event::Event, types::ArcAudioBuffer};
@@ -57,7 +57,7 @@ impl WakeWordWorker {
         let handle = std::thread::spawn(move || {
             let mut is_listening = true;
             let mut last_processing_time = Instant::now();
-            let mut audio_buffer = AudioSlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
+            let mut audio_buffer = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
 
             loop {
                 while let Ok(command) = control_rx.try_recv() {

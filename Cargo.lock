@@ -107,6 +107,7 @@ dependencies = [
  "boris-audio",
  "boris-core",
  "boris-inference",
+ "crossbeam-channel",
  "hound",
 ]
 

@@ -3,14 +3,14 @@ use boris_core::{AudioBuffer, AudioSample};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler as RubatoResampler};
 
-pub struct AudioResampler {
+pub struct Resampler {
     resampler: Option<Fft<AudioSample>>,
     channels: u32,   // output channels, this should be 1 as we are using mono audio.
     input_rate: u32, //
     output_rate: u32,
 }
 
-impl AudioResampler {
+impl Resampler {
     pub fn new(channels: u32, input_rate: u32, output_rate: u32) -> Self {
         Self {
             resampler: None,

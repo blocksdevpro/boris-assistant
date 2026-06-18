@@ -1,11 +1,7 @@
 use std::sync::mpsc;
 
-use boris_audio::{
-    AUDIO_TARGET_RATE,
-    pipeline::Pipeline,
-    processor::AudioProcessor,
-    recorder::{RecordCommand, Recorder},
-};
+use boris_audio::AUDIO_TARGET_RATE;
+use boris_audio::recorder::{RecordCommand, Recorder};
 use boris_core::{AudioBuffer, event::Event, types::ArcAudioBuffer};
 use boris_inference::{
     f32_to_pcm16_samples,
@@ -13,7 +9,11 @@ use boris_inference::{
     wakeword::{LivekitWakeWord, WakeWordCommand, WakeWordWorker},
 };
 
+use crate::workers::audio::{AudioDispatcherWorker, AudioPipelineWorker};
+
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
+
+mod workers;
 
 // write a func to save audio in file.wav
 fn save_pcm_to_wav(audio: &[i16], filename: &str) {
@@ -50,19 +50,19 @@ fn main() {
     let wakeword = LivekitWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
     let vad = WebRtcVad::new();
 
-    let _audio_pipeline = Pipeline::spawn(audio_tx);
-    let _audio_processor = AudioProcessor::spawn(
+    let _audio_pipeline_worker = AudioPipelineWorker::spawn(audio_tx);
+    let _audio_dispatcer_worker = AudioDispatcherWorker::spawn(
         audio_rx,
         vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
     );
-    let _wakeword_processor = WakeWordWorker::spawn(
+    let _wakeword_worker = WakeWordWorker::spawn(
         wakeword_audio_rx,
         wakeword_control_rx,
         event_tx.clone(),
         wakeword,
     );
-    let _vad_processor = VadWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
-    let _recorder_processor =
+    let _vad_worker = VadWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
+    let _recorder_worker =
         Recorder::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     wakeword_control_tx

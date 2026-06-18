@@ -1,7 +1,5 @@
 pub mod buffer;
 pub mod capture;
-pub mod pipeline;
-pub mod processor;
 pub mod recorder;
 pub mod resampler;
 

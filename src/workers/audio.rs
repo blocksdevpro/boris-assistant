@@ -1,24 +1,24 @@
-use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
 
-use boris_core::AudioSample;
-use boris_core::{AudioBuffer, error::Result};
+use boris_core::types::ArcAudioBuffer;
+use boris_core::{AudioBuffer, AudioSample, error::Result};
 
-use crate::AUDIO_CHUNK_SIZE;
-use crate::{AUDIO_TARGET_RATE, capture::Capture, resampler::AudioResampler};
+use boris_audio::{AUDIO_CHUNK_SIZE, AUDIO_TARGET_RATE, capture::Capture, resampler::Resampler};
 
-pub struct Pipeline {
+pub struct AudioPipelineWorker {
     _handle: JoinHandle<()>,
     _capture: Capture,
 }
 
-impl Pipeline {
+impl AudioPipelineWorker {
     pub fn spawn(audio_tx: Sender<AudioBuffer>) -> Result<Self> {
         let (raw_audio_tx, raw_audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(100);
 
         let capture = Capture::new(raw_audio_tx)?;
-        let mut resampler = AudioResampler::new(1, capture.sample_rate, AUDIO_TARGET_RATE);
+        let mut resampler = Resampler::new(1, capture.sample_rate, AUDIO_TARGET_RATE);
 
         let handle = thread::spawn(move || {
             let mut accumulator: Vec<AudioSample> = Vec::with_capacity(AUDIO_CHUNK_SIZE as usize);
@@ -45,5 +45,23 @@ impl Pipeline {
             _handle: handle,
             _capture: capture,
         })
+    }
+}
+
+pub struct AudioDispatcherWorker {
+    _handle: JoinHandle<()>,
+}
+
+impl AudioDispatcherWorker {
+    pub fn spawn(audio_rx: Receiver<AudioBuffer>, audio_txs: Vec<Sender<ArcAudioBuffer>>) -> Self {
+        let handle = std::thread::spawn(move || {
+            while let Ok(audio) = audio_rx.recv() {
+                let shared_audio: ArcAudioBuffer = Arc::from(audio);
+                for tx in &audio_txs {
+                    tx.send(shared_audio.clone()).ok();
+                }
+            }
+        });
+        Self { _handle: handle }
     }
 }

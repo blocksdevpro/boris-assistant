@@ -1,15 +1,18 @@
 use std::sync::mpsc;
 
 use boris_audio::AUDIO_TARGET_RATE;
-use boris_audio::recorder::{RecordCommand, Recorder};
-use boris_core::{AudioBuffer, event::Event, types::ArcAudioBuffer};
+use boris_core::{
+    AudioBuffer,
+    event::Event,
+    types::{ArcAudioBuffer, Lifecycle},
+};
 use boris_inference::{
     f32_to_pcm16_samples,
     vad::{VadCommand, VadWorker, WebRtcVad},
     wakeword::{LivekitWakeWord, WakeWordCommand, WakeWordWorker},
 };
 
-use crate::workers::audio::{AudioDispatcherWorker, AudioPipelineWorker};
+use crate::workers::audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker};
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
@@ -44,7 +47,7 @@ fn main() {
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
 
     let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<WakeWordCommand>();
-    let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<RecordCommand>();
+    let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
     let (vad_control_tx, vad_control_rx) = mpsc::channel::<VadCommand>();
 
     let wakeword = LivekitWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
@@ -62,8 +65,8 @@ fn main() {
         wakeword,
     );
     let _vad_worker = VadWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
-    let _recorder_worker =
-        Recorder::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
+    let _recording_worker =
+        AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     wakeword_control_tx
         .send(WakeWordCommand::StartListening)
@@ -78,12 +81,12 @@ fn main() {
                         .send(WakeWordCommand::StopListening)
                         .ok();
                     vad_control_tx.send(VadCommand::StartListening).ok();
-                    recorder_control_tx.send(RecordCommand::StartRecording).ok();
+                    recorder_control_tx.send(Lifecycle::Start).ok();
                 }
                 Event::SpeechEnded => {
                     println!("[BORIS] speech ended");
                     vad_control_tx.send(VadCommand::StopListening).ok();
-                    recorder_control_tx.send(RecordCommand::StopRecording).ok();
+                    recorder_control_tx.send(Lifecycle::Stop).ok();
                 }
                 Event::RecordingFinished(audio_chunk) => {
                     save_pcm_to_wav(&f32_to_pcm16_samples(&audio_chunk), "output.wav");

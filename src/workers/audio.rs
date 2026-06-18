@@ -3,7 +3,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
 
-use boris_core::types::ArcAudioBuffer;
+use boris_audio::buffer::RecordingBuffer;
+use boris_core::event::Event;
+use boris_core::types::{ArcAudioBuffer, Lifecycle};
 use boris_core::{AudioBuffer, AudioSample, error::Result};
 
 use boris_audio::{AUDIO_CHUNK_SIZE, AUDIO_TARGET_RATE, capture::Capture, resampler::Resampler};
@@ -62,6 +64,44 @@ impl AudioDispatcherWorker {
                 }
             }
         });
+        Self { _handle: handle }
+    }
+}
+
+pub struct AudioRecordingWorker {
+    _handle: JoinHandle<()>,
+}
+
+impl AudioRecordingWorker {
+    pub fn spawn(
+        audio_rx: Receiver<ArcAudioBuffer>,
+        control_rx: Receiver<Lifecycle>,
+        event_tx: Sender<Event>,
+    ) -> Self {
+        let handle = thread::spawn(move || {
+            let mut buffer = RecordingBuffer::new(AUDIO_TARGET_RATE as usize * 2);
+
+            loop {
+                while let Ok(command) = control_rx.try_recv() {
+                    match command {
+                        Lifecycle::Start => {
+                            buffer.set_recording(true);
+                        }
+                        Lifecycle::Stop => {
+                            buffer.set_recording(false);
+                            let audio = buffer.take_audio();
+                            event_tx.send(Event::RecordingFinished(audio)).ok();
+                        }
+                    };
+                }
+                if let Ok(audio) = audio_rx.recv() {
+                    buffer.push(&audio);
+                } else {
+                    break;
+                }
+            }
+        });
+
         Self { _handle: handle }
     }
 }

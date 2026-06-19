@@ -9,7 +9,7 @@ use boris_core::{
 use boris_inference::{
     f32_to_pcm16_samples,
     vad::{VadCommand, VadWorker, WebRtcVad},
-    wakeword::{LivekitWakeWord, WakeWordCommand, WakeWordWorker},
+    wakeword::{LivekitWakeWord as WakeWord, WakeWordCommand, WakeWordWorker},
 };
 
 use crate::workers::audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker};
@@ -50,7 +50,7 @@ fn main() {
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
     let (vad_control_tx, vad_control_rx) = mpsc::channel::<VadCommand>();
 
-    let wakeword = LivekitWakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
+    let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
     let vad = WebRtcVad::new();
 
     let _audio_pipeline_worker = AudioPipelineWorker::spawn(audio_tx);

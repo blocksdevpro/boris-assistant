@@ -73,7 +73,7 @@ impl VadWorker {
 
             let mut audio_buffer: Vec<f32> = Vec::new();
             loop {
-                // should i clear all pending commands here?
+                // i should clear all pending commands here.
                 while let Ok(command) = control_rx.try_recv() {
                     match command {
                         VadCommand::StartListening => {

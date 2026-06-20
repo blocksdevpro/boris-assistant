@@ -90,7 +90,7 @@ impl AudioRecordingWorker {
                         Lifecycle::Stop => {
                             buffer.set_recording(false);
                             let audio = buffer.take_audio();
-                            event_tx.send(Event::RecordingFinished(audio)).ok();
+                            event_tx.send(Event::RecordingResult(audio)).ok();
                         }
                     };
                 }

@@ -7,18 +7,22 @@ use boris_core::{
     types::{ArcAudioBuffer, Lifecycle},
 };
 use boris_inference::{
-    f32_to_pcm16_samples,
     vad::{VadCommand, VadWorker, WebRtcVad},
     wakeword::{LivekitWakeWord as WakeWord, WakeWordCommand, WakeWordWorker},
 };
+use boris_stt_parakeet::ParakeetSTT;
 
-use crate::workers::audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker};
+use crate::workers::{
+    audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
+    inference::STTWorker,
+};
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
 mod workers;
 
 // write a func to save audio in file.wav
+#[allow(dead_code)]
 fn save_pcm_to_wav(audio: &[i16], filename: &str) {
     use hound::{SampleFormat, WavSpec, WavWriter};
 
@@ -45,6 +49,7 @@ fn main() {
     let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
+    let (stt_audio_tx, stt_audio_rx) = mpsc::channel::<AudioBuffer>();
 
     let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<WakeWordCommand>();
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
@@ -68,6 +73,9 @@ fn main() {
     let _recording_worker =
         AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
+    let stt = ParakeetSTT::new();
+    let _stt_worker = STTWorker::spawn(stt_audio_rx, event_tx, stt);
+
     wakeword_control_tx
         .send(WakeWordCommand::StartListening)
         .ok();
@@ -88,9 +96,13 @@ fn main() {
                     vad_control_tx.send(VadCommand::StopListening).ok();
                     recorder_control_tx.send(Lifecycle::Stop).ok();
                 }
-                Event::RecordingFinished(audio_chunk) => {
-                    save_pcm_to_wav(&f32_to_pcm16_samples(&audio_chunk), "output.wav");
+                Event::RecordingResult(audio_chunk) => {
                     println!("[BORIS] recording finished");
+                    stt_audio_tx.send(audio_chunk).ok();
+                }
+
+                Event::SpeechToTextResult(text) => {
+                    println!("[BORIS] [TTS_result] {}", text);
                     wakeword_control_tx
                         .send(WakeWordCommand::StartListening)
                         .ok();

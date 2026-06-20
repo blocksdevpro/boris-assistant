@@ -3,7 +3,8 @@ use crate::AudioBuffer;
 pub enum Event {
     WakeWordDetected,
     SpeechEnded,
-    RecordingFinished(AudioBuffer),
+    RecordingResult(AudioBuffer),
+    SpeechToTextResult(String),
 }
 
 pub enum InferenceEvent {}

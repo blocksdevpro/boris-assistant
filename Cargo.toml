@@ -12,3 +12,4 @@ crossbeam-channel = "0.5.15"
 boris-core = { path = "./crates/boris-core" }
 boris-audio = { path = "./crates/boris-audio" }
 boris-inference = { path = "./crates/boris-inference" }
+boris-stt-parakeet = { path = "./crates/boris-stt-parakeet" }

@@ -8,21 +8,33 @@ use transcribe_rs::{
 };
 
 pub struct ParakeetSTT {
-    model: ParakeetModel,
+    model: Option<ParakeetModel>,
 }
 
 impl ParakeetSTT {
     pub fn new() -> Self {
-        let model_path = "./assets/models/parakeet/";
-        let model = ParakeetModel::load(Path::new(model_path), &Quantization::Int8).unwrap();
-        Self { model }
+        Self { model: None }
     }
 }
 
 impl SpeechToText for ParakeetSTT {
+    fn load(&mut self) -> Result<()> {
+        if self.model.is_none() {
+            let model_path = "./assets/models/parakeet/";
+            let model = ParakeetModel::load(Path::new(model_path), &Quantization::Int8).unwrap();
+            self.model = Some(model);
+        }
+        Ok(())
+    }
+
+    fn unload(&mut self) -> Result<()> {
+        self.model = None;
+        Ok(())
+    }
+
     fn transcribe(&mut self, audio: &[boris_core::AudioSample]) -> Result<String> {
-        let result = self
-            .model
+        let model = self.model.as_mut().expect("Model not loaded");
+        let result = model
             .transcribe(
                 audio,
                 &TranscribeOptions {

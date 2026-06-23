@@ -6,20 +6,36 @@ use std::{
 use boris_core::{AudioBuffer, event::Event};
 use boris_inference::SpeechToText;
 
+pub enum STTCommand {
+    LoadModel,
+    Transcribe(AudioBuffer),
+}
+
 pub struct STTWorker {
     _handle: JoinHandle<()>,
 }
 
 impl STTWorker {
     pub fn spawn(
-        audio_rx: Receiver<AudioBuffer>,
+        command_rx: Receiver<STTCommand>,
         event_tx: Sender<Event>,
         mut stt: impl SpeechToText + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
-            while let Ok(audio) = audio_rx.recv() {
-                if let Ok(text) = stt.transcribe(&audio) {
-                    event_tx.send(Event::SpeechToTextResult(text)).ok();
+            while let Ok(cmd) = command_rx.recv() {
+                match cmd {
+                    STTCommand::LoadModel => {
+                        println!("[BORIS] Loading STT model...");
+                        stt.load().ok();
+                        println!("[BORIS] STT model loaded.");
+                    }
+                    STTCommand::Transcribe(audio) => {
+                        if let Ok(text) = stt.transcribe(&audio) {
+                            event_tx.send(Event::SpeechToTextResult(text)).ok();
+                        }
+                        println!("[BORIS] Unloading STT model...");
+                        stt.unload().ok();
+                    }
                 }
             }
         });

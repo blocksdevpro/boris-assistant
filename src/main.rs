@@ -14,7 +14,7 @@ use boris_stt_parakeet::ParakeetSTT;
 
 use crate::workers::{
     audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
-    inference::STTWorker,
+    inference::{STTCommand, STTWorker},
 };
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
@@ -49,7 +49,7 @@ fn main() {
     let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
-    let (stt_audio_tx, stt_audio_rx) = mpsc::channel::<AudioBuffer>();
+    let (stt_control_tx, stt_control_rx) = mpsc::channel::<STTCommand>();
 
     let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<WakeWordCommand>();
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
@@ -74,7 +74,7 @@ fn main() {
         AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     let stt = ParakeetSTT::new();
-    let _stt_worker = STTWorker::spawn(stt_audio_rx, event_tx, stt);
+    let _stt_worker = STTWorker::spawn(stt_control_rx, event_tx, stt);
 
     wakeword_control_tx
         .send(WakeWordCommand::StartListening)
@@ -90,6 +90,7 @@ fn main() {
                         .ok();
                     vad_control_tx.send(VadCommand::StartListening).ok();
                     recorder_control_tx.send(Lifecycle::Start).ok();
+                    stt_control_tx.send(STTCommand::LoadModel).ok();
                 }
                 Event::SpeechEnded => {
                     println!("[BORIS] speech ended");
@@ -98,7 +99,7 @@ fn main() {
                 }
                 Event::RecordingResult(audio_chunk) => {
                     println!("[BORIS] recording finished");
-                    stt_audio_tx.send(audio_chunk).ok();
+                    stt_control_tx.send(STTCommand::Transcribe(audio_chunk)).ok();
                 }
 
                 Event::SpeechToTextResult(text) => {

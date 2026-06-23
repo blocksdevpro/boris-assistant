@@ -25,15 +25,15 @@ impl STTWorker {
             while let Ok(cmd) = command_rx.recv() {
                 match cmd {
                     STTCommand::LoadModel => {
-                        println!("[BORIS] Loading STT model...");
+                        tracing::debug!("Loading STT model into memory...");
                         stt.load().ok();
-                        println!("[BORIS] STT model loaded.");
+                        tracing::debug!("STT model loaded successfully.");
                     }
                     STTCommand::Transcribe(audio) => {
                         if let Ok(text) = stt.transcribe(&audio) {
                             event_tx.send(Event::SpeechToTextResult(text)).ok();
                         }
-                        println!("[BORIS] Unloading STT model...");
+                        tracing::debug!("Unloading STT model from memory...");
                         stt.unload().ok();
                     }
                 }

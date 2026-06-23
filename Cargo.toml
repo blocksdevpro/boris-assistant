@@ -6,10 +6,13 @@ edition = "2024"
 
 
 [dependencies]
-hound = "3.5.1"
-crossbeam-channel = "0.5.15"
-
 boris-core = { path = "./crates/boris-core" }
 boris-audio = { path = "./crates/boris-audio" }
 boris-inference = { path = "./crates/boris-inference" }
 boris-stt-parakeet = { path = "./crates/boris-stt-parakeet" }
+
+
+hound = "3.5.1"
+tracing = "0.1.44"
+crossbeam-channel = "0.5.15"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

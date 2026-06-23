@@ -84,8 +84,9 @@ impl WakeWordWorker {
 
                     let result = detector.predict(&audio).unwrap();
 
-                    println!(
-                        "[BORIS] score: {result}, took {}ms",
+                    tracing::debug!(
+                        "Wakeword score: {:.3} ({}ms)",
+                        result,
                         last_processing_time.elapsed().as_millis()
                     );
                     if result >= WAKEWORD_THRESHOLD {

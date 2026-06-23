@@ -86,7 +86,7 @@ where
                     .collect();
                 audio_tx.try_send(mono_samples).ok();
             },
-            |err| eprintln!("[ERROR] [Boris.AudioCapture] capture error: {err}"),
+            |err| tracing::error!("Audio capture failed: {err}"),
             None,
         )
         .map_err(|err| Error::AudioError("[Boris.AudioCapture] ".to_string() + &err.to_string()))?;

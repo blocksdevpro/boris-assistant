@@ -17,7 +17,7 @@ use crate::workers::{
     inference::{STTCommand, STTWorker},
 };
 
-static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
+static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-medium.onnx");
 
 mod workers;
 
@@ -43,6 +43,18 @@ fn save_pcm_to_wav(audio: &[i16], filename: &str) {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::WARN.into())
+                .add_directive("boris_assistant=info".parse().unwrap())
+                .add_directive("boris_audio=info".parse().unwrap())
+                .add_directive("boris_inference=info".parse().unwrap())
+                .add_directive("boris_stt_parakeet=info".parse().unwrap())
+                .add_directive("boris_core=info".parse().unwrap()),
+        )
+        .init();
+
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
 
@@ -84,7 +96,7 @@ fn main() {
         if let Ok(event) = event_rx.recv() {
             match event {
                 Event::WakeWordDetected => {
-                    println!("[BORIS] wakeword detected");
+                    tracing::info!("Wakeword detected, listening...");
                     wakeword_control_tx
                         .send(WakeWordCommand::StopListening)
                         .ok();
@@ -93,17 +105,19 @@ fn main() {
                     stt_control_tx.send(STTCommand::LoadModel).ok();
                 }
                 Event::SpeechEnded => {
-                    println!("[BORIS] speech ended");
+                    tracing::info!("Speech ended, processing audio...");
                     vad_control_tx.send(VadCommand::StopListening).ok();
                     recorder_control_tx.send(Lifecycle::Stop).ok();
                 }
                 Event::RecordingResult(audio_chunk) => {
-                    println!("[BORIS] recording finished");
-                    stt_control_tx.send(STTCommand::Transcribe(audio_chunk)).ok();
+                    tracing::debug!("Audio recording finalized and dispatched to STT");
+                    stt_control_tx
+                        .send(STTCommand::Transcribe(audio_chunk))
+                        .ok();
                 }
 
                 Event::SpeechToTextResult(text) => {
-                    println!("[BORIS] [TTS_result] {}", text);
+                    tracing::info!("Transcription: \"{}\"", text);
                     wakeword_control_tx
                         .send(WakeWordCommand::StartListening)
                         .ok();

@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boris-core = { path = "../boris-core" }
+
+
 cpal = "0.18.1"
 rubato = "3.0.0"
 crossbeam-channel = "0.5.15"
 
 
-boris-core = { path = "../boris-core" }
+tracing = "0.1.44"

@@ -6,18 +6,15 @@ use boris_core::{
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
 };
-use boris_inference::{
-    vad::{VadCommand, VadWorker, WebRtcVad},
-    wakeword::{LivekitWakeWord as WakeWord, WakeWordCommand, WakeWordWorker},
-};
+use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
 
 use crate::workers::{
     audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
-    inference::{STTCommand, STTWorker},
+    inference::{STTCommand, STTWorker, VADWorker, WakeWordWroker},
 };
 
-static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-medium.onnx");
+static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
 mod workers;
 
@@ -47,9 +44,9 @@ fn main() {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::WARN.into())
-                .add_directive("boris_assistant=info".parse().unwrap())
+                .add_directive("boris_assistant=debug".parse().unwrap())
                 .add_directive("boris_audio=info".parse().unwrap())
-                .add_directive("boris_inference=info".parse().unwrap())
+                .add_directive("boris_inference=debug".parse().unwrap())
                 .add_directive("boris_stt_parakeet=info".parse().unwrap())
                 .add_directive("boris_core=info".parse().unwrap()),
         )
@@ -63,9 +60,9 @@ fn main() {
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (stt_control_tx, stt_control_rx) = mpsc::channel::<STTCommand>();
 
-    let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<WakeWordCommand>();
+    let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<Lifecycle>();
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
-    let (vad_control_tx, vad_control_rx) = mpsc::channel::<VadCommand>();
+    let (vad_control_tx, vad_control_rx) = mpsc::channel::<Lifecycle>();
 
     let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
     let vad = WebRtcVad::new();
@@ -75,38 +72,34 @@ fn main() {
         audio_rx,
         vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
     );
-    let _wakeword_worker = WakeWordWorker::spawn(
+    let _wakeword_worker = WakeWordWroker::spawn(
         wakeword_audio_rx,
         wakeword_control_rx,
         event_tx.clone(),
         wakeword,
     );
-    let _vad_worker = VadWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
+    let _vad_worker = VADWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
     let _recording_worker =
         AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     let stt = ParakeetSTT::new();
     let _stt_worker = STTWorker::spawn(stt_control_rx, event_tx, stt);
 
-    wakeword_control_tx
-        .send(WakeWordCommand::StartListening)
-        .ok();
+    wakeword_control_tx.send(Lifecycle::Start).ok();
 
     loop {
         if let Ok(event) = event_rx.recv() {
             match event {
                 Event::WakeWordDetected => {
                     tracing::info!("Wakeword detected, listening...");
-                    wakeword_control_tx
-                        .send(WakeWordCommand::StopListening)
-                        .ok();
-                    vad_control_tx.send(VadCommand::StartListening).ok();
+                    wakeword_control_tx.send(Lifecycle::Stop).ok();
+                    vad_control_tx.send(Lifecycle::Start).ok();
                     recorder_control_tx.send(Lifecycle::Start).ok();
                     stt_control_tx.send(STTCommand::LoadModel).ok();
                 }
                 Event::SpeechEnded => {
                     tracing::info!("Speech ended, processing audio...");
-                    vad_control_tx.send(VadCommand::StopListening).ok();
+                    vad_control_tx.send(Lifecycle::Stop).ok();
                     recorder_control_tx.send(Lifecycle::Stop).ok();
                 }
                 Event::RecordingResult(audio_chunk) => {
@@ -118,9 +111,7 @@ fn main() {
 
                 Event::SpeechToTextResult(text) => {
                     tracing::info!("Transcription: \"{}\"", text);
-                    wakeword_control_tx
-                        .send(WakeWordCommand::StartListening)
-                        .ok();
+                    wakeword_control_tx.send(Lifecycle::Start).ok();
                 }
             }
         }

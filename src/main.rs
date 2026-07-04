@@ -1,5 +1,7 @@
+use std::env;
 use std::sync::mpsc;
 
+use boris_agent::{Engine, OpenRouterClient};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     AudioBuffer,
@@ -10,6 +12,7 @@ use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
 
 use crate::workers::{
+    agent::{AgentCommand, AgentWorker, SpeakTool},
     audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
     inference::{STTCommand, STTWorker, VADWorker, WakeWordWroker},
 };
@@ -17,6 +20,11 @@ use crate::workers::{
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
 mod workers;
+
+const BORIS_SYSTEM_PROMPT: &str = "\
+You are Boris, a helpful voice assistant. \
+Always use the `speak` tool to deliver your response to the user — never reply with plain text. \
+Keep answers concise and natural for speech.";
 
 // write a func to save audio in file.wav
 #[allow(dead_code)]
@@ -52,26 +60,32 @@ fn main() {
         )
         .init();
 
+    // ── Channels ──────────────────────────────────────────────────────────────
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
 
     let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
+
     let (stt_control_tx, stt_control_rx) = mpsc::channel::<STTCommand>();
+    let (agent_command_tx, agent_command_rx) = mpsc::channel::<AgentCommand>();
 
     let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<Lifecycle>();
     let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
     let (vad_control_tx, vad_control_rx) = mpsc::channel::<Lifecycle>();
 
-    let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
-    let vad = WebRtcVad::new();
-
+    // ── Audio pipeline ────────────────────────────────────────────────────────
     let _audio_pipeline_worker = AudioPipelineWorker::spawn(audio_tx);
-    let _audio_dispatcer_worker = AudioDispatcherWorker::spawn(
+    let _audio_dispatcher_worker = AudioDispatcherWorker::spawn(
         audio_rx,
         vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
     );
+
+    // ── Inference workers ─────────────────────────────────────────────────────
+    let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
+    let vad = WebRtcVad::new();
+
     let _wakeword_worker = WakeWordWroker::spawn(
         wakeword_audio_rx,
         wakeword_control_rx,
@@ -83,10 +97,20 @@ fn main() {
         AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
 
     let stt = ParakeetSTT::new();
-    let _stt_worker = STTWorker::spawn(stt_control_rx, event_tx, stt);
+    let _stt_worker = STTWorker::spawn(stt_control_rx, event_tx.clone(), stt);
 
+    // ── Agent ─────────────────────────────────────────────────────────────────
+    let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
+    let client = OpenRouterClient::new(api_key);
+    let mut engine = Engine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
+    engine.register_tool(Box::new(SpeakTool::new(event_tx.clone())));
+
+    let _agent_worker = AgentWorker::spawn(agent_command_rx, engine);
+
+    // ── Start listening for wakeword ──────────────────────────────────────────
     wakeword_control_tx.send(Lifecycle::Start).ok();
 
+    // ── Main event loop ───────────────────────────────────────────────────────
     loop {
         if let Ok(event) = event_rx.recv() {
             match event {
@@ -103,15 +127,20 @@ fn main() {
                     recorder_control_tx.send(Lifecycle::Stop).ok();
                 }
                 Event::RecordingResult(audio_chunk) => {
-                    tracing::debug!("Audio recording finalized and dispatched to STT");
+                    tracing::debug!("Audio recording finalized, dispatching to STT...");
                     stt_control_tx
                         .send(STTCommand::Transcribe(audio_chunk))
                         .ok();
                 }
-
                 Event::SpeechToTextResult(text) => {
                     tracing::info!("Transcription: \"{}\"", text);
+                    // Hand the text to the agent and start listening again
+                    agent_command_tx.send(AgentCommand::Chat(text)).ok();
                     wakeword_control_tx.send(Lifecycle::Start).ok();
+                }
+                Event::AgentResponse(reply) => {
+                    // TODO: send `reply` to a TTS worker once implemented
+                    tracing::info!("Boris: \"{}\"", reply);
                 }
             }
         }

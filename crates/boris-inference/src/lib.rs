@@ -24,12 +24,22 @@ pub trait Vad: Send {
 }
 
 pub trait SpeechToText: Send {
-    fn load(&mut self) -> Result<()> { Ok(()) }
-    fn unload(&mut self) -> Result<()> { Ok(()) }
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn unload(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn transcribe(&mut self, audio: &[AudioSample]) -> Result<String>;
 }
 
 pub trait TextToSpeech: Send {
+    fn load(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn unload(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn synthesize(&mut self, text: &str) -> Result<AudioBuffer>;
 }
 

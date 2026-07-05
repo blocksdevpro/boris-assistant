@@ -1,0 +1,7 @@
+[env]
+# Force esaxx-rs (and other C++ deps) to compile with /MD (dynamic CRT)
+# to match the prebuilt ONNX Runtime binaries used by ort-sys.
+# Without this, esaxx-rs uses /MT (static CRT) while ort-sys uses /MD,
+# causing LNK2038 "RuntimeLibrary mismatch" on Windows.
+CXXFLAGS = "/MD"
+CFLAGS   = "/MD"

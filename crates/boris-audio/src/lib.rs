@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod capture;
+pub mod playback;
 pub mod resampler;
 
 pub const AUDIO_CHUNK_SIZE: u32 = 512;

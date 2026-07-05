@@ -1,15 +1,11 @@
 [package]
-name = "boris-audio"
+name = "boris-tts-kokoro"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+any-tts = "0.1.2"
 boris-core = { path = "../boris-core" }
-
-
-cpal = "0.18.0"
-rubato = "3.0.0"
-crossbeam-channel = "0.5.15"
-
+boris-inference = { path = "../boris-inference" }
 
 tracing = "0.1.44"

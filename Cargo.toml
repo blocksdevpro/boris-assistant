@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 
-
 [dependencies]
 boris-core = { path = "./crates/boris-core" }
 boris-audio = { path = "./crates/boris-audio" }
 boris-inference = { path = "./crates/boris-inference" }
 boris-stt-parakeet = { path = "./crates/boris-stt-parakeet" }
 boris-agent = { path = "./crates/boris-agent" }
+boris-tts-kokoro = { path = "./crates/boris-tts-kokoro" }
 
 
 hound = "3.5.1"

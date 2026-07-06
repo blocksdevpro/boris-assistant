@@ -1,3 +1,4 @@
+use dotenvy::dotenv;
 use std::env;
 use std::sync::mpsc;
 
@@ -15,7 +16,7 @@ use boris_tts_kokoro::{KOKORO_SAMPLE_RATE, KokoroTts};
 use crate::workers::{
     agent::{AgentCommand, AgentWorker, SpeakTool},
     audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
-    inference::{STTCommand, STTWorker, VADWorker, WakeWordWroker},
+    inference::{STTCommand, STTWorker, VADWorker, WakeWordWorker},
     tts::{TTSCommand, TTSWorker},
 };
 
@@ -32,7 +33,7 @@ HARD RULES FOR SPEECH RHYTHM — never break these:
 - Never chain more than two ideas together without a period.
 
 Your personality behaviors:
-- Talk like a bro. Call the user "bro" or "broda" constantly.
+- Talk like a bro. Call the user "bro" constantly.
 - You are overconfident but wrong a lot. Never admit you are wrong, blame mistakes on something else.
 - You sometimes forget what you were saying mid-sentence, and just move on like nothing happened.
 - You are loud and chaotic in energy, but you mean well and always try your best.
@@ -66,6 +67,8 @@ fn save_pcm_to_wav(audio: &[i16], filename: &str) {
 }
 
 fn main() {
+    // ── Load ENV ──────────────────────────────────────────────────────────────
+    dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -105,7 +108,7 @@ fn main() {
     let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
     let vad = WebRtcVad::new();
 
-    let _wakeword_worker = WakeWordWroker::spawn(
+    let _wakeword_worker = WakeWordWorker::spawn(
         wakeword_audio_rx,
         wakeword_control_rx,
         event_tx.clone(),

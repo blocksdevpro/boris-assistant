@@ -120,11 +120,11 @@ impl VADWorker {
     }
 }
 
-pub struct WakeWordWroker {
+pub struct WakeWordWorker {
     _handle: JoinHandle<()>,
 }
 
-impl WakeWordWroker {
+impl WakeWordWorker {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<Lifecycle>,

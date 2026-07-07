@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -8,14 +10,15 @@ pub enum Role {
     Tool,
 }
 
-impl Role {
-    fn to_string(&self) -> String {
-        match self {
-            Role::System => "system".to_string(),
-            Role::User => "user".to_string(),
-            Role::Assistant => "assistant".to_string(),
-            Role::Tool => "tool".to_string(),
-        }
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Role::System    => "system",
+            Role::User      => "user",
+            Role::Assistant => "assistant",
+            Role::Tool      => "tool",
+        };
+        f.write_str(s)
     }
 }
 
@@ -23,7 +26,7 @@ impl Role {
 pub struct Message {
     pub role: Role,
     /// For User/System/Assistant: a plain string or content array.
-    /// For Tool: a JSON object with { tool_call_id, content }.
+    /// For Tool: a JSON object `{ tool_call_id, content }`.
     /// For Assistant with tool_calls: the raw message object from the LLM.
     pub content: Value,
 }
@@ -36,17 +39,19 @@ pub struct Context {
 impl Message {
     pub fn dump(&self) -> Value {
         match self.role {
-            // Tool result — must have tool_call_id at the top level
+            // Tool result — must surface tool_call_id at the top level.
             Role::Tool => json!({
                 "role": "tool",
                 "tool_call_id": self.content["tool_call_id"],
-                "content": self.content["content"],
+                "content":      self.content["content"],
             }),
-            // Assistant with tool_calls — forward the raw object (already has "role")
-            Role::Assistant if self.content.get("tool_calls").is_some() => self.content.clone(),
-            // Everything else
+            // Assistant with tool_calls — forward the raw object (already has "role").
+            Role::Assistant if self.content.get("tool_calls").is_some() => {
+                self.content.clone()
+            }
+            // Everything else.
             _ => json!({
-                "role": self.role.to_string(),
+                "role":    self.role.to_string(),
                 "content": self.content,
             }),
         }
@@ -61,7 +66,7 @@ impl Context {
         });
     }
 
-    pub fn json(&self) -> Value {
+    pub fn as_json(&self) -> Value {
         let messages: Vec<Value> = self.messages.iter().map(|m| m.dump()).collect();
         json!(messages)
     }

@@ -27,7 +27,7 @@ impl Capture {
 
         let stream_config = StreamConfig {
             channels: channels as u16,
-            sample_rate: sample_rate,
+            sample_rate,
             buffer_size: BufferSize::Default,
         };
 

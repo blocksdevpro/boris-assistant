@@ -1,10 +1,10 @@
 [package]
-name = "boris-stt-parakeet"
+name    = "boris-stt-parakeet"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-transcribe-rs = { version = "0.3.11", features = ["onnx"] }
+boris-core      = { workspace = true }
+boris-inference = { workspace = true }
 
-boris-core = {path = "../boris-core"}
-boris-inference = {path = "../boris-inference"}
+transcribe-rs = { version = "0.3.11", features = ["onnx"] }

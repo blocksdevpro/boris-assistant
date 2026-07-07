@@ -1,9 +1,10 @@
 [package]
-name = "boris-agent"
+name    = "boris-agent"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-serde = "1.0.228"
-serde_json = "1.0.150"
-reqwest = { version = "0.13.4", features = ["blocking", "json"] }
+serde_json = { workspace = true }
+
+serde   = "1"
+reqwest = { version = "0.13", features = ["blocking", "json"] }

@@ -282,7 +282,6 @@ dependencies = [
 name = "boris-inference"
 version = "0.1.0"
 dependencies = [
- "boris-audio",
  "boris-core",
  "livekit-wakeword",
  "tracing",

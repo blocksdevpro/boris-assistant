@@ -1,15 +1,12 @@
 [package]
-name = "boris-audio"
+name    = "boris-audio"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-boris-core = { path = "../boris-core" }
+boris-core        = { workspace = true }
+tracing           = { workspace = true }
+crossbeam-channel = { workspace = true }
 
-
-cpal = "0.18.0"
-rubato = "3.0.0"
-crossbeam-channel = "0.5.15"
-
-
-tracing = "0.1.44"
+cpal   = "0.18"
+rubato = "3.0"

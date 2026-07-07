@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use boris_core::error::Result;
+use boris_core::{AudioSample, error::Result};
 use boris_inference::SpeechToText;
 use transcribe_rs::{
     SpeechModel, TranscribeOptions,
@@ -17,11 +17,20 @@ impl ParakeetSTT {
     }
 }
 
+impl Default for ParakeetSTT {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpeechToText for ParakeetSTT {
     fn load(&mut self) -> Result<()> {
         if self.model.is_none() {
-            let model_path = "./assets/models/parakeet/";
-            let model = ParakeetModel::load(Path::new(model_path), &Quantization::Int8).unwrap();
+            let model = ParakeetModel::load(
+                Path::new("./assets/models/parakeet/"),
+                &Quantization::Int8,
+            )
+            .map_err(|e| boris_core::error::Error::Other(e.to_string()))?;
             self.model = Some(model);
         }
         Ok(())
@@ -32,8 +41,12 @@ impl SpeechToText for ParakeetSTT {
         Ok(())
     }
 
-    fn transcribe(&mut self, audio: &[boris_core::AudioSample]) -> Result<String> {
-        let model = self.model.as_mut().expect("Model not loaded");
+    fn transcribe(&mut self, audio: &[AudioSample]) -> Result<String> {
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| boris_core::error::Error::Other("STT model not loaded".into()))?;
+
         let result = model
             .transcribe(
                 audio,
@@ -42,7 +55,7 @@ impl SpeechToText for ParakeetSTT {
                     ..Default::default()
                 },
             )
-            .unwrap();
+            .map_err(|e| boris_core::error::Error::Other(e.to_string()))?;
 
         Ok(result.text)
     }

@@ -15,6 +15,12 @@ pub enum Event {
 
     /// TTS synthesis is complete; the PCM samples are ready for playback.
     PlaybackReady(AudioBuffer),
-}
 
-pub enum InferenceEvent {}
+    // ── Errors ────────────────────────────────────────────────────────────────
+    /// A worker encountered a non-fatal error. The main loop logs it and
+    /// decides whether to attempt recovery.
+    WorkerError {
+        worker: &'static str,
+        message: String,
+    },
+}

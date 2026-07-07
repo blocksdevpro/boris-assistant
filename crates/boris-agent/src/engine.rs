@@ -6,19 +6,20 @@ use crate::{
     tool::Tool,
 };
 
-pub struct Engine {
+pub struct AgentEngine {
     client: Box<dyn LlmClient>,
     tools: Vec<Box<dyn Tool>>,
     context: Context,
 }
 
-impl Engine {
+impl AgentEngine {
     /// Create a new engine.
-    /// `system_prompt` sets Boris's persona and instructions.
+    ///
+    /// `system_prompt` sets the assistant's persona and hard rules.
+    /// Register tools with [`register_tool`] before the first [`chat`] call.
     pub fn new(client: Box<dyn LlmClient>, system_prompt: &str) -> Self {
         let mut context = Context::default();
         context.push(Role::System, system_prompt);
-
         Self {
             client,
             tools: vec![],
@@ -31,7 +32,7 @@ impl Engine {
         self.tools.push(tool);
     }
 
-    /// Serialize registered tools into the JSON array expected by the API.
+    /// Serialize registered tools into the JSON array expected by the OpenAI API.
     fn tools_json(&self) -> Value {
         let list: Vec<Value> = self
             .tools
@@ -51,19 +52,24 @@ impl Engine {
     }
 
     /// Send a user message and run the tool-call loop until the LLM gives a
-    /// plain-text reply.  Returns the final assistant content string.
+    /// plain-text reply.
+    ///
+    /// Output flows through the event bus via the registered tools (e.g.
+    /// `SpeakTool`), not through the return value of this method.
     pub fn chat(&mut self, message: &str) -> String {
         self.context.push(Role::User, message);
 
         loop {
-            let response = self.client.complete(self.context.json(), self.tools_json());
+            let response = self
+                .client
+                .complete(self.context.as_json(), self.tools_json());
 
             let tool_calls = &response["tool_calls"];
             if tool_calls.is_array() && !tool_calls.as_array().unwrap().is_empty() {
-                // Push the assistant's tool-call turn into context
+                // Push the assistant's tool-call turn into context.
                 self.context.push(Role::Assistant, response.clone());
 
-                // Execute every requested tool and push results
+                // Execute every requested tool and push its result.
                 for call in tool_calls.as_array().unwrap() {
                     let call_id = call["id"].as_str().unwrap_or("").to_string();
                     let fn_name = call["function"]["name"].as_str().unwrap_or("");
@@ -78,7 +84,7 @@ impl Engine {
                         .find(|t| t.name() == fn_name)
                         .map(|t| match t.execute(args) {
                             Ok(output) => output,
-                            Err(e) => format!("Error: {}", e.message),
+                            Err(e)     => format!("Error: {}", e.message),
                         })
                         .unwrap_or_else(|| format!("Unknown tool: {fn_name}"));
 
@@ -88,11 +94,11 @@ impl Engine {
                     );
                 }
 
-                // Loop — send updated context back to the LLM
+                // Loop — send the updated context back to the LLM.
                 continue;
             }
 
-            // No tool calls: the LLM returned a final plain-text reply
+            // No tool calls: the LLM returned a final plain-text reply.
             let reply = response["content"].as_str().unwrap_or("").to_string();
             self.context.push(Role::Assistant, reply.clone());
             return reply;

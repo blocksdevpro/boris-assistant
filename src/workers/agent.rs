@@ -1,11 +1,11 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use boris_agent::{Engine, Tool, ToolError};
+use boris_agent::{AgentEngine, Tool, ToolError};
 use boris_core::event::Event;
 use serde_json::{Value, json};
 
-// ── Commands ─────────────────────────────────────────────────────────────────
+// ── Commands ──────────────────────────────────────────────────────────────────
 
 pub enum AgentCommand {
     /// Dispatch a transcribed utterance to the agent for processing.
@@ -15,7 +15,7 @@ pub enum AgentCommand {
 // ── Speak Tool ────────────────────────────────────────────────────────────────
 
 /// Gives the LLM the ability to speak aloud by routing text through the
-/// event bus as `Event::AgentResponse`.
+/// event bus as [`Event::AgentResponse`].
 pub struct SpeakTool {
     event_tx: Sender<Event>,
 }
@@ -42,8 +42,7 @@ impl Tool for SpeakTool {
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "The text to speak aloud to the user. \
-                                    Keep it concise and natural for speech."
+                    "description": "The text to speak aloud. Keep it concise and natural for speech."
                 }
             },
             "required": ["text"]
@@ -52,12 +51,10 @@ impl Tool for SpeakTool {
 
     fn execute(&self, args: Value) -> Result<String, ToolError> {
         let text = args["text"].as_str().unwrap_or("").to_string();
-        tracing::debug!("speak tool invoked: \"{}\"", text);
+        tracing::debug!(text, "speak tool invoked");
         self.event_tx
             .send(Event::AgentResponse(text))
-            .map_err(|e| ToolError {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| ToolError { message: e.to_string() })?;
         Ok("spoken".to_string())
     }
 }
@@ -71,15 +68,15 @@ pub struct AgentWorker {
 impl AgentWorker {
     /// Spawn the agent on its own thread.
     ///
-    /// The engine should have all tools registered before being passed here.
-    /// Output flows through the event bus via the tools (e.g. `SpeakTool`),
-    /// not through the return value of `chat()`.
-    pub fn spawn(command_rx: Receiver<AgentCommand>, mut engine: Engine) -> Self {
+    /// The engine must have all tools registered before being passed here.
+    /// Output is delivered through the event bus via the registered tools
+    /// (e.g. [`SpeakTool`]), not through the return value of [`AgentEngine::chat`].
+    pub fn spawn(command_rx: Receiver<AgentCommand>, mut engine: AgentEngine) -> Self {
         let handle = thread::spawn(move || {
             while let Ok(cmd) = command_rx.recv() {
                 match cmd {
                     AgentCommand::Chat(text) => {
-                        tracing::debug!("Agent received: \"{}\"", text);
+                        tracing::debug!(text, "agent received message");
                         engine.chat(&text);
                     }
                 }

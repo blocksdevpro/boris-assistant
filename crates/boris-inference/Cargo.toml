@@ -1,13 +1,11 @@
 [package]
-name = "boris-inference"
+name    = "boris-inference"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-boris-core = { path = "../boris-core" }
-boris-audio = { path = "../boris-audio" }
+boris-core = { workspace = true }
+tracing    = { workspace = true }
 
 livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }
-
-webrtc-vad = "0.4.0"
-tracing = "0.1.44"
+webrtc-vad       = "0.4"

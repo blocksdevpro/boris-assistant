@@ -1,11 +1,11 @@
 [package]
-name = "boris-tts-kokoro"
+name    = "boris-tts-kokoro"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-any-tts = "0.1.2"
-boris-core = { path = "../boris-core" }
-boris-inference = { path = "../boris-inference" }
+boris-core      = { workspace = true }
+boris-inference = { workspace = true }
+tracing         = { workspace = true }
 
-tracing = "0.1.44"
+any-tts = "0.1.2"

@@ -1,45 +1,37 @@
-use boris_audio::AUDIO_TARGET_RATE;
+use boris_core::AUDIO_TARGET_RATE;
+use webrtc_vad::{SampleRate, Vad as WebVad};
 
-use webrtc_vad::SampleRate;
-use webrtc_vad::Vad as WebVad;
-
-use crate::AudioSample;
-use crate::Result;
-use crate::Vad;
-use crate::f32_to_pcm16_samples;
-
-pub enum VadResult {
-    Speech,
-    Silence,
-}
-
-pub enum VadCommand {
-    StartListening,
-    StopListening,
-}
+use crate::{AudioSample, Result, Vad, f32_to_pcm16_samples};
 
 pub struct WebRtcVad {
     model: WebVad,
 }
 
+// The underlying C library is not Send by default; it is safe to mark it Send
+// because each WebRtcVad instance is exclusively owned by a single worker thread.
 unsafe impl Send for WebRtcVad {}
 
 impl WebRtcVad {
     pub fn new() -> Self {
-        let sample_rate =
-            SampleRate::try_from(AUDIO_TARGET_RATE as i32).expect("[ERROR] invalid sample_rate");
-        let model = WebVad::new_with_rate(sample_rate);
-        Self { model }
+        let sample_rate = SampleRate::try_from(AUDIO_TARGET_RATE as i32)
+            .expect("AUDIO_TARGET_RATE is not a valid WebRTC VAD sample rate");
+        Self {
+            model: WebVad::new_with_rate(sample_rate),
+        }
+    }
+}
+
+impl Default for WebRtcVad {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Vad for WebRtcVad {
     fn predict(&mut self, audio: &[AudioSample]) -> Result<bool> {
-        let pcm_samples = f32_to_pcm16_samples(audio);
-        let result = self
-            .model
-            .is_voice_segment(&pcm_samples)
-            .expect("[ERROR] vad predict");
-        Ok(result)
+        let pcm = f32_to_pcm16_samples(audio);
+        self.model
+            .is_voice_segment(&pcm)
+            .map_err(|_| boris_core::error::Error::Other("webrtc-vad prediction failed".into()))
     }
 }

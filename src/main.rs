@@ -2,22 +2,22 @@ use dotenvy::dotenv;
 use std::env;
 use std::sync::mpsc;
 
-use boris_agent::{Engine, OpenRouterClient};
-use boris_audio::{AUDIO_TARGET_RATE, playback::Playback};
+use boris_agent::{AgentEngine, OpenRouterClient};
+use boris_audio::{playback::Playback, AUDIO_TARGET_RATE};
 use boris_core::{
-    AudioBuffer,
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
+    AudioBuffer,
 };
 use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
-use boris_tts_kokoro::{KOKORO_SAMPLE_RATE, KokoroTts};
+use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
 use crate::workers::{
     agent::{AgentCommand, AgentWorker, SpeakTool},
     audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
-    inference::{STTCommand, STTWorker, VADWorker, WakeWordWorker},
-    tts::{TTSCommand, TTSWorker},
+    inference::{SttCommand, SttWorker, VadWorker, WakeWordWorker},
+    tts::{TtsCommand, TtsWorker},
 };
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
@@ -41,33 +41,11 @@ Your personality behaviors:
 - You give short, punchy answers like a hype guy, who also has no idea what he is talking about.
 - Never use filler words like "certainly", "absolutely", or "of course". You are not a professional assistant.
 
-
 Always use the `speak` tool to deliver your response to the user — never reply with plain text. \
 Keep answers concise and natural for speech."#;
 
-// write a func to save audio in file.wav
-#[allow(dead_code)]
-fn save_pcm_to_wav(audio: &[i16], filename: &str) {
-    use hound::{SampleFormat, WavSpec, WavWriter};
-
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: AUDIO_TARGET_RATE,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-
-    let mut writer = WavWriter::create(filename, spec).unwrap();
-
-    for sample in audio {
-        writer.write_sample(*sample).unwrap();
-    }
-
-    writer.finalize().unwrap();
-}
-
 fn main() {
-    // ── Load ENV ──────────────────────────────────────────────────────────────
+    // ── Environment & logging ─────────────────────────────────────────────────
     dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -90,99 +68,104 @@ fn main() {
     let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
     let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
 
-    let (stt_control_tx, stt_control_rx) = mpsc::channel::<STTCommand>();
-    let (agent_command_tx, agent_command_rx) = mpsc::channel::<AgentCommand>();
+    let (stt_cmd_tx, stt_cmd_rx) = mpsc::channel::<SttCommand>();
+    let (agent_cmd_tx, agent_cmd_rx) = mpsc::channel::<AgentCommand>();
+    let (tts_cmd_tx, tts_cmd_rx) = mpsc::channel::<TtsCommand>();
+    let (playback_tx, playback_rx) = mpsc::channel::<AudioBuffer>();
 
-    let (wakeword_control_tx, wakeword_control_rx) = mpsc::channel::<Lifecycle>();
-    let (recorder_control_tx, recorder_control_rx) = mpsc::channel::<Lifecycle>();
-    let (vad_control_tx, vad_control_rx) = mpsc::channel::<Lifecycle>();
+    let (wakeword_ctl_tx, wakeword_ctl_rx) = mpsc::channel::<Lifecycle>();
+    let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<Lifecycle>();
+    let (vad_ctl_tx, vad_ctl_rx) = mpsc::channel::<Lifecycle>();
 
     // ── Audio pipeline ────────────────────────────────────────────────────────
-    let _audio_pipeline_worker = AudioPipelineWorker::spawn(audio_tx);
-    let _audio_dispatcher_worker = AudioDispatcherWorker::spawn(
+    let _audio_pipeline =
+        AudioPipelineWorker::spawn(audio_tx).expect("failed to initialise audio capture");
+
+    let _audio_dispatcher = AudioDispatcherWorker::spawn(
         audio_rx,
         vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
     );
 
     // ── Inference workers ─────────────────────────────────────────────────────
-    let wakeword = WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE);
-    let vad = WebRtcVad::new();
-
     let _wakeword_worker = WakeWordWorker::spawn(
         wakeword_audio_rx,
-        wakeword_control_rx,
+        wakeword_ctl_rx,
         event_tx.clone(),
-        wakeword,
+        WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE),
     );
-    let _vad_worker = VADWorker::spawn(vad_audio_rx, vad_control_rx, event_tx.clone(), vad);
+
+    let _vad_worker =
+        VadWorker::spawn(vad_audio_rx, vad_ctl_rx, event_tx.clone(), WebRtcVad::new());
+
     let _recording_worker =
-        AudioRecordingWorker::spawn(recorder_audio_rx, recorder_control_rx, event_tx.clone());
+        AudioRecordingWorker::spawn(recorder_audio_rx, recorder_ctl_rx, event_tx.clone());
 
-    let stt = ParakeetSTT::new();
-    let _stt_worker = STTWorker::spawn(stt_control_rx, event_tx.clone(), stt);
+    let _stt_worker = SttWorker::spawn(stt_cmd_rx, event_tx.clone(), ParakeetSTT::new());
 
-    // ── Agent ─────────────────────────────────────────────────────────────────────────
+    // ── Agent ─────────────────────────────────────────────────────────────────
     let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
     let client = OpenRouterClient::new(api_key);
-    let mut engine = Engine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
+    let mut engine = AgentEngine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
     engine.register_tool(Box::new(SpeakTool::new(event_tx.clone())));
 
-    let _agent_worker = AgentWorker::spawn(agent_command_rx, engine);
+    let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine);
 
-    // ── TTS + Playback ────────────────────────────────────────────────────────────
-    let (tts_command_tx, tts_command_rx) = mpsc::channel::<TTSCommand>();
-    let (playback_tx, playback_rx) = mpsc::channel::<AudioBuffer>();
-
-    let kokoro = KokoroTts::new();
-    let _tts_worker = TTSWorker::spawn(tts_command_rx, event_tx.clone(), kokoro);
+    // ── TTS + Playback ────────────────────────────────────────────────────────
+    let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
     let _playback = Playback::new(playback_rx, KOKORO_SAMPLE_RATE)
         .expect("failed to initialise audio playback");
 
-    // ── Start listening for wakeword ──────────────────────────────────────────
-    wakeword_control_tx.send(Lifecycle::Start).ok();
+    // ── Start listening for the wake word ─────────────────────────────────────
+    wakeword_ctl_tx.send(Lifecycle::Start).ok();
 
     // ── Main event loop ───────────────────────────────────────────────────────
-    loop {
-        if let Ok(event) = event_rx.recv() {
-            match event {
-                Event::WakeWordDetected => {
-                    tracing::info!("Wakeword detected, listening...");
-                    wakeword_control_tx.send(Lifecycle::Stop).ok();
-                    vad_control_tx.send(Lifecycle::Start).ok();
-                    recorder_control_tx.send(Lifecycle::Start).ok();
-                    stt_control_tx.send(STTCommand::LoadModel).ok();
-                }
-                Event::SpeechEnded => {
-                    tracing::info!("Speech ended, processing audio...");
-                    vad_control_tx.send(Lifecycle::Stop).ok();
-                    recorder_control_tx.send(Lifecycle::Stop).ok();
-                }
-                Event::RecordingResult(audio_chunk) => {
-                    tracing::debug!("Audio recording finalized, dispatching to STT...");
-                    stt_control_tx
-                        .send(STTCommand::Transcribe(audio_chunk))
-                        .ok();
-                }
-                Event::SpeechToTextResult(text) => {
-                    tracing::info!("Transcription: \"{}\"", text);
-                    // Hand the text to the agent and start listening again
-                    agent_command_tx.send(AgentCommand::Chat(text)).ok();
-                    tts_command_tx.send(TTSCommand::LoadModel).ok();
-                    // wakeword_control_tx.send(Lifecycle::Start).ok();
-                }
-                Event::AgentResponse(reply) => {
-                    tracing::info!("Boris: \"{}\"", reply);
-                    // Stop the wakeword listener while Boris is speaking so
-                    // his own voice doesn't re-trigger it.
-                    wakeword_control_tx.send(Lifecycle::Stop).ok();
-                    tts_command_tx.send(TTSCommand::Synthesize(reply)).ok();
-                }
-                Event::PlaybackReady(pcm) => {
-                    // Hand PCM samples to the playback worker and re-arm
-                    // the wakeword listener once we've dispatched the audio.
-                    playback_tx.send(pcm).ok();
-                    wakeword_control_tx.send(Lifecycle::Start).ok();
-                }
+    tracing::info!("Boris is ready. Say the wake word to begin.");
+
+    while let Ok(event) = event_rx.recv() {
+        match event {
+            Event::WakeWordDetected => {
+                tracing::info!("Wake word detected — listening…");
+                wakeword_ctl_tx.send(Lifecycle::Stop).ok();
+                vad_ctl_tx.send(Lifecycle::Start).ok();
+                recorder_ctl_tx.send(Lifecycle::Start).ok();
+                stt_cmd_tx.send(SttCommand::LoadModel).ok();
+            }
+
+            Event::SpeechEnded => {
+                tracing::info!("Speech ended — transcribing…");
+                vad_ctl_tx.send(Lifecycle::Stop).ok();
+                recorder_ctl_tx.send(Lifecycle::Stop).ok();
+            }
+
+            Event::RecordingResult(audio) => {
+                tracing::debug!("Recording finalised — dispatching to STT");
+                stt_cmd_tx.send(SttCommand::Transcribe(audio)).ok();
+            }
+
+            Event::SpeechToTextResult(text) => {
+                tracing::info!(text, "Transcription complete");
+                agent_cmd_tx.send(AgentCommand::Chat(text)).ok();
+                tts_cmd_tx.send(TtsCommand::LoadModel).ok();
+            }
+
+            Event::AgentResponse(reply) => {
+                tracing::info!(reply, "Boris speaking");
+                // Stop the wakeword listener while Boris is speaking so his
+                // own voice doesn't re-trigger detection.
+                wakeword_ctl_tx.send(Lifecycle::Stop).ok();
+                tts_cmd_tx.send(TtsCommand::Synthesize(reply)).ok();
+            }
+
+            Event::PlaybackReady(pcm) => {
+                playback_tx.send(pcm).ok();
+                // Re-arm wakeword detection once audio is dispatched.
+                wakeword_ctl_tx.send(Lifecycle::Start).ok();
+            }
+
+            Event::WorkerError { worker, message } => {
+                tracing::error!(worker, message, "worker error");
+                // Re-arm the wakeword so the assistant doesn't get stuck.
+                wakeword_ctl_tx.send(Lifecycle::Start).ok();
             }
         }
     }

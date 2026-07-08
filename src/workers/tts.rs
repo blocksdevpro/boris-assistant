@@ -5,7 +5,7 @@ use boris_core::event::Event;
 use boris_inference::TextToSpeech;
 
 // ── Commands ──────────────────────────────────────────────────────────────────
-
+#[derive(Debug)]
 pub enum TtsCommand {
     /// Load the TTS model into memory and pre-warm it.
     LoadModel,
@@ -34,10 +34,12 @@ impl TtsWorker {
                     TtsCommand::LoadModel => {
                         if let Err(e) = tts.load() {
                             tracing::error!(error = %e, "TtsWorker: failed to load model");
-                            event_tx.send(Event::WorkerError {
-                                worker: "TtsWorker",
-                                message: e.to_string(),
-                            }).ok();
+                            event_tx
+                                .send(Event::WorkerError {
+                                    worker: "TtsWorker",
+                                    message: e.to_string(),
+                                })
+                                .ok();
                         }
                     }
                     TtsCommand::Synthesize(text) => {
@@ -48,10 +50,12 @@ impl TtsWorker {
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "TtsWorker: synthesis failed");
-                                event_tx.send(Event::WorkerError {
-                                    worker: "TtsWorker",
-                                    message: e.to_string(),
-                                }).ok();
+                                event_tx
+                                    .send(Event::WorkerError {
+                                        worker: "TtsWorker",
+                                        message: e.to_string(),
+                                    })
+                                    .ok();
                             }
                         }
                     }

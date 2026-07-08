@@ -6,17 +6,17 @@ use std::{
 
 use boris_audio::buffer::SlidingBuffer;
 use boris_core::{
-    AudioBuffer,
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
+    AudioBuffer,
 };
 use boris_inference::{
-    SpeechToText, VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE, Vad,
-    WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE, WakeWord,
+    SpeechToText, Vad, WakeWord, VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE,
+    WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
 // ── Commands ──────────────────────────────────────────────────────────────────
-
+#[derive(Debug)]
 pub enum SttCommand {
     /// Prime the STT model so transcription is fast when audio arrives.
     LoadModel,
@@ -43,10 +43,12 @@ impl SttWorker {
                         tracing::debug!("SttWorker: loading model");
                         if let Err(e) = stt.load() {
                             tracing::error!(error = %e, "SttWorker: failed to load model");
-                            event_tx.send(Event::WorkerError {
-                                worker: "SttWorker",
-                                message: e.to_string(),
-                            }).ok();
+                            event_tx
+                                .send(Event::WorkerError {
+                                    worker: "SttWorker",
+                                    message: e.to_string(),
+                                })
+                                .ok();
                         }
                     }
                     SttCommand::Transcribe(audio) => {
@@ -56,10 +58,12 @@ impl SttWorker {
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "SttWorker: transcription failed");
-                                event_tx.send(Event::WorkerError {
-                                    worker: "SttWorker",
-                                    message: e.to_string(),
-                                }).ok();
+                                event_tx
+                                    .send(Event::WorkerError {
+                                        worker: "SttWorker",
+                                        message: e.to_string(),
+                                    })
+                                    .ok();
                             }
                         }
                         if let Err(e) = stt.unload() {
@@ -171,7 +175,7 @@ impl WakeWordWorker {
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
                         Lifecycle::Start => is_listening = true,
-                        Lifecycle::Stop  => is_listening = false,
+                        Lifecycle::Stop => is_listening = false,
                     }
                 }
 
@@ -182,8 +186,7 @@ impl WakeWordWorker {
                     continue;
                 }
 
-                if last_processed.elapsed() >= WAKEWORD_PROCESSING_INTERVAL
-                    && audio_buffer.ready()
+                if last_processed.elapsed() >= WAKEWORD_PROCESSING_INTERVAL && audio_buffer.ready()
                 {
                     let window = audio_buffer.read();
 

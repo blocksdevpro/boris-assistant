@@ -3,10 +3,10 @@ use std::thread::{self, JoinHandle};
 
 use boris_agent::{AgentEngine, Tool, ToolError};
 use boris_core::event::Event;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ── Commands ──────────────────────────────────────────────────────────────────
-
+#[derive(Debug)]
 pub enum AgentCommand {
     /// Dispatch a transcribed utterance to the agent for processing.
     Chat(String),
@@ -54,7 +54,9 @@ impl Tool for SpeakTool {
         tracing::debug!(text, "speak tool invoked");
         self.event_tx
             .send(Event::AgentResponse(text))
-            .map_err(|e| ToolError { message: e.to_string() })?;
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
         Ok("spoken".to_string())
     }
 }

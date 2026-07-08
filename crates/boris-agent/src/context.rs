@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
 pub enum Role {
@@ -13,10 +13,10 @@ pub enum Role {
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Role::System    => "system",
-            Role::User      => "user",
+            Role::System => "system",
+            Role::User => "user",
             Role::Assistant => "assistant",
-            Role::Tool      => "tool",
+            Role::Tool => "tool",
         };
         f.write_str(s)
     }
@@ -34,6 +34,7 @@ pub struct Message {
 #[derive(Debug, Default)]
 pub struct Context {
     pub messages: Vec<Message>,
+    pub max_turns: u32,
 }
 
 impl Message {
@@ -46,9 +47,7 @@ impl Message {
                 "content":      self.content["content"],
             }),
             // Assistant with tool_calls — forward the raw object (already has "role").
-            Role::Assistant if self.content.get("tool_calls").is_some() => {
-                self.content.clone()
-            }
+            Role::Assistant if self.content.get("tool_calls").is_some() => self.content.clone(),
             // Everything else.
             _ => json!({
                 "role":    self.role.to_string(),
@@ -59,11 +58,30 @@ impl Message {
 }
 
 impl Context {
+    pub fn new(max_turns: u32) -> Self {
+        Self {
+            messages: Vec::new(),
+            max_turns,
+        }
+    }
+
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
         self.messages.push(Message {
             role,
             content: content.into(),
         });
+        self.prune();
+    }
+
+    fn prune(&mut self) {
+        // Each turn = 3 messages (User + Assistant tool_call + Tool result)
+        // +1 for the System prompt at index 0
+        let max_messages = 1 + (self.max_turns * 3);
+
+        if self.messages.len() > max_messages as usize {
+            self.messages
+                .drain(1..self.messages.len() - max_messages as usize);
+        }
     }
 
     pub fn as_json(&self) -> Value {

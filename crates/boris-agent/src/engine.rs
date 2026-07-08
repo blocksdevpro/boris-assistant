@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{
     client::LlmClient,
@@ -18,7 +18,7 @@ impl AgentEngine {
     /// `system_prompt` sets the assistant's persona and hard rules.
     /// Register tools with [`register_tool`] before the first [`chat`] call.
     pub fn new(client: Box<dyn LlmClient>, system_prompt: &str) -> Self {
-        let mut context = Context::default();
+        let mut context = Context::new(20);
         context.push(Role::System, system_prompt);
         Self {
             client,
@@ -84,7 +84,7 @@ impl AgentEngine {
                         .find(|t| t.name() == fn_name)
                         .map(|t| match t.execute(args) {
                             Ok(output) => output,
-                            Err(e)     => format!("Error: {}", e.message),
+                            Err(e) => format!("Error: {}", e.message),
                         })
                         .unwrap_or_else(|| format!("Unknown tool: {fn_name}"));
 

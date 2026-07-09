@@ -4,6 +4,7 @@ use crate::{
     client::LlmClient,
     context::{Context, Role},
     error::AgentError,
+    outcome::AgentOutcome,
     tool::Tool,
 };
 
@@ -17,7 +18,8 @@ impl AgentEngine {
     /// Create a new engine.
     ///
     /// `system_prompt` sets the assistant's persona and hard rules.
-    /// Register tools with [`register_tool`] before the first [`chat`] call.
+    /// Tools are optional — Boris currently runs with none registered and
+    /// treats the model's final plain-text reply as speech ([`AgentOutcome::Speak`]).
     pub fn new(client: Box<dyn LlmClient>, system_prompt: &str) -> Self {
         let mut context = Context::new(20);
         context.push(Role::System, system_prompt);
@@ -28,7 +30,11 @@ impl AgentEngine {
         }
     }
 
-    /// Register a tool the LLM is allowed to call.
+    /// Register a tool the LLM may call during the ReAct-style loop.
+    ///
+    /// Tool results are fed back into context; they must not speak to the user
+    /// directly. Final user-facing speech always comes from [`chat`]'s
+    /// [`AgentOutcome`].
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
     }
@@ -52,13 +58,15 @@ impl AgentEngine {
         json!(list)
     }
 
-    /// Send a user message and run the tool-call loop until the LLM gives a
-    /// plain-text reply (or only tool side-effects like `speak`).
+    /// Run one user turn: call the LLM, execute any requested tools, repeat
+    /// until the model returns a final plain-text message (no `tool_calls`).
     ///
-    /// Speech still flows through registered tools (e.g. `SpeakTool`). The
-    /// returned string is the final plain-text content when the model does not
-    /// use tools — callers may treat a non-empty value as a fallback utterance.
-    pub fn chat(&mut self, message: &str) -> Result<String, AgentError> {
+    /// - Non-empty content → [`AgentOutcome::Speak`] (caller / Session should TTS it).
+    /// - Empty content → [`AgentOutcome::Silent`].
+    ///
+    /// This crate never talks to the app event bus; the binary worker maps the
+    /// outcome into runtime events.
+    pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
         self.context.push(Role::User, message);
 
         loop {
@@ -99,9 +107,16 @@ impl AgentEngine {
                 }
             }
 
-            let reply = response["content"].as_str().unwrap_or("").to_string();
+            let reply = response["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             self.context.push(Role::Assistant, reply.clone());
-            return Ok(reply);
+            if reply.is_empty() {
+                return Ok(AgentOutcome::Silent);
+            }
+            return Ok(AgentOutcome::Speak(reply));
         }
     }
 }

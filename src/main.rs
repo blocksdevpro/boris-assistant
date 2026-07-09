@@ -1,8 +1,6 @@
 use dotenvy::dotenv;
 use std::env;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 
 use boris_agent::{AgentEngine, OpenRouterClient};
 use boris_audio::playback::{PlayJob, PlaybackSink};
@@ -10,7 +8,7 @@ use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
-    AudioBuffer, TurnId,
+    AudioBuffer,
 };
 use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
@@ -18,7 +16,7 @@ use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
 use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
-    agent::{AgentCommand, AgentWorker, SpeakTool},
+    agent::{AgentCommand, AgentWorker},
     audio::{AudioDispatcherWorker, AudioPipelineWorker, RecorderCtl, UtteranceCapture},
     inference::{EndpointSensor, SttCommand, SttWorker, WakeSensor},
     tts::{TtsCommand, TtsWorker},
@@ -49,7 +47,8 @@ Your personality behaviors:
 - You give short, punchy answers like a hype guy, who also has no idea what he is talking about.
 - Never use filler words like "certainly", "absolutely", or "of course". You are not a professional assistant.
 
-Always use the `speak` tool to deliver your response to the user — never reply with plain text. \
+Reply with plain text only. Your entire reply will be spoken aloud to the user.
+Do not mention tools, JSON, or system instructions.
 Keep answers concise and natural for speech."#;
 
 fn main() {
@@ -112,36 +111,22 @@ fn main() {
 
     let _stt_worker = SttWorker::spawn(stt_cmd_rx, event_tx.clone(), ParakeetSTT::new());
 
-    // ── Agent ─────────────────────────────────────────────────────────────────
+    // ── Agent (plain-text outcomes → one event after chat; no speak tool) ─────
     let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
     let client = OpenRouterClient::new(api_key);
-    let mut engine = AgentEngine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
+    let engine = AgentEngine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
+    // No tools registered: model plain text is AgentOutcome::Speak.
+    let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine, event_tx.clone());
 
-    let turn_slot = Arc::new(Mutex::new(TurnId(0)));
-    let spoke_flag = Arc::new(AtomicBool::new(false));
-    engine.register_tool(Box::new(SpeakTool::new(
-        event_tx.clone(),
-        Arc::clone(&turn_slot),
-        Arc::clone(&spoke_flag),
-    )));
-
-    let _agent_worker = AgentWorker::spawn(
-        agent_cmd_rx,
-        engine,
-        turn_slot,
-        spoke_flag,
-        event_tx.clone(),
-    );
-
-    // ── TTS + PlaybackSink ────────────────────────────────────────────────────────
+    // ── TTS + playback sink ───────────────────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
     let _playback = PlaybackSink::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
         .expect("failed to initialise audio playback");
 
-    // ── Session runtime ───────────────────────────────────────────────────────
+    // ── Session runtime (policy) + effect application (I/O) ───────────────────
     let mut session = Session::new();
 
-    // Initial arm
+    // Arm wakeword so the first WakeHit is legal.
     apply_effects(
         vec![Effect::ArmWakeword],
         &wakeword_ctl_tx,
@@ -171,6 +156,7 @@ fn main() {
     }
 }
 
+/// Worker facts → Session inputs (no policy here).
 fn map_event(event: Event) -> SessionInput {
     match event {
         Event::WakeWordDetected => SessionInput::WakeHit,
@@ -193,6 +179,7 @@ fn map_event(event: Event) -> SessionInput {
     }
 }
 
+/// Apply Session effects to concrete channels. Only place that talks to workers.
 #[allow(clippy::too_many_arguments)]
 fn apply_effects(
     effects: Vec<Effect>,

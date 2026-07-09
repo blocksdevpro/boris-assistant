@@ -1,7 +1,10 @@
 use std::time::Instant;
 
-use any_tts::{ModelType, SynthesisRequest, TtsConfig, TtsModel, load_model};
-use boris_core::{AudioBuffer, error::{Error, Result}};
+use any_tts::{load_model, ModelType, SynthesisRequest, TtsConfig, TtsModel};
+use boris_core::{
+    error::{Error, Result},
+    AudioBuffer,
+};
 use boris_inference::TextToSpeech;
 
 pub const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -32,17 +35,12 @@ impl TextToSpeech for KokoroTts {
         tracing::info!("Loading Kokoro TTS model…");
         let t = Instant::now();
 
-        let model = load_model(TtsConfig::new(ModelType::Kokoro).with_model_path(KOKORO_MODEL_PATH))
-            .map_err(|e| Error::Other(e.to_string()))?;
+        let model =
+            load_model(TtsConfig::new(ModelType::Kokoro).with_model_path(KOKORO_MODEL_PATH))
+                .map_err(|e| Error::Other(e.to_string()))?;
         self.model = Some(model);
 
         tracing::info!("Kokoro TTS model loaded in {}ms", t.elapsed().as_millis());
-
-        // Pre-warm: triggers JIT compilation on the first synthesis call.
-        tracing::info!("Pre-warming Kokoro TTS…");
-        let pw = Instant::now();
-        self.synthesize("Hi.")?;
-        tracing::info!("Kokoro TTS pre-warm done in {}ms", pw.elapsed().as_millis());
 
         Ok(())
     }

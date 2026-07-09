@@ -1,16 +1,17 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use boris_core::event::Event;
+use boris_core::{event::Event, ServiceKind, TurnId};
 use boris_inference::TextToSpeech;
 
 // ── Commands ──────────────────────────────────────────────────────────────────
+
 #[derive(Debug)]
 pub enum TtsCommand {
     /// Load the TTS model into memory and pre-warm it.
     LoadModel,
     /// Synthesize the given text and emit [`Event::PlaybackReady`] with the PCM.
-    Synthesize(String),
+    Synthesize { turn: TurnId, text: String },
 }
 
 // ── TTS Worker ────────────────────────────────────────────────────────────────
@@ -36,23 +37,32 @@ impl TtsWorker {
                             tracing::error!(error = %e, "TtsWorker: failed to load model");
                             event_tx
                                 .send(Event::WorkerError {
+                                    turn: None,
                                     worker: "TtsWorker",
+                                    kind: ServiceKind::Tts,
                                     message: e.to_string(),
                                 })
                                 .ok();
                         }
                     }
-                    TtsCommand::Synthesize(text) => {
-                        tracing::debug!(text, "TtsWorker: synthesizing");
+                    TtsCommand::Synthesize { turn, text } => {
+                        tracing::debug!(%turn, text = %text, "TtsWorker: synthesizing");
                         match tts.synthesize(&text) {
                             Ok(samples) => {
-                                event_tx.send(Event::PlaybackReady(samples)).ok();
+                                event_tx
+                                    .send(Event::PlaybackReady {
+                                        turn,
+                                        audio: samples,
+                                    })
+                                    .ok();
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "TtsWorker: synthesis failed");
+                                tracing::error!(error = %e, %turn, "TtsWorker: synthesis failed");
                                 event_tx
                                     .send(Event::WorkerError {
+                                        turn: Some(turn),
                                         worker: "TtsWorker",
+                                        kind: ServiceKind::Tts,
                                         message: e.to_string(),
                                     })
                                     .ok();

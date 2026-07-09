@@ -8,7 +8,7 @@ use boris_audio::buffer::SlidingBuffer;
 use boris_core::{
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
-    AudioBuffer,
+    AudioBuffer, ServiceKind, TurnId,
 };
 use boris_inference::{
     SpeechToText, Vad, WakeWord, VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE,
@@ -16,12 +16,13 @@ use boris_inference::{
 };
 
 // ── Commands ──────────────────────────────────────────────────────────────────
+
 #[derive(Debug)]
 pub enum SttCommand {
     /// Prime the STT model so transcription is fast when audio arrives.
     LoadModel,
     /// Transcribe the given audio buffer and emit [`Event::SpeechToTextResult`].
-    Transcribe(AudioBuffer),
+    Transcribe { turn: TurnId, audio: AudioBuffer },
 }
 
 // ── STT Worker ────────────────────────────────────────────────────────────────
@@ -45,22 +46,28 @@ impl SttWorker {
                             tracing::error!(error = %e, "SttWorker: failed to load model");
                             event_tx
                                 .send(Event::WorkerError {
+                                    turn: None,
                                     worker: "SttWorker",
+                                    kind: ServiceKind::Stt,
                                     message: e.to_string(),
                                 })
                                 .ok();
                         }
                     }
-                    SttCommand::Transcribe(audio) => {
+                    SttCommand::Transcribe { turn, audio } => {
                         match stt.transcribe(&audio) {
                             Ok(text) => {
-                                event_tx.send(Event::SpeechToTextResult(text)).ok();
+                                event_tx
+                                    .send(Event::SpeechToTextResult { turn, text })
+                                    .ok();
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "SttWorker: transcription failed");
+                                tracing::error!(error = %e, %turn, "SttWorker: transcription failed");
                                 event_tx
                                     .send(Event::WorkerError {
+                                        turn: Some(turn),
                                         worker: "SttWorker",
+                                        kind: ServiceKind::Stt,
                                         message: e.to_string(),
                                     })
                                     .ok();
@@ -97,7 +104,6 @@ impl VadWorker {
             let mut audio_buffer: Vec<f32> = Vec::new();
 
             loop {
-                // Drain all pending control signals first.
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
                         Lifecycle::Start => {
@@ -171,7 +177,6 @@ impl WakeWordWorker {
             let mut audio_buffer = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
 
             loop {
-                // Drain all pending control signals first.
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
                         Lifecycle::Start => is_listening = true,

@@ -1,27 +1,40 @@
 use dotenvy::dotenv;
 use std::env;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use boris_agent::{AgentEngine, OpenRouterClient};
-use boris_audio::{playback::Playback, AUDIO_TARGET_RATE};
+use boris_audio::playback::Playback;
+use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
-    AudioBuffer,
+    AudioBuffer, TurnId,
 };
 use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
 use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
+use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
     agent::{AgentCommand, AgentWorker, SpeakTool},
-    audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker},
+    audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker, RecorderCtl},
     inference::{SttCommand, SttWorker, VadWorker, WakeWordWorker},
     tts::{TtsCommand, TtsWorker},
 };
 
 static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/boris-large.onnx");
 
+/// Sensor fan-out depth. Full → drop frame for that subscriber (never block capture).
+const AUDIO_SENSOR_QUEUE: usize = 64;
+
+/// Extra silence after estimated TTS duration before re-arming wakeword.
+const PLAYBACK_PAD: Duration = Duration::from_millis(250);
+
+mod session;
 mod workers;
 
 const BORIS_SYSTEM_PROMPT: &str = r#"You are Boris, a 24-year-old AI voice assistant. You are German, enthusiastic, overconfident, and hilariously dumb.
@@ -64,9 +77,11 @@ fn main() {
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
 
-    let (wakeword_audio_tx, wakeword_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
-    let (vad_audio_tx, vad_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
-    let (recorder_audio_tx, recorder_audio_rx) = mpsc::channel::<ArcAudioBuffer>();
+    let (wakeword_audio_tx, wakeword_audio_rx) =
+        mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
+    let (vad_audio_tx, vad_audio_rx) = mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
+    let (recorder_audio_tx, recorder_audio_rx) =
+        mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
 
     let (stt_cmd_tx, stt_cmd_rx) = mpsc::channel::<SttCommand>();
     let (agent_cmd_tx, agent_cmd_rx) = mpsc::channel::<AgentCommand>();
@@ -74,7 +89,7 @@ fn main() {
     let (playback_tx, playback_rx) = mpsc::channel::<AudioBuffer>();
 
     let (wakeword_ctl_tx, wakeword_ctl_rx) = mpsc::channel::<Lifecycle>();
-    let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<Lifecycle>();
+    let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<RecorderCtl>();
     let (vad_ctl_tx, vad_ctl_rx) = mpsc::channel::<Lifecycle>();
 
     // ── Audio pipeline ────────────────────────────────────────────────────────
@@ -106,67 +121,149 @@ fn main() {
     let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
     let client = OpenRouterClient::new(api_key);
     let mut engine = AgentEngine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
-    engine.register_tool(Box::new(SpeakTool::new(event_tx.clone())));
 
-    let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine);
+    let turn_slot = Arc::new(Mutex::new(TurnId(0)));
+    let spoke_flag = Arc::new(AtomicBool::new(false));
+    engine.register_tool(Box::new(SpeakTool::new(
+        event_tx.clone(),
+        Arc::clone(&turn_slot),
+        Arc::clone(&spoke_flag),
+    )));
+
+    let _agent_worker = AgentWorker::spawn(
+        agent_cmd_rx,
+        engine,
+        turn_slot,
+        spoke_flag,
+        event_tx.clone(),
+    );
 
     // ── TTS + Playback ────────────────────────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
     let _playback = Playback::new(playback_rx, KOKORO_SAMPLE_RATE)
         .expect("failed to initialise audio playback");
 
-    // ── Start listening for the wake word ─────────────────────────────────────
-    wakeword_ctl_tx.send(Lifecycle::Start).ok();
+    // ── Session runtime ───────────────────────────────────────────────────────
+    let mut session = Session::new();
 
-    // ── Main event loop ───────────────────────────────────────────────────────
+    // Initial arm
+    apply_effects(
+        vec![Effect::ArmWakeword],
+        &wakeword_ctl_tx,
+        &vad_ctl_tx,
+        &recorder_ctl_tx,
+        &stt_cmd_tx,
+        &agent_cmd_tx,
+        &tts_cmd_tx,
+        &playback_tx,
+        &event_tx,
+    );
+
     tracing::info!("Boris is ready. Say the wake word to begin.");
 
     while let Ok(event) = event_rx.recv() {
-        match event {
-            Event::WakeWordDetected => {
-                tracing::info!("Wake word detected — listening…");
+        let input = map_event(event);
+        let effects = session.handle(input);
+        apply_effects(
+            effects,
+            &wakeword_ctl_tx,
+            &vad_ctl_tx,
+            &recorder_ctl_tx,
+            &stt_cmd_tx,
+            &agent_cmd_tx,
+            &tts_cmd_tx,
+            &playback_tx,
+            &event_tx,
+        );
+    }
+}
+
+fn map_event(event: Event) -> SessionInput {
+    match event {
+        Event::WakeWordDetected => SessionInput::WakeHit,
+        Event::SpeechEnded => SessionInput::Endpoint,
+        Event::RecordingResult { turn, audio } => SessionInput::ClipReady { turn, audio },
+        Event::SpeechToTextResult { turn, text } => SessionInput::Transcript { turn, text },
+        Event::AgentResponse { turn, text } => SessionInput::AgentDone { turn, text },
+        Event::PlaybackReady { turn, audio } => SessionInput::TtsReady { turn, pcm: audio },
+        Event::PlaybackFinished { turn } => SessionInput::PlaybackFinished { turn },
+        Event::WorkerError {
+            turn,
+            worker,
+            kind: _,
+            message,
+        } => SessionInput::ServiceFailed {
+            turn,
+            worker,
+            message,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_effects(
+    effects: Vec<Effect>,
+    wakeword_ctl_tx: &mpsc::Sender<Lifecycle>,
+    vad_ctl_tx: &mpsc::Sender<Lifecycle>,
+    recorder_ctl_tx: &mpsc::Sender<RecorderCtl>,
+    stt_cmd_tx: &mpsc::Sender<SttCommand>,
+    agent_cmd_tx: &mpsc::Sender<AgentCommand>,
+    tts_cmd_tx: &mpsc::Sender<TtsCommand>,
+    playback_tx: &mpsc::Sender<AudioBuffer>,
+    event_tx: &mpsc::Sender<Event>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::ArmWakeword => {
+                wakeword_ctl_tx.send(Lifecycle::Start).ok();
+            }
+            Effect::DisarmWakeword => {
                 wakeword_ctl_tx.send(Lifecycle::Stop).ok();
+            }
+            Effect::StartListen { turn } => {
                 vad_ctl_tx.send(Lifecycle::Start).ok();
-                recorder_ctl_tx.send(Lifecycle::Start).ok();
+                recorder_ctl_tx.send(RecorderCtl::Start { turn }).ok();
+            }
+            Effect::StopListen => {
+                vad_ctl_tx.send(Lifecycle::Stop).ok();
+                recorder_ctl_tx.send(RecorderCtl::Stop).ok();
+            }
+            Effect::WarmStt => {
                 stt_cmd_tx.send(SttCommand::LoadModel).ok();
             }
-
-            Event::SpeechEnded => {
-                tracing::info!("Speech ended — transcribing…");
-                vad_ctl_tx.send(Lifecycle::Stop).ok();
-                recorder_ctl_tx.send(Lifecycle::Stop).ok();
+            Effect::Transcribe { turn, audio } => {
+                stt_cmd_tx.send(SttCommand::Transcribe { turn, audio }).ok();
             }
-
-            Event::RecordingResult(audio) => {
-                tracing::debug!("Recording finalised — dispatching to STT");
-                stt_cmd_tx.send(SttCommand::Transcribe(audio)).ok();
-            }
-
-            Event::SpeechToTextResult(text) => {
-                tracing::info!(text, "Transcription complete");
-                agent_cmd_tx.send(AgentCommand::Chat(text)).ok();
+            Effect::WarmTts => {
                 tts_cmd_tx.send(TtsCommand::LoadModel).ok();
             }
-
-            Event::AgentResponse(reply) => {
-                tracing::info!(reply, "Boris speaking");
-                // Stop the wakeword listener while Boris is speaking so his
-                // own voice doesn't re-trigger detection.
-                wakeword_ctl_tx.send(Lifecycle::Stop).ok();
-                tts_cmd_tx.send(TtsCommand::Synthesize(reply)).ok();
+            Effect::Chat { turn, text } => {
+                agent_cmd_tx.send(AgentCommand::Chat { turn, text }).ok();
             }
-
-            Event::PlaybackReady(pcm) => {
-                playback_tx.send(pcm).ok();
-                // Re-arm wakeword detection once audio is dispatched.
-                wakeword_ctl_tx.send(Lifecycle::Start).ok();
+            Effect::Synthesize { turn, text } => {
+                tts_cmd_tx.send(TtsCommand::Synthesize { turn, text }).ok();
             }
-
-            Event::WorkerError { worker, message } => {
-                tracing::error!(worker, message, "worker error");
-                // Re-arm the wakeword so the assistant doesn't get stuck.
-                wakeword_ctl_tx.send(Lifecycle::Start).ok();
+            Effect::Play { turn, pcm } => {
+                let duration = playback_duration(&pcm, KOKORO_SAMPLE_RATE);
+                if playback_tx.send(pcm).is_err() {
+                    tracing::error!(%turn, "playback channel closed");
+                    continue;
+                }
+                // Approximate PlaybackFinished until the sink reports real drain.
+                let event_tx = event_tx.clone();
+                thread::spawn(move || {
+                    thread::sleep(duration + PLAYBACK_PAD);
+                    event_tx.send(Event::PlaybackFinished { turn }).ok();
+                });
             }
         }
     }
+}
+
+fn playback_duration(pcm: &[f32], sample_rate: u32) -> Duration {
+    if sample_rate == 0 || pcm.is_empty() {
+        return Duration::from_millis(100);
+    }
+    let secs = pcm.len() as f64 / sample_rate as f64;
+    Duration::from_secs_f64(secs)
 }

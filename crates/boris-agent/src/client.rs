@@ -1,5 +1,7 @@
 use reqwest::blocking::Client;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
+
+use crate::error::LlmError;
 
 // ── Trait ────────────────────────────────────────────────────────────────────
 
@@ -7,7 +9,7 @@ use serde_json::{Value, json};
 pub trait LlmClient: Send {
     /// Send the full conversation + tool definitions and return the raw
     /// `choices[0].message` JSON object.
-    fn complete(&self, messages: Value, tools: Value) -> Value;
+    fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError>;
 }
 
 // ── OpenRouter implementation ─────────────────────────────────────────────────
@@ -35,13 +37,12 @@ impl OpenRouterClient {
 }
 
 impl LlmClient for OpenRouterClient {
-    fn complete(&self, messages: Value, tools: Value) -> Value {
+    fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
         let url = "https://openrouter.ai/api/v1/chat/completions";
         let body = json!({
             "model": self.model,
             "messages": messages,
             "tools": tools,
-            // "auto" lets the model decide when to call a tool vs reply directly.
             "tool_choice": "auto",
         });
 
@@ -51,9 +52,27 @@ impl LlmClient for OpenRouterClient {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
-            .unwrap();
+            .map_err(|e| LlmError::new(format!("HTTP request failed: {e}")))?;
 
-        let json: Value = response.json().unwrap();
-        json["choices"][0]["message"].clone()
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(LlmError::new(format!(
+                "OpenRouter returned {status}: {body}"
+            )));
+        }
+
+        let json: Value = response
+            .json()
+            .map_err(|e| LlmError::new(format!("failed to parse response JSON: {e}")))?;
+
+        let message = json
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .cloned()
+            .ok_or_else(|| LlmError::new(format!("missing choices[0].message: {json}")))?;
+
+        Ok(message)
     }
 }

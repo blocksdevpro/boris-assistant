@@ -1,9 +1,23 @@
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use boris_audio::{AUDIO_CHUNK_SIZE, AUDIO_TARGET_RATE, buffer::RecordingBuffer, capture::Capture, resampler::Resampler};
-use boris_core::{AudioBuffer, AudioSample, error::Result, event::Event, types::{ArcAudioBuffer, Lifecycle}};
+use boris_audio::{
+    buffer::RecordingBuffer, capture::Capture, resampler::Resampler, AUDIO_CHUNK_SIZE,
+    AUDIO_TARGET_RATE,
+};
+use boris_core::{
+    error::Result, event::Event, types::ArcAudioBuffer, AudioBuffer, AudioSample, TurnId,
+};
+
+// ── Recorder control ──────────────────────────────────────────────────────────
+
+/// Start capture for a specific turn so the resulting clip is tagged correctly.
+#[derive(Debug)]
+pub enum RecorderCtl {
+    Start { turn: TurnId },
+    Stop,
+}
 
 // ── Audio Pipeline Worker ─────────────────────────────────────────────────────
 
@@ -65,18 +79,29 @@ impl AudioPipelineWorker {
 
 /// Fans a single [`AudioBuffer`] stream out to multiple subscribers by wrapping
 /// each chunk in an [`Arc`] and cloning the pointer (zero-copy).
+///
+/// Subscribers use **bounded** `SyncSender`s. On full channels we drop the frame
+/// for that subscriber (drop-newest) so capture never blocks on a slow sensor.
 pub struct AudioDispatcherWorker {
     _handle: JoinHandle<()>,
 }
 
 impl AudioDispatcherWorker {
-    pub fn spawn(audio_rx: Receiver<AudioBuffer>, subscribers: Vec<Sender<ArcAudioBuffer>>) -> Self {
+    pub fn spawn(
+        audio_rx: Receiver<AudioBuffer>,
+        subscribers: Vec<SyncSender<ArcAudioBuffer>>,
+    ) -> Self {
         let handle = thread::spawn(move || {
             while let Ok(audio) = audio_rx.recv() {
                 let shared: ArcAudioBuffer = Arc::from(audio);
                 for tx in &subscribers {
-                    // Best-effort delivery — a slow subscriber won't block others.
-                    tx.send(shared.clone()).ok();
+                    match tx.try_send(shared.clone()) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            tracing::warn!("AudioDispatcher: subscriber full — dropping frame");
+                        }
+                        Err(TrySendError::Disconnected(_)) => {}
+                    }
                 }
             }
         });
@@ -88,33 +113,42 @@ impl AudioDispatcherWorker {
 
 /// Accumulates incoming audio into a pre-roll buffer.
 ///
-/// When started (via [`Lifecycle::Start`]) it enters recording mode. When
-/// stopped (via [`Lifecycle::Stop`]) it drains the buffer and emits
-/// [`Event::RecordingResult`].
-pub struct AudioRecordingWorker {
+/// [`RecorderCtl::Start`] begins recording for a turn. [`RecorderCtl::Stop`]
+/// drains the buffer and emits [`Event::RecordingResult`] tagged with that turn.
+pub struct UtteranceCapture {
     _handle: JoinHandle<()>,
 }
 
-impl AudioRecordingWorker {
+impl UtteranceCapture {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
-        control_rx: Receiver<Lifecycle>,
+        control_rx: Receiver<RecorderCtl>,
         event_tx: Sender<Event>,
     ) -> Self {
         let handle = thread::spawn(move || {
-            // 2-second pre-roll buffer so we capture audio that arrived just
-            // before the VAD triggered the stop signal.
+            // 2-second pre-roll so we capture audio that arrived just before
+            // the listen phase officially started.
             let mut buffer = RecordingBuffer::new(AUDIO_TARGET_RATE as usize * 2);
+            let mut active_turn: Option<TurnId> = None;
 
             loop {
-                // Drain all pending control signals before processing audio.
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
-                        Lifecycle::Start => buffer.set_recording(true),
-                        Lifecycle::Stop => {
+                        RecorderCtl::Start { turn } => {
+                            active_turn = Some(turn);
+                            buffer.set_recording(true);
+                        }
+                        RecorderCtl::Stop => {
                             buffer.set_recording(false);
                             let audio = buffer.take_audio();
-                            event_tx.send(Event::RecordingResult(audio)).ok();
+                            if let Some(turn) = active_turn.take() {
+                                event_tx.send(Event::RecordingResult { turn, audio }).ok();
+                            } else {
+                                tracing::warn!(
+                                    "
+UtteranceCapture: Stop with no active turn — dropping clip"
+                                );
+                            }
                         }
                     }
                 }

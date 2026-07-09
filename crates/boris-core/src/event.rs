@@ -1,26 +1,39 @@
-use crate::AudioBuffer;
+use crate::{AudioBuffer, ServiceKind, TurnId};
 
+/// Messages workers send to the runtime (mapped into [`crate`] session inputs).
 pub enum Event {
-    // ── Audio pipeline ────────────────────────────────────────────────────────
+    // ── Audio / sensors ───────────────────────────────────────────────────────
     WakeWordDetected,
     SpeechEnded,
-    RecordingResult(AudioBuffer),
+    RecordingResult {
+        turn: TurnId,
+        audio: AudioBuffer,
+    },
 
-    // ── Inference ─────────────────────────────────────────────────────────────
-    SpeechToTextResult(String),
-
-    // ── Agent ─────────────────────────────────────────────────────────────────
-    /// The agent has produced a text reply to be spoken aloud (→ TTS).
-    AgentResponse(String),
-
-    /// TTS synthesis is complete; the PCM samples are ready for playback.
-    PlaybackReady(AudioBuffer),
+    // ── Services ──────────────────────────────────────────────────────────────
+    SpeechToTextResult {
+        turn: TurnId,
+        text: String,
+    },
+    AgentResponse {
+        turn: TurnId,
+        text: String,
+    },
+    /// TTS produced PCM; runtime plays it then schedules [`PlaybackFinished`].
+    PlaybackReady {
+        turn: TurnId,
+        audio: AudioBuffer,
+    },
+    /// Speaker is done (or duration estimate elapsed). Safe to re-arm wakeword.
+    PlaybackFinished {
+        turn: TurnId,
+    },
 
     // ── Errors ────────────────────────────────────────────────────────────────
-    /// A worker encountered a non-fatal error. The main loop logs it and
-    /// decides whether to attempt recovery.
     WorkerError {
+        turn: Option<TurnId>,
         worker: &'static str,
+        kind: ServiceKind,
         message: String,
     },
 }

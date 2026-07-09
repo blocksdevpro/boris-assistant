@@ -1,27 +1,28 @@
 use std::{
     sync::mpsc::{Receiver, Sender},
     thread::{self, JoinHandle},
-    time::Instant,
 };
 
 use boris_audio::buffer::SlidingBuffer;
 use boris_core::{
     event::Event,
     types::{ArcAudioBuffer, Lifecycle},
-    AudioBuffer,
+    AudioBuffer, ServiceKind, TurnId, AUDIO_TARGET_RATE,
 };
 use boris_inference::{
-    SpeechToText, Vad, WakeWord, VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE,
-    WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
+    duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, SpeechToText, Vad,
+    WakeWord, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
+    WAKEWORD_WINDOW_SIZE,
 };
 
 // ── Commands ──────────────────────────────────────────────────────────────────
+
 #[derive(Debug)]
 pub enum SttCommand {
     /// Prime the STT model so transcription is fast when audio arrives.
     LoadModel,
     /// Transcribe the given audio buffer and emit [`Event::SpeechToTextResult`].
-    Transcribe(AudioBuffer),
+    Transcribe { turn: TurnId, audio: AudioBuffer },
 }
 
 // ── STT Worker ────────────────────────────────────────────────────────────────
@@ -45,22 +46,26 @@ impl SttWorker {
                             tracing::error!(error = %e, "SttWorker: failed to load model");
                             event_tx
                                 .send(Event::WorkerError {
+                                    turn: None,
                                     worker: "SttWorker",
+                                    kind: ServiceKind::Stt,
                                     message: e.to_string(),
                                 })
                                 .ok();
                         }
                     }
-                    SttCommand::Transcribe(audio) => {
+                    SttCommand::Transcribe { turn, audio } => {
                         match stt.transcribe(&audio) {
                             Ok(text) => {
-                                event_tx.send(Event::SpeechToTextResult(text)).ok();
+                                event_tx.send(Event::SpeechToTextResult { turn, text }).ok();
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "SttWorker: transcription failed");
+                                tracing::error!(error = %e, %turn, "SttWorker: transcription failed");
                                 event_tx
                                     .send(Event::WorkerError {
+                                        turn: Some(turn),
                                         worker: "SttWorker",
+                                        kind: ServiceKind::Stt,
                                         message: e.to_string(),
                                     })
                                     .ok();
@@ -79,11 +84,11 @@ impl SttWorker {
 
 // ── VAD Worker ────────────────────────────────────────────────────────────────
 
-pub struct VadWorker {
+pub struct EndpointSensor {
     _handle: JoinHandle<()>,
 }
 
-impl VadWorker {
+impl EndpointSensor {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<Lifecycle>,
@@ -91,19 +96,22 @@ impl VadWorker {
         mut detector: impl Vad + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
-            let mut is_listening = false;
-            let mut last_speech_time = Instant::now();
             let mut has_spoken = false;
+            let mut is_listening = false;
             let mut audio_buffer: Vec<f32> = Vec::new();
+            let mut samples_since_speech: usize = 0;
+
+            let silence_after_speech = vad_silence_samples();
+            let silence_before_speech = vad_initial_timeout_samples();
 
             loop {
-                // Drain all pending control signals first.
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
                         Lifecycle::Start => {
                             is_listening = true;
                             has_spoken = false;
-                            last_speech_time = Instant::now();
+                            samples_since_speech = 0;
+                            audio_buffer.clear();
                         }
                         Lifecycle::Stop => {
                             is_listening = false;
@@ -123,26 +131,27 @@ impl VadWorker {
                     let chunk: Vec<f32> = audio_buffer.drain(..VAD_WINDOW_SIZE).collect();
 
                     match detector.predict(&chunk) {
-                        Ok(is_speech) => {
-                            if is_speech {
-                                has_spoken = true;
-                                last_speech_time = Instant::now();
+                        Ok(true) => {
+                            has_spoken = true;
+                            samples_since_speech = 0;
+                        }
+                        Ok(false) => {
+                            samples_since_speech = samples_since_speech.saturating_add(chunk.len());
+                            let limit = if has_spoken {
+                                silence_after_speech
                             } else {
-                                let silence_threshold = if has_spoken {
-                                    VAD_SILENCE_WINDOW
-                                } else {
-                                    VAD_INITIAL_TIMEOUT
-                                };
+                                silence_before_speech
+                            };
 
-                                if last_speech_time.elapsed() >= silence_threshold {
-                                    is_listening = false;
-                                    audio_buffer.clear();
-                                    event_tx.send(Event::SpeechEnded).ok();
-                                }
+                            if samples_since_speech >= limit {
+                                is_listening = false;
+                                audio_buffer.clear();
+                                samples_since_speech = 0;
+                                event_tx.send(Event::SpeechEnded).ok();
                             }
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "VadWorker: prediction failed");
+                            tracing::error!(error = %e, "EndpointSensor: prediction failed");
                         }
                     }
                 }
@@ -154,11 +163,11 @@ impl VadWorker {
 
 // ── WakeWord Worker ───────────────────────────────────────────────────────────
 
-pub struct WakeWordWorker {
+pub struct WakeSensor {
     _handle: JoinHandle<()>,
 }
 
-impl WakeWordWorker {
+impl WakeSensor {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<Lifecycle>,
@@ -167,11 +176,11 @@ impl WakeWordWorker {
     ) -> Self {
         let handle = thread::spawn(move || {
             let mut is_listening = true;
-            let mut last_processed = Instant::now();
             let mut audio_buffer = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
+            let score_every = duration_to_samples(WAKEWORD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
+            let mut samples_since_score: usize = 0;
 
             loop {
-                // Drain all pending control signals first.
                 while let Ok(cmd) = control_rx.try_recv() {
                     match cmd {
                         Lifecycle::Start => is_listening = true,
@@ -181,32 +190,27 @@ impl WakeWordWorker {
 
                 let Ok(audio) = audio_rx.recv() else { break };
                 audio_buffer.push(&audio);
+                samples_since_score = samples_since_score.saturating_add(audio.len());
 
                 if !is_listening {
                     continue;
                 }
 
-                if last_processed.elapsed() >= WAKEWORD_PROCESSING_INTERVAL && audio_buffer.ready()
-                {
+                if samples_since_score >= score_every && audio_buffer.ready() {
+                    samples_since_score = 0;
                     let window = audio_buffer.read();
 
                     match detector.predict(&window) {
                         Ok(score) => {
-                            tracing::debug!(
-                                score,
-                                elapsed_ms = last_processed.elapsed().as_millis(),
-                                "wakeword score"
-                            );
                             if score >= WAKEWORD_THRESHOLD {
                                 event_tx.send(Event::WakeWordDetected).ok();
                             }
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "WakeWordWorker: prediction failed");
+                            tracing::error!(error = %e, "
+WakeSensor: prediction failed");
                         }
                     }
-
-                    last_processed = Instant::now();
                 }
             }
         });

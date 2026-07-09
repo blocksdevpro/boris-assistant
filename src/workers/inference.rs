@@ -19,14 +19,16 @@ use boris_inference::{
 
 #[derive(Debug)]
 pub enum SttCommand {
-    /// Prime the STT model so transcription is fast when audio arrives.
+    /// Load the STT model early (e.g. on wake) so `Transcribe` is faster.
     LoadModel,
-    /// Transcribe the given audio buffer and emit [`Event::SpeechToTextResult`].
+    /// Transcribe `audio` for `turn` and emit [`Event::SpeechToTextResult`].
+    /// Unloads the model after each successful/failed transcription.
     Transcribe { turn: TurnId, audio: AudioBuffer },
 }
 
 // ── STT Worker ────────────────────────────────────────────────────────────────
 
+/// Runs [`SpeechToText`] on a background thread.
 pub struct SttWorker {
     _handle: JoinHandle<()>,
 }
@@ -82,8 +84,12 @@ impl SttWorker {
     }
 }
 
-// ── VAD Worker ────────────────────────────────────────────────────────────────
+// ── Endpoint sensor (VAD) ─────────────────────────────────────────────────────
 
+/// Watches the audio bus while listening and emits [`Event::SpeechEnded`] when
+/// silence lasts long enough in **audio time** (sample counts, not wall clock).
+///
+/// Enable/disable via [`Lifecycle`]; Session owns when that happens.
 pub struct EndpointSensor {
     _handle: JoinHandle<()>,
 }
@@ -161,8 +167,13 @@ impl EndpointSensor {
     }
 }
 
-// ── WakeWord Worker ───────────────────────────────────────────────────────────
+// ── Wake sensor ───────────────────────────────────────────────────────────────
 
+/// Scores the wakeword on a sliding window; emits [`Event::WakeWordDetected`]
+/// when the score crosses the threshold.
+///
+/// Cadence and window sizes come from `boris_inference` constants. Session
+/// decides whether wake hits are legal (Idle only).
 pub struct WakeSensor {
     _handle: JoinHandle<()>,
 }

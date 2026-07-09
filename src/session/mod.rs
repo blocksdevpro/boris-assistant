@@ -1,7 +1,12 @@
 //! Product policy for one voice interaction lives here — nowhere else.
 //!
-//! The runtime maps worker [`boris_core::event::Event`]s into [`SessionInput`],
-//! calls [`Session::handle`], then applies the returned [`Effect`]s.
+//! Pipeline:
+//! 1. Runtime maps worker [`boris_core::event::Event`]s → [`SessionInput`]
+//! 2. [`Session::handle`] returns [`Effect`]s (pure-ish transitions)
+//! 3. Runtime applies effects to sensors / STT / agent / TTS / playback
+//!
+//! Speech text reaches Session only as [`SessionInput::AgentDone`] after the
+//! agent worker maps [`boris_agent::AgentOutcome`] — not via tool side-channels.
 
 mod effect;
 mod input;

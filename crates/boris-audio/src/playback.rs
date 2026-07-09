@@ -13,35 +13,39 @@ use cpal::{
     Stream, StreamConfig,
 };
 
+/// One utterance to play, correlated to a session turn.
 pub struct PlayJob {
     pub turn: TurnId,
+    /// Mono f32 PCM at `source_sample_rate` (e.g. Kokoro 24 kHz).
     pub pcm: AudioBuffer,
 }
 
 struct PlaybackState {
-    /// Device-rate interleaved (or mono) samples waiting to play.
+    /// Device-rate samples waiting to play (channel-expanded if needed).
     pending: VecDeque<f32>,
-    /// Turn currently draining out the speakers. None = idle / silence.
+    /// Turn currently draining out the speakers (`None` = idle).
     active_turn: Option<TurnId>,
-    /// How many consecutive output callbacks saw an empty queue
-    /// while we still had an active_turn (underrun / drained).
+    /// Consecutive output callbacks that saw an empty queue while a turn was active.
     empty_callbacks: u32,
 }
 
-/// After this many empty callbacks, declare finished.
-/// Tune: 3–8 is typical. Depends on callback size (~few ms each).
+/// Declare [`Event::PlaybackFinished`] after this many empty device callbacks.
 const DRAIN_EMPTY_CALLBACKS: u32 = 5;
 
+/// Plays [`PlayJob`]s on the default output device and reports real drain.
+///
+/// Finish is detected when the pending buffer stays empty for
+/// [`DRAIN_EMPTY_CALLBACKS`] callbacks — not via wall-clock sleep.
 pub struct PlaybackSink {
     _stream: Stream,
 }
 
 impl PlaybackSink {
-    /// Spawn an output stream that drains f32 PCM samples from `audio_rx`
-    /// and plays them through the default output device.
+    /// Open the default output device and start fill + callback threads.
     ///
-    /// `sample_rate` — must match whatever rate the TTS model outputs
-    /// (Kokoro = 24_000 Hz).
+    /// - `audio_rx` — play jobs from the Session runtime (`Effect::Play`)
+    /// - `source_sample_rate` — rate of job PCM (Kokoro = 24_000)
+    /// - `event_tx` — receives [`Event::PlaybackFinished`] when a job drains
     pub fn new(
         audio_rx: Receiver<PlayJob>,
         source_sample_rate: u32,
@@ -67,20 +71,13 @@ impl PlaybackSink {
 
         let state_clone = playback_state.clone();
 
-        // A background thread refills the pending buffer from the channel,
-        // resampling and converting channels as needed.
+        // Fill thread: one job at a time — clear any previous queue (single-turn policy).
         std::thread::spawn(move || {
             while let Ok(job) = audio_rx.recv() {
                 let resampled = resample_linear(&job.pcm, source_sample_rate, target_sample_rate);
                 let channel_converted = convert_channels(&resampled, target_channels);
 
                 let mut state = state_clone.lock().unwrap();
-
-                // If a previous turn was still playing, you have a product choice:
-                //   (a) append (queue utterances) — advanced
-                //   (b) clear and replace — simple, OK for Boris today
-                // Phase 2: (b) is fine and matches “one turn at a time”.
-
                 state.pending.clear();
                 state.pending.extend(channel_converted);
                 state.active_turn = Some(job.turn);

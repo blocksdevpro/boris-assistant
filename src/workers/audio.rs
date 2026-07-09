@@ -109,12 +109,13 @@ impl AudioDispatcherWorker {
     }
 }
 
-// ── Audio Recording Worker ────────────────────────────────────────────────────
+// ── Utterance capture ─────────────────────────────────────────────────────────
 
-/// Accumulates incoming audio into a pre-roll buffer.
+/// Job that records one user utterance for a [`TurnId`].
 ///
-/// [`RecorderCtl::Start`] begins recording for a turn. [`RecorderCtl::Stop`]
-/// drains the buffer and emits [`Event::RecordingResult`] tagged with that turn.
+/// Continuously keeps a short pre-roll while idle. [`RecorderCtl::Start`] freezes
+/// that window and appends live audio; [`RecorderCtl::Stop`] emits
+/// [`Event::RecordingResult`] tagged with the active turn.
 pub struct UtteranceCapture {
     _handle: JoinHandle<()>,
 }
@@ -126,8 +127,7 @@ impl UtteranceCapture {
         event_tx: Sender<Event>,
     ) -> Self {
         let handle = thread::spawn(move || {
-            // 2-second pre-roll so we capture audio that arrived just before
-            // the listen phase officially started.
+            // 2-second pre-roll so speech that started just before Start is kept.
             let mut buffer = RecordingBuffer::new(AUDIO_TARGET_RATE as usize * 2);
             let mut active_turn: Option<TurnId> = None;
 
@@ -145,8 +145,7 @@ impl UtteranceCapture {
                                 event_tx.send(Event::RecordingResult { turn, audio }).ok();
                             } else {
                                 tracing::warn!(
-                                    "
-UtteranceCapture: Stop with no active turn — dropping clip"
+                                    "UtteranceCapture: Stop with no active turn — dropping clip"
                                 );
                             }
                         }

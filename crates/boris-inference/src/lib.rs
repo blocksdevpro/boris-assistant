@@ -3,7 +3,7 @@ pub mod wakeword;
 
 use std::time::Duration;
 
-use boris_core::{AudioBuffer, AudioSample, error::Result};
+use boris_core::{error::Result, AudioBuffer, AudioSample, AUDIO_TARGET_RATE};
 
 pub const WAKEWORD_THRESHOLD: f32 = 0.5;
 pub const WAKEWORD_WINDOW_SIZE: usize = 32_000; // 2 sec audio, 16 kHz
@@ -52,4 +52,19 @@ pub fn f32_to_pcm16_samples(audio: &[AudioSample]) -> Vec<i16> {
         .iter()
         .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
         .collect()
+}
+
+// VAD utils
+
+pub fn duration_to_samples(d: Duration, sample_rate: u32) -> usize {
+    let secs = d.as_secs_f64();
+    (secs * sample_rate as f64).round() as usize
+}
+
+pub fn vad_silence_samples() -> usize {
+    duration_to_samples(VAD_SILENCE_WINDOW, AUDIO_TARGET_RATE)
+}
+
+pub fn vad_initial_timeout_samples() -> usize {
+    duration_to_samples(VAD_INITIAL_TIMEOUT, AUDIO_TARGET_RATE)
 }

@@ -11,7 +11,7 @@ use boris_core::{
     AudioBuffer, ServiceKind, TurnId,
 };
 use boris_inference::{
-    SpeechToText, Vad, WakeWord, VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE,
+    vad_initial_timeout_samples, vad_silence_samples, SpeechToText, Vad, WakeWord, VAD_WINDOW_SIZE,
     WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
@@ -57,9 +57,7 @@ impl SttWorker {
                     SttCommand::Transcribe { turn, audio } => {
                         match stt.transcribe(&audio) {
                             Ok(text) => {
-                                event_tx
-                                    .send(Event::SpeechToTextResult { turn, text })
-                                    .ok();
+                                event_tx.send(Event::SpeechToTextResult { turn, text }).ok();
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, %turn, "SttWorker: transcription failed");
@@ -98,10 +96,13 @@ impl VadWorker {
         mut detector: impl Vad + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
-            let mut is_listening = false;
-            let mut last_speech_time = Instant::now();
             let mut has_spoken = false;
+            let mut is_listening = false;
             let mut audio_buffer: Vec<f32> = Vec::new();
+            let mut samples_since_speech: usize = 0;
+
+            let silence_after_speech = vad_silence_samples();
+            let silence_before_speech = vad_initial_timeout_samples();
 
             loop {
                 while let Ok(cmd) = control_rx.try_recv() {
@@ -109,7 +110,8 @@ impl VadWorker {
                         Lifecycle::Start => {
                             is_listening = true;
                             has_spoken = false;
-                            last_speech_time = Instant::now();
+                            samples_since_speech = 0;
+                            audio_buffer.clear();
                         }
                         Lifecycle::Stop => {
                             is_listening = false;
@@ -129,22 +131,23 @@ impl VadWorker {
                     let chunk: Vec<f32> = audio_buffer.drain(..VAD_WINDOW_SIZE).collect();
 
                     match detector.predict(&chunk) {
-                        Ok(is_speech) => {
-                            if is_speech {
-                                has_spoken = true;
-                                last_speech_time = Instant::now();
+                        Ok(true) => {
+                            has_spoken = true;
+                            samples_since_speech = 0;
+                        }
+                        Ok(false) => {
+                            samples_since_speech = samples_since_speech.saturating_add(chunk.len());
+                            let limit = if has_spoken {
+                                silence_after_speech
                             } else {
-                                let silence_threshold = if has_spoken {
-                                    VAD_SILENCE_WINDOW
-                                } else {
-                                    VAD_INITIAL_TIMEOUT
-                                };
+                                silence_before_speech
+                            };
 
-                                if last_speech_time.elapsed() >= silence_threshold {
-                                    is_listening = false;
-                                    audio_buffer.clear();
-                                    event_tx.send(Event::SpeechEnded).ok();
-                                }
+                            if samples_since_speech >= limit {
+                                is_listening = false;
+                                audio_buffer.clear();
+                                samples_since_speech = 0;
+                                event_tx.send(Event::SpeechEnded).ok();
                             }
                         }
                         Err(e) => {

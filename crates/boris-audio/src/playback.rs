@@ -1,15 +1,36 @@
 use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use boris_core::event::Event;
+use boris_core::TurnId;
 use boris_core::{
-    AudioBuffer,
     error::{Error, Result},
+    AudioBuffer,
 };
 use cpal::{
-    Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
+    Stream, StreamConfig,
 };
+
+pub struct PlayJob {
+    pub turn: TurnId,
+    pub pcm: AudioBuffer,
+}
+
+struct PlaybackState {
+    /// Device-rate interleaved (or mono) samples waiting to play.
+    pending: VecDeque<f32>,
+    /// Turn currently draining out the speakers. None = idle / silence.
+    active_turn: Option<TurnId>,
+    /// How many consecutive output callbacks saw an empty queue
+    /// while we still had an active_turn (underrun / drained).
+    empty_callbacks: u32,
+}
+
+/// After this many empty callbacks, declare finished.
+/// Tune: 3–8 is typical. Depends on callback size (~few ms each).
+const DRAIN_EMPTY_CALLBACKS: u32 = 5;
 
 pub struct Playback {
     _stream: Stream,
@@ -21,7 +42,11 @@ impl Playback {
     ///
     /// `sample_rate` — must match whatever rate the TTS model outputs
     /// (Kokoro = 24_000 Hz).
-    pub fn new(audio_rx: Receiver<AudioBuffer>, sample_rate: u32) -> Result<Self> {
+    pub fn new(
+        audio_rx: Receiver<PlayJob>,
+        source_sample_rate: u32,
+        event_tx: Sender<Event>,
+    ) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -34,30 +59,54 @@ impl Playback {
         let target_sample_rate = dconfig.sample_rate();
         let stream_config = dconfig.config();
 
-        // Shared ring-buffer of pending f32 samples (AudioBuffer = Vec<f32>).
-        let pending: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let pending_fill = pending.clone();
+        let playback_state = Arc::new(Mutex::new(PlaybackState {
+            pending: VecDeque::new(),
+            active_turn: None,
+            empty_callbacks: 0,
+        }));
+
+        let state_clone = playback_state.clone();
 
         // A background thread refills the pending buffer from the channel,
         // resampling and converting channels as needed.
         std::thread::spawn(move || {
-            while let Ok(samples) = audio_rx.recv() {
-                let resampled = resample_linear(&samples, sample_rate, target_sample_rate);
+            while let Ok(job) = audio_rx.recv() {
+                let resampled = resample_linear(&job.pcm, source_sample_rate, target_sample_rate);
                 let channel_converted = convert_channels(&resampled, target_channels);
-                pending_fill.lock().unwrap().extend(channel_converted);
+
+                let mut state = state_clone.lock().unwrap();
+
+                // If a previous turn was still playing, you have a product choice:
+                //   (a) append (queue utterances) — advanced
+                //   (b) clear and replace — simple, OK for Boris today
+                // Phase 2: (b) is fine and matches “one turn at a time”.
+
+                state.pending.clear();
+                state.pending.extend(channel_converted);
+                state.active_turn = Some(job.turn);
+                state.empty_callbacks = 0;
             }
         });
 
         let stream = match dconfig.sample_format() {
-            cpal::SampleFormat::F32 => {
-                build_output_stream::<f32>(&device, stream_config, pending)?
-            }
-            cpal::SampleFormat::I16 => {
-                build_output_stream::<i16>(&device, stream_config, pending)?
-            }
-            cpal::SampleFormat::U16 => {
-                build_output_stream::<u16>(&device, stream_config, pending)?
-            }
+            cpal::SampleFormat::F32 => build_output_stream::<f32>(
+                &device,
+                stream_config,
+                playback_state.clone(),
+                event_tx.clone(),
+            )?,
+            cpal::SampleFormat::I16 => build_output_stream::<i16>(
+                &device,
+                stream_config,
+                playback_state.clone(),
+                event_tx.clone(),
+            )?,
+            cpal::SampleFormat::U16 => build_output_stream::<u16>(
+                &device,
+                stream_config,
+                playback_state.clone(),
+                event_tx.clone(),
+            )?,
             _ => {
                 return Err(Error::AudioError("unsupported sample format".to_string()));
             }
@@ -74,7 +123,8 @@ impl Playback {
 fn build_output_stream<T>(
     device: &cpal::Device,
     config: StreamConfig,
-    pending: Arc<Mutex<VecDeque<f32>>>,
+    state: Arc<Mutex<PlaybackState>>,
+    event_tx: Sender<Event>,
 ) -> Result<Stream>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + 'static,
@@ -83,10 +133,30 @@ where
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                let mut buf = pending.lock().unwrap();
+                let mut state = state.lock().unwrap();
+                let mut got_real_sample = false;
+
                 for sample in output.iter_mut() {
-                    let s_f32 = buf.pop_front().unwrap_or(0.0);
-                    *sample = T::from_sample(s_f32);
+                    if let Some(s) = state.pending.pop_front() {
+                        *sample = T::from_sample(s);
+                        got_real_sample = true;
+                    } else {
+                        *sample = T::from_sample(0.0);
+                    }
+                }
+
+                if state.active_turn.is_some() {
+                    if got_real_sample || !state.pending.is_empty() {
+                        state.empty_callbacks = 0;
+                    } else {
+                        state.empty_callbacks = state.empty_callbacks.saturating_add(1);
+                        if state.empty_callbacks >= DRAIN_EMPTY_CALLBACKS {
+                            if let Some(turn) = state.active_turn.take() {
+                                state.empty_callbacks = 0;
+                                let _ = event_tx.send(Event::PlaybackFinished { turn }).ok();
+                            }
+                        }
+                    }
                 }
             },
             |err| tracing::error!("Playback stream error: {err}"),
@@ -137,4 +207,3 @@ fn convert_channels(input: &[f32], target_channels: u16) -> Vec<f32> {
     }
     output
 }
-

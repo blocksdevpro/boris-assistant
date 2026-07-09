@@ -3,11 +3,9 @@ use std::env;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
 use boris_agent::{AgentEngine, OpenRouterClient};
-use boris_audio::playback::Playback;
+use boris_audio::playback::{PlayJob, Playback};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     event::Event,
@@ -30,9 +28,6 @@ static WAKEWORD_MODEL_BYTES: &[u8] = include_bytes!("../assets/models/livekit/bo
 
 /// Sensor fan-out depth. Full → drop frame for that subscriber (never block capture).
 const AUDIO_SENSOR_QUEUE: usize = 64;
-
-/// Extra silence after estimated TTS duration before re-arming wakeword.
-const PLAYBACK_PAD: Duration = Duration::from_millis(250);
 
 mod session;
 mod workers;
@@ -86,7 +81,7 @@ fn main() {
     let (stt_cmd_tx, stt_cmd_rx) = mpsc::channel::<SttCommand>();
     let (agent_cmd_tx, agent_cmd_rx) = mpsc::channel::<AgentCommand>();
     let (tts_cmd_tx, tts_cmd_rx) = mpsc::channel::<TtsCommand>();
-    let (playback_tx, playback_rx) = mpsc::channel::<AudioBuffer>();
+    let (playback_tx, playback_rx) = mpsc::channel::<PlayJob>();
 
     let (wakeword_ctl_tx, wakeword_ctl_rx) = mpsc::channel::<Lifecycle>();
     let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<RecorderCtl>();
@@ -140,7 +135,7 @@ fn main() {
 
     // ── TTS + Playback ────────────────────────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
-    let _playback = Playback::new(playback_rx, KOKORO_SAMPLE_RATE)
+    let _playback = Playback::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
         .expect("failed to initialise audio playback");
 
     // ── Session runtime ───────────────────────────────────────────────────────
@@ -156,7 +151,6 @@ fn main() {
         &agent_cmd_tx,
         &tts_cmd_tx,
         &playback_tx,
-        &event_tx,
     );
 
     tracing::info!("Boris is ready. Say the wake word to begin.");
@@ -173,7 +167,6 @@ fn main() {
             &agent_cmd_tx,
             &tts_cmd_tx,
             &playback_tx,
-            &event_tx,
         );
     }
 }
@@ -209,8 +202,7 @@ fn apply_effects(
     stt_cmd_tx: &mpsc::Sender<SttCommand>,
     agent_cmd_tx: &mpsc::Sender<AgentCommand>,
     tts_cmd_tx: &mpsc::Sender<TtsCommand>,
-    playback_tx: &mpsc::Sender<AudioBuffer>,
-    event_tx: &mpsc::Sender<Event>,
+    playback_tx: &mpsc::Sender<PlayJob>,
 ) {
     for effect in effects {
         match effect {
@@ -244,26 +236,11 @@ fn apply_effects(
                 tts_cmd_tx.send(TtsCommand::Synthesize { turn, text }).ok();
             }
             Effect::Play { turn, pcm } => {
-                let duration = playback_duration(&pcm, KOKORO_SAMPLE_RATE);
-                if playback_tx.send(pcm).is_err() {
+                if playback_tx.send(PlayJob { turn, pcm }).is_err() {
                     tracing::error!(%turn, "playback channel closed");
                     continue;
                 }
-                // Approximate PlaybackFinished until the sink reports real drain.
-                let event_tx = event_tx.clone();
-                thread::spawn(move || {
-                    thread::sleep(duration + PLAYBACK_PAD);
-                    event_tx.send(Event::PlaybackFinished { turn }).ok();
-                });
             }
         }
     }
-}
-
-fn playback_duration(pcm: &[f32], sample_rate: u32) -> Duration {
-    if sample_rate == 0 || pcm.is_empty() {
-        return Duration::from_millis(100);
-    }
-    let secs = pcm.len() as f64 / sample_rate as f64;
-    Duration::from_secs_f64(secs)
 }

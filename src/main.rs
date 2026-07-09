@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use boris_agent::{AgentEngine, OpenRouterClient};
-use boris_audio::playback::{PlayJob, Playback};
+use boris_audio::playback::{PlayJob, PlaybackSink};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     event::Event,
@@ -19,8 +19,8 @@ use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
     agent::{AgentCommand, AgentWorker, SpeakTool},
-    audio::{AudioDispatcherWorker, AudioPipelineWorker, AudioRecordingWorker, RecorderCtl},
-    inference::{SttCommand, SttWorker, VadWorker, WakeWordWorker},
+    audio::{AudioDispatcherWorker, AudioPipelineWorker, RecorderCtl, UtteranceCapture},
+    inference::{EndpointSensor, SttCommand, SttWorker, WakeSensor},
     tts::{TtsCommand, TtsWorker},
 };
 
@@ -97,7 +97,7 @@ fn main() {
     );
 
     // ── Inference workers ─────────────────────────────────────────────────────
-    let _wakeword_worker = WakeWordWorker::spawn(
+    let _wakeword_worker = WakeSensor::spawn(
         wakeword_audio_rx,
         wakeword_ctl_rx,
         event_tx.clone(),
@@ -105,10 +105,10 @@ fn main() {
     );
 
     let _vad_worker =
-        VadWorker::spawn(vad_audio_rx, vad_ctl_rx, event_tx.clone(), WebRtcVad::new());
+        EndpointSensor::spawn(vad_audio_rx, vad_ctl_rx, event_tx.clone(), WebRtcVad::new());
 
     let _recording_worker =
-        AudioRecordingWorker::spawn(recorder_audio_rx, recorder_ctl_rx, event_tx.clone());
+        UtteranceCapture::spawn(recorder_audio_rx, recorder_ctl_rx, event_tx.clone());
 
     let _stt_worker = SttWorker::spawn(stt_cmd_rx, event_tx.clone(), ParakeetSTT::new());
 
@@ -133,9 +133,9 @@ fn main() {
         event_tx.clone(),
     );
 
-    // ── TTS + Playback ────────────────────────────────────────────────────────
+    // ── TTS + PlaybackSink ────────────────────────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
-    let _playback = Playback::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
+    let _playback = PlaybackSink::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
         .expect("failed to initialise audio playback");
 
     // ── Session runtime ───────────────────────────────────────────────────────

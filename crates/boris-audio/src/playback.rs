@@ -32,11 +32,11 @@ struct PlaybackState {
 /// Tune: 3–8 is typical. Depends on callback size (~few ms each).
 const DRAIN_EMPTY_CALLBACKS: u32 = 5;
 
-pub struct Playback {
+pub struct PlaybackSink {
     _stream: Stream,
 }
 
-impl Playback {
+impl PlaybackSink {
     /// Spawn an output stream that drains f32 PCM samples from `audio_rx`
     /// and plays them through the default output device.
     ///
@@ -159,7 +159,7 @@ where
                     }
                 }
             },
-            |err| tracing::error!("Playback stream error: {err}"),
+            |err| tracing::error!("PlaybackSink stream error: {err}"),
             None,
         )
         .map_err(|e| Error::AudioError(format!("failed to build output stream: {e}")))?;

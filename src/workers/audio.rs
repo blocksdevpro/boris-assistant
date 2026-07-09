@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use boris_audio::{
@@ -7,10 +7,7 @@ use boris_audio::{
     AUDIO_TARGET_RATE,
 };
 use boris_core::{
-    error::Result,
-    event::Event,
-    types::ArcAudioBuffer,
-    AudioBuffer, AudioSample, TurnId,
+    error::Result, event::Event, types::ArcAudioBuffer, AudioBuffer, AudioSample, TurnId,
 };
 
 // ── Recorder control ──────────────────────────────────────────────────────────
@@ -118,11 +115,11 @@ impl AudioDispatcherWorker {
 ///
 /// [`RecorderCtl::Start`] begins recording for a turn. [`RecorderCtl::Stop`]
 /// drains the buffer and emits [`Event::RecordingResult`] tagged with that turn.
-pub struct AudioRecordingWorker {
+pub struct UtteranceCapture {
     _handle: JoinHandle<()>,
 }
 
-impl AudioRecordingWorker {
+impl UtteranceCapture {
     pub fn spawn(
         audio_rx: Receiver<ArcAudioBuffer>,
         control_rx: Receiver<RecorderCtl>,
@@ -145,12 +142,11 @@ impl AudioRecordingWorker {
                             buffer.set_recording(false);
                             let audio = buffer.take_audio();
                             if let Some(turn) = active_turn.take() {
-                                event_tx
-                                    .send(Event::RecordingResult { turn, audio })
-                                    .ok();
+                                event_tx.send(Event::RecordingResult { turn, audio }).ok();
                             } else {
                                 tracing::warn!(
-                                    "AudioRecordingWorker: Stop with no active turn — dropping clip"
+                                    "
+UtteranceCapture: Stop with no active turn — dropping clip"
                                 );
                             }
                         }

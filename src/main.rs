@@ -11,7 +11,9 @@ use boris_core::{
     types::{ArcAudioBuffer, Lifecycle},
     AudioBuffer,
 };
-use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
+use boris_inference::{
+    init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord,
+};
 use boris_stt_parakeet::ParakeetSTT;
 // use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
@@ -49,6 +51,9 @@ fn main() {
                 .add_directive("boris_tts_kokoro=info".parse().unwrap()),
         )
         .init();
+
+    // Cap ORT thread pools *before* any ONNX sessions (wakeword mel/emb/classifier).
+    init_onnx_runtime();
 
     // ── Channels ──────────────────────────────────────────────────────────────
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();

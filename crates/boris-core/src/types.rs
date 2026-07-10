@@ -6,13 +6,16 @@ pub type AudioBuffer = Vec<AudioSample>;
 
 pub type ArcAudioBuffer = Arc<[AudioSample]>;
 
+/// Enable/disable signal for always-on sensors (wake, VAD).
+///
+/// Not product policy by itself — Session decides when to send Start/Stop.
 pub enum Lifecycle {
     Start,
     Stop,
 }
 
 /// Identifies one full interaction cycle: wake → listen → STT → agent → speak.
-/// Late async results with a non-current id are dropped.
+/// Late async results with a non-current id are dropped by the Session FSM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TurnId(pub u64);
 

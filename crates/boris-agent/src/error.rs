@@ -22,7 +22,7 @@ impl fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-/// Failure inside the agent tool-call loop.
+/// Failure inside the agent turn (LLM error or unrecoverable tool-loop issue).
 #[derive(Debug)]
 pub struct AgentError {
     pub message: String,

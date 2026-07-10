@@ -4,7 +4,11 @@ pub struct ToolError {
     pub message: String,
 }
 
-/// Implement this trait to expose a capability to the LLM.
+/// Capability the LLM may invoke during the engine tool loop.
+///
+/// Implementations return data **to the model** (observations). They must not
+/// drive TTS, playback, or the app event bus — final speech is always
+/// [`crate::AgentOutcome`] from [`crate::AgentEngine::chat`].
 pub trait Tool: Send + Sync {
     /// Snake_case name the LLM uses to invoke this tool.
     fn name(&self) -> &str;
@@ -17,7 +21,7 @@ pub trait Tool: Send + Sync {
     /// for tools that take no arguments.
     fn parameters(&self) -> Value;
 
-    /// Execute the tool with the JSON args the LLM supplied.
-    /// Return a plain string that is sent back to the LLM as the result.
+    /// Run the tool with the JSON args the LLM supplied.
+    /// The returned string is sent back to the LLM as the tool result.
     fn execute(&self, args: Value) -> Result<String, ToolError>;
 }

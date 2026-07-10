@@ -8,14 +8,15 @@ use boris_inference::TextToSpeech;
 
 #[derive(Debug)]
 pub enum TtsCommand {
-    /// Load the TTS model into memory and pre-warm it.
+    /// Load the TTS model into memory (idempotent if already loaded).
     LoadModel,
-    /// Synthesize the given text and emit [`Event::PlaybackReady`] with the PCM.
+    /// Synthesize `text` for `turn` and emit [`Event::PlaybackReady`] with PCM.
     Synthesize { turn: TurnId, text: String },
 }
 
 // ── TTS Worker ────────────────────────────────────────────────────────────────
 
+/// Runs [`TextToSpeech`] on a background thread; results go out on `event_tx`.
 pub struct TtsWorker {
     _handle: JoinHandle<()>,
 }
@@ -23,7 +24,7 @@ pub struct TtsWorker {
 impl TtsWorker {
     /// Spawn the TTS worker on its own thread.
     ///
-    /// Accepts any [`TextToSpeech`] implementation — not tied to a concrete type.
+    /// Accepts any [`TextToSpeech`] implementation — not tied to Kokoro.
     pub fn spawn(
         command_rx: Receiver<TtsCommand>,
         event_tx: Sender<Event>,

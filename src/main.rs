@@ -1,3 +1,4 @@
+use boris_tts_supertone::{SupertoneTts, SUPERTONE_SAMPLE_RATE};
 use dotenvy::dotenv;
 use std::env;
 use std::sync::mpsc;
@@ -10,9 +11,11 @@ use boris_core::{
     types::{ArcAudioBuffer, Lifecycle},
     AudioBuffer,
 };
-use boris_inference::{vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
+use boris_inference::{
+    init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord,
+};
 use boris_stt_parakeet::ParakeetSTT;
-use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
+// use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
 use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
@@ -48,6 +51,9 @@ fn main() {
                 .add_directive("boris_tts_kokoro=info".parse().unwrap()),
         )
         .init();
+
+    // Cap ORT thread pools *before* any ONNX sessions (wakeword mel/emb/classifier).
+    init_onnx_runtime();
 
     // ── Channels ──────────────────────────────────────────────────────────────
     let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
@@ -101,8 +107,12 @@ fn main() {
     let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine, event_tx.clone());
 
     // ── TTS + playback sink ───────────────────────────────────────────────────
-    let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
-    let _playback = PlaybackSink::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
+    // let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
+    // let _playback = PlaybackSink::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
+    //     .expect("failed to initialise audio playback");
+
+    let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), SupertoneTts::new());
+    let _playback = PlaybackSink::new(playback_rx, SUPERTONE_SAMPLE_RATE, event_tx.clone())
         .expect("failed to initialise audio playback");
 
     // ── Session runtime (policy) + effect application (I/O) ───────────────────

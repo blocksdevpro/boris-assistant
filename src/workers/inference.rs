@@ -1,6 +1,7 @@
 use std::{
     sync::mpsc::{Receiver, Sender},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use boris_audio::buffer::SlidingBuffer;
@@ -11,8 +12,8 @@ use boris_core::{
 };
 use boris_inference::{
     duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, SpeechToText, Vad,
-    WakeWord, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
-    WAKEWORD_WINDOW_SIZE,
+    WakeWord, VAD_PROCESSING_INTERVAL, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL,
+    WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -89,6 +90,8 @@ impl SttWorker {
 /// Watches the audio bus while listening and emits [`Event::SpeechEnded`] when
 /// silence lasts long enough in **audio time** (sample counts, not wall clock).
 ///
+/// Frames are still sized for WebRTC VAD ([`VAD_WINDOW_SIZE`]), but
+/// [`Vad::predict`] runs only every [`VAD_PROCESSING_INTERVAL`] of audio.
 /// Enable/disable via [`Lifecycle`]; Session owns when that happens.
 pub struct EndpointSensor {
     _handle: JoinHandle<()>,
@@ -106,6 +109,10 @@ impl EndpointSensor {
             let mut is_listening = false;
             let mut audio_buffer: Vec<f32> = Vec::new();
             let mut samples_since_speech: usize = 0;
+            // WebRTC VAD frames stay at VAD_WINDOW_SIZE (10 ms); only *score* every
+            // VAD_PROCESSING_INTERVAL of audio time (same idea as WakeSensor).
+            let score_every = duration_to_samples(VAD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
+            let mut samples_since_score: usize = 0;
 
             let silence_after_speech = vad_silence_samples();
             let silence_before_speech = vad_initial_timeout_samples();
@@ -117,6 +124,7 @@ impl EndpointSensor {
                             is_listening = true;
                             has_spoken = false;
                             samples_since_speech = 0;
+                            samples_since_score = 0;
                             audio_buffer.clear();
                         }
                         Lifecycle::Stop => {
@@ -135,6 +143,14 @@ impl EndpointSensor {
 
                 while audio_buffer.len() >= VAD_WINDOW_SIZE {
                     let chunk: Vec<f32> = audio_buffer.drain(..VAD_WINDOW_SIZE).collect();
+                    samples_since_score = samples_since_score.saturating_add(chunk.len());
+
+                    // Still drain 10 ms frames so the buffer does not grow, but only
+                    // call the model once per VAD_PROCESSING_INTERVAL of audio.
+                    if samples_since_score < score_every {
+                        continue;
+                    }
+                    samples_since_score = 0;
 
                     match detector.predict(&chunk) {
                         Ok(true) => {
@@ -142,7 +158,9 @@ impl EndpointSensor {
                             samples_since_speech = 0;
                         }
                         Ok(false) => {
-                            samples_since_speech = samples_since_speech.saturating_add(chunk.len());
+                            // Advance silence by the scoring hop, not the 10 ms frame.
+                            samples_since_speech =
+                                samples_since_speech.saturating_add(score_every);
                             let limit = if has_spoken {
                                 silence_after_speech
                             } else {
@@ -153,6 +171,7 @@ impl EndpointSensor {
                                 is_listening = false;
                                 audio_buffer.clear();
                                 samples_since_speech = 0;
+                                samples_since_score = 0;
                                 event_tx.send(Event::SpeechEnded).ok();
                             }
                         }
@@ -211,6 +230,7 @@ impl WakeSensor {
                     samples_since_score = 0;
                     let window = audio_buffer.read();
 
+                    tracing::debug!("WW predict {:?}", Instant::now());
                     match detector.predict(&window) {
                         Ok(score) => {
                             if score >= WAKEWORD_THRESHOLD {

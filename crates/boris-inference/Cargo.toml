@@ -8,4 +8,7 @@ boris-core = { workspace = true }
 tracing    = { workspace = true }
 
 livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }
+# Same line as livekit-wakeword; we configure the process-global ORT env
+# before any wakeword sessions are created (shared pool + no spin).
+ort              = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"] }
 webrtc-vad       = "0.4"

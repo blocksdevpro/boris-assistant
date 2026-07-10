@@ -54,6 +54,9 @@ impl AudioPipelineWorker {
                         accumulator.drain(..AUDIO_CHUNK_SIZE as usize).collect();
 
                     match resampler.resample(&to_resample) {
+                        Ok(resampled) if resampled.is_empty() => {
+                            // Rubato may produce 0 frames on some partial FFT steps.
+                        }
                         Ok(resampled) => {
                             if audio_tx.send(resampled).is_err() {
                                 tracing::warn!("AudioPipelineWorker: downstream channel closed");

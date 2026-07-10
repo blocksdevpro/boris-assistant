@@ -16,11 +16,23 @@ impl SlidingBuffer {
     }
 
     pub fn push(&mut self, value: &[AudioSample]) {
-        for &sample in value {
-            if self.buffer.len() == self.capacity {
-                self.buffer.pop_front(); // O(1), no shifting
-            }
-            self.buffer.push_back(sample); // O(1) amortized
+        if value.is_empty() {
+            return;
+        }
+        // Bulk-drop oldest samples when the sliding window would overflow.
+        let overflow = self
+            .buffer
+            .len()
+            .saturating_add(value.len())
+            .saturating_sub(self.capacity);
+        if overflow > 0 {
+            self.buffer.drain(..overflow.min(self.buffer.len()));
+        }
+        self.buffer.extend(value.iter().copied());
+        // Incoming chunk larger than capacity: keep the newest `capacity` samples.
+        if self.buffer.len() > self.capacity {
+            let excess = self.buffer.len() - self.capacity;
+            self.buffer.drain(..excess);
         }
     }
 
@@ -55,13 +67,26 @@ impl RecordingBuffer {
     }
 
     pub fn push(&mut self, value: &[AudioSample]) {
-        for &sample in value {
-            // If we are NOT recording and the buffer is full, pop the oldest sample
-            // to maintain our pre-roll window (e.g. 2 seconds of audio)
-            if !self.is_recording && self.buffer.len() == self.capacity {
-                self.buffer.pop_front();
+        if value.is_empty() {
+            return;
+        }
+        if !self.is_recording {
+            // Pre-roll: keep only the last `capacity` samples.
+            let overflow = self
+                .buffer
+                .len()
+                .saturating_add(value.len())
+                .saturating_sub(self.capacity);
+            if overflow > 0 {
+                self.buffer.drain(..overflow.min(self.buffer.len()));
             }
-            self.buffer.push_back(sample);
+            self.buffer.extend(value.iter().copied());
+            if self.buffer.len() > self.capacity {
+                let excess = self.buffer.len() - self.capacity;
+                self.buffer.drain(..excess);
+            }
+        } else {
+            self.buffer.extend(value.iter().copied());
         }
     }
 

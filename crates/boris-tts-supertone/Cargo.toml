@@ -1,0 +1,16 @@
+[package]
+name    = "boris-tts-supertone"
+version = "0.1.0"
+edition = "2021"
+
+
+
+[dependencies]
+boris-core      = { workspace = true }
+boris-inference = { workspace = true }
+tracing         = { workspace = true }
+
+st-tts = "0.3"
+tokio  = { version = "1", features = ["rt-multi-thread", "macros"] }
+hound  = "3.5"
+clap   = { version = "4", features = ["derive"] }

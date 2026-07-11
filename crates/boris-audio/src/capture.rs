@@ -3,10 +3,11 @@ use boris_core::{
     error::{Error, Result},
 };
 use cpal::{
-    BufferSize, Device, SampleFormat, Stream, StreamConfig,
+    BufferSize, Device, FromSample, Sample, SampleFormat, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use crossbeam_channel::Sender;
+
 pub struct Capture {
     _stream: Stream,
     pub sample_rate: u32,
@@ -68,18 +69,22 @@ fn build_input_stream<T>(
     audio_tx: Sender<AudioBuffer>,
 ) -> Result<Stream>
 where
-    T: cpal::Sample + cpal::SizedSample + Into<AudioSample> + 'static,
+    T: Sample + cpal::SizedSample + 'static,
+    AudioSample: FromSample<T>,
 {
     let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _| {
+                // Normalize every device format (i16/u16/f32/…) into f32 [-1, 1].
+                // Raw `Into<f32>` on integer samples yields ±32768-scale values and
+                // saturates every downstream PCM path that clamps to [-1, 1].
                 let mono_samples: Vec<AudioSample> = data
                     .chunks(channels)
                     .map(|frame| {
                         frame
                             .iter()
-                            .map(|sample| (*sample).into())
+                            .map(|sample| AudioSample::from_sample(*sample))
                             .sum::<AudioSample>()
                             / channels as AudioSample
                     })

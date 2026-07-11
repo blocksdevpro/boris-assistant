@@ -8,6 +8,10 @@ use crate::{
     tool::Tool,
 };
 
+/// Hard cap on tool-call rounds per user turn. Prevents unbounded ReAct loops
+/// if the model keeps requesting tools (or invents unknown ones).
+const MAX_TOOL_ROUNDS: usize = 5;
+
 pub struct AgentEngine {
     client: Box<dyn LlmClient>,
     tools: Vec<Box<dyn Tool>>,
@@ -39,8 +43,14 @@ impl AgentEngine {
         self.tools.push(tool);
     }
 
-    /// Serialize registered tools into the JSON array expected by the OpenAI API.
+    /// Serialize registered tools for the OpenAI-compatible API.
+    ///
+    /// Returns `Value::Null` when no tools are registered so the client can
+    /// omit `tools` / `tool_choice` entirely (avoids empty-array edge cases).
     fn tools_json(&self) -> Value {
+        if self.tools.is_empty() {
+            return Value::Null;
+        }
         let list: Vec<Value> = self
             .tools
             .iter()
@@ -63,13 +73,14 @@ impl AgentEngine {
     ///
     /// - Non-empty content → [`AgentOutcome::Speak`] (caller / Session should TTS it).
     /// - Empty content → [`AgentOutcome::Silent`].
+    /// - Tool rounds are capped at [`MAX_TOOL_ROUNDS`]; unknown tools fail closed.
     ///
     /// This crate never talks to the app event bus; the binary worker maps the
     /// outcome into runtime events.
     pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
         self.context.push(Role::User, message);
 
-        loop {
+        for round in 0..=MAX_TOOL_ROUNDS {
             let response = self
                 .client
                 .complete(self.context.as_json(), self.tools_json())?;
@@ -77,6 +88,12 @@ impl AgentEngine {
             let tool_calls = &response["tool_calls"];
             if let Some(calls) = tool_calls.as_array() {
                 if !calls.is_empty() {
+                    if round == MAX_TOOL_ROUNDS {
+                        return Err(AgentError::new(format!(
+                            "tool loop exceeded {MAX_TOOL_ROUNDS} rounds without a final reply"
+                        )));
+                    }
+
                     self.context.push(Role::Assistant, response.clone());
 
                     for call in calls {
@@ -87,15 +104,18 @@ impl AgentEngine {
                         )
                         .unwrap_or(json!({}));
 
-                        let result = self
+                        let tool = self
                             .tools
                             .iter()
                             .find(|t| t.name() == fn_name)
-                            .map(|t| match t.execute(args) {
-                                Ok(output) => output,
-                                Err(e) => format!("Error: {}", e.message),
-                            })
-                            .unwrap_or_else(|| format!("Unknown tool: {fn_name}"));
+                            .ok_or_else(|| {
+                                AgentError::new(format!("unknown tool requested by model: {fn_name}"))
+                            })?;
+
+                        let result = match tool.execute(args) {
+                            Ok(output) => output,
+                            Err(e) => format!("Error: {}", e.message),
+                        };
 
                         self.context.push(
                             Role::Tool,
@@ -118,5 +138,8 @@ impl AgentEngine {
             }
             return Ok(AgentOutcome::Speak(reply));
         }
+
+        // Unreachable: loop is `0..=MAX_TOOL_ROUNDS` and tool path returns on last round.
+        Err(AgentError::new("tool loop exhausted"))
     }
 }

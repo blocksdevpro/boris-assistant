@@ -22,10 +22,18 @@ pub struct OpenRouterClient {
 
 impl OpenRouterClient {
     pub fn new(api_key: String) -> Self {
+        // Explicit connect/read timeouts so a stalled OpenRouter call cannot
+        // leave the session FSM stuck in Thinking forever.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
             api_key,
             model: "google/gemini-2.5-flash-lite".to_string(),
-            client: Client::new(),
+            client,
         }
     }
 
@@ -39,12 +47,22 @@ impl OpenRouterClient {
 impl LlmClient for OpenRouterClient {
     fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
         let url = "https://openrouter.ai/api/v1/chat/completions";
-        let body = json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-        });
+
+        // Only advertise tools when the engine actually registered some.
+        // Empty `tools: []` + `tool_choice: auto` confuses some providers.
+        let body = if tools.is_null() || tools.as_array().is_some_and(|a| a.is_empty()) {
+            json!({
+                "model": self.model,
+                "messages": messages,
+            })
+        } else {
+            json!({
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+            })
+        };
 
         let response = self
             .client

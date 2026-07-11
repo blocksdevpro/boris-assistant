@@ -15,7 +15,6 @@ use boris_inference::{
     init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord,
 };
 use boris_stt_parakeet::ParakeetSTT;
-// use boris_tts_kokoro::{KokoroTts, KOKORO_SAMPLE_RATE};
 
 use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
@@ -48,7 +47,7 @@ fn main() {
                 .add_directive("boris_inference=info".parse().unwrap())
                 .add_directive("boris_stt_parakeet=info".parse().unwrap())
                 .add_directive("boris_core=info".parse().unwrap())
-                .add_directive("boris_tts_kokoro=info".parse().unwrap()),
+                .add_directive("boris_tts_supertone=info".parse().unwrap()),
         )
         .init();
 
@@ -106,11 +105,7 @@ fn main() {
     // No tools registered: model plain text is AgentOutcome::Speak.
     let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine, event_tx.clone());
 
-    // ── TTS + playback sink ───────────────────────────────────────────────────
-    // let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), KokoroTts::new());
-    // let _playback = PlaybackSink::new(playback_rx, KOKORO_SAMPLE_RATE, event_tx.clone())
-    //     .expect("failed to initialise audio playback");
-
+    // ── TTS + playback sink (Supertone) ───────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), SupertoneTts::new());
     let _playback = PlaybackSink::new(playback_rx, SUPERTONE_SAMPLE_RATE, event_tx.clone())
         .expect("failed to initialise audio playback");

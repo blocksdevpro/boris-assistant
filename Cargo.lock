@@ -330,7 +330,6 @@ dependencies = [
  "boris-core",
  "boris-inference",
  "boris-stt-parakeet",
- "boris-tts-kokoro",
  "boris-tts-supertone",
  "crossbeam-channel",
  "dotenvy",

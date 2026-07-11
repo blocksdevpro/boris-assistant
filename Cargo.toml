@@ -31,9 +31,8 @@ boris-core         = { workspace = true }
 boris-audio        = { workspace = true }
 boris-inference    = { workspace = true }
 boris-agent        = { path = "crates/boris-agent" }
-boris-stt-parakeet = { path = "crates/boris-stt-parakeet" }
-boris-tts-kokoro   = { path = "crates/boris-tts-kokoro" }
-boris-tts-supertone   = { path = "crates/boris-tts-supertone" }
+boris-stt-parakeet  = { path = "crates/boris-stt-parakeet" }
+boris-tts-supertone = { path = "crates/boris-tts-supertone" }
 
 
 hound              = "3.5"

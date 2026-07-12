@@ -10,29 +10,15 @@ pub enum SessionInput {
     /// Endpoint sensor reported end of user speech.
     Endpoint,
     /// Utterance PCM ready for STT.
-    ClipReady {
-        turn: TurnId,
-        audio: AudioBuffer,
-    },
+    ClipReady { turn: TurnId, audio: AudioBuffer },
     /// STT finished.
-    Transcript {
-        turn: TurnId,
-        text: String,
-    },
+    Transcript { turn: TurnId, text: String },
     /// Agent returned speakable text (from `AgentOutcome::Speak` via the worker).
-    AgentDone {
-        turn: TurnId,
-        text: String,
-    },
+    AgentDone { turn: TurnId, text: String },
     /// TTS produced PCM.
-    TtsReady {
-        turn: TurnId,
-        pcm: AudioBuffer,
-    },
+    TtsReady { turn: TurnId, pcm: AudioBuffer },
     /// Playback sink drained this turn.
-    PlaybackFinished {
-        turn: TurnId,
-    },
+    PlaybackFinished { turn: TurnId },
     /// STT / agent / TTS (or similar) failed; recover toward Idle.
     ServiceFailed {
         turn: Option<TurnId>,

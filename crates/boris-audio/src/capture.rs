@@ -1,10 +1,10 @@
 use boris_core::{
-    AudioBuffer, AudioSample,
     error::{Error, Result},
+    AudioBuffer, AudioSample,
 };
 use cpal::{
-    BufferSize, Device, FromSample, Sample, SampleFormat, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
+    BufferSize, Device, FromSample, Sample, SampleFormat, Stream, StreamConfig,
 };
 use crossbeam_channel::Sender;
 

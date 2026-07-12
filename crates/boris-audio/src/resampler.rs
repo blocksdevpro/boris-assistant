@@ -91,9 +91,7 @@ impl Resampler {
         let mut output_slice =
             InterleavedSlice::new_mut(&mut output_buffer, channels, resampler.output_frames_max())
                 .map_err(|e| {
-                    Error::AudioError(format!(
-                        "failed to create output slice for resampling: {e}"
-                    ))
+                    Error::AudioError(format!("failed to create output slice for resampling: {e}"))
                 })?;
 
         // Rubato writes only `produced` frames; the rest of the buffer stays zero.

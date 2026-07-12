@@ -159,8 +159,7 @@ impl EndpointSensor {
                         }
                         Ok(false) => {
                             // Advance silence by the scoring hop, not the 10 ms frame.
-                            samples_since_speech =
-                                samples_since_speech.saturating_add(score_every);
+                            samples_since_speech = samples_since_speech.saturating_add(score_every);
                             let limit = if has_spoken {
                                 silence_after_speech
                             } else {

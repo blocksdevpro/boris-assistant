@@ -156,10 +156,7 @@ impl Session {
 
         self.state = SessionState::Speaking { turn };
         tracing::info!(%turn, text = %text, "session → Speaking");
-        vec![
-            Effect::DisarmWakeword,
-            Effect::Synthesize { turn, text },
-        ]
+        vec![Effect::DisarmWakeword, Effect::Synthesize { turn, text }]
     }
 
     fn on_tts_ready(&mut self, turn: TurnId, pcm: boris_core::AudioBuffer) -> Vec<Effect> {

@@ -101,7 +101,7 @@ impl TextToSpeech for SupertoneTts {
         let model_dir = Path::new(SUPERTONE_MODEL_DIR);
         let voice_path = Path::new(SUPERTONE_VOICE_DIR).join(self.voice.clone() + ".json");
 
-        let model = Tts::from_local(&model_dir, &voice_path)
+        let model = Tts::from_local(model_dir, voice_path)
             .map_err(|e| Error::Other(format!("Supertone load failed: {e}")))?;
 
         tracing::info!(

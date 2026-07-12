@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use boris_core::{AudioSample, error::Result};
+use boris_core::{error::Result, AudioSample};
 use boris_inference::SpeechToText;
 use transcribe_rs::{
+    onnx::{parakeet::ParakeetModel, Quantization},
     SpeechModel, TranscribeOptions,
-    onnx::{Quantization, parakeet::ParakeetModel},
 };
 
 pub struct ParakeetSTT {
@@ -26,11 +26,9 @@ impl Default for ParakeetSTT {
 impl SpeechToText for ParakeetSTT {
     fn load(&mut self) -> Result<()> {
         if self.model.is_none() {
-            let model = ParakeetModel::load(
-                Path::new("./assets/models/parakeet/"),
-                &Quantization::Int8,
-            )
-            .map_err(|e| boris_core::error::Error::Other(e.to_string()))?;
+            let model =
+                ParakeetModel::load(Path::new("./assets/models/parakeet/"), &Quantization::Int8)
+                    .map_err(|e| boris_core::error::Error::Other(e.to_string()))?;
             self.model = Some(model);
         }
         Ok(())

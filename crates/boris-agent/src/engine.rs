@@ -104,13 +104,15 @@ impl AgentEngine {
                         )
                         .unwrap_or(json!({}));
 
-                        let tool = self
-                            .tools
-                            .iter()
-                            .find(|t| t.name() == fn_name)
-                            .ok_or_else(|| {
-                                AgentError::new(format!("unknown tool requested by model: {fn_name}"))
-                            })?;
+                        let tool =
+                            self.tools
+                                .iter()
+                                .find(|t| t.name() == fn_name)
+                                .ok_or_else(|| {
+                                    AgentError::new(format!(
+                                        "unknown tool requested by model: {fn_name}"
+                                    ))
+                                })?;
 
                         let result = match tool.execute(args) {
                             Ok(output) => output,

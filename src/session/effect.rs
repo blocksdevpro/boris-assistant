@@ -11,33 +11,19 @@ pub enum Effect {
     /// Disable wakeword scoring (listening / speaking).
     DisarmWakeword,
     /// Start VAD + utterance capture for `turn`.
-    StartListen {
-        turn: TurnId,
-    },
+    StartListen { turn: TurnId },
     /// Stop VAD + utterance capture (clip should follow).
     StopListen,
     /// Preload STT model.
     WarmStt,
     /// Send PCM to STT for `turn`.
-    Transcribe {
-        turn: TurnId,
-        audio: AudioBuffer,
-    },
+    Transcribe { turn: TurnId, audio: AudioBuffer },
     /// Preload TTS model.
     WarmTts,
     /// Send user text to the agent for `turn`.
-    Chat {
-        turn: TurnId,
-        text: String,
-    },
+    Chat { turn: TurnId, text: String },
     /// Send agent reply text to TTS for `turn`.
-    Synthesize {
-        turn: TurnId,
-        text: String,
-    },
+    Synthesize { turn: TurnId, text: String },
     /// Queue PCM on the playback sink for `turn`.
-    Play {
-        turn: TurnId,
-        pcm: AudioBuffer,
-    },
+    Play { turn: TurnId, pcm: AudioBuffer },
 }

@@ -11,9 +11,7 @@ use boris_core::{
     types::{ArcAudioBuffer, Lifecycle},
     AudioBuffer,
 };
-use boris_inference::{
-    init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord,
-};
+use boris_inference::{init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
 
 use crate::session::{Effect, Session, SessionInput};

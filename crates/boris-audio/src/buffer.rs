@@ -103,9 +103,7 @@ impl RecordingBuffer {
                 self.buffer.drain(..excess);
             }
         } else if !self.exceeded_max {
-            let room = self
-                .max_recording_samples
-                .saturating_sub(self.buffer.len());
+            let room = self.max_recording_samples.saturating_sub(self.buffer.len());
             if room == 0 {
                 self.exceeded_max = true;
                 return;

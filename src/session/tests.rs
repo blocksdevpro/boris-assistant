@@ -159,5 +159,3 @@ fn untagged_service_failed_does_not_abort_busy_turn() {
     assert!(effects.is_empty());
     assert!(matches!(s.state(), SessionState::Thinking { turn } if turn.0 == 1));
 }
-
-

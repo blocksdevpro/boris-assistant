@@ -175,10 +175,7 @@ impl UtteranceCapture {
                                     "UtteranceCapture: max utterance length reached — forcing clip"
                                 );
                                 event_tx
-                                    .send(Event::RecordingResult {
-                                        turn,
-                                        audio: clip,
-                                    })
+                                    .send(Event::RecordingResult { turn, audio: clip })
                                     .ok();
                             }
                         }

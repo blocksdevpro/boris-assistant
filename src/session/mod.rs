@@ -196,13 +196,20 @@ impl Session {
         worker: &'static str,
         message: String,
     ) -> Vec<Effect> {
-        if let Some(t) = turn {
-            if !self.is_current(t) {
-                tracing::debug!(%t, worker, "ignoring stale ServiceFailed");
-                return vec![];
-            }
-        } else if matches!(self.state, SessionState::Idle) {
-            tracing::error!(worker, message = %message, "worker error while Idle");
+        let Some(t) = turn else {
+            // Untagged errors (model load / warmup) must not abort an in-flight turn.
+            // A later Transcribe/Synthesize failure for the real turn will recover.
+            tracing::error!(
+                worker,
+                message = %message,
+                state = ?self.state,
+                "worker error without turn id — not recovering session"
+            );
+            return vec![];
+        };
+
+        if !self.is_current(t) {
+            tracing::debug!(%t, worker, "ignoring stale ServiceFailed");
             return vec![];
         }
 

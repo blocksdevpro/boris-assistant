@@ -134,4 +134,30 @@ fn empty_agent_reply_recovers() {
     assert_eq!(effects_kinds(&effects), vec!["ArmWakeword"]);
 }
 
+#[test]
+fn untagged_service_failed_does_not_abort_busy_turn() {
+    let mut s = Session::new();
+    s.handle(SessionInput::WakeHit);
+    let turn = TurnId(1);
+    s.handle(SessionInput::Endpoint);
+    s.handle(SessionInput::ClipReady {
+        turn,
+        audio: vec![0.0; 8],
+    });
+    s.handle(SessionInput::Transcript {
+        turn,
+        text: "hi".into(),
+    });
+    assert!(matches!(s.state(), SessionState::Thinking { .. }));
+
+    // Warm STT/TTS load failures use turn: None — must not kill Thinking.
+    let effects = s.handle(SessionInput::ServiceFailed {
+        turn: None,
+        worker: "TtsWorker",
+        message: "load failed".into(),
+    });
+    assert!(effects.is_empty());
+    assert!(matches!(s.state(), SessionState::Thinking { turn } if turn.0 == 1));
+}
+
 

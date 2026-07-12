@@ -222,6 +222,8 @@ impl Session {
         }
 
         self.state = SessionState::Idle;
+        // Kill any draining TTS so re-arming wake does not hear echo.
+        effects.push(Effect::StopPlayback);
         effects.push(Effect::ArmWakeword);
         effects
     }

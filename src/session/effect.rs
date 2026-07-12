@@ -26,4 +26,7 @@ pub enum Effect {
     Synthesize { turn: TurnId, text: String },
     /// Queue PCM on the playback sink for `turn`.
     Play { turn: TurnId, pcm: AudioBuffer },
+    /// Immediately silence speakers and drop any in-flight play job.
+    /// Used on recovery so wake re-arm does not hear TTS echo.
+    StopPlayback,
 }

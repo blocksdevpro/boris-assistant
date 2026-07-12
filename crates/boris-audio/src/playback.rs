@@ -14,10 +14,21 @@ use cpal::{
 };
 
 /// One utterance to play, correlated to a session turn.
+#[derive(Debug)]
 pub struct PlayJob {
     pub turn: TurnId,
-    /// Mono f32 PCM at `source_sample_rate` (e.g. Kokoro 24 kHz).
+    /// Mono f32 PCM at `source_sample_rate` (e.g. Supertone / Kokoro rate).
     pub pcm: AudioBuffer,
+}
+
+/// Commands for the playback sink fill thread.
+#[derive(Debug)]
+pub enum PlaybackCommand {
+    /// Queue PCM for a turn (replaces any pending audio — single-turn policy).
+    Play(PlayJob),
+    /// Immediately silence output and clear the active turn without emitting
+    /// [`Event::PlaybackFinished`] (used on session recovery / barge-in prep).
+    Stop,
 }
 
 struct PlaybackState {
@@ -32,7 +43,7 @@ struct PlaybackState {
 /// Declare [`Event::PlaybackFinished`] after this many empty device callbacks.
 const DRAIN_EMPTY_CALLBACKS: u32 = 5;
 
-/// Plays [`PlayJob`]s on the default output device and reports real drain.
+/// Plays [`PlaybackCommand`]s on the default output device and reports real drain.
 ///
 /// Finish is detected when the pending buffer stays empty for
 /// [`DRAIN_EMPTY_CALLBACKS`] callbacks — not via wall-clock sleep.
@@ -43,11 +54,11 @@ pub struct PlaybackSink {
 impl PlaybackSink {
     /// Open the default output device and start fill + callback threads.
     ///
-    /// - `audio_rx` — play jobs from the Session runtime (`Effect::Play`)
-    /// - `source_sample_rate` — rate of job PCM (Kokoro = 24_000)
+    /// - `audio_rx` — play/stop commands from the Session runtime
+    /// - `source_sample_rate` — rate of job PCM
     /// - `event_tx` — receives [`Event::PlaybackFinished`] when a job drains
     pub fn new(
-        audio_rx: Receiver<PlayJob>,
+        audio_rx: Receiver<PlaybackCommand>,
         source_sample_rate: u32,
         event_tx: Sender<Event>,
     ) -> Result<Self> {
@@ -73,15 +84,26 @@ impl PlaybackSink {
 
         // Fill thread: one job at a time — clear any previous queue (single-turn policy).
         std::thread::spawn(move || {
-            while let Ok(job) = audio_rx.recv() {
-                let resampled = resample_linear(&job.pcm, source_sample_rate, target_sample_rate);
-                let channel_converted = convert_channels(&resampled, target_channels);
+            while let Ok(cmd) = audio_rx.recv() {
+                match cmd {
+                    PlaybackCommand::Play(job) => {
+                        let resampled =
+                            resample_linear(&job.pcm, source_sample_rate, target_sample_rate);
+                        let channel_converted = convert_channels(&resampled, target_channels);
 
-                let mut state = state_clone.lock().unwrap();
-                state.pending.clear();
-                state.pending.extend(channel_converted);
-                state.active_turn = Some(job.turn);
-                state.empty_callbacks = 0;
+                        let mut state = state_clone.lock().unwrap();
+                        state.pending.clear();
+                        state.pending.extend(channel_converted);
+                        state.active_turn = Some(job.turn);
+                        state.empty_callbacks = 0;
+                    }
+                    PlaybackCommand::Stop => {
+                        let mut state = state_clone.lock().unwrap();
+                        state.pending.clear();
+                        state.active_turn = None;
+                        state.empty_callbacks = 0;
+                    }
+                }
             }
         });
 

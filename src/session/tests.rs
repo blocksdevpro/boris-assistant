@@ -15,6 +15,7 @@ fn effects_kinds(effects: &[Effect]) -> Vec<&'static str> {
             Effect::Chat { .. } => "Chat",
             Effect::Synthesize { .. } => "Synthesize",
             Effect::Play { .. } => "Play",
+            Effect::StopPlayback => "StopPlayback",
         })
         .collect()
 }
@@ -108,6 +109,7 @@ fn service_failed_recovers_to_idle() {
     assert!(s.state().is_idle());
     assert!(effects_kinds(&effects).contains(&"ArmWakeword"));
     assert!(effects_kinds(&effects).contains(&"StopListen"));
+    assert!(effects_kinds(&effects).contains(&"StopPlayback"));
 }
 
 #[test]
@@ -131,3 +133,5 @@ fn empty_agent_reply_recovers() {
     assert!(s.state().is_idle());
     assert_eq!(effects_kinds(&effects), vec!["ArmWakeword"]);
 }
+
+

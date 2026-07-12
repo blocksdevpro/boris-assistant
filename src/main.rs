@@ -4,7 +4,7 @@ use std::env;
 use std::sync::mpsc;
 
 use boris_agent::{AgentEngine, OpenRouterClient};
-use boris_audio::playback::{PlayJob, PlaybackSink};
+use boris_audio::playback::{PlayJob, PlaybackCommand, PlaybackSink};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{
     event::Event,
@@ -65,7 +65,7 @@ fn main() {
     let (stt_cmd_tx, stt_cmd_rx) = mpsc::channel::<SttCommand>();
     let (agent_cmd_tx, agent_cmd_rx) = mpsc::channel::<AgentCommand>();
     let (tts_cmd_tx, tts_cmd_rx) = mpsc::channel::<TtsCommand>();
-    let (playback_tx, playback_rx) = mpsc::channel::<PlayJob>();
+    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCommand>();
 
     let (wakeword_ctl_tx, wakeword_ctl_rx) = mpsc::channel::<Lifecycle>();
     let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<RecorderCtl>();
@@ -174,7 +174,7 @@ fn apply_effects(
     stt_cmd_tx: &mpsc::Sender<SttCommand>,
     agent_cmd_tx: &mpsc::Sender<AgentCommand>,
     tts_cmd_tx: &mpsc::Sender<TtsCommand>,
-    playback_tx: &mpsc::Sender<PlayJob>,
+    playback_tx: &mpsc::Sender<PlaybackCommand>,
 ) {
     for effect in effects {
         match effect {
@@ -208,10 +208,16 @@ fn apply_effects(
                 tts_cmd_tx.send(TtsCommand::Synthesize { turn, text }).ok();
             }
             Effect::Play { turn, pcm } => {
-                if playback_tx.send(PlayJob { turn, pcm }).is_err() {
+                if playback_tx
+                    .send(PlaybackCommand::Play(PlayJob { turn, pcm }))
+                    .is_err()
+                {
                     tracing::error!(%turn, "playback channel closed");
                     continue;
                 }
+            }
+            Effect::StopPlayback => {
+                playback_tx.send(PlaybackCommand::Stop).ok();
             }
         }
     }

@@ -74,12 +74,27 @@ impl AgentEngine {
     /// - Non-empty content → [`AgentOutcome::Speak`] (caller / Session should TTS it).
     /// - Empty content → [`AgentOutcome::Silent`].
     /// - Tool rounds are capped at [`MAX_TOOL_ROUNDS`]; unknown tools fail closed.
+    /// - On any error the conversation context is rolled back to its pre-turn
+    ///   snapshot so a failed HTTP/tool round does not leave unpaired messages.
     ///
     /// This crate never talks to the app event bus; the binary worker maps the
     /// outcome into runtime events.
     pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
+        // Snapshot before mutating so prune during a failed turn cannot leave
+        // a half-applied user/tool chain in multi-turn context.
+        let snapshot = self.context.messages.clone();
         self.context.push(Role::User, message);
 
+        match self.run_turn() {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                self.context.messages = snapshot;
+                Err(e)
+            }
+        }
+    }
+
+    fn run_turn(&mut self) -> Result<AgentOutcome, AgentError> {
         for round in 0..=MAX_TOOL_ROUNDS {
             let response = self
                 .client
@@ -104,15 +119,15 @@ impl AgentEngine {
                         )
                         .unwrap_or(json!({}));
 
-                        let tool =
-                            self.tools
-                                .iter()
-                                .find(|t| t.name() == fn_name)
-                                .ok_or_else(|| {
-                                    AgentError::new(format!(
-                                        "unknown tool requested by model: {fn_name}"
-                                    ))
-                                })?;
+                        let tool = self
+                            .tools
+                            .iter()
+                            .find(|t| t.name() == fn_name)
+                            .ok_or_else(|| {
+                                AgentError::new(format!(
+                                    "unknown tool requested by model: {fn_name}"
+                                ))
+                            })?;
 
                         let result = match tool.execute(args) {
                             Ok(output) => output,

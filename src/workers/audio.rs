@@ -131,7 +131,12 @@ impl UtteranceCapture {
     ) -> Self {
         let handle = thread::spawn(move || {
             // 2-second pre-roll so speech that started just before Start is kept.
-            let mut buffer = RecordingBuffer::new(AUDIO_TARGET_RATE as usize * 2);
+            // Hard-cap active recording at 30s so a stuck VAD cannot grow forever.
+            const MAX_UTTERANCE_SECS: u32 = 30;
+            let mut buffer = RecordingBuffer::new(
+                AUDIO_TARGET_RATE as usize * 2,
+                AUDIO_TARGET_RATE as usize * MAX_UTTERANCE_SECS as usize,
+            );
             let mut active_turn: Option<TurnId> = None;
 
             loop {
@@ -156,7 +161,28 @@ impl UtteranceCapture {
                 }
 
                 match audio_rx.recv() {
-                    Ok(audio) => buffer.push(&audio),
+                    Ok(audio) => {
+                        buffer.push(&audio);
+                        // Force-end the utterance when the hard cap is hit so Session
+                        // can progress (STT) instead of growing RAM indefinitely.
+                        if buffer.exceeded_max() {
+                            if let Some(turn) = active_turn.take() {
+                                buffer.set_recording(false);
+                                let clip = buffer.take_audio();
+                                tracing::warn!(
+                                    %turn,
+                                    samples = clip.len(),
+                                    "UtteranceCapture: max utterance length reached — forcing clip"
+                                );
+                                event_tx
+                                    .send(Event::RecordingResult {
+                                        turn,
+                                        audio: clip,
+                                    })
+                                    .ok();
+                            }
+                        }
+                    }
                     Err(_) => break,
                 }
             }

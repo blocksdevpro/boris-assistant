@@ -21,7 +21,7 @@ pub struct OpenRouterClient {
 }
 
 impl OpenRouterClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: Option<String>) -> Self {
         // Explicit connect/read timeouts so a stalled OpenRouter call cannot
         // leave the session FSM stuck in Thinking forever.
         let client = Client::builder()
@@ -32,7 +32,7 @@ impl OpenRouterClient {
 
         Self {
             api_key,
-            model: "google/gemini-2.5-flash-lite".to_string(),
+            model: model.unwrap_or_else(|| "google/gemini-2.5-flash-lite".to_string()),
             client,
         }
     }

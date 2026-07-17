@@ -98,7 +98,9 @@ fn main() {
 
     // ── Agent (plain-text outcomes → one event after chat; no speak tool) ─────
     let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
-    let client = OpenRouterClient::new(api_key);
+    let model = env::var("OPENROUTER_MODEL").ok();
+
+    let client = OpenRouterClient::new(api_key, model);
     let engine = AgentEngine::new(Box::new(client), BORIS_SYSTEM_PROMPT);
     // No tools registered: model plain text is AgentOutcome::Speak.
     let _agent_worker = AgentWorker::spawn(agent_cmd_rx, engine, event_tx.clone());

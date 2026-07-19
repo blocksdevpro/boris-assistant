@@ -14,7 +14,13 @@
       {
         "title": "Boris",
         "width": 960,
-        "height": 720
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 480,
+        "decorations": false,
+        "resizable": true,
+        "shadow": true,
+        "center": true
       }
     ],
     "security": {

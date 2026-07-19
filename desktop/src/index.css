@@ -120,11 +120,17 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    }
-  body {
-    @apply bg-background text-foreground;
-    }
+  }
+  html,
+  body,
+  #root {
+    @apply h-full overflow-hidden;
+  }
   html {
     @apply font-sans;
-    }
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
 }

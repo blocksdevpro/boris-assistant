@@ -1,69 +1,49 @@
-import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { TitleBar } from "@/components/TitleBar";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { MainWindow } from "@/windows/main/MainWindow";
+import { OverlayWindow } from "@/windows/overlay/OverlayWindow";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type Surface = "main" | "overlay";
 
-  async function greet() {
-    setGreetMsg(await invoke("greet", { name }));
+/**
+ * One SPA, two surfaces.
+ * Tauri loads the same frontend for every window; we pick the tree
+ * from the window label (and a ?window= query for plain Vite).
+ */
+async function resolveSurface(): Promise<Surface> {
+  try {
+    const label = getCurrentWindow().label;
+    if (label === "overlay") return "overlay";
+    if (label === "main") return "main";
+  } catch {
+    // Not under Tauri (browser / Vite only).
   }
 
-  return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <TitleBar />
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("window") === "overlay") return "overlay";
+  return "main";
+}
 
-      <main className="flex min-h-0 flex-1 items-center justify-center p-8">
-        <Card className="w-full max-w-md">
-          <CardHeader className="text-center">
-            <CardTitle className="text-2xl">Boris Desktop</CardTitle>
-            <CardDescription>
-              Tauri v2 + React + Tailwind + shadcn. Shell scaffold — engine
-              wiring comes next.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void greet();
-              }}
-            >
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="greet-input">Name</Label>
-                <Input
-                  id="greet-input"
-                  value={name}
-                  onChange={(e) => setName(e.currentTarget.value)}
-                  placeholder="Enter a name..."
-                />
-              </div>
-              <Button type="submit" className="w-full">
-                Greet from Rust
-              </Button>
-              {greetMsg ? (
-                <p className="text-center text-sm text-muted-foreground">
-                  {greetMsg}
-                </p>
-              ) : null}
-            </form>
-          </CardContent>
-        </Card>
-      </main>
-    </div>
-  );
+function App() {
+  const [surface, setSurface] = useState<Surface | null>(null);
+
+  useEffect(() => {
+    void resolveSurface().then(setSurface);
+  }, []);
+
+  if (surface === null) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
+        Loading…
+      </div>
+    );
+  }
+
+  if (surface === "overlay") {
+    return <OverlayWindow />;
+  }
+
+  return <MainWindow />;
 }
 
 export default App;

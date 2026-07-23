@@ -1,19 +1,6 @@
-pub type AudioBuffer = Vec<f32>;
-pub type ArcAudioBuffer = Arc<AudioBuffer>;
-
-pub enum Direction {
-    Input,
-    Output,
-}
-
-#[derive(Debug)]
-pub struct DeviceInfo {
-    pub id: DeviceId,
-    pub name: String,
-    pub is_default: bool,
-}
-
 use std::{
+    collections::VecDeque,
+    panic,
     sync::{Arc, Mutex},
     thread,
 };
@@ -26,13 +13,28 @@ use cpal::{
 
 use crate::resampler::Resampler;
 
+pub type AudioSample = f32;
+pub type AudioBuffer = Vec<f32>;
+pub type ArcAudioBuffer = Arc<AudioBuffer>;
+
 type CrossBeamChannel<T> = (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>);
 
+pub enum Direction {
+    Input,
+    Output,
+}
+
+#[derive(Debug)]
+pub struct DeviceInfo {
+    pub id: DeviceId,
+    pub name: String,
+    pub is_default: bool,
+}
 pub struct InputStream {
     _stream: Stream,
-    pub device_id: DeviceId,
-    pub sample_rate: u32,
     pub channels: u32,
+    pub sample_rate: u32,
+    pub device_id: DeviceId,
 }
 
 impl InputStream {
@@ -49,15 +51,15 @@ impl InputStream {
 
         let stream = match config.sample_format() {
             SampleFormat::F32 => {
-                build_input_stream::<f32>(device, stream_config, channels as usize, audio_tx)
+                Self::build_stream::<f32>(device, stream_config, channels as usize, audio_tx)
             }
             SampleFormat::I16 => {
-                build_input_stream::<i16>(device, stream_config, channels as usize, audio_tx)
+                Self::build_stream::<i16>(device, stream_config, channels as usize, audio_tx)
             }
             SampleFormat::U16 => {
-                build_input_stream::<u16>(device, stream_config, channels as usize, audio_tx)
+                Self::build_stream::<u16>(device, stream_config, channels as usize, audio_tx)
             }
-            _ => panic!("Unsupported sample format"),
+            _ => panic!("Unsupported sample format for InputStream"),
         };
 
         stream.play().unwrap();
@@ -65,14 +67,154 @@ impl InputStream {
         Self {
             _stream: stream,
             channels: channels as u32,
-            device_id: device.id().unwrap(),
             sample_rate,
+            device_id: device.id().unwrap(),
         }
     }
+
+    fn build_stream<T>(
+        device: &Device,
+        config: StreamConfig,
+        channels: usize,
+        audio_tx: crossbeam_channel::Sender<AudioBuffer>,
+    ) -> Stream
+    where
+        T: cpal::Sample + cpal::SizedSample + 'static,
+        AudioSample: FromSample<T>,
+    {
+        let stream = device
+            .build_input_stream(
+                config,
+                move |data: &[T], _| {
+                    // Normalize every device format (i16/u16/f32/…) into f32 [-1, 1].
+                    // Raw `Into<f32>` on integer samples yields ±32768-scale values and
+                    // saturates every downstream PCM path that clamps to [-1, 1].
+                    let mono_samples: Vec<AudioSample> = data
+                        .chunks(channels)
+                        .map(|frame| {
+                            frame
+                                .iter()
+                                .map(|sample| AudioSample::from_sample(*sample))
+                                .sum::<AudioSample>()
+                                / channels as AudioSample
+                        })
+                        .collect();
+                    audio_tx.try_send(mono_samples).ok();
+                },
+                |err| tracing::error!("Audio capture failed: {err}"),
+                None,
+            )
+            .unwrap();
+
+        stream
+    }
+}
+
+const DRAIN_EMPTY_CALLBACKS: u32 = 5;
+
+pub enum OutputCommand {
+    Play(AudioBuffer),
+    Flush,
+}
+
+pub enum OutputEvent {
+    Drained,
+    Cleared,
+}
+pub struct OutputStreamState {
+    pending: VecDeque<AudioSample>,
+    empty_callbacks: u32,
 }
 
 pub struct OutputStream {
     _stream: Stream,
+    pub channels: u32,
+    pub sample_rate: u32,
+    pub device_id: DeviceId,
+    state: Arc<Mutex<OutputStreamState>>,
+}
+
+impl OutputStream {
+    pub fn from_device(
+        device: &Device,
+        command_rx: crossbeam_channel::Receiver<OutputCommand>,
+        event_tx: crossbeam_channel::Sender<OutputEvent>,
+    ) -> Self {
+        let config = device.default_output_config().unwrap();
+        let channels = config.channels();
+        let sample_rate = config.sample_rate();
+
+        let state = Arc::new(Mutex::new(OutputStreamState {
+            pending: VecDeque::new(),
+            empty_callbacks: 0,
+        }));
+
+        let state_clone = Arc::clone(&state);
+        let stream = match config.sample_format() {
+            SampleFormat::F32 => {
+                Self::build_stream::<f32>(device, config.config(), state_clone, event_tx)
+            }
+            SampleFormat::I16 => {
+                Self::build_stream::<i16>(device, config.config(), state_clone, event_tx)
+            }
+            SampleFormat::U16 => {
+                Self::build_stream::<u16>(device, config.config(), state_clone, event_tx)
+            }
+            _ => panic!("Unsupported sample format for OutputStream"),
+        };
+
+        stream.play().unwrap();
+
+        Self {
+            _stream: stream,
+            channels: channels as u32,
+            sample_rate,
+            device_id: device.id().unwrap(),
+            state,
+        }
+    }
+
+    fn build_stream<T>(
+        device: &cpal::Device,
+        config: StreamConfig,
+        state: Arc<Mutex<OutputStreamState>>,
+        event_tx: crossbeam_channel::Sender<OutputEvent>,
+    ) -> Stream
+    where
+        T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + 'static,
+    {
+        let stream = device
+            .build_output_stream(
+                config,
+                move |output: &mut [T], _| {
+                    let mut state = state.lock().unwrap();
+                    let mut got_real_sample = false;
+
+                    for sample in output.iter_mut() {
+                        if let Some(s) = state.pending.pop_front() {
+                            *sample = T::from_sample(s);
+                            got_real_sample = true;
+                        } else {
+                            *sample = T::from_sample(0.0);
+                        }
+                    }
+
+                    if got_real_sample || !state.pending.is_empty() {
+                        state.empty_callbacks = 0;
+                    } else {
+                        state.empty_callbacks = state.empty_callbacks.saturating_add(1);
+                        if state.empty_callbacks >= DRAIN_EMPTY_CALLBACKS {
+                            state.empty_callbacks = 0;
+                            let _ = event_tx.send(OutputEvent::Drained).ok();
+                        }
+                    }
+                },
+                |err| tracing::error!("PlaybackSink stream error: {err}"),
+                None,
+            )
+            .unwrap();
+        stream
+    }
 }
 
 pub struct AudioService {
@@ -200,45 +342,6 @@ impl AudioService {
             println!("already using device {}", id);
         }
     }
-}
-
-pub type AudioSample = f32;
-
-fn build_input_stream<T>(
-    device: &Device,
-    config: StreamConfig,
-    channels: usize,
-    audio_tx: crossbeam_channel::Sender<AudioBuffer>,
-) -> Stream
-where
-    T: Sample + cpal::SizedSample + 'static,
-    AudioSample: FromSample<T>,
-{
-    let stream = device
-        .build_input_stream(
-            config,
-            move |data: &[T], _| {
-                // Normalize every device format (i16/u16/f32/…) into f32 [-1, 1].
-                // Raw `Into<f32>` on integer samples yields ±32768-scale values and
-                // saturates every downstream PCM path that clamps to [-1, 1].
-                let mono_samples: Vec<AudioSample> = data
-                    .chunks(channels)
-                    .map(|frame| {
-                        frame
-                            .iter()
-                            .map(|sample| AudioSample::from_sample(*sample))
-                            .sum::<AudioSample>()
-                            / channels as AudioSample
-                    })
-                    .collect();
-                audio_tx.try_send(mono_samples).ok();
-            },
-            |err| tracing::error!("Audio capture failed: {err}"),
-            None,
-        )
-        .unwrap();
-
-    stream
 }
 
 #[cfg(test)]

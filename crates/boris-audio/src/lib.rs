@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod capture;
 pub mod playback;
 pub mod resampler;
+pub mod service;
 
 // Re-export from core so existing call sites don't break.
 pub use boris_core::AUDIO_TARGET_RATE;

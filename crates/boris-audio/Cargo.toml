@@ -7,6 +7,5 @@ edition = "2021"
 boris-core        = { workspace = true }
 tracing           = { workspace = true }
 crossbeam-channel = { workspace = true }
-
 cpal   = "0.18"
 rubato = "3.0"

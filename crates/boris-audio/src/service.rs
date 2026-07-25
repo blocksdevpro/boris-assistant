@@ -1,8 +1,11 @@
 use std::{
     collections::VecDeque,
     panic,
-    sync::{Arc, Mutex},
-    thread,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
 };
 
 use cpal::{
@@ -30,15 +33,28 @@ pub struct DeviceInfo {
     pub name: String,
     pub is_default: bool,
 }
-pub struct InputStream {
+
+pub struct InputPipeline {
     _stream: Stream,
-    pub channels: u32,
-    pub sample_rate: u32,
-    pub device_id: DeviceId,
+    _handle: Option<JoinHandle<()>>,
+    _flag: Arc<AtomicBool>,
+    channel: CrossBeamChannel<AudioBuffer>,
+    device_id: DeviceId,
+    subscribers: Arc<Mutex<Vec<crossbeam_channel::Sender<ArcAudioBuffer>>>>,
 }
 
-impl InputStream {
-    pub fn from_device(device: &Device, audio_tx: crossbeam_channel::Sender<AudioBuffer>) -> Self {
+impl InputPipeline {
+    pub fn from_device(
+        device: &Device,
+        subscribers: Arc<Mutex<Vec<crossbeam_channel::Sender<ArcAudioBuffer>>>>,
+    ) -> Self {
+        // instance params
+        let flag = Arc::new(AtomicBool::new(false));
+        let channel = crossbeam_channel::bounded::<AudioBuffer>(10);
+        let (audio_tx, audio_rx) = (channel.0.clone(), channel.1.clone());
+
+        // device params
+        let device_id = device.id().unwrap();
         let config = device.default_input_config().unwrap();
         let channels = config.channels();
         let sample_rate = config.sample_rate();
@@ -64,11 +80,35 @@ impl InputStream {
 
         stream.play().unwrap();
 
+        let mut resampler = Resampler::new(1, sample_rate, 16_000);
+        let flag_clone = flag.clone();
+        let subscribers_clone = subscribers.clone();
+
+        let handle = thread::spawn(move || {
+            while let Ok(audio) = audio_rx.recv() {
+                if flag_clone.load(Ordering::Relaxed) {
+                    println!("droped");
+                    break;
+                }
+                let resampled = resampler.resample(&audio).unwrap();
+                let arc_resampled = Arc::new(resampled);
+
+                {
+                    let subs = subscribers_clone.lock().unwrap();
+                    for sub in subs.iter() {
+                        sub.try_send(arc_resampled.clone()).unwrap();
+                    }
+                };
+            }
+        });
+
         Self {
             _stream: stream,
-            channels: channels as u32,
-            sample_rate,
-            device_id: device.id().unwrap(),
+            _handle: Some(handle),
+            _flag: flag,
+            channel: channel,
+            device_id: device_id,
+            subscribers: subscribers,
         }
     }
 
@@ -107,6 +147,15 @@ impl InputStream {
             .unwrap();
 
         stream
+    }
+}
+
+impl Drop for InputPipeline {
+    fn drop(&mut self) {
+        self._flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self._handle.take() {
+            handle.join().ok();
+        }
     }
 }
 
@@ -218,10 +267,8 @@ impl OutputStream {
 }
 
 pub struct AudioService {
-    input_channel: CrossBeamChannel<AudioBuffer>,
-    input_stream: InputStream,
+    input_pipeline: InputPipeline,
     input_subscribers: Arc<Mutex<Vec<crossbeam_channel::Sender<ArcAudioBuffer>>>>,
-    input_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl AudioService {
@@ -286,39 +333,13 @@ impl AudioService {
     pub fn new() -> Self {
         let host = cpal::default_host();
         let input_device = host.default_input_device().unwrap();
-        let input_channel = crossbeam_channel::bounded::<AudioBuffer>(20);
-
-        let input_stream = InputStream::from_device(&input_device, input_channel.0.clone());
+        let input_subscribers = Arc::new(Mutex::new(vec![]));
+        let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone());
 
         Self {
-            input_channel,
-            input_stream,
-            input_handle: None,
-            input_subscribers: Arc::new(Mutex::new(vec![])),
+            input_pipeline,
+            input_subscribers,
         }
-    }
-
-    pub fn spawn_input(&mut self) {
-        let audio_rx = self.input_channel.1.clone();
-        let mut input_resampler = Resampler::new(
-            self.input_stream.channels,
-            self.input_stream.sample_rate,
-            16_000,
-        );
-        let input_subscribers = self.input_subscribers.clone();
-        let handle = thread::spawn(move || {
-            while let Ok(audio) = audio_rx.recv() {
-                let resampled = input_resampler.resample(&audio).unwrap();
-                let arc_resampled = Arc::new(resampled);
-                {
-                    let subscribers = input_subscribers.lock().unwrap();
-                    for subscriber in subscribers.iter() {
-                        subscriber.try_send(arc_resampled.clone()).ok();
-                    }
-                }
-            }
-        });
-        self.input_handle = Some(handle);
     }
 
     pub fn subscribe_input(&mut self) -> crossbeam_channel::Receiver<ArcAudioBuffer> {
@@ -331,12 +352,11 @@ impl AudioService {
     }
 
     pub fn switch_input(&mut self, id: &DeviceId) {
-        if &self.input_stream.device_id != id {
+        if &self.input_pipeline.device_id != id {
             if let Some(device) = Self::find_input_device_or_default(id) {
-                let audio_tx = self.input_channel.0.clone();
-                let input_stream = InputStream::from_device(&device, audio_tx);
-                self.input_stream = input_stream;
-                self.spawn_input();
+                let input_pipeline =
+                    InputPipeline::from_device(&device, self.input_subscribers.clone());
+                self.input_pipeline = input_pipeline;
             }
         } else {
             println!("already using device {}", id);
@@ -354,7 +374,6 @@ mod tests {
     #[test]
     fn test_audio_service_input() {
         let mut service = AudioService::new();
-        service.spawn_input();
         let rx = service.subscribe_input();
 
         if let Some(_audio) = rx.recv().ok() {

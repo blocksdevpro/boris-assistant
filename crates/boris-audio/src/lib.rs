@@ -1,5 +1,7 @@
 pub mod buffer;
 pub mod capture;
+pub mod input;
+pub mod output;
 pub mod playback;
 pub mod resampler;
 pub mod service;

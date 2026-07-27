@@ -84,9 +84,7 @@ impl Resampler {
         })?;
         let mut out_slice =
             InterleavedSlice::new_mut(&mut out_buf, channels, out_cap).map_err(|e| {
-                Error::AudioError(format!(
-                    "failed to create output slice for resampling: {e}"
-                ))
+                Error::AudioError(format!("failed to create output slice for resampling: {e}"))
             })?;
 
         let (_consumed, produced) = resampler

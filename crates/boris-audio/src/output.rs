@@ -69,13 +69,13 @@ impl OutputPipeline {
         let event_tx_clone = event_tx.clone();
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
-                Self::build_stream::<f32>(device, stream_config.clone(), state_clone, event_tx_clone)
+                Self::build_stream::<f32>(device, stream_config, state_clone, event_tx_clone)
             }
             cpal::SampleFormat::I32 => {
-                Self::build_stream::<i32>(device, stream_config.clone(), state_clone, event_tx_clone)
+                Self::build_stream::<i32>(device, stream_config, state_clone, event_tx_clone)
             }
             cpal::SampleFormat::U32 => {
-                Self::build_stream::<u32>(device, stream_config.clone(), state_clone, event_tx_clone)
+                Self::build_stream::<u32>(device, stream_config, state_clone, event_tx_clone)
             }
             _ => panic!("unsupported sample format"),
         };

@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_audio_service_output_switch() {
-        let mut service = AudioService::new();
+        let mut service = AudioService::with_source_rate(16_000);
 
         let mut count = 0;
 

@@ -69,6 +69,9 @@ impl InputPipeline {
                 }
 
                 match resampler.process(&audio) {
+                    Ok(resampled) if resampled.is_empty() => {
+                        // Stream resampler only emits when a full FFT block is ready.
+                    }
                     Ok(resampled) => {
                         // Arc::from(Vec) → Arc<[T]> so it matches ArcAudioBuffer.
                         let arc_resampled: ArcAudioBuffer = Arc::from(resampled);
@@ -78,7 +81,7 @@ impl InputPipeline {
                         }
                     }
                     Err(e) => {
-                        println!("resample failed: {e}");
+                        tracing::error!(error = %e, "InputPipeline: resample failed");
                     }
                 }
             }

@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -125,9 +125,9 @@ pub struct UtteranceCapture {
 
 impl UtteranceCapture {
     pub fn spawn(
-        audio_rx: Receiver<ArcAudioBuffer>,
-        control_rx: Receiver<RecorderCtl>,
-        event_tx: Sender<Event>,
+        audio_rx: crossbeam_channel::Receiver<ArcAudioBuffer>,
+        control_rx: mpsc::Receiver<RecorderCtl>,
+        event_tx: mpsc::Sender<Event>,
     ) -> Self {
         let handle = thread::spawn(move || {
             // 2-second pre-roll so speech that started just before Start is kept.

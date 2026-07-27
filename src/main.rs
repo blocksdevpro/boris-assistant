@@ -1,23 +1,21 @@
+use boris_audio::output::OutputEvent;
+use boris_audio::service::AudioService;
+use boris_core::TurnId;
 use boris_tts_supertone::{SupertoneTts, SUPERTONE_SAMPLE_RATE};
 use dotenvy::dotenv;
-use std::env;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::{env, thread};
 
 use boris_agent::{AgentEngine, OpenRouterClient};
-use boris_audio::playback::{PlayJob, PlaybackCommand, PlaybackSink};
 use boris_audio::AUDIO_TARGET_RATE;
-use boris_core::{
-    event::Event,
-    types::{ArcAudioBuffer, Lifecycle},
-    AudioBuffer,
-};
+use boris_core::{event::Event, types::Lifecycle};
 use boris_inference::{init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
 use boris_stt_parakeet::ParakeetSTT;
 
 use crate::session::{Effect, Session, SessionInput};
 use crate::workers::{
     agent::{AgentCommand, AgentWorker},
-    audio::{AudioDispatcherWorker, AudioPipelineWorker, RecorderCtl, UtteranceCapture},
+    audio::{RecorderCtl, UtteranceCapture},
     inference::{EndpointSensor, SttCommand, SttWorker, WakeSensor},
     tts::{TtsCommand, TtsWorker},
 };
@@ -52,47 +50,40 @@ fn main() {
     // Cap ORT thread pools *before* any ONNX sessions (wakeword mel/emb/classifier).
     init_onnx_runtime();
 
-    // ── Channels ──────────────────────────────────────────────────────────────
-    let (audio_tx, audio_rx) = mpsc::channel::<AudioBuffer>();
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    // Play path resamples from TTS rate → device rate. Must match Supertone (44.1 kHz).
+    let mut audio_service = AudioService::with_source_rate(SUPERTONE_SAMPLE_RATE);
 
-    let (wakeword_audio_tx, wakeword_audio_rx) =
-        mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
-    let (vad_audio_tx, vad_audio_rx) = mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
-    let (recorder_audio_tx, recorder_audio_rx) =
-        mpsc::sync_channel::<ArcAudioBuffer>(AUDIO_SENSOR_QUEUE);
+    // ── Channels ──────────────────────────────────────────────────────────────
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
 
     let (stt_cmd_tx, stt_cmd_rx) = mpsc::channel::<SttCommand>();
     let (agent_cmd_tx, agent_cmd_rx) = mpsc::channel::<AgentCommand>();
     let (tts_cmd_tx, tts_cmd_rx) = mpsc::channel::<TtsCommand>();
-    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCommand>();
 
     let (wakeword_ctl_tx, wakeword_ctl_rx) = mpsc::channel::<Lifecycle>();
     let (recorder_ctl_tx, recorder_ctl_rx) = mpsc::channel::<RecorderCtl>();
     let (vad_ctl_tx, vad_ctl_rx) = mpsc::channel::<Lifecycle>();
 
-    // ── Audio pipeline ────────────────────────────────────────────────────────
-    let _audio_pipeline =
-        AudioPipelineWorker::spawn(audio_tx).expect("failed to initialise audio capture");
-
-    let _audio_dispatcher = AudioDispatcherWorker::spawn(
-        audio_rx,
-        vec![wakeword_audio_tx, vad_audio_tx, recorder_audio_tx],
-    );
-
     // ── Inference workers ─────────────────────────────────────────────────────
     let _wakeword_worker = WakeSensor::spawn(
-        wakeword_audio_rx,
+        audio_service.subscribe_input(Some(AUDIO_SENSOR_QUEUE)),
         wakeword_ctl_rx,
         event_tx.clone(),
         WakeWord::new("boris", WAKEWORD_MODEL_BYTES, AUDIO_TARGET_RATE),
     );
 
-    let _vad_worker =
-        EndpointSensor::spawn(vad_audio_rx, vad_ctl_rx, event_tx.clone(), WebRtcVad::new());
+    let _vad_worker = EndpointSensor::spawn(
+        audio_service.subscribe_input(Some(AUDIO_SENSOR_QUEUE)),
+        vad_ctl_rx,
+        event_tx.clone(),
+        WebRtcVad::new(),
+    );
 
-    let _recording_worker =
-        UtteranceCapture::spawn(recorder_audio_rx, recorder_ctl_rx, event_tx.clone());
+    let _recording_worker = UtteranceCapture::spawn(
+        audio_service.subscribe_input(Some(AUDIO_SENSOR_QUEUE)),
+        recorder_ctl_rx,
+        event_tx.clone(),
+    );
 
     let _stt_worker = SttWorker::spawn(stt_cmd_rx, event_tx.clone(), ParakeetSTT::new());
 
@@ -107,11 +98,31 @@ fn main() {
 
     // ── TTS + playback sink (Supertone) ───────────────────────────────────────
     let _tts_worker = TtsWorker::spawn(tts_cmd_rx, event_tx.clone(), SupertoneTts::new());
-    let _playback = PlaybackSink::new(playback_rx, SUPERTONE_SAMPLE_RATE, event_tx.clone())
-        .expect("failed to initialise audio playback");
 
     // ── Session runtime (policy) + effect application (I/O) ───────────────────
     let mut session = Session::new();
+
+    // AudioService ouput work-around
+    let active_play_turn = Arc::new(Mutex::new(None::<TurnId>));
+
+    let output_event_rx = audio_service.subscribe_output();
+    let event_tx_clone = event_tx.clone();
+    let active_play_turn_clone = active_play_turn.clone();
+
+    thread::spawn(move || {
+        while let Ok(event) = output_event_rx.recv() {
+            match event {
+                OutputEvent::Drained => {
+                    if let Some(turn) = active_play_turn_clone.lock().unwrap().take() {
+                        event_tx_clone.send(Event::PlaybackFinished { turn }).ok();
+                    }
+                }
+                OutputEvent::Cleared => {
+                    active_play_turn_clone.lock().unwrap().take();
+                }
+            }
+        }
+    });
 
     // Arm wakeword so the first WakeHit is legal.
     apply_effects(
@@ -122,7 +133,8 @@ fn main() {
         &stt_cmd_tx,
         &agent_cmd_tx,
         &tts_cmd_tx,
-        &playback_tx,
+        &audio_service,
+        &active_play_turn,
     );
 
     tracing::info!("Boris is ready. Say the wake word to begin.");
@@ -138,7 +150,8 @@ fn main() {
             &stt_cmd_tx,
             &agent_cmd_tx,
             &tts_cmd_tx,
-            &playback_tx,
+            &audio_service,
+            &active_play_turn,
         );
     }
 }
@@ -176,7 +189,8 @@ fn apply_effects(
     stt_cmd_tx: &mpsc::Sender<SttCommand>,
     agent_cmd_tx: &mpsc::Sender<AgentCommand>,
     tts_cmd_tx: &mpsc::Sender<TtsCommand>,
-    playback_tx: &mpsc::Sender<PlaybackCommand>,
+    audio_service: &AudioService,
+    active_play_turn: &Arc<Mutex<Option<TurnId>>>,
 ) {
     for effect in effects {
         match effect {
@@ -210,16 +224,14 @@ fn apply_effects(
                 tts_cmd_tx.send(TtsCommand::Synthesize { turn, text }).ok();
             }
             Effect::Play { turn, pcm } => {
-                if playback_tx
-                    .send(PlaybackCommand::Play(PlayJob { turn, pcm }))
-                    .is_err()
                 {
-                    tracing::error!(%turn, "playback channel closed");
-                    continue;
+                    let mut active_play_turn = active_play_turn.lock().unwrap();
+                    *active_play_turn = Some(turn);
                 }
+                audio_service.play(pcm);
             }
             Effect::StopPlayback => {
-                playback_tx.send(PlaybackCommand::Stop).ok();
+                audio_service.stop();
             }
         }
     }

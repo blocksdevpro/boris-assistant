@@ -1,5 +1,5 @@
 use std::{
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
     time::Instant,
 };
@@ -99,9 +99,9 @@ pub struct EndpointSensor {
 
 impl EndpointSensor {
     pub fn spawn(
-        audio_rx: Receiver<ArcAudioBuffer>,
-        control_rx: Receiver<Lifecycle>,
-        event_tx: Sender<Event>,
+        audio_rx: crossbeam_channel::Receiver<ArcAudioBuffer>,
+        control_rx: mpsc::Receiver<Lifecycle>,
+        event_tx: mpsc::Sender<Event>,
         mut detector: impl Vad + 'static,
     ) -> Self {
         let handle = thread::spawn(move || {
@@ -198,8 +198,8 @@ pub struct WakeSensor {
 
 impl WakeSensor {
     pub fn spawn(
-        audio_rx: Receiver<ArcAudioBuffer>,
-        control_rx: Receiver<Lifecycle>,
+        audio_rx: crossbeam_channel::Receiver<ArcAudioBuffer>,
+        control_rx: mpsc::Receiver<Lifecycle>,
         event_tx: Sender<Event>,
         mut detector: impl WakeWord + 'static,
     ) -> Self {

@@ -12,7 +12,9 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 
 use crate::resampler::OutputResampler;
 
-const DRAIN_EMPTY_CALLBACKS: u32 = 5;
+/// Empty device callbacks required after software queue empties before [`OutputEvent::Drained`].
+/// Covers OS/driver ring-buffer lag after our pending deque is empty.
+const DRAIN_EMPTY_CALLBACKS: u32 = 12;
 
 pub enum OutputCommand {
     Play(AudioBuffer),
@@ -20,13 +22,20 @@ pub enum OutputCommand {
 }
 
 pub enum OutputEvent {
+    /// Software + short device-buffer drain after a real Play job finished.
     Drained,
+    /// Stopped by Flush; not a successful natural finish.
     Cleared,
 }
 
-pub struct OutputStreamState {
+struct OutputStreamState {
     pending: VecDeque<AudioSample>,
     empty_callbacks: u32,
+    /// Job in flight: samples queued (or already streaming) for the current Play.
+    active: bool,
+    /// At least one real sample written to the device for this job.
+    /// Prevents Drained while still resampling / before audio starts.
+    started: bool,
 }
 
 pub struct OutputPipeline {
@@ -44,61 +53,87 @@ impl OutputPipeline {
         event_tx: crossbeam_channel::Sender<OutputEvent>,
         source_rate: u32,
     ) -> Self {
-        // instance params
         let flag = Arc::new(AtomicBool::new(false));
         let device_id = device.id().unwrap();
         let state = Arc::new(Mutex::new(OutputStreamState {
             pending: VecDeque::new(),
             empty_callbacks: 0,
+            active: false,
+            started: false,
         }));
 
-        // device params
         let config = device.default_output_config().unwrap();
-        let channels = config.channels();
-        let sample_rate = config.sample_rate();
         let stream_config = config.config();
 
-        // build the stream
         let state_clone = state.clone();
+        let event_tx_clone = event_tx.clone();
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
-                Self::build_stream::<f32>(device, stream_config, state_clone, event_tx)
+                Self::build_stream::<f32>(device, stream_config.clone(), state_clone, event_tx_clone)
             }
             cpal::SampleFormat::I32 => {
-                Self::build_stream::<i32>(device, stream_config, state_clone, event_tx)
+                Self::build_stream::<i32>(device, stream_config.clone(), state_clone, event_tx_clone)
             }
             cpal::SampleFormat::U32 => {
-                Self::build_stream::<u32>(device, stream_config, state_clone, event_tx)
+                Self::build_stream::<u32>(device, stream_config.clone(), state_clone, event_tx_clone)
             }
             _ => panic!("unsupported sample format"),
         };
 
         stream.play().unwrap();
 
-        // spawn thread
         let flag_clone = flag.clone();
         let state_clone = state.clone();
-        let mut resampler = OutputResampler::new(source_rate, sample_rate, channels);
+        let mut resampler = OutputResampler::new(
+            source_rate,
+            stream_config.sample_rate,
+            stream_config.channels,
+        );
         let handle = thread::spawn(move || {
             while let Ok(command) = cmd_rx.recv() {
                 if flag_clone.load(Ordering::Relaxed) {
-                    println!("OutputPipeline droped");
                     break;
                 }
                 match command {
                     OutputCommand::Play(audio) => {
-                        let resampled = resampler.process(&audio).unwrap();
-                        {
-                            let mut state = state_clone.lock().unwrap();
-                            state.pending.clear();
-                            state.pending.extend(resampled);
-                            state.empty_callbacks = 0
+                        // Resample *outside* the state lock so the stream can keep
+                        // outputting silence without holding the mutex for long.
+                        // `active` stays false until samples are queued → no early Drained.
+                        let in_samples = audio.len();
+                        let resampled = match resampler.process(&audio) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::error!(error = %e, "OutputPipeline: resample failed");
+                                continue;
+                            }
+                        };
+
+                        tracing::info!(
+                            in_samples,
+                            out_samples = resampled.len(),
+                            "OutputPipeline: queued play buffer"
+                        );
+
+                        let mut state = state_clone.lock().unwrap();
+                        state.pending.clear();
+                        state.pending.extend(resampled);
+                        state.empty_callbacks = 0;
+                        state.started = false;
+                        // Only arm drain detection once audio is actually ready.
+                        state.active = !state.pending.is_empty();
+                        if !state.active {
+                            tracing::warn!("OutputPipeline: Play produced empty buffer");
                         }
                     }
                     OutputCommand::Flush => {
-                        let mut state = state_clone.lock().unwrap();
-                        state.pending.clear();
-                        state.empty_callbacks = 0;
+                        {
+                            let mut state = state_clone.lock().unwrap();
+                            state.pending.clear();
+                            state.empty_callbacks = 0;
+                            state.active = false;
+                            state.started = false;
+                        }
+                        let _ = event_tx.send(OutputEvent::Cleared);
                     }
                 }
             }
@@ -112,6 +147,7 @@ impl OutputPipeline {
             _handle: Some(handle),
         }
     }
+
     fn build_stream<T>(
         device: &cpal::Device,
         config: cpal::StreamConfig,
@@ -137,14 +173,34 @@ impl OutputPipeline {
                         }
                     }
 
-                    if got_real_sample || !state.pending.is_empty() {
+                    // Idle: never emit Drained.
+                    if !state.active {
+                        return;
+                    }
+
+                    if got_real_sample {
+                        state.started = true;
                         state.empty_callbacks = 0;
-                    } else {
-                        state.empty_callbacks = state.empty_callbacks.saturating_add(1);
-                        if state.empty_callbacks >= DRAIN_EMPTY_CALLBACKS {
-                            state.empty_callbacks = 0;
-                            let _ = event_tx.send(OutputEvent::Drained).ok();
-                        }
+                        return;
+                    }
+
+                    if !state.pending.is_empty() {
+                        state.empty_callbacks = 0;
+                        return;
+                    }
+
+                    // Software queue empty. Only count toward drain after we have
+                    // actually written samples for this job (not pre-play / idle).
+                    if !state.started {
+                        return;
+                    }
+
+                    state.empty_callbacks = state.empty_callbacks.saturating_add(1);
+                    if state.empty_callbacks >= DRAIN_EMPTY_CALLBACKS {
+                        state.active = false;
+                        state.started = false;
+                        state.empty_callbacks = 0;
+                        let _ = event_tx.send(OutputEvent::Drained);
                     }
                 },
                 |err| tracing::error!("OutputStream error: {err}"),
@@ -157,8 +213,7 @@ impl OutputPipeline {
 
 impl Drop for OutputPipeline {
     fn drop(&mut self) {
-        // Stop the output stream and wait for it to finish
-        self._flag.store(false, Ordering::Relaxed);
+        self._flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self._handle.take() {
             let _ = handle.join();
         }

@@ -35,6 +35,8 @@ pub struct AudioService {
     output_event_channel: CrossBeamChannel<OutputEvent>,
     output_command_channel: CrossBeamChannel<OutputCommand>,
     output_pipeline: OutputPipeline,
+    /// Sample rate of PCM passed to [`Self::play`] (must match TTS, e.g. Supertone 44.1 kHz).
+    source_rate: u32,
 }
 
 impl AudioService {
@@ -96,7 +98,10 @@ impl AudioService {
         host.default_output_device()
     }
 
-    pub fn new() -> Self {
+    /// Build with default devices. `source_rate` is the rate of buffers given to [`Self::play`].
+    ///
+    /// Use the TTS native rate (Supertone = 44_100, Kokoro = 24_000). Wrong rate = slow/fast audio.
+    pub fn with_source_rate(source_rate: u32) -> Self {
         let host = cpal::default_host();
         // setup input pipeline
         let input_device = host.default_input_device().unwrap();
@@ -110,19 +115,33 @@ impl AudioService {
 
         let output_event_tx = output_event_channel.0.clone();
         let output_command_rx = output_command_channel.1.clone();
-        let output_pipeline =
-            OutputPipeline::from_device(&output_device, output_command_rx, output_event_tx, 24_000);
+        let output_pipeline = OutputPipeline::from_device(
+            &output_device,
+            output_command_rx,
+            output_event_tx,
+            source_rate,
+        );
         Self {
             input_pipeline,
             input_subscribers,
             output_pipeline,
             output_event_channel,
             output_command_channel,
+            source_rate,
         }
     }
 
-    pub fn subscribe_input(&mut self) -> crossbeam_channel::Receiver<ArcAudioBuffer> {
-        let (tx, rx) = crossbeam_channel::bounded::<ArcAudioBuffer>(10);
+    /// Defaults to 44.1 kHz play source (Supertone). Prefer [`Self::with_source_rate`] when known.
+    pub fn new() -> Self {
+        Self::with_source_rate(44_100)
+    }
+
+    pub fn subscribe_input(
+        &mut self,
+        queue: Option<usize>,
+    ) -> crossbeam_channel::Receiver<ArcAudioBuffer> {
+        let queue = queue.unwrap_or(64);
+        let (tx, rx) = crossbeam_channel::bounded::<ArcAudioBuffer>(queue);
         {
             let mut subscribers = self.input_subscribers.lock().unwrap();
             subscribers.push(tx);
@@ -155,7 +174,7 @@ impl AudioService {
                     &device,
                     output_command_rx,
                     output_event_tx,
-                    24_000,
+                    self.source_rate,
                 );
                 self.output_command_channel = output_command_channel;
                 self.output_event_channel = output_event_channel;
@@ -164,11 +183,22 @@ impl AudioService {
         }
     }
 
-    pub fn play(&mut self, audio: AudioBuffer) {
+    pub fn play(&self, audio: AudioBuffer) {
         self.output_command_channel
             .0
             .try_send(OutputCommand::Play(audio))
             .unwrap();
+    }
+
+    pub fn stop(&self) {
+        self.output_command_channel
+            .0
+            .try_send(OutputCommand::Flush)
+            .unwrap();
+    }
+
+    pub fn subscribe_output(&self) -> crossbeam_channel::Receiver<OutputEvent> {
+        self.output_event_channel.1.clone()
     }
 }
 
@@ -188,7 +218,7 @@ mod tests {
     #[test]
     fn test_audio_service_input() {
         let mut service = AudioService::new();
-        let rx = service.subscribe_input();
+        let rx = service.subscribe_input(None);
 
         if let Some(_audio) = rx.recv().ok() {
             println!("working ",)
@@ -198,7 +228,7 @@ mod tests {
     #[test]
     fn test_audio_service_input_switch() {
         let mut service = AudioService::new();
-        let rx = service.subscribe_input();
+        let rx = service.subscribe_input(None);
         let devices = AudioService::list_input_devices();
         let device = devices.get(1).unwrap();
         println!("switching input to {}", device.name);
@@ -214,7 +244,7 @@ mod tests {
 
         let mut count = 0;
 
-        let rx = service.subscribe_input();
+        let rx = service.subscribe_input(None);
         while let Some(audio) = rx.recv().ok() {
             count += 1;
             if count == 200 {

@@ -3,16 +3,22 @@ use boris_core::{AudioBuffer, AudioSample, AUDIO_TARGET_RATE};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler as RubatoResampler};
 
-/// Core rate-conversion primitive. Works for both realtime streaming
-/// (stable chunk size after warm-up) and one-shot buffers (chunk size
-/// varies per call) by rebuilding the internal FFT resampler whenever
-/// the input chunk size changes, instead of erroring.
+/// Fixed processing block for the FFT resampler (frames, not samples).
+///
+/// Important: never pass a whole multi-second TTS utterance as the rubato
+/// `chunk_size`. That builds a huge FFT and, with one process call, floors away
+/// large amounts of audio (e.g. ~7s in → ~3.5s out). Always stream fixed chunks.
+const FFT_CHUNK_FRAMES: usize = 1024;
+
+/// Core rate-conversion primitive.
+///
+/// Uses a **fixed** FFT chunk size and walks the input in blocks so one-shot
+/// buffers (TTS) and streaming chunks (mic) both convert fully.
 pub struct Resampler {
     resampler: Option<Fft<AudioSample>>,
     channels: u32,
     input_rate: u32,
     output_rate: u32,
-    chunk_frames: Option<usize>,
 }
 
 impl Resampler {
@@ -22,11 +28,33 @@ impl Resampler {
             channels,
             input_rate,
             output_rate,
-            chunk_frames: None,
         }
     }
 
-    /// Resample one chunk of interleaved audio at `self.channels` channels.
+    fn ensure_resampler(&mut self) -> Result<()> {
+        if self.resampler.is_some() {
+            return Ok(());
+        }
+        let channels = self.channels as usize;
+        // sub_chunks ≈ 4 → ~256-frame FFT blocks for CHUNK=1024 (good delay/quality).
+        self.resampler = Some(
+            Fft::<AudioSample>::new(
+                self.input_rate as usize,
+                self.output_rate as usize,
+                FFT_CHUNK_FRAMES,
+                4,
+                channels,
+                FixedSync::Input,
+            )
+            .map_err(|e| Error::AudioError(format!("failed to create resampler: {e}")))?,
+        );
+        Ok(())
+    }
+
+    /// Resample interleaved audio at `self.channels` channels.
+    ///
+    /// Accepts any length (including multi-second TTS). Internally walks fixed
+    /// FFT chunks and flushes the resampler delay so the tail is not dropped.
     pub fn resample(&mut self, input: &[AudioSample]) -> Result<AudioBuffer> {
         if input.is_empty() {
             return Ok(Vec::new());
@@ -49,56 +77,89 @@ impl Resampler {
             )));
         }
 
-        let input_frames = input.len() / channels;
-
-        // Rebuild only when chunk size actually changes. Streaming callers
-        // (mic, stable chunk size after warm-up) pay this once. One-shot
-        // callers (TTS output, variable utterance lengths) pay it per call —
-        // off the realtime capture hot path, so it's cheap where it happens.
-        let needs_rebuild = self.resampler.is_none() || self.chunk_frames != Some(input_frames);
-        if needs_rebuild {
-            let input_rate = self.input_rate as usize;
-            let output_rate = self.output_rate as usize;
-            self.resampler = Some(
-                Fft::<AudioSample>::new(
-                    input_rate,
-                    output_rate,
-                    input_frames,
-                    2,
-                    channels,
-                    FixedSync::Input,
-                )
-                .map_err(|e| Error::AudioError(format!("failed to create resampler: {e}")))?,
-            );
-            self.chunk_frames = Some(input_frames);
-        }
-
+        self.ensure_resampler()?;
         let resampler = self
             .resampler
             .as_mut()
             .expect("resampler just built or already present");
 
-        let output_frames = resampler.output_frames_max();
-        let output_capacity = output_frames * channels;
-        // Must be length-initialized: InterleavedSlice::new_mut checks buf.len(),
-        // not capacity. Vec::with_capacity alone leaves len=0 and always errors.
-        let mut output_buffer: Vec<AudioSample> = vec![AudioSample::default(); output_capacity];
+        // Reset internal delay state so consecutive one-shot TTS calls don't
+        // leak samples into each other.
+        resampler.reset();
 
-        let input_slice = InterleavedSlice::new(input, channels, input_frames).map_err(|e| {
-            Error::AudioError(format!("failed to create input slice for resampling: {e}"))
-        })?;
-        let mut output_slice =
-            InterleavedSlice::new_mut(&mut output_buffer, channels, output_frames).map_err(
-                |e| Error::AudioError(format!("failed to create output slice for resampling: {e}")),
-            )?;
+        let input_frames = input.len() / channels;
+        let mut output: Vec<AudioSample> = Vec::with_capacity(
+            ((input_frames as u64 * self.output_rate as u64) / self.input_rate as u64) as usize
+                * channels
+                + FFT_CHUNK_FRAMES * channels,
+        );
 
-        // Rubato writes only `produced` frames; the rest of the buffer stays zero.
-        let (_consumed, produced) = resampler
-            .process_into_buffer(&input_slice, &mut output_slice, None)
-            .map_err(|e| Error::AudioError(format!("resampling failed: {e}")))?;
+        let mut frame_pos = 0usize;
+        while frame_pos < input_frames {
+            let need = resampler.input_frames_next();
+            let available = (input_frames - frame_pos).min(need);
 
-        output_buffer.truncate(produced * channels);
-        Ok(output_buffer)
+            // Always feed exactly `need` frames; pad the tail with silence.
+            let mut in_buf = vec![0.0f32; need * channels];
+            let copy_samples = available * channels;
+            let src = frame_pos * channels;
+            in_buf[..copy_samples].copy_from_slice(&input[src..src + copy_samples]);
+
+            let out_cap = resampler.output_frames_next().max(resampler.output_frames_max());
+            let mut out_buf = vec![0.0f32; out_cap * channels];
+
+            let in_slice = InterleavedSlice::new(&in_buf, channels, need).map_err(|e| {
+                Error::AudioError(format!("failed to create input slice for resampling: {e}"))
+            })?;
+            let mut out_slice = InterleavedSlice::new_mut(&mut out_buf, channels, out_cap)
+                .map_err(|e| {
+                    Error::AudioError(format!(
+                        "failed to create output slice for resampling: {e}"
+                    ))
+                })?;
+
+            let (_consumed, produced) = resampler
+                .process_into_buffer(&in_slice, &mut out_slice, None)
+                .map_err(|e| Error::AudioError(format!("resampling failed: {e}")))?;
+
+            output.extend_from_slice(&out_buf[..produced * channels]);
+            frame_pos += available;
+
+            // After a padded (last) block, stop reading input and flush below.
+            if available < need {
+                break;
+            }
+        }
+
+        // Flush FFT delay with silent input until we cover output_delay.
+        let delay = resampler.output_delay();
+        let mut flushed = 0usize;
+        while flushed < delay {
+            let need = resampler.input_frames_next();
+            let in_buf = vec![0.0f32; need * channels];
+            let out_cap = resampler.output_frames_next().max(resampler.output_frames_max());
+            let mut out_buf = vec![0.0f32; out_cap * channels];
+
+            let in_slice = InterleavedSlice::new(&in_buf, channels, need).map_err(|e| {
+                Error::AudioError(format!("failed to create flush input slice: {e}"))
+            })?;
+            let mut out_slice = InterleavedSlice::new_mut(&mut out_buf, channels, out_cap)
+                .map_err(|e| {
+                    Error::AudioError(format!("failed to create flush output slice: {e}"))
+                })?;
+
+            let (_consumed, produced) = resampler
+                .process_into_buffer(&in_slice, &mut out_slice, None)
+                .map_err(|e| Error::AudioError(format!("resampler flush failed: {e}")))?;
+
+            output.extend_from_slice(&out_buf[..produced * channels]);
+            flushed = flushed.saturating_add(produced);
+            if produced == 0 {
+                break;
+            }
+        }
+
+        Ok(output)
     }
 }
 
@@ -203,11 +264,28 @@ mod tests {
     }
 
     #[test]
-    fn resampler_rebuilds_on_chunk_size_change() {
+    fn resampler_accepts_varying_chunk_sizes() {
         let mut r = Resampler::new(1, 48_000, AUDIO_TARGET_RATE);
         let chunk_a = vec![0.0f32; 480];
-        let chunk_b = vec![0.0f32; 960]; // different length — one-shot / TTS-style use
+        let chunk_b = vec![0.0f32; 960];
         assert!(r.resample(&chunk_a).is_ok());
-        assert!(r.resample(&chunk_b).is_ok()); // would have errored in the old version
+        assert!(r.resample(&chunk_b).is_ok());
+    }
+
+    /// One-shot TTS-sized buffers must not be truncated by the FFT chunk floor.
+    #[test]
+    fn resampler_preserves_long_buffer_duration() {
+        let mut r = Resampler::new(1, 44_100, 48_000);
+        // ~7.036s of mono @ 44.1 kHz (matches a typical Supertone utterance).
+        let input = vec![0.1f32; 310_327];
+        let out = r.resample(&input).expect("resample");
+        let expected = (input.len() as f64 * 48_000.0 / 44_100.0).round();
+        let ratio = out.len() as f64 / expected;
+        // Allow a little FFT delay / block alignment slack, but not half the audio.
+        assert!(
+            ratio > 0.95 && ratio < 1.05,
+            "duration ratio {ratio:.3} (out={}, expected≈{expected})",
+            out.len()
+        );
     }
 }

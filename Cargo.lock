@@ -550,6 +550,9 @@ dependencies = [
 name = "boris-desktop"
 version = "0.1.0"
 dependencies = [
+ "boris-audio",
+ "boris-core",
+ "crossbeam-channel",
  "serde",
  "serde_json",
  "tauri",
@@ -563,6 +566,16 @@ version = "0.1.0"
 dependencies = [
  "boris-core",
  "livekit-wakeword",
+ "ort",
+ "tracing",
+ "webrtc-vad",
+]
+
+[[package]]
+name = "boris-sense"
+version = "0.1.0"
+dependencies = [
+ "boris-core",
  "ort",
  "tracing",
  "webrtc-vad",

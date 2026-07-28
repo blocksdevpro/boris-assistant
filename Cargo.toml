@@ -8,7 +8,7 @@ members = [
     "crates/boris-stt-parakeet",
     "crates/boris-tts-kokoro",
     "crates/boris-tts-supertone",
-    "desktop/src-tauri",
+    "desktop/src-tauri", "crates/boris-sense",
 ]
 
 [workspace.dependencies]

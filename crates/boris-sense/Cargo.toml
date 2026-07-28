@@ -1,0 +1,11 @@
+[package]
+name = "boris-sense"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+boris-core = { workspace = true }
+tracing    = { workspace = true }
+
+webrtc-vad       = "0.4"
+ort = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"] }

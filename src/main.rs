@@ -9,7 +9,7 @@ use std::{env, thread};
 use boris_agent::{AgentEngine, OpenRouterClient};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{event::Event, types::Lifecycle};
-use boris_inference::{init_onnx_runtime, vad::WebRtcVad, wakeword::LivekitWakeWord as WakeWord};
+use boris_sense::{init_onnx_runtime, LivekitWakeWord as WakeWord, WebRtcVad};
 use boris_stt_parakeet::ParakeetSTT;
 
 use crate::session::{Effect, Session, SessionInput};
@@ -40,6 +40,7 @@ fn main() {
                 .add_directive(tracing::Level::WARN.into())
                 .add_directive("boris_assistant=info".parse().unwrap())
                 .add_directive("boris_audio=info".parse().unwrap())
+                .add_directive("boris_sense=info".parse().unwrap())
                 .add_directive("boris_inference=info".parse().unwrap())
                 .add_directive("boris_stt_parakeet=info".parse().unwrap())
                 .add_directive("boris_core=info".parse().unwrap())

@@ -4,8 +4,7 @@
 /// a process-global pool, each session gets its own multi-core thread pool and
 /// idle workers **spin**, which shows up as high Idle CPU and dozens of threads.
 ///
-/// Must be called once at process start, before [`crate::wakeword::LivekitWakeWord::new`].
-
+/// Must be called once at process start, before [`crate::wake::LivekitWakeWord::new`].
 pub fn init_onnx_runtime() {
     // Cap OpenMP too — some ORT builds ignore session intra-op settings.
     if std::env::var_os("OMP_NUM_THREADS").is_none() {

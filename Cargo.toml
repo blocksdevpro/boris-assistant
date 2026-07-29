@@ -3,12 +3,13 @@ resolver = "2"
 members = [
     "crates/boris-core",
     "crates/boris-audio",
+    "crates/boris-sense",
     "crates/boris-inference",
     "crates/boris-agent",
     "crates/boris-stt-parakeet",
     "crates/boris-tts-kokoro",
     "crates/boris-tts-supertone",
-    "desktop/src-tauri", "crates/boris-sense",
+    "desktop/src-tauri",
 ]
 
 [workspace.dependencies]
@@ -17,6 +18,7 @@ serde_json        = "1"
 crossbeam-channel = "0.5"
 thiserror         = "2"
 boris-core        = { path = "crates/boris-core" }
+boris-sense        = { path = "crates/boris-sense" }
 boris-audio       = { path = "crates/boris-audio" }
 boris-inference   = { path = "crates/boris-inference" }
 
@@ -30,6 +32,7 @@ edition = "2021"
 [dependencies]
 boris-core         = { workspace = true }
 boris-audio        = { workspace = true }
+boris-sense        = { workspace = true }
 boris-inference    = { workspace = true }
 boris-agent        = { path = "crates/boris-agent" }
 boris-stt-parakeet  = { path = "crates/boris-stt-parakeet" }

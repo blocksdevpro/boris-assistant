@@ -518,6 +518,7 @@ dependencies = [
  "boris-audio",
  "boris-core",
  "boris-inference",
+ "boris-sense",
  "boris-stt-parakeet",
  "boris-tts-supertone",
  "crossbeam-channel",
@@ -565,10 +566,6 @@ name = "boris-inference"
 version = "0.1.0"
 dependencies = [
  "boris-core",
- "livekit-wakeword",
- "ort",
- "tracing",
- "webrtc-vad",
 ]
 
 [[package]]
@@ -576,6 +573,7 @@ name = "boris-sense"
 version = "0.1.0"
 dependencies = [
  "boris-core",
+ "livekit-wakeword",
  "ort",
  "tracing",
  "webrtc-vad",

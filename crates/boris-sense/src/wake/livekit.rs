@@ -3,7 +3,8 @@ use livekit_wakeword::WakeWordModel;
 use boris_core::error::Result;
 use boris_core::AudioSample;
 
-use crate::{f32_to_pcm16_samples, WakeWord};
+use crate::pcm::f32_to_pcm16_samples;
+use crate::wake::WakeWord;
 
 pub struct LivekitWakeWord {
     model: WakeWordModel,

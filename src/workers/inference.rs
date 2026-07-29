@@ -10,10 +10,11 @@ use boris_core::{
     types::{ArcAudioBuffer, Lifecycle},
     AudioBuffer, ServiceKind, TurnId, AUDIO_TARGET_RATE,
 };
-use boris_inference::{
-    duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, SpeechToText, Vad,
-    WakeWord, VAD_PROCESSING_INTERVAL, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL,
-    WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
+use boris_inference::SpeechToText;
+use boris_sense::{
+    duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, Vad, WakeWord,
+    VAD_PROCESSING_INTERVAL, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
+    WAKEWORD_WINDOW_SIZE,
 };
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -190,7 +191,7 @@ impl EndpointSensor {
 /// Scores the wakeword on a sliding window; emits [`Event::WakeWordDetected`]
 /// when the score crosses the threshold.
 ///
-/// Cadence and window sizes come from `boris_inference` constants. Session
+/// Cadence and window sizes come from `boris_sense` constants. Session
 /// decides whether wake hits are legal (Idle only).
 pub struct WakeSensor {
     _handle: JoinHandle<()>,

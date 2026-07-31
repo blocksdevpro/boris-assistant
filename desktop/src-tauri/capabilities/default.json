@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for main + overlay windows",
   "windows": ["main", "overlay"],
   "permissions": [
     "core:default",
+    "core:event:default",
     "core:window:allow-close",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
@@ -12,6 +13,13 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-start-dragging",
-    "opener:default"
+    "opener:default",
+    "allow-get-status",
+    "allow-start-engine",
+    "allow-stop-engine",
+    "allow-list-input-devices",
+    "allow-list-output-devices",
+    "allow-switch-input",
+    "allow-switch-output"
   ]
 }

@@ -1,4 +1,4 @@
-import { OFF_STATUS } from "@/bridge";
+import { useStatus } from "@/bridge";
 
 /**
  * OVERLAY — read-only live HUD.
@@ -6,7 +6,13 @@ import { OFF_STATUS } from "@/bridge";
  * Never calls choose_input, save_config, or start/stop.
  */
 export function OverlayWindow() {
-  const status = OFF_STATUS;
+  const status = useStatus();
+
+  const phasePulse =
+    status.phase === "Hearing" ||
+    status.phase === "Talking" ||
+    status.phase === "Thinking" ||
+    status.phase === "Reading";
 
   return (
     <div
@@ -14,10 +20,15 @@ export function OverlayWindow() {
       className="flex h-screen flex-col items-center justify-center gap-3 overflow-hidden bg-background/95 px-4 text-foreground"
     >
       <div
-        className="size-10 rounded-full border-2 border-primary/60 bg-primary/20"
+        className={`size-10 rounded-full border-2 border-primary/60 bg-primary/20 ${
+          phasePulse ? "animate-pulse" : ""
+        }`}
         aria-hidden
       />
       <p className="text-sm font-medium tracking-tight">{status.phase}</p>
+      {status.engine === "Off" ? (
+        <p className="text-[10px] text-muted-foreground">Engine off</p>
+      ) : null}
       {status.heard ? (
         <p className="max-w-full truncate text-xs text-muted-foreground">
           Heard: {status.heard}

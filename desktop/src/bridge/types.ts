@@ -1,7 +1,6 @@
 /**
  * UI contract shared by WINDOW and OVERLAY.
- * Mirrors the StatusPicture shape from the system architecture.
- * Rust will own the real source of truth later; these are the TS mirrors.
+ * Mirrors Rust `boris_pipeline::StatusPicture`.
  */
 
 export type EngineState = "Off" | "Starting" | "On" | "Fault";
@@ -31,6 +30,13 @@ export type StatusPicture = {
   turn?: string | null;
 };
 
+/** Device list entry from `list_input_devices` / `list_output_devices`. */
+export type DeviceDto = {
+  id: string;
+  name: string;
+  is_default: boolean;
+};
+
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {
   engine: "Off",
@@ -42,3 +48,18 @@ export const OFF_STATUS: StatusPicture = {
   speaker: { label: "—", ok: false },
   turn: null,
 };
+
+/** Normalize partial / missing Option fields from serde. */
+export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined): StatusPicture {
+  if (!raw) return { ...OFF_STATUS };
+  return {
+    engine: raw.engine ?? "Off",
+    phase: raw.phase ?? "Off",
+    detail: raw.detail ?? null,
+    heard: raw.heard ?? null,
+    said: raw.said ?? null,
+    mic: raw.mic ?? OFF_STATUS.mic,
+    speaker: raw.speaker ?? OFF_STATUS.speaker,
+    turn: raw.turn ?? null,
+  };
+}

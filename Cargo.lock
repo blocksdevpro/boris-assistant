@@ -513,21 +513,6 @@ dependencies = [
 [[package]]
 name = "boris-assistant"
 version = "0.1.0"
-dependencies = [
- "boris-agent",
- "boris-audio",
- "boris-core",
- "boris-inference",
- "boris-sense",
- "boris-stt-parakeet",
- "boris-tts-supertone",
- "crossbeam-channel",
- "dotenvy",
- "hound",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "boris-audio"
@@ -551,14 +536,15 @@ dependencies = [
 name = "boris-desktop"
 version = "0.1.0"
 dependencies = [
- "boris-audio",
- "boris-core",
- "crossbeam-channel",
+ "boris-pipeline",
+ "boris-tts-supertone",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -566,6 +552,23 @@ name = "boris-inference"
 version = "0.1.0"
 dependencies = [
  "boris-core",
+]
+
+[[package]]
+name = "boris-pipeline"
+version = "0.1.0"
+dependencies = [
+ "boris-agent",
+ "boris-audio",
+ "boris-core",
+ "boris-inference",
+ "boris-sense",
+ "boris-stt-parakeet",
+ "boris-tts-supertone",
+ "crossbeam-channel",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -585,6 +588,7 @@ version = "0.1.0"
 dependencies = [
  "boris-core",
  "boris-inference",
+ "tracing",
  "transcribe-rs",
 ]
 
@@ -1542,12 +1546,6 @@ dependencies = [
  "selectors",
  "tendril",
 ]
-
-[[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dpi"

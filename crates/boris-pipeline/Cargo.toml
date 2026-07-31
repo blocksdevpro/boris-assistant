@@ -1,0 +1,25 @@
+[package]
+name    = "boris-pipeline"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop voice engine: sequential turns, status, no worker mesh"
+
+[features]
+default = ["stt-parakeet", "tts-supertone"]
+stt-parakeet = ["dep:boris-stt-parakeet"]
+tts-supertone = ["dep:boris-tts-supertone"]
+
+[dependencies]
+boris-core      = { workspace = true }
+boris-audio     = { workspace = true }
+boris-sense     = { workspace = true }
+boris-inference = { workspace = true }
+boris-agent     = { path = "../boris-agent" }
+
+crossbeam-channel = { workspace = true }
+tracing           = { workspace = true }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = { workspace = true }
+
+boris-stt-parakeet  = { path = "../boris-stt-parakeet", optional = true }
+boris-tts-supertone = { path = "../boris-tts-supertone", optional = true }

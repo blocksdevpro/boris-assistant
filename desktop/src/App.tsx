@@ -31,6 +31,24 @@ function App() {
     void resolveSurface().then(setSurface);
   }, []);
 
+  // Overlay paints pure-black chrome (Windows color-key); main keeps dark theme.
+  useEffect(() => {
+    const root = document.documentElement;
+    const meta = document.querySelector('meta[name="color-scheme"]');
+    if (surface === "overlay") {
+      root.classList.add("overlay-mode");
+      root.classList.remove("dark");
+      meta?.setAttribute("content", "only light");
+    } else if (surface === "main") {
+      root.classList.remove("overlay-mode");
+      root.classList.add("dark");
+      meta?.setAttribute("content", "dark");
+    }
+    return () => {
+      root.classList.remove("overlay-mode");
+    };
+  }, [surface]);
+
   if (surface === null) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">

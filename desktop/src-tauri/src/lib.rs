@@ -1,4 +1,5 @@
 mod orchestrator;
+mod overlay_win;
 
 use orchestrator::AppState;
 use boris_pipeline::{DeviceDto, StatusPicture};
@@ -29,7 +30,6 @@ fn start_engine(
     api_key: String,
     model: Option<String>,
 ) -> Result<(), String> {
-    // Prefer explicit key; fall back to process env for local dev.
     let key = if api_key.trim().is_empty() {
         std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
     } else {
@@ -84,7 +84,9 @@ pub fn run() {
             switch_output,
         ])
         .setup(|app| {
-            // Seed UI with Off status.
+            // Overlay is `"create": false` in config — build with explicit transparent API.
+            overlay_win::spawn_overlay_window(app.handle())?;
+
             if let Some(state) = app.try_state::<AppState>() {
                 let _ = app.emit("status", state.status());
             }

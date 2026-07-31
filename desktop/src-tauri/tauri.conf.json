@@ -25,15 +25,24 @@
       },
       {
         "label": "overlay",
+        "create": false,
         "title": "Boris",
-        "width": 280,
-        "height": 160,
+        "width": 380,
+        "height": 120,
+        "minWidth": 280,
+        "minHeight": 88,
+        "maxWidth": 420,
+        "maxHeight": 160,
         "decorations": false,
         "alwaysOnTop": true,
         "visible": true,
+        "resizable": false,
         "skipTaskbar": true,
-        "transparent": true
-
+        "transparent": true,
+        "shadow": false,
+        "center": false,
+        "focus": false,
+        "backgroundColor": [0, 0, 0, 0]
       }
     ],
     "security": {

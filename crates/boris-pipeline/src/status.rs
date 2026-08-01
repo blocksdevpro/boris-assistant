@@ -18,6 +18,8 @@ pub enum Phase {
     Off,
     Quiet,
     Armed,
+    /// Waiting for a freeform user reply without another wake word.
+    AwaitingReply,
     Hearing,
     Reading,
     Thinking,

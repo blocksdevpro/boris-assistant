@@ -1,5 +1,10 @@
+//! Thin WebRTC VAD wrapper.
+//!
+//! Keep this dumb: the C VAD decides voice vs not. Extra energy gates / hangover
+//! state machines were cutting real speech mid-utterance.
+
 use boris_core::AUDIO_TARGET_RATE;
-use webrtc_vad::{SampleRate, Vad as WebVad};
+use webrtc_vad::{SampleRate, Vad as WebVad, VadMode};
 
 use crate::pcm::f32_to_pcm16_samples;
 use crate::vad::Vad;
@@ -17,8 +22,11 @@ impl WebRtcVad {
     pub fn new() -> Self {
         let sample_rate = SampleRate::try_from(AUDIO_TARGET_RATE as i32)
             .expect("AUDIO_TARGET_RATE is not a valid WebRTC VAD sample rate");
+        // Quality matches the original Boris behavior (reliable on real speech).
+        // Background music false-positives are a separate problem — do not "fix"
+        // them by gating energy here (that clips soft speech).
         Self {
-            model: WebVad::new_with_rate(sample_rate),
+            model: WebVad::new_with_rate_and_mode(sample_rate, VadMode::Quality),
         }
     }
 }

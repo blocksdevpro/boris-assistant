@@ -175,6 +175,8 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(20px) saturate(1.35);
   -webkit-backdrop-filter: blur(20px) saturate(1.35);
+  /* Framer Motion drives accent transitions; keep transform GPU-friendly */
+  will-change: border-color, box-shadow;
 }
 
 .overlay-caption {
@@ -182,6 +184,7 @@
   border: 1px solid oklch(1 0 0 / 6%);
 }
 
+/* Continuous presence loops (Framer handles enter/exit of these nodes) */
 @keyframes overlay-breathe {
   0%,
   100% {

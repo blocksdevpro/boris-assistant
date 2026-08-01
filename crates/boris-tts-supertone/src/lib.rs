@@ -62,9 +62,11 @@ impl SupertoneTts {
             voice: voice.to_string(),
             lang: "en".into(),
             params: SynthesisParams {
-                total_step: 8,
+                // Fewer diffusion steps → lower synth latency (quality trade-off).
+                total_step: 6,
                 speed: 1.17,
-                silence_duration: 0.18,
+                // Less trailing silence on each clip.
+                silence_duration: 0.12,
                 rng_seed: None,
             },
         }

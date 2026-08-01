@@ -39,11 +39,19 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Armed: {
     label: "Ready",
-    hint: "Say the wake word",
+    hint: "Say the wake word when you need me",
     accent: "oklch(0.78 0.14 165)",
-    glow: "oklch(0.55 0.12 165 / 45%)",
+    glow: "oklch(0.55 0.12 165 / 40%)",
     alive: true,
     motion: "breathe",
+  },
+  AwaitingReply: {
+    label: "Your turn",
+    hint: "He asked — answer freely, no wake word",
+    accent: "oklch(0.8 0.15 200)",
+    glow: "oklch(0.55 0.14 200 / 50%)",
+    alive: true,
+    motion: "listen",
   },
   Hearing: {
     label: "Listening",
@@ -63,7 +71,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Thinking: {
     label: "Thinking",
-    hint: "Working on a reply",
+    hint: "Working on a reply (includes speech prep)",
     accent: "oklch(0.72 0.18 295)",
     glow: "oklch(0.5 0.16 295 / 50%)",
     alive: true,
@@ -71,7 +79,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Talking: {
     label: "Speaking",
-    hint: "Boris is talking",
+    hint: "Audio is playing now",
     accent: "oklch(0.78 0.16 35)",
     glow: "oklch(0.55 0.14 35 / 50%)",
     alive: true,

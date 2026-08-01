@@ -22,6 +22,8 @@ pub enum OutputCommand {
 }
 
 pub enum OutputEvent {
+    /// Samples are in the device queue — audible audio is about to start (or just started).
+    Started,
     /// Software + short device-buffer drain after a real Play job finished.
     Drained,
     /// Stopped by Flush; not a successful natural finish.
@@ -123,6 +125,9 @@ impl OutputPipeline {
                         state.active = !state.pending.is_empty();
                         if !state.active {
                             tracing::warn!("OutputPipeline: Play produced empty buffer");
+                        } else {
+                            // Host can flip UI to "Speaking" only after this — not during TTS synth.
+                            let _ = event_tx.send(OutputEvent::Started);
                         }
                     }
                     OutputCommand::Flush => {

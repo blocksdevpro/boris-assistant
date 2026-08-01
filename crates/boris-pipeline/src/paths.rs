@@ -8,6 +8,7 @@
 //!   sessions/            # voice session meta + JSONL transcripts (agent store)
 //!   memory/
 //!     notes.jsonl        # durable notes for builtin memory tools
+//!     profile.json       # active personal context (name, prefs, facts)
 //!   models/
 //!     parakeet/          # STT
 //!     supertone/
@@ -93,6 +94,11 @@ pub fn memory_dir() -> PathBuf {
 /// Append-only notes store for builtin memory tools (`~/.boris/memory/notes.jsonl`).
 pub fn notes_path() -> PathBuf {
     memory_dir().join("notes.jsonl")
+}
+
+/// Durable personal context profile (`~/.boris/memory/profile.json`).
+pub fn profile_path() -> PathBuf {
+    memory_dir().join("profile.json")
 }
 
 /// Ensure the directory tree exists under `~/.boris/models`.

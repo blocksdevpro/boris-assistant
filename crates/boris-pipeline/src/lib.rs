@@ -28,7 +28,8 @@ pub use download::{
 };
 pub use engine::{Engine, EngineCommand, EngineHandle};
 pub use paths::{
-    boris_home, ensure_sessions_dir, memory_dir, models_dir, notes_path, preflight, sessions_dir,
+    boris_home, ensure_sessions_dir, memory_dir, models_dir, notes_path, preflight, profile_path,
+    sessions_dir,
     PreflightReport, BORIS_HOME_ENV,
 };
 pub use prompt::BORIS_SYSTEM_PROMPT;

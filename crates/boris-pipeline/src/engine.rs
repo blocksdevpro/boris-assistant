@@ -176,10 +176,12 @@ fn run(
 
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
     let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
+    // Time/date, notes, and active personal context (profile tools + extract).
     boris_agent::tools::register_builtin_tools(
         &mut agent,
         boris_agent::tools::BuiltinToolPaths {
             notes_path: paths::notes_path(),
+            profile_path: paths::profile_path(),
         },
     );
 

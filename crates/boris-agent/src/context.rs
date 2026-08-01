@@ -97,6 +97,26 @@ impl Context {
         self.prune();
     }
 
+    /// Replace or insert the leading system message (used when personal context refreshes).
+    pub fn set_system(&mut self, content: impl Into<Value>) {
+        let content = content.into();
+        if self
+            .messages
+            .first()
+            .is_some_and(|m| matches!(m.role, Role::System))
+        {
+            self.messages[0].content = content;
+        } else {
+            self.messages.insert(
+                0,
+                Message {
+                    role: Role::System,
+                    content,
+                },
+            );
+        }
+    }
+
     /// Replace non-system messages with history loaded from a session.
     ///
     /// Always installs `system_prompt` as the first message (current prompt wins

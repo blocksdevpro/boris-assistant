@@ -1,12 +1,18 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     client::LlmClient,
     context::{Context, Message, Role},
     error::AgentError,
+    memory::{
+        extract_heuristic, extract_with_llm, should_llm_extract, ProfileStore, UserProfile,
+        PERSONAL_CONTEXT_MAX_CHARS,
+    },
     observe::TurnReport,
     outcome::AgentOutcome,
     tool::Tool,
@@ -19,10 +25,22 @@ const MAX_TOOL_ROUNDS: usize = 5;
 /// Max characters of user text included in turn-start logs (avoids dumping secrets).
 const LOG_PREVIEW_CHARS: usize = 80;
 
+/// Optional durable personal context attached to the engine.
+struct PersonalMemory {
+    store: ProfileStore,
+    /// Shared with tools so mid-turn saves stay coherent.
+    profile: Arc<Mutex<UserProfile>>,
+    /// When true, may spend an extra LLM call after a turn to learn.
+    llm_extract: bool,
+}
+
 pub struct AgentEngine {
     client: Box<dyn LlmClient>,
     tools: Vec<Box<dyn Tool>>,
     context: Context,
+    /// Persona + channel rules without the dynamic personal_context block.
+    base_system_prompt: String,
+    personal: Option<PersonalMemory>,
 }
 
 /// Truncate `s` for logging; appends `…` when cut.
@@ -40,8 +58,7 @@ impl AgentEngine {
     /// Create a new engine.
     ///
     /// `system_prompt` sets the assistant's persona and hard rules.
-    /// Tools are optional — Boris currently runs with none registered and
-    /// treats the model's final plain-text reply as speech ([`AgentOutcome::Speak`]).
+    /// Tools are optional — register via [`Self::register_tool`] / builtins.
     pub fn new(client: Box<dyn LlmClient>, system_prompt: &str) -> Self {
         let mut context = Context::new(20);
         context.push(Role::System, system_prompt);
@@ -49,14 +66,75 @@ impl AgentEngine {
             client,
             tools: vec![],
             context,
+            base_system_prompt: system_prompt.to_string(),
+            personal: None,
         }
     }
 
-    /// Register a tool the LLM may call during the ReAct-style loop.
+    /// Enable durable personal context stored at `profile_path`.
     ///
-    /// Tool results are fed back into context; they must not speak to the user
-    /// directly. Final user-facing speech always comes from a turn's
-    /// [`AgentOutcome`].
+    /// Loads existing profile (if any), injects a `<personal_context>` block into
+    /// the system message, and runs active extraction after successful turns.
+    ///
+    /// `llm_extract`: when true, may call the LLM side-channel to learn deeper
+    /// facts (extra latency/cost). Heuristics always run.
+    pub fn enable_personal_context(
+        &mut self,
+        profile_path: impl Into<PathBuf>,
+        llm_extract: bool,
+    ) -> Result<Arc<Mutex<UserProfile>>, String> {
+        let store = ProfileStore::new(profile_path);
+        let profile = store.load()?;
+        let shared = Arc::new(Mutex::new(profile));
+        self.personal = Some(PersonalMemory {
+            store,
+            profile: shared.clone(),
+            llm_extract,
+        });
+        self.refresh_system_prompt();
+        info!(path = %self.personal.as_ref().unwrap().store.path().display(), "personal context enabled");
+        Ok(shared)
+    }
+
+    /// Shared profile handle for registering profile tools.
+    pub fn personal_profile(&self) -> Option<Arc<Mutex<UserProfile>>> {
+        self.personal.as_ref().map(|p| p.profile.clone())
+    }
+
+    pub fn profile_store_path(&self) -> Option<PathBuf> {
+        self.personal
+            .as_ref()
+            .map(|p| p.store.path().to_path_buf())
+    }
+
+    /// Compose base persona + personal context into the live system message.
+    pub fn refresh_system_prompt(&mut self) {
+        let composed = self.composed_system_prompt();
+        self.context.set_system(composed);
+    }
+
+    fn composed_system_prompt(&self) -> String {
+        let Some(mem) = &self.personal else {
+            return self.base_system_prompt.clone();
+        };
+        let block = match mem.profile.lock() {
+            Ok(p) => p.render_block(PERSONAL_CONTEXT_MAX_CHARS),
+            Err(_) => String::new(),
+        };
+        if block.is_empty() {
+            self.base_system_prompt.clone()
+        } else {
+            format!("{}\n\n{block}", self.base_system_prompt)
+        }
+    }
+
+    /// Update the base persona prompt (without losing personal context).
+    pub fn set_base_system_prompt(&mut self, system_prompt: &str) {
+        self.base_system_prompt = system_prompt.to_string();
+        self.refresh_system_prompt();
+    }
+
+    /// Register a tool the LLM may call during the ReAct-style loop.
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
     }
@@ -70,18 +148,20 @@ impl AgentEngine {
 
     /// Clear conversation to a fresh system-only context (new session).
     ///
+    /// Personal profile is **kept**; only chat history resets.
     /// Tools and the LLM client are left unchanged.
     pub fn reset_conversation(&mut self, system_prompt: &str) {
+        self.base_system_prompt = system_prompt.to_string();
         self.context.messages.clear();
-        self.context.push(Role::System, system_prompt);
+        let composed = self.composed_system_prompt();
+        self.context.push(Role::System, composed);
     }
 
     /// Load prior user/assistant/tool messages after the system prompt.
-    ///
-    /// Used when resuming a session. `system_prompt` is forced as the first
-    /// message; any system rows in `history` are dropped. Prunes once after bulk load.
     pub fn load_session_history(&mut self, system_prompt: &str, history: Vec<Message>) {
-        self.context.load_history(system_prompt, history);
+        self.base_system_prompt = system_prompt.to_string();
+        let composed = self.composed_system_prompt();
+        self.context.load_history(&composed, history);
     }
 
     /// Snapshot messages for saving (clone).
@@ -89,10 +169,6 @@ impl AgentEngine {
         self.context.messages().to_vec()
     }
 
-    /// Serialize registered tools for the OpenAI-compatible API.
-    ///
-    /// Returns `Value::Null` when no tools are registered so the client can
-    /// omit `tools` / `tool_choice` entirely (avoids empty-array edge cases).
     fn tools_json(&self) -> Value {
         if self.tools.is_empty() {
             return Value::Null;
@@ -115,16 +191,11 @@ impl AgentEngine {
     }
 
     /// Back-compat entry used by the pipeline. Delegates to [`Self::run_turn`].
-    ///
-    /// Prefer [`Self::run_turn`] / [`Self::run_turn_with_report`] for new call sites.
     pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
         self.run_turn(message)
     }
 
     /// Primary turn API: one user message → [`AgentOutcome`].
-    ///
-    /// Emits the same `tracing` events as [`Self::run_turn_with_report`] but
-    /// discards the structured [`TurnReport`].
     pub fn run_turn(&mut self, user_text: &str) -> Result<AgentOutcome, AgentError> {
         self.run_turn_with_report(user_text)
             .map(|(outcome, _report)| outcome)
@@ -132,18 +203,18 @@ impl AgentEngine {
 
     /// Run one user turn and return both the outcome and a [`TurnReport`].
     ///
-    /// - Non-empty content → [`AgentOutcome::Speak`] (caller / Session should TTS it).
-    /// - Empty content → [`AgentOutcome::Silent`].
-    /// - Tool rounds are capped at [`MAX_TOOL_ROUNDS`]; unknown tools fail closed.
-    /// - On any error the conversation context is rolled back to its pre-turn
-    ///   snapshot so a failed HTTP/tool round does not leave unpaired messages.
-    ///
-    /// This crate never talks to the app event bus; the binary worker maps the
-    /// outcome into runtime events.
+    /// After a successful turn, actively updates personal context (heuristics
+    /// always; optional LLM extract when enabled and the turn looks personal).
     pub fn run_turn_with_report(
         &mut self,
         user_text: &str,
     ) -> Result<(AgentOutcome, TurnReport), AgentError> {
+        // Ensure tools that mutated the shared profile mid-turn are reflected
+        // in the system prompt before we start (best-effort).
+        if self.personal.is_some() {
+            self.refresh_system_prompt();
+        }
+
         let started = Instant::now();
         let preview = log_preview(user_text, LOG_PREVIEW_CHARS);
         info!(
@@ -153,8 +224,6 @@ impl AgentEngine {
             "agent turn start"
         );
 
-        // Snapshot before mutating so prune during a failed turn cannot leave
-        // a half-applied user/tool chain in multi-turn context.
         let snapshot = self.context.messages.clone();
         self.context.push(Role::User, user_text);
 
@@ -185,6 +254,14 @@ impl AgentEngine {
                     approx_chars_in,
                     "agent turn end"
                 );
+
+                // Active personal context learning (does not affect this turn's speech).
+                let assistant_text = match &outcome {
+                    AgentOutcome::Speak(s) => s.as_str(),
+                    AgentOutcome::Silent => "",
+                };
+                self.after_turn_learn(user_text, assistant_text, &tools_used);
+
                 Ok((outcome, report))
             }
             Err(e) => {
@@ -199,8 +276,98 @@ impl AgentEngine {
         }
     }
 
+    /// Heuristic + optional LLM extract → merge → persist → refresh system prompt.
+    fn after_turn_learn(&mut self, user_text: &str, assistant_text: &str, tools_used: &[String]) {
+        let Some(mem) = &self.personal else {
+            return;
+        };
+        let llm_extract_enabled = mem.llm_extract;
+
+        // 1) Heuristics on what the user said.
+        let mut delta = extract_heuristic(user_text);
+        let heuristic_hit = !delta.is_empty();
+
+        // 2) Turns counter + maybe LLM extract.
+        let (turns_seen, profile_summary, do_llm) = {
+            let Ok(mut p) = mem.profile.lock() else {
+                return;
+            };
+            p.turns_seen = p.turns_seen.saturating_add(1);
+            let turns_seen = p.turns_seen;
+            let summary = if p.is_empty() {
+                "(empty)".to_string()
+            } else {
+                p.render_block(400)
+            };
+            let do_llm = llm_extract_enabled
+                && should_llm_extract(user_text, tools_used, turns_seen, heuristic_hit);
+            (turns_seen, summary, do_llm)
+        };
+
+        if do_llm {
+            match extract_with_llm(self.client.as_ref(), user_text, assistant_text, &profile_summary)
+            {
+                Ok(llm_delta) if !llm_delta.is_empty() => {
+                    debug!(turns_seen, "personal llm extract produced updates");
+                    // Merge: heuristics first, then LLM (LLM can refine name etc.).
+                    if let Some(n) = llm_delta.preferred_name.clone() {
+                        delta.preferred_name = Some(n);
+                    }
+                    if let Some(a) = llm_delta.address_as.clone() {
+                        delta.address_as = Some(a);
+                    }
+                    delta.preferences_add.extend(llm_delta.preferences_add);
+                    delta.facts_add.extend(llm_delta.facts_add);
+                    delta
+                        .facts_remove_query
+                        .extend(llm_delta.facts_remove_query);
+                    delta.ongoing_add.extend(llm_delta.ongoing_add);
+                    if llm_delta.ongoing_replace.is_some() {
+                        delta.ongoing_replace = llm_delta.ongoing_replace;
+                    }
+                }
+                Ok(_) => {
+                    debug!(turns_seen, "personal llm extract empty");
+                }
+                Err(e) => {
+                    warn!(error = %e, "personal llm extract failed");
+                }
+            }
+        }
+
+        if delta.is_empty() && !heuristic_hit {
+            // Still persist turns_seen bump.
+            if let Some(mem) = &self.personal {
+                if let Ok(p) = mem.profile.lock() {
+                    let _ = mem.store.save(&p);
+                }
+            }
+            return;
+        }
+
+        if let Some(mem) = &self.personal {
+            if let Ok(mut p) = mem.profile.lock() {
+                let before_empty = p.is_empty();
+                delta.apply(&mut p);
+                if let Err(e) = mem.store.save(&p) {
+                    warn!(error = %e, "failed to save personal profile");
+                } else {
+                    info!(
+                        was_empty = before_empty,
+                        name = ?p.preferred_name,
+                        facts = p.facts.len(),
+                        prefs = p.preferences.len(),
+                        "personal context updated"
+                    );
+                }
+            }
+        }
+
+        // Tools may also have written; always re-inject after learning.
+        self.refresh_system_prompt();
+    }
+
     /// Internal ReAct loop after the user message is already on context.
-    /// Caller owns snapshot / rollback and logging.
     fn execute_turn_loop(&mut self) -> Result<TurnLoopResult, AgentError> {
         let mut tools_used: Vec<String> = Vec::new();
         let mut tool_rounds: u32 = 0;
@@ -253,6 +420,15 @@ impl AgentEngine {
                         );
                     }
 
+                    // Profile tools may have updated shared state — refresh before next LLM hop.
+                    if tools_used.iter().any(|n| {
+                        n == "save_user_fact"
+                            || n == "update_user_profile"
+                            || n == "get_user_context"
+                    }) {
+                        self.refresh_system_prompt();
+                    }
+
                     continue;
                 }
             }
@@ -275,7 +451,6 @@ impl AgentEngine {
             });
         }
 
-        // Unreachable: loop is `0..=MAX_TOOL_ROUNDS` and tool path returns on last round.
         Err(AgentError::tool_loop("tool loop exhausted"))
     }
 }

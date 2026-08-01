@@ -6,6 +6,9 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+use boris_agent::context::Context;
+use boris_agent::session::store::SessionStore;
+use boris_agent::session::types::SessionId;
 use boris_agent::{AgentEngine, AgentOutcome, OpenRouterClient};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
@@ -16,6 +19,7 @@ use boris_sense::{init_onnx_runtime, LivekitWakeWord, WebRtcVad};
 use crate::config::PipelineConfig;
 use crate::devices::{find_input, find_output};
 use crate::hear::{self, HearBreak};
+use crate::paths;
 use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture};
 
 const MIC_QUEUE: usize = 64;
@@ -173,6 +177,13 @@ fn run(
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
     let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
 
+    // Session persistence under ~/.boris/sessions (soft-fail on I/O).
+    if let Err(e) = paths::ensure_sessions_dir() {
+        tracing::warn!(error = %e, "ensure sessions dir failed");
+    }
+    let store = SessionStore::new(paths::sessions_dir());
+    let mut active_session: Option<SessionId> = None;
+
     let mut picture = Picture {
         engine: EngineState::Off,
         phase: Phase::Off,
@@ -206,11 +217,18 @@ fn run(
                     picture.heard = None;
                     picture.said = None;
                     picture.turn = None;
+                    begin_session(
+                        &store,
+                        &mut active_session,
+                        &mut agent,
+                        &config.system_prompt,
+                    );
                     picture.set_phase(Phase::Armed);
                     tracing::info!("engine started");
                 }
                 Ok(EngineCommand::Stop) => continue,
                 Ok(EngineCommand::Shutdown) | Err(_) => {
+                    end_session(&store, &mut active_session);
                     picture.engine = EngineState::Off;
                     picture.set_phase(Phase::Off);
                     return Ok(());
@@ -243,21 +261,19 @@ fn run(
                 continue;
             }
             Err(HearBreak::Stopped) if !running => {
-                audio.stop();
-                picture.engine = EngineState::Off;
-                picture.set_phase(Phase::Off);
+                go_off(&mut picture, &audio, &store, &mut active_session);
                 continue;
             }
             Err(HearBreak::Stopped) => continue,
             Err(HearBreak::Disconnected) => {
+                end_session(&store, &mut active_session);
                 picture.set_phase(Phase::Off);
                 return Ok(());
             }
         }
 
         if !running {
-            picture.engine = EngineState::Off;
-            picture.set_phase(Phase::Off);
+            go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
@@ -279,18 +295,18 @@ fn run(
                 continue;
             }
             Err(HearBreak::Stopped) if !running => {
-                audio.stop();
-                picture.engine = EngineState::Off;
-                picture.set_phase(Phase::Off);
+                go_off(&mut picture, &audio, &store, &mut active_session);
                 continue;
             }
             Err(HearBreak::Stopped) => continue,
-            Err(HearBreak::Disconnected) => return Ok(()),
+            Err(HearBreak::Disconnected) => {
+                end_session(&store, &mut active_session);
+                return Ok(());
+            }
         };
 
         if !running {
-            picture.engine = EngineState::Off;
-            picture.set_phase(Phase::Off);
+            go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
@@ -338,23 +354,43 @@ fn run(
             &mut output_events,
             &mut picture,
         ) {
-            go_off(&mut picture, &audio);
+            go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
         // Think — primary turn API (chat is a thin alias).
         picture.set_phase(Phase::Thinking);
-        let reply = match agent.run_turn(&text) {
-            Ok(AgentOutcome::Speak(s)) if !s.trim().is_empty() => s,
-            Ok(_) => {
-                tracing::warn!(%turn, "agent produced no speech");
-                picture.detail = Some("empty agent reply".into());
-                picture.set_phase(Phase::Armed);
-                continue;
-            }
+        let outcome = match agent.run_turn(&text) {
+            Ok(o) => o,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
                 picture.detail = Some(format!("agent: {e}"));
+                picture.set_phase(Phase::Armed);
+                continue;
+            }
+        };
+
+        // Persist user + assistant (empty assistant for Silent) when a session is active.
+        let assistant_for_store = match &outcome {
+            AgentOutcome::Speak(s) => s.as_str(),
+            AgentOutcome::Silent => "",
+        };
+        if let Some(ref sid) = active_session {
+            if let Err(e) = store.append_user_assistant(sid, &text, assistant_for_store) {
+                tracing::warn!(
+                    error = %e,
+                    session_id = %sid,
+                    %turn,
+                    "session append_user_assistant failed"
+                );
+            }
+        }
+
+        let reply = match outcome {
+            AgentOutcome::Speak(s) if !s.trim().is_empty() => s,
+            _ => {
+                tracing::warn!(%turn, "agent produced no speech");
+                picture.detail = Some("empty agent reply".into());
                 picture.set_phase(Phase::Armed);
                 continue;
             }
@@ -370,7 +406,7 @@ fn run(
             &mut output_events,
             &mut picture,
         ) {
-            go_off(&mut picture, &audio);
+            go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
@@ -404,7 +440,7 @@ fn run(
         );
 
         if !running {
-            go_off(&mut picture, &audio);
+            go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
@@ -413,7 +449,88 @@ fn run(
     }
 }
 
-fn go_off(picture: &mut Picture, audio: &AudioService) {
+/// Start or resume a voice session and seed the agent context.
+///
+/// Soft-fails on store I/O — voice loop continues without persistence.
+fn begin_session(
+    store: &SessionStore,
+    active_session: &mut Option<SessionId>,
+    agent: &mut AgentEngine,
+    system_prompt: &str,
+) {
+    *active_session = None;
+    let previous = match store.current_id() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "session current_id failed");
+            None
+        }
+    };
+
+    match store.resume_or_create() {
+        Ok(meta) => {
+            let resumed = previous.as_ref() == Some(&meta.id);
+            if resumed {
+                tracing::info!(session_id = %meta.id, "session resumed");
+                match store.load_transcript(&meta.id) {
+                    Ok(records) => {
+                        let wire: Vec<(String, serde_json::Value)> = records
+                            .into_iter()
+                            .map(|r| (r.role, r.content))
+                            .collect();
+                        let history = Context::messages_from_transcript(&wire);
+                        agent.load_session_history(system_prompt, history);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            session_id = %meta.id,
+                            "failed to load session transcript; resetting conversation"
+                        );
+                        agent.reset_conversation(system_prompt);
+                    }
+                }
+            } else {
+                tracing::info!(session_id = %meta.id, "session created");
+                agent.reset_conversation(system_prompt);
+            }
+            *active_session = Some(meta.id);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "session resume_or_create failed; continuing without persistence"
+            );
+            agent.reset_conversation(system_prompt);
+        }
+    }
+}
+
+/// Soft-fail end of the current session (Stop / go_off / shutdown).
+fn end_session(store: &SessionStore, active_session: &mut Option<SessionId>) {
+    match store.end_current() {
+        Ok(Some(meta)) => {
+            tracing::info!(session_id = %meta.id, "session ended");
+        }
+        Ok(None) => {
+            if let Some(ref sid) = active_session {
+                tracing::debug!(session_id = %sid, "session end_current: no current pointer");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "session end_current failed");
+        }
+    }
+    *active_session = None;
+}
+
+fn go_off(
+    picture: &mut Picture,
+    audio: &AudioService,
+    store: &SessionStore,
+    active_session: &mut Option<SessionId>,
+) {
+    end_session(store, active_session);
     audio.stop();
     picture.engine = EngineState::Off;
     picture.turn = None;

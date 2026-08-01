@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use crate::{
     client::LlmClient,
-    context::{Context, Role},
+    context::{Context, Message, Role},
     error::AgentError,
     observe::TurnReport,
     outcome::AgentOutcome,
@@ -59,6 +59,27 @@ impl AgentEngine {
     /// [`AgentOutcome`].
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Clear conversation to a fresh system-only context (new session).
+    ///
+    /// Tools and the LLM client are left unchanged.
+    pub fn reset_conversation(&mut self, system_prompt: &str) {
+        self.context.messages.clear();
+        self.context.push(Role::System, system_prompt);
+    }
+
+    /// Load prior user/assistant/tool messages after the system prompt.
+    ///
+    /// Used when resuming a session. `system_prompt` is forced as the first
+    /// message; any system rows in `history` are dropped. Prunes once after bulk load.
+    pub fn load_session_history(&mut self, system_prompt: &str, history: Vec<Message>) {
+        self.context.load_history(system_prompt, history);
+    }
+
+    /// Snapshot messages for saving (clone).
+    pub fn export_messages(&self) -> Vec<Message> {
+        self.context.messages().to_vec()
     }
 
     /// Serialize registered tools for the OpenAI-compatible API.

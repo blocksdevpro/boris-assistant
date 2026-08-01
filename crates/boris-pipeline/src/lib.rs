@@ -27,7 +27,10 @@ pub use download::{
     ModelsInstallReport, ModelsStatus, BORIS_MODEL_BASE_URL_ENV,
 };
 pub use engine::{Engine, EngineCommand, EngineHandle};
-pub use paths::{boris_home, models_dir, preflight, PreflightReport, BORIS_HOME_ENV};
+pub use paths::{
+    boris_home, ensure_sessions_dir, models_dir, preflight, sessions_dir, PreflightReport,
+    BORIS_HOME_ENV,
+};
 pub use prompt::BORIS_SYSTEM_PROMPT;
 pub use settings::{load_settings, save_settings, settings_path, AppSettings};
 pub use status::{DeviceHealth, EngineState, Phase, StatusPicture};

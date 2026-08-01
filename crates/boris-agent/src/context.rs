@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 
 use serde_json::{json, Value};
 
@@ -19,6 +20,29 @@ impl fmt::Display for Role {
             Role::Tool => "tool",
         };
         f.write_str(s)
+    }
+}
+
+impl Role {
+    /// Parse a transcript / wire role string (`"user"`, `"assistant"`, …).
+    ///
+    /// Unknown roles return `None` (callers skip them when rebuilding history).
+    pub fn from_role_str(s: &str) -> Option<Self> {
+        match s {
+            "system" => Some(Role::System),
+            "user" => Some(Role::User),
+            "assistant" => Some(Role::Assistant),
+            "tool" => Some(Role::Tool),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for Role {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Role::from_role_str(s).ok_or(())
     }
 }
 
@@ -71,6 +95,47 @@ impl Context {
             content: content.into(),
         });
         self.prune();
+    }
+
+    /// Replace non-system messages with history loaded from a session.
+    ///
+    /// Always installs `system_prompt` as the first message (current prompt wins
+    /// over any system rows that may appear in `history`). Remaining history
+    /// messages that are not `Role::System` are appended, then pruned once.
+    pub fn load_history(&mut self, system_prompt: &str, history: Vec<Message>) {
+        self.messages.clear();
+        self.messages.push(Message {
+            role: Role::System,
+            content: Value::String(system_prompt.to_string()),
+        });
+        for msg in history {
+            if !matches!(msg.role, Role::System) {
+                self.messages.push(msg);
+            }
+        }
+        self.prune();
+    }
+
+    /// All messages (borrowed) for persistence / debug.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Build [`Message`] list from transcript role strings + content values.
+    ///
+    /// Skips unknown roles. Prefer this over importing session transcript types
+    /// so `context` stays free of a dependency cycle with `session`.
+    pub fn messages_from_transcript(records: &[(String, Value)]) -> Vec<Message> {
+        records
+            .iter()
+            .filter_map(|(role, content)| {
+                let role = Role::from_role_str(role)?;
+                Some(Message {
+                    role,
+                    content: content.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Prune conversation history by **user turns**, not raw message count.
@@ -266,5 +331,57 @@ mod tests {
         ctx.push(Role::User, "u1");
         ctx.push(Role::Assistant, "a1");
         assert_eq!(roles_of(&ctx), vec!["system"]);
+    }
+
+    #[test]
+    fn load_history_forces_system_and_skips_history_system() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "old-sys");
+        ctx.push(Role::User, "stale");
+
+        let history = vec![
+            Message {
+                role: Role::System,
+                content: json!("history-sys"),
+            },
+            Message {
+                role: Role::User,
+                content: json!("hello"),
+            },
+            Message {
+                role: Role::Assistant,
+                content: json!("hi"),
+            },
+        ];
+        ctx.load_history("fresh-sys", history);
+
+        assert_eq!(roles_of(&ctx), vec!["system", "user", "assistant"]);
+        assert_eq!(text(&ctx.messages[0]), "fresh-sys");
+        assert_eq!(text(&ctx.messages[1]), "hello");
+        assert_eq!(text(&ctx.messages[2]), "hi");
+    }
+
+    #[test]
+    fn messages_from_transcript_skips_unknown_roles() {
+        let records = vec![
+            ("user".into(), json!("u")),
+            ("bogus".into(), json!("x")),
+            ("assistant".into(), json!("a")),
+            ("tool".into(), json!({ "tool_call_id": "c1", "content": "ok" })),
+        ];
+        let msgs = Context::messages_from_transcript(&records);
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert!(matches!(msgs[1].role, Role::Assistant));
+        assert!(matches!(msgs[2].role, Role::Tool));
+    }
+
+    #[test]
+    fn role_from_str_roundtrip() {
+        assert!(matches!(Role::from_str("user"), Ok(Role::User)));
+        assert!(matches!(Role::from_str("assistant"), Ok(Role::Assistant)));
+        assert!(matches!(Role::from_str("system"), Ok(Role::System)));
+        assert!(matches!(Role::from_str("tool"), Ok(Role::Tool)));
+        assert!(Role::from_str("nope").is_err());
     }
 }

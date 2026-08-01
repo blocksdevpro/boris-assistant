@@ -5,6 +5,7 @@
 //! ```text
 //! ~/.boris/
 //!   settings.json        # OpenRouter key + model (desktop)
+//!   sessions/            # voice session meta + JSONL transcripts (agent store)
 //!   models/
 //!     parakeet/          # STT
 //!     supertone/
@@ -68,6 +69,16 @@ pub fn supertone_voices_dir() -> PathBuf {
 
 pub fn livekit_dir() -> PathBuf {
     models_dir().join("livekit")
+}
+
+/// Directory for voice session metadata + transcripts (`~/.boris/sessions`).
+pub fn sessions_dir() -> PathBuf {
+    boris_home().join("sessions")
+}
+
+/// Ensure `~/.boris/sessions` exists.
+pub fn ensure_sessions_dir() -> std::io::Result<()> {
+    fs::create_dir_all(sessions_dir())
 }
 
 /// Ensure the directory tree exists under `~/.boris/models`.

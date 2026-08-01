@@ -9,11 +9,16 @@ pub mod engine;
 pub mod error;
 pub mod observe;
 pub mod outcome;
+pub mod session;
 pub mod tool;
 
 pub use client::{LlmClient, OpenRouterClient};
+pub use context::{Context, Message, Role};
 pub use engine::AgentEngine;
 pub use error::{AgentError, AgentErrorKind, LlmError, LlmErrorKind};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
+pub use session::{
+    generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore,
+};
 pub use tool::{Tool, ToolError};

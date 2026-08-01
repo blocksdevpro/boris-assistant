@@ -22,6 +22,17 @@ bun run tauri dev
 bun run tauri build
 ```
 
+### ONNX Runtime (Windows)
+
+Wake-word inference uses the `ort` crate. On Windows, `build.rs` stages
+`onnxruntime.dll` / `DirectML.dll` (from `target/{profile}/` after ort's
+`copy-dylibs`, or the pyke download cache) into `src-tauri/resources/ort/`.
+Tauri `bundle.resources` then installs those DLLs **next to** `Boris.exe`
+so a clean machine does not need a separate ORT install.
+
+**Verify after install (or open the NSIS/MSI payload):** `onnxruntime.dll`
+and/or `DirectML.dll` sit beside the app executable.
+
 ## Add UI components
 
 ```bash

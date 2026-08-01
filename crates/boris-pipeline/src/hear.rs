@@ -18,15 +18,19 @@ use boris_sense::{
 use crate::engine::EngineCommand;
 
 /// Why a hear step returned early.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HearBreak {
     /// Host asked to stop / shut down.
     Stopped,
     /// Host command channel closed.
     Disconnected,
+    /// Host wants a different microphone (engine applies then re-enters hear).
+    SwitchInput { device_id: String },
+    /// Host wants a different speaker.
+    SwitchOutput { device_id: String },
 }
 
-/// Poll host commands while blocking on audio. Returns `true` if still running.
+/// Poll host commands while blocking on audio.
 fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result<(), HearBreak> {
     loop {
         match cmd_rx.try_recv() {
@@ -37,8 +41,13 @@ fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result
             Ok(EngineCommand::Start) => {
                 *running = true;
             }
-            Ok(EngineCommand::SwitchInput { .. }) | Ok(EngineCommand::SwitchOutput { .. }) => {
-                // Device switch is applied by the engine between turns; ignore mid-hear.
+            // Bubble device switches to the engine so they are applied immediately
+            // (previously ignored while Armed — UI selection did nothing).
+            Ok(EngineCommand::SwitchInput { device_id }) => {
+                return Err(HearBreak::SwitchInput { device_id });
+            }
+            Ok(EngineCommand::SwitchOutput { device_id }) => {
+                return Err(HearBreak::SwitchOutput { device_id });
             }
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => return Err(HearBreak::Disconnected),
@@ -63,7 +72,7 @@ fn next_frame(
     }
 }
 
-/// Block until the wake model crosses threshold, or the host stops us.
+/// Block until the wake model crosses threshold, or the host stops / switches devices.
 pub fn wait_for_wake(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     wake: &mut impl WakeWord,

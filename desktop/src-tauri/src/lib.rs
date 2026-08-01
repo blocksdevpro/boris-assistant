@@ -1,8 +1,11 @@
 mod orchestrator;
 mod overlay_win;
 
+use boris_pipeline::{
+    load_settings, save_settings, AppSettings, DeviceDto, DownloadProgress, ModelsInstallReport,
+    ModelsStatus, PreflightReport, StatusPicture,
+};
 use orchestrator::AppState;
-use boris_pipeline::{DeviceDto, StatusPicture};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 fn init_tracing() {
@@ -21,6 +24,12 @@ fn init_tracing() {
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> StatusPicture {
     state.status()
+}
+
+/// Model readiness gate for the UI (paths under `~/.boris`).
+#[tauri::command]
+fn preflight_check() -> PreflightReport {
+    AppState::preflight()
 }
 
 #[tauri::command]
@@ -67,6 +76,40 @@ fn switch_output(state: State<'_, AppState>, device_id: String) -> Result<(), St
     state.switch_output(device_id)
 }
 
+#[tauri::command]
+fn models_status() -> ModelsStatus {
+    boris_pipeline::models_status()
+}
+
+/// Download missing STT/TTS models into `~/.boris/models`.
+///
+/// Runs on a worker thread so the UI stays responsive for multi-hundred-MB
+/// transfers. Emits `models-progress` ([`DownloadProgress`]) while running.
+#[tauri::command]
+async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, String> {
+    // Blocking reqwest must not run on the async/UI path — that freezes the
+    // window ("Not Responding") for the entire install (~900 MB).
+    tauri::async_runtime::spawn_blocking(move || {
+        boris_pipeline::install_models(|progress: DownloadProgress| {
+            let _ = app.emit("models-progress", &progress);
+        })
+    })
+    .await
+    .map_err(|e| format!("download task failed: {e}"))?
+}
+
+/// Restore OpenRouter key + model from `~/.boris/settings.json`.
+#[tauri::command]
+fn get_settings() -> Result<AppSettings, String> {
+    load_settings()
+}
+
+/// Persist OpenRouter key + model to `~/.boris/settings.json` (never logged).
+#[tauri::command]
+fn save_app_settings(settings: AppSettings) -> Result<(), String> {
+    save_settings(&settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -76,12 +119,17 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             get_status,
+            preflight_check,
             start_engine,
             stop_engine,
             list_input_devices,
             list_output_devices,
             switch_input,
             switch_output,
+            models_status,
+            download_models,
+            get_settings,
+            save_app_settings,
         ])
         .setup(|app| {
             // Overlay is `"create": false` in config — build with explicit transparent API.

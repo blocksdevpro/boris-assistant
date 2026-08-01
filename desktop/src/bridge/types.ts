@@ -37,6 +37,72 @@ export type DeviceDto = {
   is_default: boolean;
 };
 
+/** Result of `preflight_check` — model readiness under `~/.boris`. */
+export type PreflightReport = {
+  parakeet_ready: boolean;
+  supertone_ready: boolean;
+  boris_home: string;
+  parakeet_dir: string;
+  supertone_onnx_dir: string;
+  supertone_voices_dir: string;
+  ok: boolean;
+  messages: string[];
+};
+
+/** Local model install status from `models_status`. */
+export type ModelsStatus = {
+  home: string;
+  models_dir: string;
+  parakeet_ready: boolean;
+  parakeet_dir: string;
+  supertone_ready: boolean;
+  supertone_onnx_dir: string;
+  supertone_voices_dir: string;
+  missing: string[];
+  base_url_override: string | null;
+};
+
+export type ModelComponent = "parakeet" | "supertone";
+
+export type DownloadFileStatus =
+  | "starting"
+  | "downloading"
+  | "skipped"
+  | "done"
+  | "failed";
+
+/** Progress event payload for `models-progress`. */
+export type DownloadProgress = {
+  component: ModelComponent;
+  file_name: string;
+  relative_path: string;
+  bytes_downloaded: number;
+  total_bytes: number | null;
+  status: DownloadFileStatus;
+  message?: string | null;
+};
+
+export type ModelsInstallReport = {
+  ok: boolean;
+  parakeet_ready: boolean;
+  supertone_ready: boolean;
+  files_downloaded: number;
+  files_skipped: number;
+  files_failed: number;
+  errors: string[];
+};
+
+/** Persisted under `~/.boris/settings.json` (Rust `AppSettings`). */
+export type AppSettings = {
+  openrouter_api_key: string;
+  openrouter_model: string;
+};
+
+export const EMPTY_SETTINGS: AppSettings = {
+  openrouter_api_key: "",
+  openrouter_model: "",
+};
+
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {
   engine: "Off",

@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! ~/.boris/
+//!   settings.json        # OpenRouter key + model (desktop)
 //!   models/
 //!     parakeet/          # STT
 //!     supertone/
@@ -16,6 +17,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// Env override for the home root (default: `$HOME/.boris` / `%USERPROFILE%\.boris`).
 pub const BORIS_HOME_ENV: &str = "BORIS_HOME";
@@ -80,22 +83,96 @@ pub fn ensure_model_dirs() -> std::io::Result<()> {
     Ok(())
 }
 
-/// True if Parakeet has something loadable (int8 encoder or any onnx).
+/// True if Parakeet has the real ONNX graphs needed to load (not just config).
 pub fn parakeet_looks_ready(dir: &Path) -> bool {
-    dir.join("encoder-model.int8.onnx").is_file()
-        || dir.join("encoder-model.onnx").is_file()
-        || dir.join("config.json").is_file()
+    let encoder =
+        dir.join("encoder-model.int8.onnx").is_file() || dir.join("encoder-model.onnx").is_file();
+    let decoder = dir.join("decoder_joint-model.int8.onnx").is_file()
+        || dir.join("decoder_joint-model.onnx").is_file()
+        || dir.join("decoder-model.int8.onnx").is_file()
+        || dir.join("decoder-model.onnx").is_file();
+    let vocab = dir.join("vocab.txt").is_file();
+    // nemo128 is part of the onnx-asr feature pipeline; require it so a partial
+    // copy does not look "ready".
+    let fe = dir.join("nemo128.onnx").is_file();
+    encoder && decoder && vocab && fe
 }
 
+/// True if Supertone has loadable graphs + default voice (not config-only).
 pub fn supertone_looks_ready(onnx: &Path, voices: &Path) -> bool {
-    (onnx.join("tts.json").is_file() || onnx.join("vocoder.onnx").is_file())
+    onnx.join("vocoder.onnx").is_file()
+        && onnx.join("text_encoder.onnx").is_file()
+        && onnx.join("vector_estimator.onnx").is_file()
+        && onnx.join("duration_predictor.onnx").is_file()
+        && onnx.join("tts.json").is_file()
         && voices.join("M4.json").is_file()
+}
+
+/// Snapshot for UI preflight gate + host start defense-in-depth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreflightReport {
+    pub parakeet_ready: bool,
+    pub supertone_ready: bool,
+    pub boris_home: String,
+    pub parakeet_dir: String,
+    pub supertone_onnx_dir: String,
+    pub supertone_voices_dir: String,
+    /// Both STT and TTS model trees look ready.
+    pub ok: bool,
+    pub messages: Vec<String>,
+}
+
+/// Best-effort bootstrap then report whether required models are on disk.
+pub fn preflight() -> PreflightReport {
+    if let Err(e) = bootstrap_models_if_needed() {
+        tracing::warn!(error = %e, "model bootstrap during preflight failed");
+    }
+
+    let home = boris_home();
+    let pk = parakeet_dir();
+    let onnx = supertone_onnx_dir();
+    let voices = supertone_voices_dir();
+
+    let parakeet_ready = parakeet_looks_ready(&pk);
+    let supertone_ready = supertone_looks_ready(&onnx, &voices);
+
+    let mut messages = Vec::new();
+    if !parakeet_ready {
+        messages.push(format!(
+            "Parakeet STT models missing. Place encoder + decoder ONNX, vocab.txt, \
+             and nemo128.onnx under {} — or use Install models in the app.",
+            pk.display()
+        ));
+    }
+    if !supertone_ready {
+        messages.push(format!(
+            "Supertone TTS models missing. Need full onnx graphs under {} \
+             and M4.json under {} — or use Install models in the app.",
+            onnx.display(),
+            voices.display()
+        ));
+    }
+    if messages.is_empty() {
+        messages.push("Models look ready under ~/.boris.".into());
+    }
+
+    PreflightReport {
+        parakeet_ready,
+        supertone_ready,
+        boris_home: home.display().to_string(),
+        parakeet_dir: pk.display().to_string(),
+        supertone_onnx_dir: onnx.display().to_string(),
+        supertone_voices_dir: voices.display().to_string(),
+        ok: parakeet_ready && supertone_ready,
+        messages,
+    }
 }
 
 /// One-time / best-effort seed: copy from a discovered workspace `assets/models`
 /// into `~/.boris/models` when the home models are empty.
 ///
 /// Safe to call every launch — no-ops when already populated.
+/// Product path for missing models is HTTP install (`download` module).
 pub fn bootstrap_models_if_needed() -> Result<(), String> {
     ensure_model_dirs().map_err(|e| format!("create ~/.boris/models: {e}"))?;
 
@@ -121,7 +198,8 @@ pub fn bootstrap_models_if_needed() -> Result<(), String> {
         let from_voices = src_root.join("supertone").join("voices");
         if from_onnx.is_dir() {
             tracing::info!(from = %from_onnx.display(), to = %onnx.display(), "seeding supertone onnx into ~/.boris");
-            copy_dir_recursive(&from_onnx, &onnx).map_err(|e| format!("copy supertone onnx: {e}"))?;
+            copy_dir_recursive(&from_onnx, &onnx)
+                .map_err(|e| format!("copy supertone onnx: {e}"))?;
         }
         if from_voices.is_dir() {
             tracing::info!(from = %from_voices.display(), to = %voices.display(), "seeding supertone voices into ~/.boris");

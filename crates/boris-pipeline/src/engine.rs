@@ -115,7 +115,28 @@ fn run(
 ) -> Result<(), String> {
     init_onnx_runtime();
 
-    let mut audio = AudioService::with_source_rate(config.play_source_rate);
+    let mut audio = match AudioService::with_source_rate(config.play_source_rate) {
+        Ok(audio) => audio,
+        Err(e) => {
+            let _ = status_tx.send(StatusPicture {
+                engine: EngineState::Fault,
+                phase: Phase::Off,
+                detail: Some(e.clone()),
+                heard: None,
+                said: None,
+                mic: DeviceHealth {
+                    label: config.mic_label.clone(),
+                    ok: false,
+                },
+                speaker: DeviceHealth {
+                    label: config.speaker_label.clone(),
+                    ok: false,
+                },
+                turn: None,
+            });
+            return Err(format!("audio init failed: {e}"));
+        }
+    };
     let mic = audio.subscribe_input(Some(MIC_QUEUE));
     let mut output_events = audio.subscribe_output();
 
@@ -213,6 +234,14 @@ fn run(
 
         match hear::wait_for_wake(&mic, &mut wake, &cmd_rx, &mut running) {
             Ok(()) => {}
+            Err(HearBreak::SwitchInput { device_id }) => {
+                apply_input_switch(&mut audio, &mut picture, &device_id);
+                continue; // re-arm with new mic
+            }
+            Err(HearBreak::SwitchOutput { device_id }) => {
+                apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                continue;
+            }
             Err(HearBreak::Stopped) if !running => {
                 audio.stop();
                 picture.engine = EngineState::Off;
@@ -241,6 +270,14 @@ fn run(
 
         let clip = match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running) {
             Ok(c) => c,
+            Err(HearBreak::SwitchInput { device_id }) => {
+                apply_input_switch(&mut audio, &mut picture, &device_id);
+                continue; // drop partial clip; re-arm
+            }
+            Err(HearBreak::SwitchOutput { device_id }) => {
+                apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                continue;
+            }
             Err(HearBreak::Stopped) if !running => {
                 audio.stop();
                 picture.engine = EngineState::Off;
@@ -280,7 +317,13 @@ fn run(
         picture.publish();
         tracing::info!(%turn, %text, "heard");
 
-        if !poll_running(&cmd_rx, &mut running) {
+        if !poll_running(
+            &cmd_rx,
+            &mut running,
+            &mut audio,
+            &mut output_events,
+            &mut picture,
+        ) {
             go_off(&mut picture, &audio);
             continue;
         }
@@ -306,7 +349,13 @@ fn run(
         picture.publish();
         tracing::info!(%turn, %reply, "said");
 
-        if !poll_running(&cmd_rx, &mut running) {
+        if !poll_running(
+            &cmd_rx,
+            &mut running,
+            &mut audio,
+            &mut output_events,
+            &mut picture,
+        ) {
             go_off(&mut picture, &audio);
             continue;
         }
@@ -332,7 +381,13 @@ fn run(
         // Drain any stale output events, then play and wait for drain.
         while output_events.try_recv().is_ok() {}
         audio.play(pcm);
-        wait_playback_or_stop(&output_events, &cmd_rx, &mut running, &audio);
+        wait_playback_or_stop(
+            &mut output_events,
+            &cmd_rx,
+            &mut running,
+            &mut audio,
+            &mut picture,
+        );
 
         if !running {
             go_off(&mut picture, &audio);
@@ -351,7 +406,14 @@ fn go_off(picture: &mut Picture, audio: &AudioService) {
     picture.set_phase(Phase::Off);
 }
 
-fn poll_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> bool {
+/// Drain host commands; apply device switches immediately. Returns false if stopped.
+fn poll_running(
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    audio: &mut AudioService,
+    output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
+    picture: &mut Picture,
+) -> bool {
     loop {
         match cmd_rx.try_recv() {
             Ok(EngineCommand::Stop) | Ok(EngineCommand::Shutdown) => {
@@ -359,7 +421,12 @@ fn poll_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> bool {
                 return false;
             }
             Ok(EngineCommand::Start) => *running = true,
-            Ok(EngineCommand::SwitchInput { .. }) | Ok(EngineCommand::SwitchOutput { .. }) => {}
+            Ok(EngineCommand::SwitchInput { device_id }) => {
+                apply_input_switch(audio, picture, &device_id);
+            }
+            Ok(EngineCommand::SwitchOutput { device_id }) => {
+                apply_output_switch(audio, output_events, picture, &device_id);
+            }
             Err(mpsc::TryRecvError::Empty) => return *running,
             Err(mpsc::TryRecvError::Disconnected) => {
                 *running = false;
@@ -370,13 +437,14 @@ fn poll_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> bool {
 }
 
 fn wait_playback_or_stop(
-    output_events: &crossbeam_channel::Receiver<OutputEvent>,
+    output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
-    audio: &AudioService,
+    audio: &mut AudioService,
+    picture: &mut Picture,
 ) {
     loop {
-        if !poll_running(cmd_rx, running) {
+        if !poll_running(cmd_rx, running, audio, output_events, picture) {
             audio.stop();
             return;
         }
@@ -390,15 +458,29 @@ fn wait_playback_or_stop(
 }
 
 fn apply_input_switch(audio: &mut AudioService, picture: &mut Picture, device_id: &str) {
-    if let Some(info) = find_input(device_id) {
-        audio.switch_input(&info.id);
-        picture.mic = DeviceHealth {
-            label: info.name,
-            ok: true,
-        };
-        picture.publish();
-    } else {
-        tracing::warn!(%device_id, "unknown input device");
+    match find_input(device_id) {
+        Some(info) => match audio.switch_input(&info.id) {
+            Ok(()) => {
+                tracing::info!(name = %info.name, "switched input device");
+                picture.mic = DeviceHealth {
+                    label: info.name,
+                    ok: true,
+                };
+                picture.detail = None;
+                picture.publish();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, %device_id, "input switch failed");
+                picture.detail = Some(format!("mic switch failed: {e}"));
+                picture.mic.ok = false;
+                picture.publish();
+            }
+        },
+        None => {
+            tracing::warn!(%device_id, "unknown input device");
+            picture.detail = Some(format!("unknown microphone id"));
+            picture.publish();
+        }
     }
 }
 
@@ -408,17 +490,31 @@ fn apply_output_switch(
     picture: &mut Picture,
     device_id: &str,
 ) {
-    if let Some(info) = find_output(device_id) {
-        audio.switch_output(&info.id);
-        // Output pipeline rebuilds its event channel — resubscribe.
-        *output_events = audio.subscribe_output();
-        picture.speaker = DeviceHealth {
-            label: info.name,
-            ok: true,
-        };
-        picture.publish();
-    } else {
-        tracing::warn!(%device_id, "unknown output device");
+    match find_output(device_id) {
+        Some(info) => match audio.switch_output(&info.id) {
+            Ok(()) => {
+                tracing::info!(name = %info.name, "switched output device");
+                // Output pipeline rebuilds its event channel — resubscribe.
+                *output_events = audio.subscribe_output();
+                picture.speaker = DeviceHealth {
+                    label: info.name,
+                    ok: true,
+                };
+                picture.detail = None;
+                picture.publish();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, %device_id, "output switch failed");
+                picture.detail = Some(format!("speaker switch failed: {e}"));
+                picture.speaker.ok = false;
+                picture.publish();
+            }
+        },
+        None => {
+            tracing::warn!(%device_id, "unknown output device");
+            picture.detail = Some(format!("unknown speaker id"));
+            picture.publish();
+        }
     }
 }
 

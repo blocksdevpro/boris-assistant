@@ -242,17 +242,23 @@ export function MainWindow() {
         }
       />
 
-      <main className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-6 py-5">
-        {/* ── Hero presence ───────────────────────────────────────────── */}
-        <section
-          className="main-hero relative rounded-2xl px-5 py-5 sm:px-6 sm:py-6"
-          style={
-            {
-              "--hero-accent": tone.accent,
-              "--hero-glow": tone.glow,
-            } as CSSProperties
-          }
-        >
+      {/*
+        Scroll container is block-level (not flex-col). Flex children of a
+        constrained flex parent default to shrink, which let Conversation
+        collapse and Connection paint over the bubbles.
+      */}
+      <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex flex-col gap-5">
+          {/* ── Hero presence ─────────────────────────────────────────── */}
+          <section
+            className="main-hero relative rounded-2xl px-5 py-5 sm:px-6 sm:py-6"
+            style={
+              {
+                "--hero-accent": tone.accent,
+                "--hero-glow": tone.glow,
+              } as CSSProperties
+            }
+          >
           {/* Glow clipped separately so the phase title never loses ascenders */}
           <div aria-hidden className="main-hero-glow absolute inset-0">
             <div
@@ -450,6 +456,7 @@ export function MainWindow() {
               </Field>
             </div>
           </Panel>
+        </div>
         </div>
       </main>
     </div>
@@ -690,11 +697,13 @@ function ModelChip({ label, ok }: { label: string; ok: boolean }) {
 }
 
 function ConversationPanel({ status }: { status: StatusPicture }) {
-  const hasLines = Boolean(status.heard?.trim() || status.said?.trim());
+  const heard = status.heard?.trim() || "";
+  const said = status.said?.trim() || "";
+  const hasLines = Boolean(heard || said);
 
   return (
-    <section className="main-panel flex min-h-[120px] flex-col rounded-2xl">
-      <header className="flex items-center justify-between border-b border-white/[0.05] px-4 py-3.5">
+    <section className="main-panel flex min-h-[120px] flex-col overflow-hidden rounded-2xl">
+      <header className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3.5">
         <div>
           <h2 className="main-type-title">Conversation</h2>
           <p className="main-type-desc mt-0.5">
@@ -702,19 +711,15 @@ function ConversationPanel({ status }: { status: StatusPicture }) {
           </p>
         </div>
       </header>
-      <div className="flex flex-1 flex-col gap-3 px-4 py-4">
+      <div className="flex flex-col gap-3 px-4 py-4">
         {!hasLines ? (
           <p className="main-type-body text-white/32">
             When Boris is listening, your words and his reply show up here.
           </p>
         ) : (
           <>
-            {status.heard?.trim() ? (
-              <Bubble who="You" text={status.heard.trim()} />
-            ) : null}
-            {status.said?.trim() ? (
-              <Bubble who="Boris" text={status.said.trim()} accent />
-            ) : null}
+            {heard ? <Bubble who="You" text={heard} /> : null}
+            {said ? <Bubble who="Boris" text={said} accent /> : null}
           </>
         )}
       </div>
@@ -743,7 +748,7 @@ function Bubble({
       </span>
       <p
         className={cn(
-          "rounded-xl px-3.5 py-2.5 text-[13px] font-normal leading-[1.5] tracking-[-0.005em]",
+          "break-words rounded-xl px-3.5 py-2.5 text-[13px] font-normal leading-[1.5] tracking-[-0.005em]",
           accent
             ? "bg-white/[0.07] text-white/90 ring-1 ring-white/[0.06]"
             : "bg-white/[0.03] text-white/70 ring-1 ring-white/[0.04]",

@@ -61,6 +61,13 @@ impl AgentEngine {
         self.tools.push(tool);
     }
 
+    /// Register many tools (e.g. the default set from [`crate::tools::builtin_tools`]).
+    pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        for tool in tools {
+            self.register_tool(tool);
+        }
+    }
+
     /// Clear conversation to a fresh system-only context (new session).
     ///
     /// Tools and the LLM client are left unchanged.

@@ -176,6 +176,12 @@ fn run(
 
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
     let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
+    boris_agent::tools::register_builtin_tools(
+        &mut agent,
+        boris_agent::tools::BuiltinToolPaths {
+            notes_path: paths::notes_path(),
+        },
+    );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).
     if let Err(e) = paths::ensure_sessions_dir() {

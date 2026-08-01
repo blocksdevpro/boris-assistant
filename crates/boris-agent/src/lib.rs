@@ -11,6 +11,7 @@ pub mod observe;
 pub mod outcome;
 pub mod session;
 pub mod tool;
+pub mod tools;
 
 pub use client::{LlmClient, OpenRouterClient};
 pub use context::{Context, Message, Role};
@@ -22,3 +23,4 @@ pub use session::{
     generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore,
 };
 pub use tool::{Tool, ToolError};
+pub use tools::{builtin_tools, register_builtin_tools, BuiltinToolPaths};

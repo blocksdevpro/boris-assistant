@@ -6,6 +6,8 @@
 //! ~/.boris/
 //!   settings.json        # OpenRouter key + model (desktop)
 //!   sessions/            # voice session meta + JSONL transcripts (agent store)
+//!   memory/
+//!     notes.jsonl        # durable notes for builtin memory tools
 //!   models/
 //!     parakeet/          # STT
 //!     supertone/
@@ -79,6 +81,18 @@ pub fn sessions_dir() -> PathBuf {
 /// Ensure `~/.boris/sessions` exists.
 pub fn ensure_sessions_dir() -> std::io::Result<()> {
     fs::create_dir_all(sessions_dir())
+}
+
+/// Directory for durable agent memory (`~/.boris/memory`).
+///
+/// The notes tool may create this on first write; callers need not pre-create.
+pub fn memory_dir() -> PathBuf {
+    boris_home().join("memory")
+}
+
+/// Append-only notes store for builtin memory tools (`~/.boris/memory/notes.jsonl`).
+pub fn notes_path() -> PathBuf {
+    memory_dir().join("notes.jsonl")
 }
 
 /// Ensure the directory tree exists under `~/.boris/models`.

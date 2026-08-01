@@ -1,4 +1,5 @@
-use std::{path::Path, time::Instant};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use boris_core::{
     error::{Error, Result},
@@ -13,26 +14,40 @@ pub const SUPERTONE_SAMPLE_RATE: u32 = 44_100;
 /// Supertonic Model ID.
 pub const SUPERTONE_MODEL_ID: &str = "Supertone 3";
 
-/// Supertonic Model dir.
-pub const SUPERTONE_MODEL_DIR: &str = "assets/models/supertone/onnx/";
-
-/// Supertonic Voice path.
-pub const SUPERTONE_VOICE_DIR: &str = "assets/models/supertone/voices/";
-
 pub struct SupertoneTts {
     runtime: tokio::runtime::Runtime,
     model: Option<Tts>,
+    model_dir: PathBuf,
+    voice_dir: PathBuf,
     voice: String,
     lang: String,
     params: SynthesisParams,
 }
 
 impl SupertoneTts {
+    /// Relative `assets/` paths (legacy). Prefer [`Self::with_paths`].
     pub fn new() -> Self {
-        Self::with_voice("M4")
+        Self::with_paths(
+            PathBuf::from("assets/models/supertone/onnx"),
+            PathBuf::from("assets/models/supertone/voices"),
+            "M4",
+        )
     }
 
     pub fn with_voice(voice: &str) -> Self {
+        Self::with_paths(
+            PathBuf::from("assets/models/supertone/onnx"),
+            PathBuf::from("assets/models/supertone/voices"),
+            voice,
+        )
+    }
+
+    /// Explicit onnx + voices directories (desktop / `~/.boris`).
+    pub fn with_paths(
+        model_dir: impl Into<PathBuf>,
+        voice_dir: impl Into<PathBuf>,
+        voice: &str,
+    ) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -42,6 +57,8 @@ impl SupertoneTts {
         Self {
             runtime,
             model: None,
+            model_dir: model_dir.into(),
+            voice_dir: voice_dir.into(),
             voice: voice.to_string(),
             lang: "en".into(),
             params: SynthesisParams {
@@ -53,19 +70,16 @@ impl SupertoneTts {
         }
     }
 
-    /// Language code (`en`, `de`, `na`, …). See Supertonic docs for all 31.
     pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
         self.lang = lang.into();
         self
     }
 
-    /// Denoising steps: 5 (fast) … 12 (high quality). Default 8.
     pub fn with_total_step(mut self, steps: usize) -> Self {
         self.params.total_step = steps;
         self
     }
 
-    /// Speech rate: ~0.7 (slow) … 2.0 (fast). Default 1.05.
     pub fn with_speed(mut self, speed: f32) -> Self {
         self.params.speed = speed;
         self
@@ -76,6 +90,10 @@ impl SupertoneTts {
             .as_ref()
             .map(|m| m.sample_rate())
             .unwrap_or(SUPERTONE_SAMPLE_RATE)
+    }
+
+    pub fn model_dir(&self) -> &Path {
+        &self.model_dir
     }
 }
 
@@ -91,17 +109,31 @@ impl TextToSpeech for SupertoneTts {
             return Ok(());
         }
 
+        let model_dir = &self.model_dir;
+        let voice_path = self.voice_dir.join(format!("{}.json", self.voice));
+
+        if !model_dir.is_dir() {
+            return Err(Error::Other(format!(
+                "supertone model dir not found: {}",
+                model_dir.display()
+            )));
+        }
+        if !voice_path.is_file() {
+            return Err(Error::Other(format!(
+                "supertone voice not found: {}",
+                voice_path.display()
+            )));
+        }
+
         tracing::info!(
             model = SUPERTONE_MODEL_ID,
             voice = %self.voice,
-            "Loading Supertone TTS (downloads on first run)…"
+            path = %model_dir.display(),
+            "loading Supertone TTS"
         );
         let t = Instant::now();
 
-        let model_dir = Path::new(SUPERTONE_MODEL_DIR);
-        let voice_path = Path::new(SUPERTONE_VOICE_DIR).join(self.voice.clone() + ".json");
-
-        let model = Tts::from_local(model_dir, voice_path)
+        let model = Tts::from_local(model_dir, &voice_path)
             .map_err(|e| Error::Other(format!("Supertone load failed: {e}")))?;
 
         tracing::info!(
@@ -119,6 +151,10 @@ impl TextToSpeech for SupertoneTts {
     }
 
     fn synthesize(&mut self, text: &str) -> Result<AudioBuffer> {
+        if self.model.is_none() {
+            self.load()?;
+        }
+
         let model = self
             .model
             .as_ref()

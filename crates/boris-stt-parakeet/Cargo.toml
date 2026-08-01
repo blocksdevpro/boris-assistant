@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 boris-core      = { workspace = true }
 boris-inference = { workspace = true }
+tracing         = { workspace = true }
 
 transcribe-rs = { version = "0.3.11", features = ["onnx"] }

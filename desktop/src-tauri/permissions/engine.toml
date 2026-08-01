@@ -1,0 +1,36 @@
+# ACL for app-level Tauri commands (boris-desktop lib.rs).
+
+[[permission]]
+identifier = "allow-get-status"
+description = "Read the latest StatusPicture"
+commands.allow = ["get_status"]
+
+[[permission]]
+identifier = "allow-start-engine"
+description = "Start the voice engine"
+commands.allow = ["start_engine"]
+
+[[permission]]
+identifier = "allow-stop-engine"
+description = "Stop the voice engine"
+commands.allow = ["stop_engine"]
+
+[[permission]]
+identifier = "allow-list-input-devices"
+description = "List microphones"
+commands.allow = ["list_input_devices"]
+
+[[permission]]
+identifier = "allow-list-output-devices"
+description = "List speakers"
+commands.allow = ["list_output_devices"]
+
+[[permission]]
+identifier = "allow-switch-input"
+description = "Switch microphone device"
+commands.allow = ["switch_input"]
+
+[[permission]]
+identifier = "allow-switch-output"
+description = "Switch speaker device"
+commands.allow = ["switch_output"]

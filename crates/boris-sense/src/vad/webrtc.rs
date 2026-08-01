@@ -1,7 +1,9 @@
 use boris_core::AUDIO_TARGET_RATE;
 use webrtc_vad::{SampleRate, Vad as WebVad};
 
-use crate::{f32_to_pcm16_samples, AudioSample, Result, Vad};
+use crate::pcm::f32_to_pcm16_samples;
+use crate::vad::Vad;
+use boris_core::{error::Result, AudioSample};
 
 pub struct WebRtcVad {
     model: WebVad,

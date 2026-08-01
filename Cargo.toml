@@ -3,11 +3,13 @@ resolver = "2"
 members = [
     "crates/boris-core",
     "crates/boris-audio",
+    "crates/boris-sense",
     "crates/boris-inference",
     "crates/boris-agent",
     "crates/boris-stt-parakeet",
     "crates/boris-tts-kokoro",
     "crates/boris-tts-supertone",
+    "crates/boris-pipeline",
     "desktop/src-tauri",
 ]
 
@@ -17,28 +19,20 @@ serde_json        = "1"
 crossbeam-channel = "0.5"
 thiserror         = "2"
 boris-core        = { path = "crates/boris-core" }
+boris-sense       = { path = "crates/boris-sense" }
 boris-audio       = { path = "crates/boris-audio" }
 boris-inference   = { path = "crates/boris-inference" }
+boris-pipeline    = { path = "crates/boris-pipeline" }
 
-# ── Binary ────────────────────────────────────────────────────────────────────
-
+# Root package is intentionally not a voice host. Product entrypoint: boris-desktop.
 [package]
 name    = "boris-assistant"
 version = "0.1.0"
 edition = "2021"
+publish = false
+
+[[bin]]
+name = "boris-assistant"
+path = "src/main.rs"
 
 [dependencies]
-boris-core         = { workspace = true }
-boris-audio        = { workspace = true }
-boris-inference    = { workspace = true }
-boris-agent        = { path = "crates/boris-agent" }
-boris-stt-parakeet  = { path = "crates/boris-stt-parakeet" }
-boris-tts-supertone = { path = "crates/boris-tts-supertone" }
-
-
-hound              = "3.5"
-tracing            = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-crossbeam-channel  = { workspace = true }
-serde_json         = { workspace = true }
-dotenvy            = "0.15"

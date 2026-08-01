@@ -19,7 +19,7 @@ function RestoreIcon({ className }: { className?: string }) {
   );
 }
 
-export function TitleBar() {
+export function TitleBar({ trailing }: { trailing?: ReactNode }) {
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [maximized, setMaximized] = useState(false);
 
@@ -27,14 +27,13 @@ export function TitleBar() {
     try {
       setMaximized(await appWindow.isMaximized());
     } catch {
-      // Not running under Tauri (plain Vite) — ignore.
+      // plain Vite
     }
   }, [appWindow]);
 
   useEffect(() => {
     void refreshMaximized();
     let unlisten: (() => void) | undefined;
-
     void appWindow
       .onResized(() => {
         void refreshMaximized();
@@ -42,36 +41,47 @@ export function TitleBar() {
       .then((fn) => {
         unlisten = fn;
       })
-      .catch(() => {
-        // plain browser
-      });
-
-    return () => {
-      unlisten?.();
-    };
+      .catch(() => {});
+    return () => unlisten?.();
   }, [appWindow, refreshMaximized]);
 
   return (
     <header
       data-tauri-drag-region
-      className="flex h-10 shrink-0 select-none items-center border-b border-border bg-background"
+      className="flex h-11 shrink-0 select-none items-center border-b border-white/[0.06] bg-[#0c0d10]/80 backdrop-blur-xl"
     >
       <div
         data-tauri-drag-region
-        className="flex min-w-0 flex-1 items-center gap-2 px-3"
+        className="flex min-w-0 flex-1 items-center gap-2.5 px-4"
       >
-        <img
-          src="/icons/boris-mark.svg"
-          alt=""
-          className="pointer-events-none size-4 shrink-0"
-          draggable={false}
-        />
-        <span
+        <div
           data-tauri-drag-region
-          className="truncate text-xs font-medium tracking-tight text-foreground"
+          className="flex size-6 items-center justify-center rounded-md bg-white/[0.06] ring-1 ring-white/10"
         >
-          Boris
-        </span>
+          <img
+            src="/icons/boris-mark.svg"
+            alt=""
+            className="pointer-events-none size-3.5 opacity-90"
+            draggable={false}
+          />
+        </div>
+        <div data-tauri-drag-region className="min-w-0">
+          <p
+            data-tauri-drag-region
+            className="truncate text-[13px] font-semibold tracking-tight text-white"
+          >
+            Boris
+          </p>
+          <p
+            data-tauri-drag-region
+            className="truncate text-[10px] tracking-wide text-white/35"
+          >
+            Voice console
+          </p>
+        </div>
+        {trailing ? (
+          <div className="ml-3 hidden min-w-0 sm:block">{trailing}</div>
+        ) : null}
       </div>
 
       <div className="flex h-full shrink-0">
@@ -120,11 +130,11 @@ function TitleBarButton({
       aria-label={ariaLabel}
       onClick={onClick}
       className={cn(
-        "inline-flex h-full w-11 items-center justify-center text-muted-foreground transition-colors",
-        "hover:bg-muted hover:text-foreground",
-        "focus-visible:bg-muted focus-visible:text-foreground focus-visible:outline-none",
+        "inline-flex h-full w-11 items-center justify-center text-white/40 transition-colors",
+        "hover:bg-white/[0.06] hover:text-white",
+        "focus-visible:bg-white/[0.06] focus-visible:text-white focus-visible:outline-none",
         variant === "close" &&
-          "hover:bg-destructive hover:text-white focus-visible:bg-destructive focus-visible:text-white",
+          "hover:bg-red-500/90 hover:text-white focus-visible:bg-red-500/90",
       )}
     >
       {children}

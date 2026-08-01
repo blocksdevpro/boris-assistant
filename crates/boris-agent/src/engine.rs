@@ -1,9 +1,13 @@
+use std::time::Instant;
+
 use serde_json::{json, Value};
+use tracing::{error, info};
 
 use crate::{
     client::LlmClient,
     context::{Context, Role},
     error::AgentError,
+    observe::TurnReport,
     outcome::AgentOutcome,
     tool::Tool,
 };
@@ -12,10 +16,24 @@ use crate::{
 /// if the model keeps requesting tools (or invents unknown ones).
 const MAX_TOOL_ROUNDS: usize = 5;
 
+/// Max characters of user text included in turn-start logs (avoids dumping secrets).
+const LOG_PREVIEW_CHARS: usize = 80;
+
 pub struct AgentEngine {
     client: Box<dyn LlmClient>,
     tools: Vec<Box<dyn Tool>>,
     context: Context,
+}
+
+/// Truncate `s` for logging; appends `…` when cut.
+fn log_preview(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let preview: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
 }
 
 impl AgentEngine {
@@ -37,7 +55,7 @@ impl AgentEngine {
     /// Register a tool the LLM may call during the ReAct-style loop.
     ///
     /// Tool results are fed back into context; they must not speak to the user
-    /// directly. Final user-facing speech always comes from [`chat`]'s
+    /// directly. Final user-facing speech always comes from a turn's
     /// [`AgentOutcome`].
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
@@ -68,8 +86,23 @@ impl AgentEngine {
         json!(list)
     }
 
-    /// Run one user turn: call the LLM, execute any requested tools, repeat
-    /// until the model returns a final plain-text message (no `tool_calls`).
+    /// Back-compat entry used by the pipeline. Delegates to [`Self::run_turn`].
+    ///
+    /// Prefer [`Self::run_turn`] / [`Self::run_turn_with_report`] for new call sites.
+    pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
+        self.run_turn(message)
+    }
+
+    /// Primary turn API: one user message → [`AgentOutcome`].
+    ///
+    /// Emits the same `tracing` events as [`Self::run_turn_with_report`] but
+    /// discards the structured [`TurnReport`].
+    pub fn run_turn(&mut self, user_text: &str) -> Result<AgentOutcome, AgentError> {
+        self.run_turn_with_report(user_text)
+            .map(|(outcome, _report)| outcome)
+    }
+
+    /// Run one user turn and return both the outcome and a [`TurnReport`].
     ///
     /// - Non-empty content → [`AgentOutcome::Speak`] (caller / Session should TTS it).
     /// - Empty content → [`AgentOutcome::Silent`].
@@ -79,22 +112,71 @@ impl AgentEngine {
     ///
     /// This crate never talks to the app event bus; the binary worker maps the
     /// outcome into runtime events.
-    pub fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
+    pub fn run_turn_with_report(
+        &mut self,
+        user_text: &str,
+    ) -> Result<(AgentOutcome, TurnReport), AgentError> {
+        let started = Instant::now();
+        let preview = log_preview(user_text, LOG_PREVIEW_CHARS);
+        info!(
+            model = %self.client.model(),
+            message_len = user_text.len(),
+            preview = %preview,
+            "agent turn start"
+        );
+
         // Snapshot before mutating so prune during a failed turn cannot leave
         // a half-applied user/tool chain in multi-turn context.
         let snapshot = self.context.messages.clone();
-        self.context.push(Role::User, message);
+        self.context.push(Role::User, user_text);
 
-        match self.run_turn() {
-            Ok(outcome) => Ok(outcome),
+        match self.execute_turn_loop() {
+            Ok(TurnLoopResult {
+                outcome,
+                tool_rounds,
+                tools_used,
+            }) => {
+                let duration = started.elapsed();
+                let outcome_label = match &outcome {
+                    AgentOutcome::Speak(_) => "speak",
+                    AgentOutcome::Silent => "silent",
+                };
+                let approx_chars_in = self.context.as_json().to_string().len();
+                let report = TurnReport {
+                    duration,
+                    tool_rounds,
+                    tools_used: tools_used.clone(),
+                    outcome: outcome_label.to_string(),
+                    approx_chars_in,
+                };
+                info!(
+                    outcome = outcome_label,
+                    duration_ms = duration.as_millis() as u64,
+                    tool_rounds,
+                    tools = ?tools_used,
+                    approx_chars_in,
+                    "agent turn end"
+                );
+                Ok((outcome, report))
+            }
             Err(e) => {
                 self.context.messages = snapshot;
+                error!(
+                    error = %e,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "agent turn failed"
+                );
                 Err(e)
             }
         }
     }
 
-    fn run_turn(&mut self) -> Result<AgentOutcome, AgentError> {
+    /// Internal ReAct loop after the user message is already on context.
+    /// Caller owns snapshot / rollback and logging.
+    fn execute_turn_loop(&mut self) -> Result<TurnLoopResult, AgentError> {
+        let mut tools_used: Vec<String> = Vec::new();
+        let mut tool_rounds: u32 = 0;
+
         for round in 0..=MAX_TOOL_ROUNDS {
             let response = self
                 .client
@@ -104,11 +186,12 @@ impl AgentEngine {
             if let Some(calls) = tool_calls.as_array() {
                 if !calls.is_empty() {
                     if round == MAX_TOOL_ROUNDS {
-                        return Err(AgentError::new(format!(
+                        return Err(AgentError::tool_loop(format!(
                             "tool loop exceeded {MAX_TOOL_ROUNDS} rounds without a final reply"
                         )));
                     }
 
+                    tool_rounds += 1;
                     self.context.push(Role::Assistant, response.clone());
 
                     for call in calls {
@@ -124,10 +207,12 @@ impl AgentEngine {
                                 .iter()
                                 .find(|t| t.name() == fn_name)
                                 .ok_or_else(|| {
-                                    AgentError::new(format!(
+                                    AgentError::unknown_tool(format!(
                                         "unknown tool requested by model: {fn_name}"
                                     ))
                                 })?;
+
+                        tools_used.push(fn_name.to_string());
 
                         let result = match tool.execute(args) {
                             Ok(output) => output,
@@ -150,13 +235,25 @@ impl AgentEngine {
                 .trim()
                 .to_string();
             self.context.push(Role::Assistant, reply.clone());
-            if reply.is_empty() {
-                return Ok(AgentOutcome::Silent);
-            }
-            return Ok(AgentOutcome::Speak(reply));
+            let outcome = if reply.is_empty() {
+                AgentOutcome::Silent
+            } else {
+                AgentOutcome::Speak(reply)
+            };
+            return Ok(TurnLoopResult {
+                outcome,
+                tool_rounds,
+                tools_used,
+            });
         }
 
         // Unreachable: loop is `0..=MAX_TOOL_ROUNDS` and tool path returns on last round.
-        Err(AgentError::new("tool loop exhausted"))
+        Err(AgentError::tool_loop("tool loop exhausted"))
     }
+}
+
+struct TurnLoopResult {
+    outcome: AgentOutcome,
+    tool_rounds: u32,
+    tools_used: Vec<String>,
 }

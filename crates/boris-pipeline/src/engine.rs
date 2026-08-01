@@ -294,28 +294,42 @@ fn run(
             continue;
         }
 
-        // Read
+        // Read — load STT once and keep warm across turns (no unload on success).
         picture.set_phase(Phase::Reading);
         if let Err(e) = stt.load() {
             tracing::error!(error = %e, %turn, "stt load failed");
             picture.detail = Some(format!("stt load: {e}"));
+            // Load failure: leave model cold; next turn will retry load.
             picture.set_phase(Phase::Armed);
             continue;
         }
         let text = match stt.transcribe(&clip) {
             Ok(t) => t,
             Err(e) => {
-                tracing::error!(error = %e, %turn, "stt failed");
+                // Keep STT loaded on transcribe error so the model stays warm.
+                tracing::error!(error = %e, %turn, "stt failed (model kept loaded)");
                 picture.detail = Some(format!("stt: {e}"));
-                let _ = stt.unload();
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
-        let _ = stt.unload();
+        tracing::debug!(%turn, "stt kept loaded for next turn");
         picture.heard = Some(text.clone());
         picture.publish();
         tracing::info!(%turn, %text, "heard");
+
+        // Host guard: skip agent on empty / whitespace / junk transcripts.
+        if !transcript_usable(&text) {
+            tracing::warn!(
+                %turn,
+                %text,
+                alnum = text.chars().filter(|c| c.is_alphanumeric()).count(),
+                "skipping empty/junk transcript — not calling agent"
+            );
+            picture.detail = Some("didn't catch that".into());
+            picture.set_phase(Phase::Armed);
+            continue;
+        }
 
         if !poll_running(
             &cmd_rx,
@@ -328,9 +342,9 @@ fn run(
             continue;
         }
 
-        // Think
+        // Think — primary turn API (chat is a thin alias).
         picture.set_phase(Phase::Thinking);
-        let reply = match agent.chat(&text) {
+        let reply = match agent.run_turn(&text) {
             Ok(AgentOutcome::Speak(s)) if !s.trim().is_empty() => s,
             Ok(_) => {
                 tracing::warn!(%turn, "agent produced no speech");
@@ -404,6 +418,14 @@ fn go_off(picture: &mut Picture, audio: &AudioService) {
     picture.engine = EngineState::Off;
     picture.turn = None;
     picture.set_phase(Phase::Off);
+}
+
+/// True when STT text is worth sending to the agent.
+///
+/// Rejects empty/whitespace and transcripts with fewer than 2 alphanumeric
+/// characters (noise, partial wake, accidental clicks).
+fn transcript_usable(text: &str) -> bool {
+    text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
 }
 
 /// Drain host commands; apply device switches immediately. Returns false if stopped.
@@ -560,5 +582,19 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<EngineCommand>();
         assert_send::<EngineHandle>();
+    }
+
+    #[test]
+    fn transcript_usable_rejects_empty_and_junk() {
+        assert!(!transcript_usable(""));
+        assert!(!transcript_usable("   \t\n"));
+        assert!(!transcript_usable("a"));
+        assert!(!transcript_usable("!"));
+        assert!(!transcript_usable("."));
+        assert!(!transcript_usable("a "));
+        assert!(transcript_usable("hi"));
+        assert!(transcript_usable("ok"));
+        assert!(transcript_usable("hello world"));
+        assert!(transcript_usable("  yo  "));
     }
 }

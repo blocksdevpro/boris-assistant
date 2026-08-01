@@ -35,6 +35,8 @@ impl PipelineConfig {
         play_source_rate: u32,
         wakeword_model: Vec<u8>,
     ) -> Self {
+        // Best-effort dev seed from workspace `assets/models` only.
+        // Product path for clean installs is `download::install_models`.
         if let Err(e) = paths::bootstrap_models_if_needed() {
             tracing::warn!(error = %e, "model bootstrap into ~/.boris failed");
         }

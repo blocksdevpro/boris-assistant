@@ -276,9 +276,9 @@ fn run(
         }
 
         // ── Entry: wake OR freeform follow-up (no second wake) ─────────────
+        // Keep last `heard` + `said` while idle so Conversation shows the full
+        // last turn (not just Boris). Clear both only when a new utterance starts.
         let capture_kind = if await_reply {
-            picture.heard = None;
-            // Keep last `said` so UI still shows what Boris asked.
             picture.detail = None;
             picture.turn = None;
             picture.set_phase(Phase::AwaitingReply);
@@ -293,7 +293,12 @@ fn run(
                         continue;
                     }
                     HearBreak::SwitchOutput { device_id } => {
-                        apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                        apply_output_switch(
+                            &mut audio,
+                            &mut output_events,
+                            &mut picture,
+                            &device_id,
+                        );
                         continue;
                     }
                     HearBreak::Stopped if !running => {
@@ -318,12 +323,14 @@ fn run(
             }
             // Consumed for this entry; may re-arm after this turn if Boris asks again.
             await_reply = false;
+            // New freeform utterance — drop previous lines now that we're recording.
+            picture.said = None;
+            picture.heard = None;
             CaptureKind::AwaitReply
         } else {
             follow_up_depth = 0;
-            // Soft landing into Ready: keep last `said` so the caption doesn't
-            // hard-cut when Speaking ends — clear it only after the next wake.
-            picture.heard = None;
+            // Soft landing into Ready: keep last turn text so captions / Conversation
+            // don't hard-cut when Speaking ends — clear only after the next wake.
             picture.detail = None;
             picture.turn = None;
             picture.set_phase(Phase::Armed);
@@ -368,30 +375,30 @@ fn run(
         picture.set_phase(Phase::Hearing);
         tracing::info!(%turn, ?capture_kind, "turn begin — hearing");
 
-        let clip = match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind)
-        {
-            Ok(c) => c,
-            Err(HearBreak::SwitchInput { device_id }) => {
-                apply_input_switch(&mut audio, &mut picture, &device_id);
-                continue;
-            }
-            Err(HearBreak::SwitchOutput { device_id }) => {
-                apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
-                continue;
-            }
-            Err(HearBreak::Stopped) if !running => {
-                go_off(&mut picture, &audio, &store, &mut active_session);
-                continue;
-            }
-            Err(HearBreak::Stopped) => {
-                follow_up_depth = 0;
-                continue;
-            }
-            Err(HearBreak::Disconnected) => {
-                end_session(&store, &mut active_session);
-                return Ok(());
-            }
-        };
+        let clip =
+            match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind) {
+                Ok(c) => c,
+                Err(HearBreak::SwitchInput { device_id }) => {
+                    apply_input_switch(&mut audio, &mut picture, &device_id);
+                    continue;
+                }
+                Err(HearBreak::SwitchOutput { device_id }) => {
+                    apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                    continue;
+                }
+                Err(HearBreak::Stopped) if !running => {
+                    go_off(&mut picture, &audio, &store, &mut active_session);
+                    continue;
+                }
+                Err(HearBreak::Stopped) => {
+                    follow_up_depth = 0;
+                    continue;
+                }
+                Err(HearBreak::Disconnected) => {
+                    end_session(&store, &mut active_session);
+                    return Ok(());
+                }
+            };
 
         if !running {
             go_off(&mut picture, &audio, &store, &mut active_session);
@@ -455,7 +462,9 @@ fn run(
             &mut audio,
             &mut output_events,
             &mut picture,
-        ) {
+        )
+        .still_running()
+        {
             go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
@@ -511,7 +520,9 @@ fn run(
             &mut audio,
             &mut output_events,
             &mut picture,
-        ) {
+        )
+        .still_running()
+        {
             go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
@@ -545,38 +556,52 @@ fn run(
             &mut audio,
             &mut output_events,
             &mut picture,
-        ) {
+        )
+        .still_running()
+        {
             go_off(&mut picture, &audio, &store, &mut active_session);
             continue;
         }
 
         // Queue audio, then flip UI to Talking only when playback has started.
+        // Speaker switch mid-play rebuilds the output pipeline and aborts the job —
+        // we must not hang waiting for Drained on a dead channel (stuck Talking).
         let play_t = std::time::Instant::now();
         while output_events.try_recv().is_ok() {}
         audio.play(pcm);
-        if !wait_playback_started(
+        match wait_playback_started(
             &mut output_events,
             &cmd_rx,
             &mut running,
             &mut audio,
             &mut picture,
         ) {
-            go_off(&mut picture, &audio, &store, &mut active_session);
-            continue;
+            PlaybackWait::Stopped => {
+                go_off(&mut picture, &audio, &store, &mut active_session);
+                continue;
+            }
+            PlaybackWait::Aborted => {
+                tracing::info!(
+                    %turn,
+                    "playback aborted (speaker switch) before/during start — skipping Talking"
+                );
+            }
+            PlaybackWait::Finished => {
+                picture.set_phase(Phase::Talking);
+                tracing::info!(
+                    %turn,
+                    queue_ms = play_t.elapsed().as_millis() as u64,
+                    "playback started — UI Talking"
+                );
+                wait_playback_or_stop(
+                    &mut output_events,
+                    &cmd_rx,
+                    &mut running,
+                    &mut audio,
+                    &mut picture,
+                );
+            }
         }
-        picture.set_phase(Phase::Talking);
-        tracing::info!(
-            %turn,
-            queue_ms = play_t.elapsed().as_millis() as u64,
-            "playback started — UI Talking"
-        );
-        wait_playback_or_stop(
-            &mut output_events,
-            &cmd_rx,
-            &mut running,
-            &mut audio,
-            &mut picture,
-        );
         let play_ms = play_t.elapsed().as_millis() as u64;
 
         if !running {
@@ -638,10 +663,8 @@ fn begin_session(
                 tracing::info!(session_id = %meta.id, "session resumed");
                 match store.load_transcript(&meta.id) {
                     Ok(records) => {
-                        let wire: Vec<(String, serde_json::Value)> = records
-                            .into_iter()
-                            .map(|r| (r.role, r.content))
-                            .collect();
+                        let wire: Vec<(String, serde_json::Value)> =
+                            records.into_iter().map(|r| (r.role, r.content)).collect();
                         let history = Context::messages_from_transcript(&wire);
                         agent.load_session_history(system_prompt, history);
                     }
@@ -709,62 +732,113 @@ fn transcript_usable(text: &str) -> bool {
     text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
 }
 
-/// Drain host commands; apply device switches immediately. Returns false if stopped.
+/// Result of draining host commands once.
+#[derive(Debug, Clone, Copy)]
+struct PollOutcome {
+    /// Engine still on.
+    running: bool,
+    /// Output pipeline was rebuilt — any in-flight Play is gone and its
+    /// Started/Drained events will never arrive on the new channel.
+    output_rebuilt: bool,
+}
+
+impl PollOutcome {
+    fn still_running(self) -> bool {
+        self.running
+    }
+}
+
+/// How a playback wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackWait {
+    /// Natural finish (Started then later Drained), or Started observed.
+    Finished,
+    /// Speaker switched / Flush — do not keep waiting for dead events.
+    Aborted,
+    /// Host stop / disconnect — go Off.
+    Stopped,
+}
+
+/// Drain host commands; apply device switches immediately.
 fn poll_running(
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
     audio: &mut AudioService,
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     picture: &mut Picture,
-) -> bool {
+) -> PollOutcome {
+    let mut output_rebuilt = false;
     loop {
         match cmd_rx.try_recv() {
             Ok(EngineCommand::Stop) | Ok(EngineCommand::Shutdown) => {
                 *running = false;
-                return false;
+                return PollOutcome {
+                    running: false,
+                    output_rebuilt,
+                };
             }
             Ok(EngineCommand::Start) => *running = true,
             Ok(EngineCommand::SwitchInput { device_id }) => {
                 apply_input_switch(audio, picture, &device_id);
             }
             Ok(EngineCommand::SwitchOutput { device_id }) => {
-                apply_output_switch(audio, output_events, picture, &device_id);
+                if apply_output_switch(audio, output_events, picture, &device_id) {
+                    output_rebuilt = true;
+                }
             }
-            Err(mpsc::TryRecvError::Empty) => return *running,
+            Err(mpsc::TryRecvError::Empty) => {
+                return PollOutcome {
+                    running: *running,
+                    output_rebuilt,
+                };
+            }
             Err(mpsc::TryRecvError::Disconnected) => {
                 *running = false;
-                return false;
+                return PollOutcome {
+                    running: false,
+                    output_rebuilt,
+                };
             }
         }
     }
 }
 
 /// Wait until the output worker has resampled + queued samples (about to be audible).
-/// Returns false if the engine should go off (stop / disconnect).
 fn wait_playback_started(
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
     audio: &mut AudioService,
     picture: &mut Picture,
-) -> bool {
+) -> PlaybackWait {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if !poll_running(cmd_rx, running, audio, output_events, picture) {
+        let poll = poll_running(cmd_rx, running, audio, output_events, picture);
+        if !poll.running {
             audio.stop();
-            return false;
+            return PlaybackWait::Stopped;
+        }
+        if poll.output_rebuilt {
+            tracing::info!("speaker switched before playback Started — aborting play wait");
+            return PlaybackWait::Aborted;
         }
         if std::time::Instant::now() > deadline {
             tracing::warn!("playback Started timeout — flipping UI anyway");
-            return *running;
+            return if *running {
+                PlaybackWait::Finished
+            } else {
+                PlaybackWait::Stopped
+            };
         }
         match output_events.recv_timeout(std::time::Duration::from_millis(20)) {
-            Ok(OutputEvent::Started) => return true,
+            Ok(OutputEvent::Started) => return PlaybackWait::Finished,
             // Short clips may drain before we observe Started if we missed it — treat as ok.
-            Ok(OutputEvent::Drained) => return true,
-            Ok(OutputEvent::Cleared) => return *running,
+            Ok(OutputEvent::Drained) => return PlaybackWait::Finished,
+            Ok(OutputEvent::Cleared) => return PlaybackWait::Aborted,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return false,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return PlaybackWait::Stopped;
+            }
         }
     }
 }
@@ -777,8 +851,14 @@ fn wait_playback_or_stop(
     picture: &mut Picture,
 ) {
     loop {
-        if !poll_running(cmd_rx, running, audio, output_events, picture) {
+        let poll = poll_running(cmd_rx, running, audio, output_events, picture);
+        if !poll.running {
             audio.stop();
+            return;
+        }
+        if poll.output_rebuilt {
+            // Old pipeline (and its Drained event) is gone with the device rebuild.
+            tracing::info!("speaker switched mid-playback — ending Talking wait");
             return;
         }
         match output_events.recv_timeout(std::time::Duration::from_millis(40)) {
@@ -818,36 +898,46 @@ fn apply_input_switch(audio: &mut AudioService, picture: &mut Picture, device_id
     }
 }
 
+/// Switch speaker. Returns `true` when the output pipeline was rebuilt
+/// (in-flight playback and its event stream are gone).
 fn apply_output_switch(
     audio: &mut AudioService,
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     picture: &mut Picture,
     device_id: &str,
-) {
+) -> bool {
     match find_output(device_id) {
         Some(info) => match audio.switch_output(&info.id) {
-            Ok(()) => {
-                tracing::info!(name = %info.name, "switched output device");
-                // Output pipeline rebuilds its event channel — resubscribe.
-                *output_events = audio.subscribe_output();
+            Ok(rebuilt) => {
+                if rebuilt {
+                    tracing::info!(name = %info.name, "switched output device");
+                    // Pipeline rebuild drops in-flight Play + its event stream.
+                    // Waiters must treat this as playback abort (`output_rebuilt`).
+                    *output_events = audio.subscribe_output();
+                } else {
+                    tracing::debug!(name = %info.name, "output already selected");
+                }
                 picture.speaker = DeviceHealth {
                     label: info.name,
                     ok: true,
                 };
                 picture.detail = None;
                 picture.publish();
+                rebuilt
             }
             Err(e) => {
                 tracing::error!(error = %e, %device_id, "output switch failed");
                 picture.detail = Some(format!("speaker switch failed: {e}"));
                 picture.speaker.ok = false;
                 picture.publish();
+                false
             }
         },
         None => {
             tracing::warn!(%device_id, "unknown output device");
             picture.detail = Some(format!("unknown speaker id"));
             picture.publish();
+            false
         }
     }
 }

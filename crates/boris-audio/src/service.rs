@@ -176,10 +176,13 @@ impl AudioService {
     }
 
     /// Switch playback to `id`. Does **not** silently fall back to default.
-    pub fn switch_output(&mut self, id: &DeviceId) -> Result<(), String> {
+    ///
+    /// Returns `Ok(true)` when the pipeline was rebuilt (any in-flight Play is
+    /// dropped). Returns `Ok(false)` when `id` was already selected.
+    pub fn switch_output(&mut self, id: &DeviceId) -> Result<bool, String> {
         if &self.output_pipeline.device_id == id {
             tracing::debug!(?id, "output already selected");
-            return Ok(());
+            return Ok(false);
         }
         let device = Self::find_output_device(id).ok_or_else(|| {
             format!("output device not found (id={id:?}) — unplugged or no longer available")
@@ -205,7 +208,7 @@ impl AudioService {
         self.output_command_channel = output_command_channel;
         self.output_event_channel = output_event_channel;
         self.output_pipeline = output_pipeline;
-        Ok(())
+        Ok(true)
     }
 
     pub fn play(&self, audio: AudioBuffer) {

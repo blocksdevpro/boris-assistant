@@ -61,7 +61,7 @@ export function TitleBar({ trailing }: { trailing?: ReactNode }) {
           <img
             src="/icons/boris-mark.svg"
             alt=""
-            className="pointer-events-none size-3.5 opacity-90"
+            className="pointer-events-none size-3.5"
             draggable={false}
           />
         </div>

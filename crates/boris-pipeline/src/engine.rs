@@ -1,7 +1,8 @@
-//! Single-threaded sequential voice engine for desktop.
+//! Voice engine for desktop.
 //!
-//! One background thread owns audio + models and walks a turn top-to-bottom.
-//! Phase updates are for the UI only — control flow is ordinary `?` / `match`.
+//! One engine thread owns the turn loop. STT/TTS load one step ahead on short
+//! helper threads (STT while capturing, TTS while the agent thinks) so the UI
+//! never shows "loading model" chrome — only real phases.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -227,26 +228,13 @@ fn run(
             match cmd_rx.recv() {
                 Ok(EngineCommand::Start) => {
                     running = true;
-                    picture.engine = EngineState::Starting;
-                    picture.detail = Some("warming models…".into());
                     picture.heard = None;
                     picture.said = None;
                     picture.turn = None;
-                    picture.publish();
+                    picture.detail = None;
 
-                    // Warm STT/TTS on Start so the first turn is not paying load cost.
-                    let warm_t = std::time::Instant::now();
-                    if let Err(e) = stt.load() {
-                        tracing::warn!(error = %e, "STT warm-load failed (will retry on first turn)");
-                    }
-                    if let Err(e) = tts.load() {
-                        tracing::warn!(error = %e, "TTS warm-load failed (will retry on first turn)");
-                    }
-                    tracing::info!(
-                        warm_ms = warm_t.elapsed().as_millis() as u64,
-                        "models warm-load finished"
-                    );
-
+                    // STT/TTS stay unloaded until a turn needs them (preloaded one
+                    // step ahead during capture / agent — never kept for Armed idle).
                     begin_session(
                         &store,
                         &mut active_session,
@@ -254,13 +242,13 @@ fn run(
                         &config.system_prompt,
                     );
                     picture.engine = EngineState::On;
-                    picture.detail = None;
                     picture.set_phase(Phase::Armed);
-                    tracing::info!("engine started");
+                    tracing::info!("engine started (STT/TTS on-demand, preload one step ahead)");
                 }
                 Ok(EngineCommand::Stop) => continue,
                 Ok(EngineCommand::Shutdown) | Err(_) => {
                     end_session(&store, &mut active_session);
+                    release_voice_models(stt.as_mut(), tts.as_mut(), "shutdown");
                     picture.engine = EngineState::Off;
                     picture.set_phase(Phase::Off);
                     return Ok(());
@@ -302,7 +290,14 @@ fn run(
                         continue;
                     }
                     HearBreak::Stopped if !running => {
-                        go_off(&mut picture, &audio, &store, &mut active_session);
+                        go_off(
+                            &mut picture,
+                            &audio,
+                            &store,
+                            &mut active_session,
+                            stt.as_mut(),
+                            tts.as_mut(),
+                        );
                         continue;
                     }
                     HearBreak::Stopped => {
@@ -312,13 +307,21 @@ fn run(
                     }
                     HearBreak::Disconnected => {
                         end_session(&store, &mut active_session);
+                        release_voice_models(stt.as_mut(), tts.as_mut(), "disconnected");
                         picture.set_phase(Phase::Off);
                         return Ok(());
                     }
                 }
             }
             if !running {
-                go_off(&mut picture, &audio, &store, &mut active_session);
+                go_off(
+                    &mut picture,
+                    &audio,
+                    &store,
+                    &mut active_session,
+                    stt.as_mut(),
+                    tts.as_mut(),
+                );
                 continue;
             }
             // Consumed for this entry; may re-arm after this turn if Boris asks again.
@@ -346,19 +349,34 @@ fn run(
                     continue;
                 }
                 Err(HearBreak::Stopped) if !running => {
-                    go_off(&mut picture, &audio, &store, &mut active_session);
+                    go_off(
+                        &mut picture,
+                        &audio,
+                        &store,
+                        &mut active_session,
+                        stt.as_mut(),
+                        tts.as_mut(),
+                    );
                     continue;
                 }
                 Err(HearBreak::Stopped) => continue,
                 Err(HearBreak::Disconnected) => {
                     end_session(&store, &mut active_session);
+                    release_voice_models(stt.as_mut(), tts.as_mut(), "disconnected");
                     picture.set_phase(Phase::Off);
                     return Ok(());
                 }
             }
 
             if !running {
-                go_off(&mut picture, &audio, &store, &mut active_session);
+                go_off(
+                    &mut picture,
+                    &audio,
+                    &store,
+                    &mut active_session,
+                    stt.as_mut(),
+                    tts.as_mut(),
+                );
                 continue;
             }
             // New user turn — drop previous line now that we're listening again.
@@ -372,59 +390,85 @@ fn run(
         next_turn = next_turn.saturating_add(1);
         picture.turn = Some(turn);
         // Hearing only while the mic is actually recording (not during STT).
+        // Preload STT in parallel — should be ready by the time capture ends.
         picture.set_phase(Phase::Hearing);
-        tracing::info!(%turn, ?capture_kind, "turn begin — hearing");
+        tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
 
-        let clip =
-            match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind) {
-                Ok(c) => c,
-                Err(HearBreak::SwitchInput { device_id }) => {
-                    apply_input_switch(&mut audio, &mut picture, &device_id);
-                    continue;
-                }
-                Err(HearBreak::SwitchOutput { device_id }) => {
-                    apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
-                    continue;
-                }
-                Err(HearBreak::Stopped) if !running => {
-                    go_off(&mut picture, &audio, &store, &mut active_session);
-                    continue;
-                }
-                Err(HearBreak::Stopped) => {
-                    follow_up_depth = 0;
-                    continue;
-                }
-                Err(HearBreak::Disconnected) => {
-                    end_session(&store, &mut active_session);
-                    return Ok(());
-                }
-            };
+        let stt_job = spawn_stt_load(stt);
+        let capture =
+            hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind);
+        let (stt_owned, stt_load) = join_stt_load(stt_job);
+        stt = stt_owned;
+
+        let clip = match capture {
+            Ok(c) => c,
+            Err(HearBreak::SwitchInput { device_id }) => {
+                apply_input_switch(&mut audio, &mut picture, &device_id);
+                continue;
+            }
+            Err(HearBreak::SwitchOutput { device_id }) => {
+                apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                continue;
+            }
+            Err(HearBreak::Stopped) if !running => {
+                go_off(
+                    &mut picture,
+                    &audio,
+                    &store,
+                    &mut active_session,
+                    stt.as_mut(),
+                    tts.as_mut(),
+                );
+                continue;
+            }
+            Err(HearBreak::Stopped) => {
+                follow_up_depth = 0;
+                continue;
+            }
+            Err(HearBreak::Disconnected) => {
+                end_session(&store, &mut active_session);
+                release_voice_models(stt.as_mut(), tts.as_mut(), "disconnected");
+                return Ok(());
+            }
+        };
 
         if !running {
-            go_off(&mut picture, &audio, &store, &mut active_session);
+            go_off(
+                &mut picture,
+                &audio,
+                &store,
+                &mut active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
+            continue;
+        }
+
+        if let Err(e) = stt_load {
+            tracing::error!(error = %e, %turn, "stt load failed");
+            let _ = stt.unload();
+            picture.detail = Some(format!("stt load: {e}"));
+            follow_up_depth = 0;
+            picture.set_phase(Phase::Armed);
             continue;
         }
 
         // Leave Hearing as soon as the mic stops — STT is "Reading", not listening.
         picture.set_phase(Phase::Reading);
         let stt_t = std::time::Instant::now();
-        if let Err(e) = stt.load() {
-            tracing::error!(error = %e, %turn, "stt load failed");
-            picture.detail = Some(format!("stt load: {e}"));
-            follow_up_depth = 0;
-            picture.set_phase(Phase::Armed);
-            continue;
-        }
         let text = match stt.transcribe(&clip) {
             Ok(t) => t,
             Err(e) => {
-                tracing::error!(error = %e, %turn, "stt failed (model kept loaded)");
+                tracing::error!(error = %e, %turn, "stt failed");
+                let _ = stt.unload();
                 picture.detail = Some(format!("stt: {e}"));
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
+        // Free ~600MB before agent; TTS will preload while the agent runs.
+        unload_stt(stt.as_mut(), turn);
         let stt_ms = stt_t.elapsed().as_millis() as u64;
         tracing::info!(
             %turn,
@@ -465,17 +509,30 @@ fn run(
         )
         .still_running()
         {
-            go_off(&mut picture, &audio, &store, &mut active_session);
+            go_off(
+                &mut picture,
+                &audio,
+                &store,
+                &mut active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
             continue;
         }
 
-        // Think
+        // Think + preload TTS in parallel (one step ahead of synthesize).
         picture.set_phase(Phase::Thinking);
         let agent_t = std::time::Instant::now();
-        let outcome = match agent.run_turn(&text) {
+        let tts_job = spawn_tts_load(tts);
+        let outcome = agent.run_turn(&text);
+        let (tts_owned, tts_load) = join_tts_load(tts_job);
+        tts = tts_owned;
+
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
+                let _ = tts.unload();
                 picture.detail = Some(format!("agent: {e}"));
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
@@ -491,6 +548,7 @@ fn run(
             }
             AgentOutcome::Speak { .. } | AgentOutcome::Silent => {
                 tracing::warn!(%turn, "agent produced no speech");
+                let _ = tts.unload();
                 picture.detail = Some("empty agent reply".into());
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
@@ -523,29 +581,41 @@ fn run(
         )
         .still_running()
         {
-            go_off(&mut picture, &audio, &store, &mut active_session);
+            go_off(
+                &mut picture,
+                &audio,
+                &store,
+                &mut active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
             continue;
         }
 
-        // Synthesize under Thinking so UI doesn't say "Speaking" with silence.
-        let tts_t = std::time::Instant::now();
-        if let Err(e) = tts.load() {
+        if let Err(e) = tts_load {
             tracing::error!(error = %e, %turn, "tts load failed");
+            let _ = tts.unload();
             picture.detail = Some(format!("tts load: {e}"));
             follow_up_depth = 0;
             picture.set_phase(Phase::Armed);
             continue;
         }
+
+        // Synthesize under Thinking so UI doesn't say "Speaking" with silence.
+        let tts_t = std::time::Instant::now();
         let pcm = match tts.synthesize(&reply) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "tts failed");
+                let _ = tts.unload();
                 picture.detail = Some(format!("tts: {e}"));
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
+        // Free TTS during playback; optionally preload STT for freeform follow-up.
+        unload_tts(tts.as_mut(), turn);
         let tts_ms = tts_t.elapsed().as_millis() as u64;
         let play_samples = pcm.len();
         tracing::info!(%turn, tts_ms, play_samples, "tts synth done");
@@ -559,9 +629,27 @@ fn run(
         )
         .still_running()
         {
-            go_off(&mut picture, &audio, &store, &mut active_session);
+            go_off(
+                &mut picture,
+                &audio,
+                &store,
+                &mut active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
             continue;
         }
+
+        // Decide follow-up before playback so we can preload STT while speaking.
+        let will_await = expect_reply && follow_up_depth < MAX_FOLLOW_UPS;
+        // Move STT into a load job (or keep it in the Option) so the compiler
+        // always sees a single reclaim path after playback.
+        let mut stt_slot: Option<SttBox> = Some(stt);
+        let mut stt_follow_job = if will_await {
+            Some(spawn_stt_load(stt_slot.take().expect("stt")))
+        } else {
+            None
+        };
 
         // Queue audio, then flip UI to Talking only when playback has started.
         // Speaker switch mid-play rebuilds the output pipeline and aborts the job —
@@ -577,7 +665,15 @@ fn run(
             &mut picture,
         ) {
             PlaybackWait::Stopped => {
-                go_off(&mut picture, &audio, &store, &mut active_session);
+                stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
+                go_off(
+                    &mut picture,
+                    &audio,
+                    &store,
+                    &mut active_session,
+                    stt.as_mut(),
+                    tts.as_mut(),
+                );
                 continue;
             }
             PlaybackWait::Aborted => {
@@ -604,13 +700,22 @@ fn run(
         }
         let play_ms = play_t.elapsed().as_millis() as u64;
 
+        stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
+
         if !running {
-            go_off(&mut picture, &audio, &store, &mut active_session);
+            go_off(
+                &mut picture,
+                &audio,
+                &store,
+                &mut active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
             continue;
         }
 
         // Freeform follow-up: any speakable answer (not yes/no only). Cap chain depth.
-        if expect_reply && follow_up_depth < MAX_FOLLOW_UPS {
+        if will_await {
             follow_up_depth = follow_up_depth.saturating_add(1);
             await_reply = true;
             tracing::info!(
@@ -624,6 +729,9 @@ fn run(
             }
             follow_up_depth = 0;
             await_reply = false;
+            // No follow-up — make sure heavy models are gone for Armed idle.
+            unload_stt(stt.as_mut(), turn);
+            unload_tts(tts.as_mut(), turn);
         }
 
         tracing::info!(
@@ -716,12 +824,131 @@ fn go_off(
     audio: &AudioService,
     store: &SessionStore,
     active_session: &mut Option<SessionId>,
+    stt: &mut dyn SpeechToText,
+    tts: &mut dyn TextToSpeech,
 ) {
     end_session(store, active_session);
     audio.stop();
+    release_voice_models(stt, tts, "engine stop");
     picture.engine = EngineState::Off;
     picture.turn = None;
     picture.set_phase(Phase::Off);
+}
+
+/// Drop STT + TTS weights from RAM. Safe if already unloaded.
+fn release_voice_models(stt: &mut dyn SpeechToText, tts: &mut dyn TextToSpeech, reason: &str) {
+    if let Err(e) = stt.unload() {
+        tracing::warn!(error = %e, %reason, "stt unload failed");
+    }
+    if let Err(e) = tts.unload() {
+        tracing::warn!(error = %e, %reason, "tts unload failed");
+    }
+    tracing::info!(%reason, "STT/TTS released (idle RAM)");
+}
+
+type SttBox = Box<dyn SpeechToText>;
+type TtsBox = Box<dyn TextToSpeech>;
+
+/// Load STT on a helper thread (overlaps with mic capture / playback).
+fn spawn_stt_load(mut stt: SttBox) -> JoinHandle<(SttBox, Result<(), String>)> {
+    thread::Builder::new()
+        .name("boris-stt-load".into())
+        .spawn(move || {
+            let t = std::time::Instant::now();
+            let r = stt.load().map_err(|e| e.to_string());
+            if r.is_ok() {
+                tracing::info!(ms = t.elapsed().as_millis() as u64, "stt preload ready");
+            }
+            (stt, r)
+        })
+        .expect("spawn stt load thread")
+}
+
+fn join_stt_load(job: JoinHandle<(SttBox, Result<(), String>)>) -> (SttBox, Result<(), String>) {
+    job.join().unwrap_or_else(|_| {
+        tracing::error!("stt load thread panicked");
+        // Recover with a no-op stub so the engine can still stop cleanly.
+        // Real STT is lost only if the load thread panicked mid-flight.
+        (
+            Box::new(PanicLostStt),
+            Err("stt load thread panicked".into()),
+        )
+    })
+}
+
+/// Reclaim STT after an optional follow-up preload job (or the idle slot).
+fn reclaim_stt_slot(
+    slot: &mut Option<SttBox>,
+    job: &mut Option<JoinHandle<(SttBox, Result<(), String>)>>,
+) -> SttBox {
+    if let Some(j) = job.take() {
+        let (stt, load_r) = join_stt_load(j);
+        if let Err(e) = load_r {
+            tracing::warn!(error = %e, "stt follow-up preload failed (will retry on next turn)");
+        }
+        return stt;
+    }
+    slot.take().expect("stt slot empty")
+}
+
+/// Load TTS on a helper thread (overlaps with agent thinking).
+fn spawn_tts_load(mut tts: TtsBox) -> JoinHandle<(TtsBox, Result<(), String>)> {
+    thread::Builder::new()
+        .name("boris-tts-load".into())
+        .spawn(move || {
+            let t = std::time::Instant::now();
+            let r = tts.load().map_err(|e| e.to_string());
+            if r.is_ok() {
+                tracing::info!(ms = t.elapsed().as_millis() as u64, "tts preload ready");
+            }
+            (tts, r)
+        })
+        .expect("spawn tts load thread")
+}
+
+fn join_tts_load(job: JoinHandle<(TtsBox, Result<(), String>)>) -> (TtsBox, Result<(), String>) {
+    job.join().unwrap_or_else(|_| {
+        tracing::error!("tts load thread panicked");
+        (
+            Box::new(PanicLostTts),
+            Err("tts load thread panicked".into()),
+        )
+    })
+}
+
+fn unload_stt(stt: &mut dyn SpeechToText, turn: TurnId) {
+    if let Err(e) = stt.unload() {
+        tracing::warn!(error = %e, %turn, "stt unload failed");
+    } else {
+        tracing::debug!(%turn, "stt unloaded");
+    }
+}
+
+fn unload_tts(tts: &mut dyn TextToSpeech, turn: TurnId) {
+    if let Err(e) = tts.unload() {
+        tracing::warn!(error = %e, %turn, "tts unload failed");
+    } else {
+        tracing::debug!(%turn, "tts unloaded");
+    }
+}
+
+/// Placeholder if the STT load thread panics (should never happen in practice).
+struct PanicLostStt;
+impl SpeechToText for PanicLostStt {
+    fn transcribe(&mut self, _: &[boris_core::AudioSample]) -> boris_core::error::Result<String> {
+        Err(boris_core::error::Error::Other(
+            "STT model lost after load-thread panic".into(),
+        ))
+    }
+}
+
+struct PanicLostTts;
+impl TextToSpeech for PanicLostTts {
+    fn synthesize(&mut self, _: &str) -> boris_core::error::Result<boris_core::AudioBuffer> {
+        Err(boris_core::error::Error::Other(
+            "TTS model lost after load-thread panic".into(),
+        ))
+    }
 }
 
 /// True when STT text is worth sending to the agent.

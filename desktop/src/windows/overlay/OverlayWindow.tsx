@@ -11,18 +11,26 @@ const soft = [0.22, 1, 0.36, 1] as const;
 /** Slightly longer for Speaking → Ready so idle doesn't snap. */
 const softIdle = [0.16, 1, 0.3, 1] as const;
 
+/** Shared duration scale for phase chrome. */
+const DUR = {
+  fast: 0.28,
+  base: 0.42,
+  slow: 0.55,
+  idle: 0.7,
+} as const;
+
 const fadeSwap = {
-  initial: { opacity: 0, y: 4, filter: "blur(2px)" },
+  initial: { opacity: 0, y: 3, filter: "blur(2px)" },
   animate: { opacity: 1, y: 0, filter: "blur(0px)" },
-  exit: { opacity: 0, y: -3, filter: "blur(2px)" },
-  transition: { duration: 0.42, ease: soft },
+  exit: { opacity: 0, y: -2, filter: "blur(2px)" },
+  transition: { duration: DUR.base, ease: soft },
 };
 
 /**
  * OVERLAY — always-on-top voice island.
  *
- * Phase / caption / accent transitions use Framer Motion for subtle crossfades
- * and layout animation. Tauri transparency rules still apply.
+ * Every phase / caption / accent / size change is eased via Framer Motion.
+ * Avoid remount keys that churn on streaming text (that causes visible jumps).
  */
 export function OverlayWindow() {
   const status = useStatus();
@@ -31,10 +39,10 @@ export function OverlayWindow() {
     [status.phase, status.engine],
   );
   const caption = pickCaption(status);
-  const phaseKey = `${status.engine}-${status.phase}`;
   const isReady =
     status.engine === "On" &&
     (status.phase === "Armed" || status.phase === "Quiet");
+  const subtitle = pickSubtitle(status, tone, caption);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -67,8 +75,9 @@ export function OverlayWindow() {
             `,
           }}
           transition={{
-            duration: isReady ? 0.7 : 0.5,
+            duration: isReady ? DUR.idle : DUR.slow,
             ease: isReady ? softIdle : soft,
+            layout: { duration: DUR.slow, ease: softIdle },
           }}
         >
           {/* ── Primary row ─────────────────────────────────────────── */}
@@ -88,19 +97,30 @@ export function OverlayWindow() {
                 className="flex h-[1.125rem] items-center gap-2"
               >
                 <div className="relative min-w-0 flex-1 overflow-hidden">
-                  <AnimatePresence mode="wait" initial={false}>
+                  {/* Crossfade labels in-place (no empty gap from mode="wait") */}
+                  <AnimatePresence mode="sync" initial={false}>
                     <motion.span
-                      key={`label-${phaseKey}-${tone.label}`}
+                      key={`label-${tone.label}`}
                       data-tauri-drag-region
-                      className="block truncate text-[13px] font-semibold leading-[1.125rem] tracking-tight text-white"
+                      className="absolute inset-x-0 top-0 block truncate text-[13px] font-semibold leading-[1.125rem] tracking-tight text-white"
                       initial={fadeSwap.initial}
                       animate={fadeSwap.animate}
                       exit={fadeSwap.exit}
-                      transition={fadeSwap.transition}
+                      transition={{
+                        duration: isReady ? DUR.slow : DUR.base,
+                        ease: isReady ? softIdle : soft,
+                      }}
                     >
                       {tone.label}
                     </motion.span>
                   </AnimatePresence>
+                  {/* Spacer so the absolute label still occupies flow height */}
+                  <span
+                    aria-hidden
+                    className="invisible block truncate text-[13px] font-semibold leading-[1.125rem]"
+                  >
+                    {tone.label}
+                  </span>
                 </div>
 
                 <AnimatePresence initial={false}>
@@ -109,10 +129,10 @@ export function OverlayWindow() {
                       key={`turn-${status.turn}`}
                       data-tauri-drag-region
                       className="shrink-0 font-mono text-[10px] tabular-nums text-white/35"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.3, ease: soft }}
+                      initial={{ opacity: 0, scale: 0.92 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.92 }}
+                      transition={{ duration: DUR.base, ease: soft }}
                     >
                       #{status.turn}
                     </motion.span>
@@ -121,37 +141,27 @@ export function OverlayWindow() {
               </div>
 
               <div className="relative h-[1rem] overflow-hidden">
-                <AnimatePresence mode="wait" initial={false}>
+                {/* Key on the visible string only — phase changes that keep
+                    the same subtitle no longer remount and jump. */}
+                <AnimatePresence mode="sync" initial={false}>
                   <motion.p
-                    key={
-                      caption
-                        ? `sub-${caption.kind}-${status.phase}`
-                        : `hint-${phaseKey}-${tone.hint}`
-                    }
+                    key={`sub-${subtitle}`}
                     data-tauri-drag-region
-                    className={cn(
-                      "truncate text-[11px] leading-4",
-                      caption ? "text-white/30" : "text-white/45",
-                    )}
+                    className="absolute inset-x-0 top-0 truncate text-[11px] leading-4"
                     initial={fadeSwap.initial}
-                    animate={fadeSwap.animate}
+                    animate={{
+                      ...fadeSwap.animate,
+                      color: caption
+                        ? "rgba(255,255,255,0.3)"
+                        : "rgba(255,255,255,0.45)",
+                    }}
                     exit={fadeSwap.exit}
                     transition={{
-                      ...fadeSwap.transition,
-                      duration: isReady ? 0.5 : 0.42,
+                      duration: isReady ? DUR.slow : DUR.base,
+                      ease: isReady ? softIdle : soft,
                     }}
                   >
-                    {caption
-                      ? caption.kind === "error"
-                        ? "Something came up"
-                        : caption.kind === "said"
-                          ? status.phase === "Armed" || status.phase === "Quiet"
-                            ? "Say the wake word"
-                            : status.phase === "AwaitingReply"
-                              ? "Your turn to answer"
-                              : "Speaking…"
-                          : "Listening…"
-                      : tone.hint}
+                    {subtitle}
                   </motion.p>
                 </AnimatePresence>
               </div>
@@ -161,20 +171,17 @@ export function OverlayWindow() {
           </div>
 
           {/* ── Caption (You / Boris) ─────────────────────────────────
-              Stable key on said-text so Speaking → Ready keeps the same node
-              (no remount jump); only phase chrome eases to Ready. */}
-          <AnimatePresence initial={false} mode="sync">
+              Stable keys by *kind* so streaming text updates in place
+              (no remount mid-utterance). Kind swaps crossfade; height
+              and ready-state chrome ease instead of snapping. */}
+          <AnimatePresence initial={false} mode="popLayout">
             {caption ? (
               <motion.div
-                key={
-                  caption.kind === "said"
-                    ? `caption-said-${caption.text.slice(0, 80)}`
-                    : `caption-${caption.kind}-${caption.text.slice(0, 64)}`
-                }
+                key={`caption-${caption.kind}`}
                 data-tauri-drag-region
                 layout
                 className="overlay-caption min-w-0 max-w-[320px] overflow-hidden rounded-xl px-2.5 py-1.5"
-                initial={{ opacity: 0, height: 0, marginTop: 0, y: 6 }}
+                initial={{ opacity: 0, height: 0, marginTop: 0, y: 8 }}
                 animate={{
                   opacity: isReady && caption.kind === "said" ? 0.72 : 1,
                   height: "auto",
@@ -185,48 +192,99 @@ export function OverlayWindow() {
                   opacity: 0,
                   height: 0,
                   marginTop: 0,
-                  y: -3,
+                  y: -4,
                   transition: {
-                    height: { duration: 0.55, ease: softIdle },
-                    opacity: { duration: 0.45, ease: softIdle },
-                    marginTop: { duration: 0.55, ease: softIdle },
-                    y: { duration: 0.4, ease: softIdle },
+                    height: { duration: DUR.slow, ease: softIdle },
+                    opacity: { duration: DUR.base, ease: softIdle },
+                    marginTop: { duration: DUR.slow, ease: softIdle },
+                    y: { duration: DUR.base, ease: softIdle },
                   },
                 }}
                 transition={{
-                  height: { duration: 0.45, ease: soft },
-                  opacity: { duration: 0.5, ease: isReady ? softIdle : soft },
-                  marginTop: { duration: 0.45, ease: soft },
-                  y: { duration: 0.4, ease: soft },
-                  layout: { duration: 0.5, ease: softIdle },
+                  height: { duration: DUR.slow, ease: soft },
+                  opacity: {
+                    duration: isReady ? DUR.slow : DUR.base,
+                    ease: isReady ? softIdle : soft,
+                  },
+                  marginTop: { duration: DUR.slow, ease: soft },
+                  y: { duration: DUR.base, ease: soft },
+                  layout: { duration: DUR.slow, ease: softIdle },
                 }}
               >
-                <p
-                  data-tauri-drag-region
-                  className={cn(
-                    "line-clamp-2 text-[12px] leading-snug tracking-tight",
-                    caption.kind === "error"
-                      ? "text-red-300/95"
-                      : caption.kind === "said"
-                        ? isReady
-                          ? "text-white/55"
-                          : "text-white/80"
-                        : "text-white/65",
-                  )}
-                >
-                  {caption.kind !== "error" ? (
-                    <span className="mr-1.5 text-[10px] font-medium uppercase tracking-wider text-white/30">
-                      {caption.kind === "said" ? "Boris" : "You"}
-                    </span>
-                  ) : null}
-                  {caption.text}
-                </p>
+                <CaptionBody
+                  caption={caption}
+                  isReady={isReady}
+                  turnKey={status.turn ?? "none"}
+                />
               </motion.div>
             ) : null}
           </AnimatePresence>
         </motion.div>
       </LayoutGroup>
     </div>
+  );
+}
+
+function CaptionBody({
+  caption,
+  isReady,
+  turnKey,
+}: {
+  caption: Caption;
+  isReady: boolean;
+  turnKey: string;
+}) {
+  const textColor =
+    caption.kind === "error"
+      ? "rgba(252, 165, 165, 0.95)"
+      : caption.kind === "said"
+        ? isReady
+          ? "rgba(255,255,255,0.55)"
+          : "rgba(255,255,255,0.8)"
+        : "rgba(255,255,255,0.65)";
+
+  // Stable identity per turn for streaming heard text (no flash on partials
+  // or Hearing→Reading). Said keys on content so a brand-new line soft-fades.
+  const textKey =
+    caption.kind === "error"
+      ? `err-${caption.text.slice(0, 48)}`
+      : caption.kind === "said"
+        ? `said-${caption.text.slice(0, 96)}`
+        : `heard-${turnKey}`;
+
+  return (
+    <motion.p
+      data-tauri-drag-region
+      className="line-clamp-2 text-[12px] leading-snug tracking-tight"
+      animate={{ color: textColor }}
+      transition={{
+        duration: isReady ? DUR.idle : DUR.base,
+        ease: isReady ? softIdle : soft,
+      }}
+    >
+      {caption.kind !== "error" ? (
+        <motion.span
+          className="mr-1.5 text-[10px] font-medium uppercase tracking-wider"
+          animate={{ color: "rgba(255,255,255,0.3)" }}
+          transition={{ duration: DUR.base, ease: soft }}
+        >
+          {caption.kind === "said" ? "Boris" : "You"}
+        </motion.span>
+      ) : null}
+      {/* Soft crossfade when the utterance itself is replaced, without
+          remounting the outer card (height/layout stay continuous). */}
+      <AnimatePresence mode="sync" initial={false}>
+        <motion.span
+          key={textKey}
+          initial={{ opacity: 0.35 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: DUR.fast, ease: soft }}
+        >
+          {caption.text}
+        </motion.span>
+      </AnimatePresence>
+    </motion.p>
   );
 }
 
@@ -243,54 +301,80 @@ function PresenceOrb({
       className="relative flex size-9 shrink-0 items-center justify-center"
       aria-hidden
     >
+      {/* Outer ring — wrapper fades enter/exit; inner runs CSS loop so
+          Framer opacity and keyframe opacity never fight. Accent eases. */}
       <AnimatePresence initial={false}>
         {motionKind !== "none" ? (
           <motion.span
             key={`ring-a-${motionKind}`}
-            className={cn(
-              "absolute inset-0 rounded-full border-[1.5px]",
-              motionKind === "listen" && "overlay-ring-listen",
-              motionKind === "think" && "overlay-ring-think",
-              motionKind === "speak" && "overlay-ring-speak",
-              motionKind === "breathe" && "overlay-ring-breathe",
-            )}
-            style={{ borderColor: accent }}
-            initial={{ opacity: 0, scale: 0.88 }}
+            className="absolute inset-0"
+            initial={{ opacity: 0, scale: 0.86 }}
             animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.05 }}
-            transition={{ duration: 0.4, ease: soft }}
-          />
+            exit={{ opacity: 0, scale: 1.06 }}
+            transition={{ duration: DUR.slow, ease: soft }}
+          >
+            <motion.span
+              className={cn(
+                "absolute inset-0 rounded-full border-[1.5px]",
+                motionKind === "listen" && "overlay-ring-listen",
+                motionKind === "think" && "overlay-ring-think",
+                motionKind === "speak" && "overlay-ring-speak",
+                motionKind === "breathe" && "overlay-ring-breathe",
+              )}
+              animate={{ borderColor: accent }}
+              transition={{ duration: DUR.slow, ease: soft }}
+            />
+          </motion.span>
         ) : null}
       </AnimatePresence>
 
+      {/* Secondary pulse ring for listen / speak */}
       <AnimatePresence initial={false}>
         {motionKind === "listen" || motionKind === "speak" ? (
           <motion.span
             key={`ring-b-${motionKind}`}
-            className="overlay-ring-listen-delay absolute inset-0.5 rounded-full border"
-            style={{ borderColor: accent }}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 0.7 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.35, ease: soft }}
-          />
+            className="absolute inset-0.5"
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 0.7, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.04 }}
+            transition={{ duration: DUR.base, ease: soft }}
+          >
+            <motion.span
+              className="overlay-ring-listen-delay absolute inset-0 rounded-full border"
+              animate={{ borderColor: accent }}
+              transition={{ duration: DUR.slow, ease: soft }}
+            />
+          </motion.span>
         ) : null}
       </AnimatePresence>
 
-      <motion.span
-        className={cn(
-          "relative size-3 rounded-full",
-          motionKind === "breathe" && "overlay-core-breathe",
-          motionKind === "listen" && "overlay-core-listen",
-          motionKind === "think" && "overlay-core-think",
-          motionKind === "speak" && "overlay-core-speak",
-        )}
-        animate={{
-          backgroundColor: accent,
-          boxShadow: `0 0 16px ${accent}`,
-        }}
-        transition={{ duration: 0.5, ease: soft }}
-      />
+      {/* Core — crossfade when motion style changes so CSS keyframe
+          restarts don't hard-snap scale mid-loop. */}
+      <AnimatePresence mode="sync" initial={false}>
+        <motion.span
+          key={`core-wrap-${motionKind}`}
+          className="absolute flex size-3 items-center justify-center"
+          initial={{ opacity: 0, scale: 0.7 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 1.15 }}
+          transition={{ duration: DUR.slow, ease: soft }}
+        >
+          <motion.span
+            className={cn(
+              "size-3 rounded-full",
+              motionKind === "breathe" && "overlay-core-breathe",
+              motionKind === "listen" && "overlay-core-listen",
+              motionKind === "think" && "overlay-core-think",
+              motionKind === "speak" && "overlay-core-speak",
+            )}
+            animate={{
+              backgroundColor: accent,
+              boxShadow: `0 0 16px ${accent}`,
+            }}
+            transition={{ duration: DUR.slow, ease: soft }}
+          />
+        </motion.span>
+      </AnimatePresence>
     </div>
   );
 }
@@ -328,25 +412,25 @@ function Pip({
     <motion.div
       data-tauri-drag-region
       title={title}
-      className={cn(
-        "relative flex size-7 items-center justify-center rounded-full border",
-        ok
-          ? "border-white/10 bg-white/5 text-white/70"
-          : "border-white/5 bg-white/[0.03] text-white/25",
-      )}
+      className="relative flex size-7 items-center justify-center rounded-full border"
       animate={{
         opacity: ok ? 1 : 0.55,
         borderColor: ok ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)",
+        backgroundColor: ok
+          ? "rgba(255,255,255,0.05)"
+          : "rgba(255,255,255,0.03)",
+        color: ok ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.25)",
       }}
-      transition={{ duration: 0.4, ease: soft }}
+      transition={{ duration: DUR.base, ease: soft }}
     >
       {icon}
       <motion.span
         className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40"
         animate={{
           backgroundColor: ok ? "rgb(52 211 153)" : "rgba(255,255,255,0.2)",
+          scale: ok ? 1 : 0.9,
         }}
-        transition={{ duration: 0.4, ease: soft }}
+        transition={{ duration: DUR.base, ease: soft }}
         aria-hidden
       />
     </motion.div>
@@ -357,6 +441,23 @@ type Caption = {
   kind: "heard" | "said" | "error";
   text: string;
 };
+
+function pickSubtitle(
+  status: StatusPicture,
+  tone: ReturnType<typeof toneFor>,
+  caption: Caption | null,
+): string {
+  if (!caption) return tone.hint;
+  if (caption.kind === "error") return "Something came up";
+  if (caption.kind === "said") {
+    if (status.phase === "Armed" || status.phase === "Quiet") {
+      return "Say the wake word";
+    }
+    if (status.phase === "AwaitingReply") return "Your turn to answer";
+    return "Speaking…";
+  }
+  return "Listening…";
+}
 
 function pickCaption(status: StatusPicture): Caption | null {
   if (status.detail?.trim()) {

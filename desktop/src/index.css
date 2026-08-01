@@ -175,13 +175,21 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(20px) saturate(1.35);
   -webkit-backdrop-filter: blur(20px) saturate(1.35);
-  /* Framer Motion drives accent transitions; keep transform GPU-friendly */
-  will-change: border-color, box-shadow;
+  /* Framer Motion drives accent + layout; keep transform GPU-friendly */
+  will-change: border-color, box-shadow, transform;
+  /* Fallback if Motion isn't driving a property (e.g. width reflow) */
+  transition:
+    border-color 0.5s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .overlay-caption {
   background: oklch(0 0 0 / 28%);
   border: 1px solid oklch(1 0 0 / 6%);
+  /* Soften any non-Motion reflow of the quote card */
+  transition:
+    opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Continuous presence loops (Framer handles enter/exit of these nodes) */

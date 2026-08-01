@@ -18,11 +18,13 @@ use boris_sense::{init_onnx_runtime, LivekitWakeWord, WebRtcVad};
 
 use crate::config::PipelineConfig;
 use crate::devices::{find_input, find_output};
-use crate::hear::{self, HearBreak};
+use crate::hear::{self, CaptureKind, HearBreak};
 use crate::paths;
 use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture};
 
 const MIC_QUEUE: usize = 64;
+/// Max freeform follow-ups without re-wake (name, choice, full sentence, yes/no, …).
+const MAX_FOLLOW_UPS: u32 = 3;
 
 #[derive(Debug)]
 pub enum EngineCommand {
@@ -213,10 +215,15 @@ fn run(
 
     let mut running = false;
     let mut next_turn: u64 = 1;
+    /// When true, next iteration skips wake and freeform-listens for a reply.
+    let mut await_reply = false;
+    let mut follow_up_depth: u32 = 0;
 
     loop {
         // ── Off: wait for Start ─────────────────────────────────────────────
         if !running {
+            await_reply = false;
+            follow_up_depth = 0;
             match cmd_rx.recv() {
                 Ok(EngineCommand::Start) => {
                     running = true;
@@ -251,52 +258,100 @@ fn run(
             continue;
         }
 
-        // ── Armed: wait for wake (interruptible) ────────────────────────────
-        picture.heard = None;
-        picture.said = None;
-        picture.detail = None;
-        picture.turn = None;
-        picture.set_phase(Phase::Armed);
-
-        match hear::wait_for_wake(&mic, &mut wake, &cmd_rx, &mut running) {
-            Ok(()) => {}
-            Err(HearBreak::SwitchInput { device_id }) => {
-                apply_input_switch(&mut audio, &mut picture, &device_id);
-                continue; // re-arm with new mic
+        // ── Entry: wake OR freeform follow-up (no second wake) ─────────────
+        let capture_kind = if await_reply {
+            picture.heard = None;
+            // Keep last `said` so UI still shows what Boris asked.
+            picture.detail = None;
+            picture.turn = None;
+            picture.set_phase(Phase::AwaitingReply);
+            tracing::info!(
+                depth = follow_up_depth,
+                "awaiting freeform user reply (no wake)"
+            );
+            if let Err(e) = hear::settle_after_playback(&mic, &cmd_rx, &mut running) {
+                match e {
+                    HearBreak::SwitchInput { device_id } => {
+                        apply_input_switch(&mut audio, &mut picture, &device_id);
+                        continue;
+                    }
+                    HearBreak::SwitchOutput { device_id } => {
+                        apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                        continue;
+                    }
+                    HearBreak::Stopped if !running => {
+                        go_off(&mut picture, &audio, &store, &mut active_session);
+                        continue;
+                    }
+                    HearBreak::Stopped => {
+                        await_reply = false;
+                        follow_up_depth = 0;
+                        continue;
+                    }
+                    HearBreak::Disconnected => {
+                        end_session(&store, &mut active_session);
+                        picture.set_phase(Phase::Off);
+                        return Ok(());
+                    }
+                }
             }
-            Err(HearBreak::SwitchOutput { device_id }) => {
-                apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
-                continue;
-            }
-            Err(HearBreak::Stopped) if !running => {
+            if !running {
                 go_off(&mut picture, &audio, &store, &mut active_session);
                 continue;
             }
-            Err(HearBreak::Stopped) => continue,
-            Err(HearBreak::Disconnected) => {
-                end_session(&store, &mut active_session);
-                picture.set_phase(Phase::Off);
-                return Ok(());
-            }
-        }
+            // Consumed for this entry; may re-arm after this turn if Boris asks again.
+            await_reply = false;
+            CaptureKind::AwaitReply
+        } else {
+            follow_up_depth = 0;
+            picture.heard = None;
+            picture.said = None;
+            picture.detail = None;
+            picture.turn = None;
+            picture.set_phase(Phase::Armed);
 
-        if !running {
-            go_off(&mut picture, &audio, &store, &mut active_session);
-            continue;
-        }
+            match hear::wait_for_wake(&mic, &mut wake, &cmd_rx, &mut running) {
+                Ok(()) => {}
+                Err(HearBreak::SwitchInput { device_id }) => {
+                    apply_input_switch(&mut audio, &mut picture, &device_id);
+                    continue;
+                }
+                Err(HearBreak::SwitchOutput { device_id }) => {
+                    apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
+                    continue;
+                }
+                Err(HearBreak::Stopped) if !running => {
+                    go_off(&mut picture, &audio, &store, &mut active_session);
+                    continue;
+                }
+                Err(HearBreak::Stopped) => continue,
+                Err(HearBreak::Disconnected) => {
+                    end_session(&store, &mut active_session);
+                    picture.set_phase(Phase::Off);
+                    return Ok(());
+                }
+            }
+
+            if !running {
+                go_off(&mut picture, &audio, &store, &mut active_session);
+                continue;
+            }
+            CaptureKind::AfterWake
+        };
 
         // ── One turn, top to bottom ─────────────────────────────────────────
         let turn = TurnId(next_turn);
         next_turn = next_turn.saturating_add(1);
         picture.turn = Some(turn);
         picture.set_phase(Phase::Hearing);
-        tracing::info!(%turn, "turn begin — hearing");
+        tracing::info!(%turn, ?capture_kind, "turn begin — hearing");
 
-        let clip = match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running) {
+        let clip = match hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind)
+        {
             Ok(c) => c,
             Err(HearBreak::SwitchInput { device_id }) => {
                 apply_input_switch(&mut audio, &mut picture, &device_id);
-                continue; // drop partial clip; re-arm
+                continue;
             }
             Err(HearBreak::SwitchOutput { device_id }) => {
                 apply_output_switch(&mut audio, &mut output_events, &mut picture, &device_id);
@@ -306,7 +361,10 @@ fn run(
                 go_off(&mut picture, &audio, &store, &mut active_session);
                 continue;
             }
-            Err(HearBreak::Stopped) => continue,
+            Err(HearBreak::Stopped) => {
+                follow_up_depth = 0;
+                continue;
+            }
             Err(HearBreak::Disconnected) => {
                 end_session(&store, &mut active_session);
                 return Ok(());
@@ -323,16 +381,16 @@ fn run(
         if let Err(e) = stt.load() {
             tracing::error!(error = %e, %turn, "stt load failed");
             picture.detail = Some(format!("stt load: {e}"));
-            // Load failure: leave model cold; next turn will retry load.
+            follow_up_depth = 0;
             picture.set_phase(Phase::Armed);
             continue;
         }
         let text = match stt.transcribe(&clip) {
             Ok(t) => t,
             Err(e) => {
-                // Keep STT loaded on transcribe error so the model stays warm.
                 tracing::error!(error = %e, %turn, "stt failed (model kept loaded)");
                 picture.detail = Some(format!("stt: {e}"));
+                follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
@@ -351,7 +409,13 @@ fn run(
                 "skipping empty/junk transcript — not calling agent"
             );
             picture.detail = Some("didn't catch that".into());
-            picture.set_phase(Phase::Armed);
+            // If we were in a follow-up, one soft retry is enough; then re-arm.
+            if matches!(capture_kind, CaptureKind::AwaitReply) && follow_up_depth < MAX_FOLLOW_UPS {
+                await_reply = true;
+            } else {
+                follow_up_depth = 0;
+                picture.set_phase(Phase::Armed);
+            }
             continue;
         }
 
@@ -366,25 +430,34 @@ fn run(
             continue;
         }
 
-        // Think — primary turn API (chat is a thin alias).
+        // Think
         picture.set_phase(Phase::Thinking);
         let outcome = match agent.run_turn(&text) {
             Ok(o) => o,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
                 picture.detail = Some(format!("agent: {e}"));
+                follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
 
-        // Persist user + assistant (empty assistant for Silent) when a session is active.
-        let assistant_for_store = match &outcome {
-            AgentOutcome::Speak(s) => s.as_str(),
-            AgentOutcome::Silent => "",
+        let (reply, expect_reply) = match outcome {
+            AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {
+                (text, expect_reply)
+            }
+            AgentOutcome::Speak { .. } | AgentOutcome::Silent => {
+                tracing::warn!(%turn, "agent produced no speech");
+                picture.detail = Some("empty agent reply".into());
+                follow_up_depth = 0;
+                picture.set_phase(Phase::Armed);
+                continue;
+            }
         };
+
         if let Some(ref sid) = active_session {
-            if let Err(e) = store.append_user_assistant(sid, &text, assistant_for_store) {
+            if let Err(e) = store.append_user_assistant(sid, &text, &reply) {
                 tracing::warn!(
                     error = %e,
                     session_id = %sid,
@@ -394,18 +467,9 @@ fn run(
             }
         }
 
-        let reply = match outcome {
-            AgentOutcome::Speak(s) if !s.trim().is_empty() => s,
-            _ => {
-                tracing::warn!(%turn, "agent produced no speech");
-                picture.detail = Some("empty agent reply".into());
-                picture.set_phase(Phase::Armed);
-                continue;
-            }
-        };
         picture.said = Some(reply.clone());
         picture.publish();
-        tracing::info!(%turn, %reply, "said");
+        tracing::info!(%turn, %reply, expect_reply, "said");
 
         if !poll_running(
             &cmd_rx,
@@ -423,6 +487,7 @@ fn run(
         if let Err(e) = tts.load() {
             tracing::error!(error = %e, %turn, "tts load failed");
             picture.detail = Some(format!("tts load: {e}"));
+            follow_up_depth = 0;
             picture.set_phase(Phase::Armed);
             continue;
         }
@@ -431,12 +496,12 @@ fn run(
             Err(e) => {
                 tracing::error!(error = %e, %turn, "tts failed");
                 picture.detail = Some(format!("tts: {e}"));
+                follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
 
-        // Drain any stale output events, then play and wait for drain.
         while output_events.try_recv().is_ok() {}
         audio.play(pcm);
         wait_playback_or_stop(
@@ -452,8 +517,24 @@ fn run(
             continue;
         }
 
+        // Freeform follow-up: any speakable answer (not yes/no only). Cap chain depth.
+        if expect_reply && follow_up_depth < MAX_FOLLOW_UPS {
+            follow_up_depth = follow_up_depth.saturating_add(1);
+            await_reply = true;
+            tracing::info!(
+                %turn,
+                depth = follow_up_depth,
+                "will await freeform reply after speak"
+            );
+        } else {
+            if expect_reply {
+                tracing::info!(%turn, "expect_reply but follow-up cap reached — re-arming");
+            }
+            follow_up_depth = 0;
+            await_reply = false;
+        }
+
         tracing::info!(%turn, "turn complete");
-        // loop → Armed again
     }
 }
 

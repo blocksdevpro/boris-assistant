@@ -45,6 +45,14 @@ const PHASE: Record<Phase, PhaseTone> = {
     alive: true,
     motion: "breathe",
   },
+  AwaitingReply: {
+    label: "Your turn",
+    hint: "He asked — answer freely, no wake word",
+    accent: "oklch(0.8 0.15 200)",
+    glow: "oklch(0.55 0.14 200 / 50%)",
+    alive: true,
+    motion: "listen",
+  },
   Hearing: {
     label: "Listening",
     hint: "Hearing you…",

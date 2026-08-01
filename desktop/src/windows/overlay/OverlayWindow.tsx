@@ -222,17 +222,24 @@ function pickCaption(status: StatusPicture): Caption | null {
   if (status.detail?.trim()) {
     return { kind: "error", text: status.detail.trim() };
   }
-  if (status.phase === "Talking" && status.said?.trim()) {
+  if (
+    (status.phase === "Talking" || status.phase === "AwaitingReply") &&
+    status.said?.trim()
+  ) {
     return { kind: "said", text: status.said.trim() };
   }
   if (
     (status.phase === "Thinking" ||
       status.phase === "Reading" ||
       status.phase === "Hearing" ||
-      status.phase === "Talking") &&
+      status.phase === "Talking" ||
+      status.phase === "AwaitingReply") &&
     status.heard?.trim()
   ) {
-    if (status.phase !== "Talking" || !status.said?.trim()) {
+    if (
+      (status.phase !== "Talking" && status.phase !== "AwaitingReply") ||
+      !status.said?.trim()
+    ) {
       return { kind: "heard", text: status.heard.trim() };
     }
   }

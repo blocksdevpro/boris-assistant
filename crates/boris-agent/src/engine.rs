@@ -235,7 +235,8 @@ impl AgentEngine {
             }) => {
                 let duration = started.elapsed();
                 let outcome_label = match &outcome {
-                    AgentOutcome::Speak(_) => "speak",
+                    AgentOutcome::Speak { expect_reply, .. } if *expect_reply => "speak_await",
+                    AgentOutcome::Speak { .. } => "speak",
                     AgentOutcome::Silent => "silent",
                 };
                 let approx_chars_in = self.context.as_json().to_string().len();
@@ -257,7 +258,7 @@ impl AgentEngine {
 
                 // Active personal context learning (does not affect this turn's speech).
                 let assistant_text = match &outcome {
-                    AgentOutcome::Speak(s) => s.as_str(),
+                    AgentOutcome::Speak { text, .. } => text.as_str(),
                     AgentOutcome::Silent => "",
                 };
                 self.after_turn_learn(user_text, assistant_text, &tools_used);
@@ -442,7 +443,8 @@ impl AgentEngine {
             let outcome = if reply.is_empty() {
                 AgentOutcome::Silent
             } else {
-                AgentOutcome::Speak(reply)
+                // Freeform follow-up when the line is a real question (not yes/no only).
+                AgentOutcome::speak(reply)
             };
             return Ok(TurnLoopResult {
                 outcome,

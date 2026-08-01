@@ -71,7 +71,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Thinking: {
     label: "Thinking",
-    hint: "Working on a reply",
+    hint: "Working on a reply (includes speech prep)",
     accent: "oklch(0.72 0.18 295)",
     glow: "oklch(0.5 0.16 295 / 50%)",
     alive: true,
@@ -79,7 +79,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Talking: {
     label: "Speaking",
-    hint: "Boris is talking",
+    hint: "Audio is playing now",
     accent: "oklch(0.78 0.16 35)",
     glow: "oklch(0.55 0.14 35 / 50%)",
     alive: true,

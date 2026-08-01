@@ -215,7 +215,7 @@ fn run(
 
     let mut running = false;
     let mut next_turn: u64 = 1;
-    /// When true, next iteration skips wake and freeform-listens for a reply.
+    // When true, next iteration skips wake and freeform-listens for a reply.
     let mut await_reply = false;
     let mut follow_up_depth: u32 = 0;
 
@@ -360,6 +360,7 @@ fn run(
         let turn = TurnId(next_turn);
         next_turn = next_turn.saturating_add(1);
         picture.turn = Some(turn);
+        // Hearing only while the mic is actually recording (not during STT).
         picture.set_phase(Phase::Hearing);
         tracing::info!(%turn, ?capture_kind, "turn begin — hearing");
 
@@ -393,7 +394,7 @@ fn run(
             continue;
         }
 
-        // Read — STT should already be warm after Start; keep loaded across turns.
+        // Leave Hearing as soon as the mic stops — STT is "Reading", not listening.
         picture.set_phase(Phase::Reading);
         let stt_t = std::time::Instant::now();
         if let Err(e) = stt.load() {
@@ -495,9 +496,10 @@ fn run(
             }
         }
 
+        // Show reply text while still "Thinking" — TTS synth is NOT speaking yet.
         picture.said = Some(reply.clone());
         picture.publish();
-        tracing::info!(%turn, %reply, expect_reply, "said");
+        tracing::info!(%turn, %reply, expect_reply, "said (synth next)");
 
         if !poll_running(
             &cmd_rx,
@@ -510,8 +512,7 @@ fn run(
             continue;
         }
 
-        // Talk
-        picture.set_phase(Phase::Talking);
+        // Synthesize under Thinking so UI doesn't say "Speaking" with silence.
         let tts_t = std::time::Instant::now();
         if let Err(e) = tts.load() {
             tracing::error!(error = %e, %turn, "tts load failed");
@@ -534,9 +535,37 @@ fn run(
         let play_samples = pcm.len();
         tracing::info!(%turn, tts_ms, play_samples, "tts synth done");
 
+        if !poll_running(
+            &cmd_rx,
+            &mut running,
+            &mut audio,
+            &mut output_events,
+            &mut picture,
+        ) {
+            go_off(&mut picture, &audio, &store, &mut active_session);
+            continue;
+        }
+
+        // Queue audio, then flip UI to Talking only when playback has started.
         let play_t = std::time::Instant::now();
         while output_events.try_recv().is_ok() {}
         audio.play(pcm);
+        if !wait_playback_started(
+            &mut output_events,
+            &cmd_rx,
+            &mut running,
+            &mut audio,
+            &mut picture,
+        ) {
+            go_off(&mut picture, &audio, &store, &mut active_session);
+            continue;
+        }
+        picture.set_phase(Phase::Talking);
+        tracing::info!(
+            %turn,
+            queue_ms = play_t.elapsed().as_millis() as u64,
+            "playback started — UI Talking"
+        );
         wait_playback_or_stop(
             &mut output_events,
             &cmd_rx,
@@ -706,6 +735,36 @@ fn poll_running(
     }
 }
 
+/// Wait until the output worker has resampled + queued samples (about to be audible).
+/// Returns false if the engine should go off (stop / disconnect).
+fn wait_playback_started(
+    output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    audio: &mut AudioService,
+    picture: &mut Picture,
+) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if !poll_running(cmd_rx, running, audio, output_events, picture) {
+            audio.stop();
+            return false;
+        }
+        if std::time::Instant::now() > deadline {
+            tracing::warn!("playback Started timeout — flipping UI anyway");
+            return *running;
+        }
+        match output_events.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(OutputEvent::Started) => return true,
+            // Short clips may drain before we observe Started if we missed it — treat as ok.
+            Ok(OutputEvent::Drained) => return true,
+            Ok(OutputEvent::Cleared) => return *running,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
 fn wait_playback_or_stop(
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     cmd_rx: &Receiver<EngineCommand>,
@@ -719,6 +778,7 @@ fn wait_playback_or_stop(
             return;
         }
         match output_events.recv_timeout(std::time::Duration::from_millis(40)) {
+            Ok(OutputEvent::Started) => continue, // already speaking
             Ok(OutputEvent::Drained) => return,
             Ok(OutputEvent::Cleared) => return,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,

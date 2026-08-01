@@ -8,11 +8,14 @@ import { toneFor } from "@/lib/phaseVisual";
 /** Soft ease-out — calm, no bounce. */
 const soft = [0.22, 1, 0.36, 1] as const;
 
+/** Slightly longer for Speaking → Ready so idle doesn't snap. */
+const softIdle = [0.16, 1, 0.3, 1] as const;
+
 const fadeSwap = {
-  initial: { opacity: 0, y: 5, filter: "blur(3px)" },
+  initial: { opacity: 0, y: 4, filter: "blur(2px)" },
   animate: { opacity: 1, y: 0, filter: "blur(0px)" },
-  exit: { opacity: 0, y: -4, filter: "blur(2px)" },
-  transition: { duration: 0.38, ease: soft },
+  exit: { opacity: 0, y: -3, filter: "blur(2px)" },
+  transition: { duration: 0.42, ease: soft },
 };
 
 /**
@@ -29,6 +32,9 @@ export function OverlayWindow() {
   );
   const caption = pickCaption(status);
   const phaseKey = `${status.engine}-${status.phase}`;
+  const isReady =
+    status.engine === "On" &&
+    (status.phase === "Armed" || status.phase === "Quiet");
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -57,10 +63,13 @@ export function OverlayWindow() {
             boxShadow: `
               0 10px 28px rgba(12, 14, 20, 0.45),
               inset 0 1px 0 rgba(255, 255, 255, 0.1),
-              0 0 28px color-mix(in oklch, ${tone.glow} 50%, transparent)
+              0 0 ${isReady ? 18 : 28}px color-mix(in oklch, ${tone.glow} ${isReady ? 35 : 50}%, transparent)
             `,
           }}
-          transition={{ duration: 0.55, ease: soft }}
+          transition={{
+            duration: isReady ? 0.7 : 0.5,
+            ease: isReady ? softIdle : soft,
+          }}
         >
           {/* ── Primary row ─────────────────────────────────────────── */}
           <div
@@ -113,35 +122,37 @@ export function OverlayWindow() {
 
               <div className="relative h-[1rem] overflow-hidden">
                 <AnimatePresence mode="wait" initial={false}>
-                  {!caption ? (
-                    <motion.p
-                      key={`hint-${phaseKey}-${tone.hint}`}
-                      data-tauri-drag-region
-                      className="truncate text-[11px] leading-4 text-white/45"
-                      initial={fadeSwap.initial}
-                      animate={fadeSwap.animate}
-                      exit={fadeSwap.exit}
-                      transition={fadeSwap.transition}
-                    >
-                      {tone.hint}
-                    </motion.p>
-                  ) : (
-                    <motion.p
-                      key="hint-spacer"
-                      data-tauri-drag-region
-                      className="truncate text-[11px] leading-4 text-white/30"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.25, ease: soft }}
-                    >
-                      {caption.kind === "error"
+                  <motion.p
+                    key={
+                      caption
+                        ? `sub-${caption.kind}-${status.phase}`
+                        : `hint-${phaseKey}-${tone.hint}`
+                    }
+                    data-tauri-drag-region
+                    className={cn(
+                      "truncate text-[11px] leading-4",
+                      caption ? "text-white/30" : "text-white/45",
+                    )}
+                    initial={fadeSwap.initial}
+                    animate={fadeSwap.animate}
+                    exit={fadeSwap.exit}
+                    transition={{
+                      ...fadeSwap.transition,
+                      duration: isReady ? 0.5 : 0.42,
+                    }}
+                  >
+                    {caption
+                      ? caption.kind === "error"
                         ? "Something came up"
                         : caption.kind === "said"
-                          ? "Speaking…"
-                          : "Listening…"}
-                    </motion.p>
-                  )}
+                          ? status.phase === "Armed" || status.phase === "Quiet"
+                            ? "Say the wake word"
+                            : status.phase === "AwaitingReply"
+                              ? "Your turn to answer"
+                              : "Speaking…"
+                          : "Listening…"
+                      : tone.hint}
+                  </motion.p>
                 </AnimatePresence>
               </div>
             </div>
@@ -149,22 +160,45 @@ export function OverlayWindow() {
             <DevicePips status={status} />
           </div>
 
-          {/* ── Caption (You / Boris) ───────────────────────────────── */}
+          {/* ── Caption (You / Boris) ─────────────────────────────────
+              Stable key on said-text so Speaking → Ready keeps the same node
+              (no remount jump); only phase chrome eases to Ready. */}
           <AnimatePresence initial={false} mode="sync">
             {caption ? (
               <motion.div
-                key={`caption-${caption.kind}-${caption.text.slice(0, 64)}`}
+                key={
+                  caption.kind === "said"
+                    ? `caption-said-${caption.text.slice(0, 80)}`
+                    : `caption-${caption.kind}-${caption.text.slice(0, 64)}`
+                }
                 data-tauri-drag-region
                 layout
-                className="overlay-caption mt-2 min-w-0 max-w-[320px] overflow-hidden rounded-xl px-2.5 py-1.5"
-                initial={{ opacity: 0, height: 0, marginTop: 0, y: 4 }}
-                animate={{ opacity: 1, height: "auto", marginTop: 8, y: 0 }}
-                exit={{ opacity: 0, height: 0, marginTop: 0, y: -2 }}
+                className="overlay-caption min-w-0 max-w-[320px] overflow-hidden rounded-xl px-2.5 py-1.5"
+                initial={{ opacity: 0, height: 0, marginTop: 0, y: 6 }}
+                animate={{
+                  opacity: isReady && caption.kind === "said" ? 0.72 : 1,
+                  height: "auto",
+                  marginTop: 8,
+                  y: 0,
+                }}
+                exit={{
+                  opacity: 0,
+                  height: 0,
+                  marginTop: 0,
+                  y: -3,
+                  transition: {
+                    height: { duration: 0.55, ease: softIdle },
+                    opacity: { duration: 0.45, ease: softIdle },
+                    marginTop: { duration: 0.55, ease: softIdle },
+                    y: { duration: 0.4, ease: softIdle },
+                  },
+                }}
                 transition={{
-                  height: { duration: 0.4, ease: soft },
-                  opacity: { duration: 0.32, ease: soft },
-                  marginTop: { duration: 0.4, ease: soft },
-                  y: { duration: 0.35, ease: soft },
+                  height: { duration: 0.45, ease: soft },
+                  opacity: { duration: 0.5, ease: isReady ? softIdle : soft },
+                  marginTop: { duration: 0.45, ease: soft },
+                  y: { duration: 0.4, ease: soft },
+                  layout: { duration: 0.5, ease: softIdle },
                 }}
               >
                 <p
@@ -174,7 +208,9 @@ export function OverlayWindow() {
                     caption.kind === "error"
                       ? "text-red-300/95"
                       : caption.kind === "said"
-                        ? "text-white/80"
+                        ? isReady
+                          ? "text-white/55"
+                          : "text-white/80"
                         : "text-white/65",
                   )}
                 >

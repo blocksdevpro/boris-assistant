@@ -321,8 +321,9 @@ fn run(
             CaptureKind::AwaitReply
         } else {
             follow_up_depth = 0;
+            // Soft landing into Ready: keep last `said` so the caption doesn't
+            // hard-cut when Speaking ends — clear it only after the next wake.
             picture.heard = None;
-            picture.said = None;
             picture.detail = None;
             picture.turn = None;
             picture.set_phase(Phase::Armed);
@@ -353,6 +354,9 @@ fn run(
                 go_off(&mut picture, &audio, &store, &mut active_session);
                 continue;
             }
+            // New user turn — drop previous line now that we're listening again.
+            picture.said = None;
+            picture.heard = None;
             CaptureKind::AfterWake
         };
 

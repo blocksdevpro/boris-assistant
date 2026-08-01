@@ -39,9 +39,9 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Armed: {
     label: "Ready",
-    hint: "Say the wake word",
+    hint: "Say the wake word when you need me",
     accent: "oklch(0.78 0.14 165)",
-    glow: "oklch(0.55 0.12 165 / 45%)",
+    glow: "oklch(0.55 0.12 165 / 40%)",
     alive: true,
     motion: "breathe",
   },

@@ -1,24 +1,25 @@
-import {
-  useEffect,
-  useMemo,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
+import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
 import { useStatus, type StatusPicture } from "@/bridge";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
 
+/** Soft ease-out — calm, no bounce. */
+const soft = [0.22, 1, 0.36, 1] as const;
+
+const fadeSwap = {
+  initial: { opacity: 0, y: 5, filter: "blur(3px)" },
+  animate: { opacity: 1, y: 0, filter: "blur(0px)" },
+  exit: { opacity: 0, y: -4, filter: "blur(2px)" },
+  transition: { duration: 0.38, ease: soft },
+};
+
 /**
  * OVERLAY — always-on-top voice island.
  *
- * Transparency follows Tauri: `transparent: true` + CSS/html transparent
- * backgrounds + webview default color alpha 0. Empty chrome must stay
- * transparent — never solid black.
- *
- * Phase changes crossfade label/hint/caption and morph orb accent so
- * transitions don't pop.
+ * Phase / caption / accent transitions use Framer Motion for subtle crossfades
+ * and layout animation. Tauri transparency rules still apply.
  */
 export function OverlayWindow() {
   const status = useStatus();
@@ -26,21 +27,8 @@ export function OverlayWindow() {
     () => toneFor(status.phase, status.engine),
     [status.phase, status.engine],
   );
-
   const caption = pickCaption(status);
-  const showCaption = Boolean(caption);
-
-  // Keep last caption mounted briefly so exit can fade via grid collapse.
-  const [displayCaption, setDisplayCaption] = useState(caption);
-  useEffect(() => {
-    if (caption) {
-      setDisplayCaption(caption);
-      return;
-    }
-    // Delay clear so CSS can collapse; content stays until shell closes.
-    const t = window.setTimeout(() => setDisplayCaption(null), 280);
-    return () => window.clearTimeout(t);
-  }, [caption]);
+  const phaseKey = `${status.engine}-${status.phase}`;
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -56,130 +44,158 @@ export function OverlayWindow() {
 
   return (
     <div className="overlay-surface flex h-full w-full items-center justify-center bg-transparent p-3">
-      <div
-        data-tauri-drag-region
-        className={cn(
-          "overlay-island group relative inline-flex max-w-[min(360px,100%)] select-none flex-col gap-2",
-          "rounded-[22px] px-3.5 py-2.5",
-          "w-max min-w-[260px]",
-        )}
-        style={
-          {
-            "--island-accent": tone.accent,
-            "--island-glow": tone.glow,
-            borderColor: `color-mix(in oklch, ${tone.accent} 28%, rgba(255,255,255,0.14))`,
+      <LayoutGroup id="boris-overlay">
+        <motion.div
+          data-tauri-drag-region
+          layout
+          className={cn(
+            "overlay-island relative flex w-max min-w-[272px] max-w-[min(360px,100%)]",
+            "select-none flex-col rounded-[22px] px-3.5 py-2.5",
+          )}
+          animate={{
+            borderColor: `color-mix(in oklch, ${tone.accent} 32%, rgba(255,255,255,0.12))`,
             boxShadow: `
               0 10px 28px rgba(12, 14, 20, 0.45),
               inset 0 1px 0 rgba(255, 255, 255, 0.1),
-              0 0 24px color-mix(in oklch, ${tone.glow} 55%, transparent)
+              0 0 28px color-mix(in oklch, ${tone.glow} 50%, transparent)
             `,
-          } as CSSProperties
-        }
-      >
-        <div data-tauri-drag-region className="flex items-center gap-3">
-          <PresenceOrb motion={tone.motion} accent={tone.accent} />
-
-          <div data-tauri-drag-region className="min-w-0 flex-1 pr-1">
-            <div data-tauri-drag-region className="flex items-baseline gap-2">
-              <FadeText
-                textKey={`${status.phase}-${status.engine}-${tone.label}`}
-                className="text-[13px] font-semibold tracking-tight text-white"
-              >
-                {tone.label}
-              </FadeText>
-              {status.turn ? (
-                <span
-                  data-tauri-drag-region
-                  className="font-mono text-[10px] tabular-nums text-white/35 transition-opacity duration-300"
-                >
-                  #{status.turn}
-                </span>
-              ) : null}
-            </div>
-            {!showCaption ? (
-              <FadeText
-                textKey={`${status.phase}-${tone.hint}`}
-                className="truncate text-[11px] leading-snug text-white/45"
-              >
-                {tone.hint}
-              </FadeText>
-            ) : (
-              // Reserve one line so the island doesn't jump when caption opens.
-              <p
-                data-tauri-drag-region
-                className="h-[1.125rem] truncate text-[11px] leading-snug text-transparent"
-                aria-hidden
-              >
-                .
-              </p>
-            )}
-          </div>
-
-          <DevicePips status={status} />
-        </div>
-
-        <div
-          data-tauri-drag-region
-          className="overlay-caption-shell"
-          data-open={showCaption ? "true" : "false"}
+          }}
+          transition={{ duration: 0.55, ease: soft }}
         >
-          <div className="overlay-caption-inner">
-            {displayCaption ? (
+          {/* ── Primary row ─────────────────────────────────────────── */}
+          <div
+            data-tauri-drag-region
+            className="flex h-9 items-center gap-3"
+          >
+            <PresenceOrb motion={tone.motion} accent={tone.accent} />
+
+            {/* Fixed-height text column keeps vertical alignment stable */}
+            <div
+              data-tauri-drag-region
+              className="flex min-w-0 flex-1 flex-col justify-center gap-0.5"
+            >
               <div
                 data-tauri-drag-region
-                className="overlay-caption overlay-caption-body min-w-0 max-w-[320px] rounded-xl px-2.5 py-1.5"
-                key={`${displayCaption.kind}-${displayCaption.text.slice(0, 48)}`}
+                className="flex h-[1.125rem] items-center gap-2"
+              >
+                <div className="relative min-w-0 flex-1 overflow-hidden">
+                  <AnimatePresence mode="wait" initial={false}>
+                    <motion.span
+                      key={`label-${phaseKey}-${tone.label}`}
+                      data-tauri-drag-region
+                      className="block truncate text-[13px] font-semibold leading-[1.125rem] tracking-tight text-white"
+                      initial={fadeSwap.initial}
+                      animate={fadeSwap.animate}
+                      exit={fadeSwap.exit}
+                      transition={fadeSwap.transition}
+                    >
+                      {tone.label}
+                    </motion.span>
+                  </AnimatePresence>
+                </div>
+
+                <AnimatePresence initial={false}>
+                  {status.turn ? (
+                    <motion.span
+                      key={`turn-${status.turn}`}
+                      data-tauri-drag-region
+                      className="shrink-0 font-mono text-[10px] tabular-nums text-white/35"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.3, ease: soft }}
+                    >
+                      #{status.turn}
+                    </motion.span>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+
+              <div className="relative h-[1rem] overflow-hidden">
+                <AnimatePresence mode="wait" initial={false}>
+                  {!caption ? (
+                    <motion.p
+                      key={`hint-${phaseKey}-${tone.hint}`}
+                      data-tauri-drag-region
+                      className="truncate text-[11px] leading-4 text-white/45"
+                      initial={fadeSwap.initial}
+                      animate={fadeSwap.animate}
+                      exit={fadeSwap.exit}
+                      transition={fadeSwap.transition}
+                    >
+                      {tone.hint}
+                    </motion.p>
+                  ) : (
+                    <motion.p
+                      key="hint-spacer"
+                      data-tauri-drag-region
+                      className="truncate text-[11px] leading-4 text-white/30"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.25, ease: soft }}
+                    >
+                      {caption.kind === "error"
+                        ? "Something came up"
+                        : caption.kind === "said"
+                          ? "Speaking…"
+                          : "Listening…"}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+
+            <DevicePips status={status} />
+          </div>
+
+          {/* ── Caption (You / Boris) ───────────────────────────────── */}
+          <AnimatePresence initial={false} mode="sync">
+            {caption ? (
+              <motion.div
+                key={`caption-${caption.kind}-${caption.text.slice(0, 64)}`}
+                data-tauri-drag-region
+                layout
+                className="overlay-caption mt-2 min-w-0 max-w-[320px] overflow-hidden rounded-xl px-2.5 py-1.5"
+                initial={{ opacity: 0, height: 0, marginTop: 0, y: 4 }}
+                animate={{ opacity: 1, height: "auto", marginTop: 8, y: 0 }}
+                exit={{ opacity: 0, height: 0, marginTop: 0, y: -2 }}
+                transition={{
+                  height: { duration: 0.4, ease: soft },
+                  opacity: { duration: 0.32, ease: soft },
+                  marginTop: { duration: 0.4, ease: soft },
+                  y: { duration: 0.35, ease: soft },
+                }}
               >
                 <p
                   data-tauri-drag-region
                   className={cn(
-                    "line-clamp-2 text-[12px] leading-snug tracking-tight transition-colors duration-300",
-                    displayCaption.kind === "error"
+                    "line-clamp-2 text-[12px] leading-snug tracking-tight",
+                    caption.kind === "error"
                       ? "text-red-300/95"
-                      : displayCaption.kind === "said"
+                      : caption.kind === "said"
                         ? "text-white/80"
                         : "text-white/65",
                   )}
                 >
-                  {displayCaption.kind !== "error" ? (
+                  {caption.kind !== "error" ? (
                     <span className="mr-1.5 text-[10px] font-medium uppercase tracking-wider text-white/30">
-                      {displayCaption.kind === "said" ? "Boris" : "You"}
+                      {caption.kind === "said" ? "Boris" : "You"}
                     </span>
                   ) : null}
-                  {displayCaption.text}
+                  {caption.text}
                 </p>
-              </div>
+              </motion.div>
             ) : null}
-          </div>
-        </div>
-      </div>
+          </AnimatePresence>
+        </motion.div>
+      </LayoutGroup>
     </div>
   );
 }
 
-/** Remount + fade when `textKey` changes so phase labels don't pop. */
-function FadeText({
-  textKey,
-  className,
-  children,
-}: {
-  textKey: string;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <span
-      key={textKey}
-      data-tauri-drag-region
-      className={cn("overlay-fade-in inline-block max-w-full", className)}
-    >
-      {children}
-    </span>
-  );
-}
-
 function PresenceOrb({
-  motion,
+  motion: motionKind,
   accent,
 }: {
   motion: ReturnType<typeof toneFor>["motion"];
@@ -191,41 +207,53 @@ function PresenceOrb({
       className="relative flex size-9 shrink-0 items-center justify-center"
       aria-hidden
     >
-      {motion !== "none" ? (
-        <>
-          <span
-            key={`ring-${motion}`}
+      <AnimatePresence initial={false}>
+        {motionKind !== "none" ? (
+          <motion.span
+            key={`ring-a-${motionKind}`}
             className={cn(
-              "overlay-orb-ring absolute inset-0 rounded-full border-[1.5px] overlay-fade-in",
-              motion === "listen" && "overlay-ring-listen",
-              motion === "think" && "overlay-ring-think",
-              motion === "speak" && "overlay-ring-speak",
-              motion === "breathe" && "overlay-ring-breathe",
+              "absolute inset-0 rounded-full border-[1.5px]",
+              motionKind === "listen" && "overlay-ring-listen",
+              motionKind === "think" && "overlay-ring-think",
+              motionKind === "speak" && "overlay-ring-speak",
+              motionKind === "breathe" && "overlay-ring-breathe",
             )}
             style={{ borderColor: accent }}
+            initial={{ opacity: 0, scale: 0.88 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.05 }}
+            transition={{ duration: 0.4, ease: soft }}
           />
-          {(motion === "listen" || motion === "speak") && (
-            <span
-              key={`ring2-${motion}`}
-              className="overlay-orb-ring overlay-ring-listen-delay absolute inset-0.5 rounded-full border overlay-fade-in"
-              style={{ borderColor: accent }}
-            />
-          )}
-        </>
-      ) : null}
+        ) : null}
+      </AnimatePresence>
 
-      <span
+      <AnimatePresence initial={false}>
+        {motionKind === "listen" || motionKind === "speak" ? (
+          <motion.span
+            key={`ring-b-${motionKind}`}
+            className="overlay-ring-listen-delay absolute inset-0.5 rounded-full border"
+            style={{ borderColor: accent }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 0.7 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.35, ease: soft }}
+          />
+        ) : null}
+      </AnimatePresence>
+
+      <motion.span
         className={cn(
-          "overlay-orb-core relative size-3 rounded-full",
-          motion === "breathe" && "overlay-core-breathe",
-          motion === "listen" && "overlay-core-listen",
-          motion === "think" && "overlay-core-think",
-          motion === "speak" && "overlay-core-speak",
+          "relative size-3 rounded-full",
+          motionKind === "breathe" && "overlay-core-breathe",
+          motionKind === "listen" && "overlay-core-listen",
+          motionKind === "think" && "overlay-core-think",
+          motionKind === "speak" && "overlay-core-speak",
         )}
-        style={{
-          background: accent,
-          boxShadow: `0 0 14px ${accent}`,
+        animate={{
+          backgroundColor: accent,
+          boxShadow: `0 0 16px ${accent}`,
         }}
+        transition={{ duration: 0.5, ease: soft }}
       />
     </div>
   );
@@ -233,7 +261,10 @@ function PresenceOrb({
 
 function DevicePips({ status }: { status: StatusPicture }) {
   return (
-    <div data-tauri-drag-region className="flex shrink-0 items-center gap-1.5">
+    <div
+      data-tauri-drag-region
+      className="flex h-9 shrink-0 items-center gap-1.5"
+    >
       <Pip
         ok={status.mic.ok && status.engine !== "Off"}
         title={`Mic · ${status.mic.label}`}
@@ -258,25 +289,31 @@ function Pip({
   icon: ReactNode;
 }) {
   return (
-    <div
+    <motion.div
       data-tauri-drag-region
       title={title}
       className={cn(
-        "relative flex size-7 items-center justify-center rounded-full border transition-all duration-300",
+        "relative flex size-7 items-center justify-center rounded-full border",
         ok
           ? "border-white/10 bg-white/5 text-white/70"
           : "border-white/5 bg-white/[0.03] text-white/25",
       )}
+      animate={{
+        opacity: ok ? 1 : 0.55,
+        borderColor: ok ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)",
+      }}
+      transition={{ duration: 0.4, ease: soft }}
     >
       {icon}
-      <span
-        className={cn(
-          "absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40 transition-colors duration-300",
-          ok ? "bg-emerald-400" : "bg-white/20",
-        )}
+      <motion.span
+        className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40"
+        animate={{
+          backgroundColor: ok ? "rgb(52 211 153)" : "rgba(255,255,255,0.2)",
+        }}
+        transition={{ duration: 0.4, ease: soft }}
         aria-hidden
       />
-    </div>
+    </motion.div>
   );
 }
 

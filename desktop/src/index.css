@@ -175,6 +175,8 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(20px) saturate(1.35);
   -webkit-backdrop-filter: blur(20px) saturate(1.35);
+  /* Framer Motion drives accent transitions; keep transform GPU-friendly */
+  will-change: border-color, box-shadow;
 }
 
 .overlay-caption {
@@ -182,76 +184,7 @@
   border: 1px solid oklch(1 0 0 / 6%);
 }
 
-/* Soft island accent shift when phase changes */
-.overlay-island {
-  transition:
-    border-color 0.35s ease,
-    box-shadow 0.45s ease;
-}
-
-/* Crossfade for label / hint text swaps */
-@keyframes overlay-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes overlay-fade-out {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-}
-
-.overlay-fade-in {
-  animation: overlay-fade-in 0.28s ease-out both;
-}
-
-/* Caption expand / collapse without layout jump */
-.overlay-caption-shell {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows 0.32s ease,
-    opacity 0.28s ease;
-}
-
-.overlay-caption-shell[data-open="true"] {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-
-.overlay-caption-shell > .overlay-caption-inner {
-  overflow: hidden;
-  min-height: 0;
-}
-
-.overlay-caption-body {
-  animation: overlay-fade-in 0.3s ease-out both;
-}
-
-/* Orb color morphs with phase accent */
-.overlay-orb-core {
-  transition:
-    background-color 0.4s ease,
-    box-shadow 0.4s ease,
-    transform 0.25s ease;
-}
-
-.overlay-orb-ring {
-  transition: border-color 0.4s ease;
-}
-
+/* Continuous presence loops (Framer handles enter/exit of these nodes) */
 @keyframes overlay-breathe {
   0%,
   100% {

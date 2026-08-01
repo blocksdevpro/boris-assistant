@@ -1,4 +1,10 @@
-import { useEffect, useMemo, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { Mic, Volume2 } from "lucide-react";
 import { useStatus, type StatusPicture } from "@/bridge";
 import { cn } from "@/lib/utils";
@@ -10,6 +16,9 @@ import { toneFor } from "@/lib/phaseVisual";
  * Transparency follows Tauri: `transparent: true` + CSS/html transparent
  * backgrounds + webview default color alpha 0. Empty chrome must stay
  * transparent — never solid black.
+ *
+ * Phase changes crossfade label/hint/caption and morph orb accent so
+ * transitions don't pop.
  */
 export function OverlayWindow() {
   const status = useStatus();
@@ -20,6 +29,18 @@ export function OverlayWindow() {
 
   const caption = pickCaption(status);
   const showCaption = Boolean(caption);
+
+  // Keep last caption mounted briefly so exit can fade via grid collapse.
+  const [displayCaption, setDisplayCaption] = useState(caption);
+  useEffect(() => {
+    if (caption) {
+      setDisplayCaption(caption);
+      return;
+    }
+    // Delay clear so CSS can collapse; content stays until shell closes.
+    const t = window.setTimeout(() => setDisplayCaption(null), 280);
+    return () => window.clearTimeout(t);
+  }, [caption]);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -40,13 +61,18 @@ export function OverlayWindow() {
         className={cn(
           "overlay-island group relative inline-flex max-w-[min(360px,100%)] select-none flex-col gap-2",
           "rounded-[22px] px-3.5 py-2.5",
-          // Hug content — never stretch to the full transparent HWND.
           "w-max min-w-[260px]",
         )}
         style={
           {
             "--island-accent": tone.accent,
             "--island-glow": tone.glow,
+            borderColor: `color-mix(in oklch, ${tone.accent} 28%, rgba(255,255,255,0.14))`,
+            boxShadow: `
+              0 10px 28px rgba(12, 14, 20, 0.45),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 24px color-mix(in oklch, ${tone.glow} 55%, transparent)
+            `,
           } as CSSProperties
         }
       >
@@ -55,61 +81,100 @@ export function OverlayWindow() {
 
           <div data-tauri-drag-region className="min-w-0 flex-1 pr-1">
             <div data-tauri-drag-region className="flex items-baseline gap-2">
-              <span
-                data-tauri-drag-region
+              <FadeText
+                textKey={`${status.phase}-${status.engine}-${tone.label}`}
                 className="text-[13px] font-semibold tracking-tight text-white"
               >
                 {tone.label}
-              </span>
+              </FadeText>
               {status.turn ? (
                 <span
                   data-tauri-drag-region
-                  className="font-mono text-[10px] tabular-nums text-white/35"
+                  className="font-mono text-[10px] tabular-nums text-white/35 transition-opacity duration-300"
                 >
                   #{status.turn}
                 </span>
               ) : null}
             </div>
             {!showCaption ? (
-              <p
-                data-tauri-drag-region
+              <FadeText
+                textKey={`${status.phase}-${tone.hint}`}
                 className="truncate text-[11px] leading-snug text-white/45"
               >
                 {tone.hint}
+              </FadeText>
+            ) : (
+              // Reserve one line so the island doesn't jump when caption opens.
+              <p
+                data-tauri-drag-region
+                className="h-[1.125rem] truncate text-[11px] leading-snug text-transparent"
+                aria-hidden
+              >
+                .
               </p>
-            ) : null}
+            )}
           </div>
 
           <DevicePips status={status} />
         </div>
 
-        {showCaption ? (
-          <div
-            data-tauri-drag-region
-            className="overlay-caption min-w-0 max-w-[320px] rounded-xl px-2.5 py-1.5"
-          >
-            <p
-              data-tauri-drag-region
-              className={cn(
-                "line-clamp-2 text-[12px] leading-snug tracking-tight",
-                caption?.kind === "error"
-                  ? "text-red-300/95"
-                  : caption?.kind === "said"
-                    ? "text-white/80"
-                    : "text-white/65",
-              )}
-            >
-              {caption?.kind !== "error" ? (
-                <span className="mr-1.5 text-[10px] font-medium uppercase tracking-wider text-white/30">
-                  {caption?.kind === "said" ? "Boris" : "You"}
-                </span>
-              ) : null}
-              {caption?.text}
-            </p>
+        <div
+          data-tauri-drag-region
+          className="overlay-caption-shell"
+          data-open={showCaption ? "true" : "false"}
+        >
+          <div className="overlay-caption-inner">
+            {displayCaption ? (
+              <div
+                data-tauri-drag-region
+                className="overlay-caption overlay-caption-body min-w-0 max-w-[320px] rounded-xl px-2.5 py-1.5"
+                key={`${displayCaption.kind}-${displayCaption.text.slice(0, 48)}`}
+              >
+                <p
+                  data-tauri-drag-region
+                  className={cn(
+                    "line-clamp-2 text-[12px] leading-snug tracking-tight transition-colors duration-300",
+                    displayCaption.kind === "error"
+                      ? "text-red-300/95"
+                      : displayCaption.kind === "said"
+                        ? "text-white/80"
+                        : "text-white/65",
+                  )}
+                >
+                  {displayCaption.kind !== "error" ? (
+                    <span className="mr-1.5 text-[10px] font-medium uppercase tracking-wider text-white/30">
+                      {displayCaption.kind === "said" ? "Boris" : "You"}
+                    </span>
+                  ) : null}
+                  {displayCaption.text}
+                </p>
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        </div>
       </div>
     </div>
+  );
+}
+
+/** Remount + fade when `textKey` changes so phase labels don't pop. */
+function FadeText({
+  textKey,
+  className,
+  children,
+}: {
+  textKey: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      key={textKey}
+      data-tauri-drag-region
+      className={cn("overlay-fade-in inline-block max-w-full", className)}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -129,8 +194,9 @@ function PresenceOrb({
       {motion !== "none" ? (
         <>
           <span
+            key={`ring-${motion}`}
             className={cn(
-              "absolute inset-0 rounded-full border-[1.5px]",
+              "overlay-orb-ring absolute inset-0 rounded-full border-[1.5px] overlay-fade-in",
               motion === "listen" && "overlay-ring-listen",
               motion === "think" && "overlay-ring-think",
               motion === "speak" && "overlay-ring-speak",
@@ -140,7 +206,8 @@ function PresenceOrb({
           />
           {(motion === "listen" || motion === "speak") && (
             <span
-              className="overlay-ring-listen-delay absolute inset-0.5 rounded-full border"
+              key={`ring2-${motion}`}
+              className="overlay-orb-ring overlay-ring-listen-delay absolute inset-0.5 rounded-full border overlay-fade-in"
               style={{ borderColor: accent }}
             />
           )}
@@ -149,7 +216,7 @@ function PresenceOrb({
 
       <span
         className={cn(
-          "relative size-3 rounded-full",
+          "overlay-orb-core relative size-3 rounded-full",
           motion === "breathe" && "overlay-core-breathe",
           motion === "listen" && "overlay-core-listen",
           motion === "think" && "overlay-core-think",
@@ -195,7 +262,7 @@ function Pip({
       data-tauri-drag-region
       title={title}
       className={cn(
-        "relative flex size-7 items-center justify-center rounded-full border transition-colors",
+        "relative flex size-7 items-center justify-center rounded-full border transition-all duration-300",
         ok
           ? "border-white/10 bg-white/5 text-white/70"
           : "border-white/5 bg-white/[0.03] text-white/25",
@@ -204,7 +271,7 @@ function Pip({
       {icon}
       <span
         className={cn(
-          "absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40",
+          "absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40 transition-colors duration-300",
           ok ? "bg-emerald-400" : "bg-white/20",
         )}
         aria-hidden

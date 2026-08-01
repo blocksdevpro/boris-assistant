@@ -42,8 +42,8 @@ impl ProfileStore {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create profile dir {}: {e}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(profile)
-            .map_err(|e| format!("serialize profile: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(profile).map_err(|e| format!("serialize profile: {e}"))?;
         write_atomic(&self.path, json.as_bytes())
             .map_err(|e| format!("write profile {}: {e}", self.path.display()))?;
         Ok(())

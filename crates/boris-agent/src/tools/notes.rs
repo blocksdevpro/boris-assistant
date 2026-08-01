@@ -56,9 +56,8 @@ impl NotesStore {
     pub fn append(&self, note: &str) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    format!("create notes parent dir {}: {e}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("create notes parent dir {}: {e}", parent.display()))?;
             }
         }
 
@@ -66,8 +65,7 @@ impl NotesStore {
             ts_ms: now_ms(),
             note: note.to_string(),
         };
-        let line =
-            serde_json::to_string(&record).map_err(|e| format!("serialize note: {e}"))?;
+        let line = serde_json::to_string(&record).map_err(|e| format!("serialize note: {e}"))?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -89,12 +87,7 @@ impl NotesStore {
         }
         let all = self.read_all()?;
         let take = limit.min(all.len());
-        Ok(all
-            .into_iter()
-            .rev()
-            .take(take)
-            .map(|r| r.note)
-            .collect())
+        Ok(all.into_iter().rev().take(take).map(|r| r.note).collect())
     }
 
     /// Case-insensitive substring search; newest matches first, up to `limit`.
@@ -132,8 +125,7 @@ impl NotesStore {
         let mut out = Vec::new();
 
         for (idx, line_res) in reader.lines().enumerate() {
-            let line = line_res
-                .map_err(|e| format!("read notes {}: {e}", self.path.display()))?;
+            let line = line_res.map_err(|e| format!("read notes {}: {e}", self.path.display()))?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -288,7 +280,10 @@ fn parse_limit(obj: &Map<String, Value>) -> Result<usize, ToolError> {
         Some(v) => {
             let n = v
                 .as_u64()
-                .or_else(|| v.as_i64().and_then(|i| if i >= 0 { Some(i as u64) } else { None }))
+                .or_else(|| {
+                    v.as_i64()
+                        .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+                })
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
                         if f.is_finite() && f >= 0.0 {

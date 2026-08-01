@@ -11,9 +11,7 @@ pub mod extract;
 pub mod profile;
 pub mod store;
 
-pub use extract::{
-    extract_heuristic, extract_with_llm, should_llm_extract, ProfileDelta,
-};
+pub use extract::{extract_heuristic, extract_with_llm, should_llm_extract, ProfileDelta};
 pub use profile::{FactCategory, UserFact, UserProfile};
 pub use store::ProfileStore;
 

@@ -264,7 +264,9 @@ fn parse_llm_delta(content: &str) -> Result<ProfileDelta, LlmError> {
         .collect();
     delta.facts_remove_query = raw.facts_remove_query;
     delta.ongoing_add = raw.ongoing_add.into_iter().take(5).collect();
-    delta.ongoing_replace = raw.ongoing_replace.map(|v| v.into_iter().take(10).collect());
+    delta.ongoing_replace = raw
+        .ongoing_replace
+        .map(|v| v.into_iter().take(10).collect());
     for f in raw.facts_add.into_iter().take(5) {
         let text = f.text.trim();
         if text.len() < 3 {
@@ -342,8 +344,8 @@ fn looks_like_name(s: &str) -> bool {
     // Reject common false positives for "i am …"
     let lower = s.to_ascii_lowercase();
     const BAD: &[&str] = &[
-        "tired", "fine", "good", "ok", "okay", "here", "back", "ready", "done", "busy",
-        "hungry", "sorry", "sure", "confused", "lost", "home", "going", "trying",
+        "tired", "fine", "good", "ok", "okay", "here", "back", "ready", "done", "busy", "hungry",
+        "sorry", "sure", "confused", "lost", "home", "going", "trying",
     ];
     if words.len() == 1 && BAD.contains(&lower.as_str()) {
         return false;

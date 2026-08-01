@@ -1,12 +1,13 @@
 mod orchestrator;
 mod overlay_win;
+mod tray;
 
 use boris_pipeline::{
     load_settings, save_settings, AppSettings, DeviceDto, DownloadProgress, ModelsInstallReport,
     ModelsStatus, PreflightReport, StatusPicture,
 };
 use orchestrator::AppState;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -135,10 +136,26 @@ pub fn run() {
             // Overlay is `"create": false` in config — build with explicit transparent API.
             overlay_win::spawn_overlay_window(app.handle())?;
 
+            // Tray keeps control after the main console is closed/hidden.
+            if let Err(e) = tray::setup_tray(app.handle()) {
+                tracing::error!(error = %e, "failed to create system tray");
+            }
+
             if let Some(state) = app.try_state::<AppState>() {
                 let _ = app.emit("status", state.status());
             }
             Ok(())
+        })
+        // Closing the console hides it; only tray "Quit Boris" exits the app.
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                tracing::info!("main window hidden to tray");
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -79,8 +79,8 @@ impl SessionStore {
     /// Load `meta.json` for an existing session.
     pub fn open(&self, id: &SessionId) -> Result<SessionMeta, String> {
         let path = self.meta_path(id);
-        let raw = fs::read_to_string(&path)
-            .map_err(|e| format!("read meta {}: {e}", path.display()))?;
+        let raw =
+            fs::read_to_string(&path).map_err(|e| format!("read meta {}: {e}", path.display()))?;
         serde_json::from_str(&raw).map_err(|e| format!("parse meta {}: {e}", path.display()))
     }
 
@@ -106,8 +106,8 @@ impl SessionStore {
         let cur = CurrentFile {
             session_id: id.clone(),
         };
-        let json = serde_json::to_string_pretty(&cur)
-            .map_err(|e| format!("serialize current: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&cur).map_err(|e| format!("serialize current: {e}"))?;
         write_atomic(&self.current_path(), json.as_bytes())
             .map_err(|e| format!("write current: {e}"))
     }
@@ -276,10 +276,7 @@ mod tests {
 
         let dir = store.session_dir(&a.id);
         assert_eq!(dir, root.join(a.id.as_str()));
-        assert_eq!(
-            store.transcript_path(&a.id),
-            dir.join("transcript.jsonl")
-        );
+        assert_eq!(store.transcript_path(&a.id), dir.join("transcript.jsonl"));
 
         cleanup(&root);
     }
@@ -424,10 +421,7 @@ mod tests {
         let meta = store.create().expect("create");
         let raw = fs::read_to_string(store.current_path()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(
-            v["session_id"].as_str().unwrap(),
-            meta.id.as_str()
-        );
+        assert_eq!(v["session_id"].as_str().unwrap(), meta.id.as_str());
         cleanup(&root);
     }
 }

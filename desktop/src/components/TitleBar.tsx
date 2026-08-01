@@ -102,7 +102,8 @@ export function TitleBar({ trailing }: { trailing?: ReactNode }) {
           )}
         </TitleBarButton>
         <TitleBarButton
-          aria-label="Close"
+          aria-label="Close to tray"
+          title="Close to system tray (app keeps running)"
           variant="close"
           onClick={() => void appWindow.close()}
         >
@@ -117,17 +118,20 @@ function TitleBarButton({
   children,
   onClick,
   "aria-label": ariaLabel,
+  title,
   variant = "default",
 }: {
   children: ReactNode;
   onClick: () => void;
   "aria-label": string;
+  title?: string;
   variant?: "default" | "close";
 }) {
   return (
     <button
       type="button"
       aria-label={ariaLabel}
+      title={title ?? ariaLabel}
       onClick={onClick}
       className={cn(
         "inline-flex h-full w-11 items-center justify-center text-white/40 transition-colors",

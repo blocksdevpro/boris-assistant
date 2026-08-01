@@ -14,6 +14,4 @@ pub mod transcript;
 pub mod types;
 
 pub use store::SessionStore;
-pub use types::{
-    generate_session_id, now_unix_ms, SessionId, SessionMeta, SessionStatus,
-};
+pub use types::{generate_session_id, now_unix_ms, SessionId, SessionMeta, SessionStatus};

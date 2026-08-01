@@ -21,14 +21,10 @@ pub use client::{LlmClient, OpenRouterClient};
 pub use context::{Context, Message, Role};
 pub use engine::AgentEngine;
 pub use error::{AgentError, AgentErrorKind, LlmError, LlmErrorKind};
-pub use memory::{
-    FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS,
-};
+pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
-pub use session::{
-    generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore,
-};
+pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
 pub use tool::{Tool, ToolError};
 pub use tools::{
     builtin_tools, register_builtin_tools, register_builtin_tools_with_options, BuiltinToolPaths,

@@ -308,23 +308,16 @@ mod tests {
             json!({ "tool_call_id": "call_2", "content": "tool-result-2" }),
         );
 
-        assert_eq!(
-            roles_of(&ctx),
-            vec!["system", "user", "assistant", "tool"]
-        );
+        assert_eq!(roles_of(&ctx), vec!["system", "user", "assistant", "tool"]);
         assert_eq!(text(&ctx.messages[1]), "u2");
         // Assistant tool_calls still paired with its tool result.
         assert!(ctx.messages[2].content.get("tool_calls").is_some());
-        assert_eq!(
-            ctx.messages[3].content["tool_call_id"],
-            json!("call_2")
-        );
+        assert_eq!(ctx.messages[3].content["tool_call_id"], json!("call_2"));
         // No leftover turn-1 tool results (would be orphaned without assistant).
-        assert!(
-            !ctx.messages
-                .iter()
-                .any(|m| m.content.get("tool_call_id") == Some(&json!("call_1")))
-        );
+        assert!(!ctx
+            .messages
+            .iter()
+            .any(|m| m.content.get("tool_call_id") == Some(&json!("call_1"))));
     }
 
     #[test]
@@ -387,7 +380,10 @@ mod tests {
             ("user".into(), json!("u")),
             ("bogus".into(), json!("x")),
             ("assistant".into(), json!("a")),
-            ("tool".into(), json!({ "tool_call_id": "c1", "content": "ok" })),
+            (
+                "tool".into(),
+                json!({ "tool_call_id": "c1", "content": "ok" }),
+            ),
         ];
         let msgs = Context::messages_from_transcript(&records);
         assert_eq!(msgs.len(), 3);

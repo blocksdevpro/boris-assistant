@@ -102,9 +102,7 @@ impl AgentEngine {
     }
 
     pub fn profile_store_path(&self) -> Option<PathBuf> {
-        self.personal
-            .as_ref()
-            .map(|p| p.store.path().to_path_buf())
+        self.personal.as_ref().map(|p| p.store.path().to_path_buf())
     }
 
     /// Compose base persona + personal context into the live system message.
@@ -306,8 +304,12 @@ impl AgentEngine {
         };
 
         if do_llm {
-            match extract_with_llm(self.client.as_ref(), user_text, assistant_text, &profile_summary)
-            {
+            match extract_with_llm(
+                self.client.as_ref(),
+                user_text,
+                assistant_text,
+                &profile_summary,
+            ) {
                 Ok(llm_delta) if !llm_delta.is_empty() => {
                     debug!(turns_seen, "personal llm extract produced updates");
                     // Merge: heuristics first, then LLM (LLM can refine name etc.).

@@ -234,10 +234,7 @@ mod tests {
             AgentErrorKind::UnknownTool
         );
         assert_eq!(AgentError::timeout("x").kind(), AgentErrorKind::Timeout);
-        assert_eq!(
-            AgentError::cancelled("x").kind(),
-            AgentErrorKind::Cancelled
-        );
+        assert_eq!(AgentError::cancelled("x").kind(), AgentErrorKind::Cancelled);
         assert_eq!(AgentError::llm("x").kind(), AgentErrorKind::Llm);
     }
 }

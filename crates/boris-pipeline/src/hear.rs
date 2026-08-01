@@ -163,7 +163,9 @@ pub fn capture_utterance(
     let silence_after = vad_silence_samples();
     let silence_before = match kind {
         CaptureKind::AfterWake => vad_initial_timeout_samples(),
-        CaptureKind::AwaitReply => duration_to_samples(AWAIT_REPLY_START_TIMEOUT, AUDIO_TARGET_RATE),
+        CaptureKind::AwaitReply => {
+            duration_to_samples(AWAIT_REPLY_START_TIMEOUT, AUDIO_TARGET_RATE)
+        }
     };
 
     loop {

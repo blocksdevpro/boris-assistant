@@ -174,8 +174,7 @@ impl UserProfile {
             .find(|f| f.id == fact.id || similar_fact(&f.text, &fact.text))
         {
             existing.last_seen_at_ms = now_ms();
-            existing.confidence =
-                ((existing.confidence + fact.confidence) * 0.5).clamp(0.0, 1.0);
+            existing.confidence = ((existing.confidence + fact.confidence) * 0.5).clamp(0.0, 1.0);
             if fact.salience > existing.salience {
                 existing.salience = fact.salience;
             }
@@ -334,13 +333,8 @@ impl UserProfile {
             }
         }
         // Absolute fallback.
-        let name = self
-            .preferred_name
-            .as_deref()
-            .unwrap_or("unknown");
-        format!(
-            "<personal_context>\nName: {name}\n</personal_context>"
-        )
+        let name = self.preferred_name.as_deref().unwrap_or("unknown");
+        format!("<personal_context>\nName: {name}\n</personal_context>")
     }
 }
 
@@ -374,9 +368,9 @@ fn normalize_fact_text(s: String) -> String {
 }
 
 fn clean_name(s: String) -> String {
-    let s = s.trim().trim_matches(|c: char| {
-        c == '"' || c == '\'' || c == ',' || c == '.' || c == '!'
-    });
+    let s = s
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '.' || c == '!');
     // First token / short name only.
     let s = s.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
     if s.chars().count() > 40 {

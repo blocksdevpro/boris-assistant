@@ -227,17 +227,34 @@ fn run(
             match cmd_rx.recv() {
                 Ok(EngineCommand::Start) => {
                     running = true;
-                    picture.engine = EngineState::On;
-                    picture.detail = None;
+                    picture.engine = EngineState::Starting;
+                    picture.detail = Some("warming models…".into());
                     picture.heard = None;
                     picture.said = None;
                     picture.turn = None;
+                    picture.publish();
+
+                    // Warm STT/TTS on Start so the first turn is not paying load cost.
+                    let warm_t = std::time::Instant::now();
+                    if let Err(e) = stt.load() {
+                        tracing::warn!(error = %e, "STT warm-load failed (will retry on first turn)");
+                    }
+                    if let Err(e) = tts.load() {
+                        tracing::warn!(error = %e, "TTS warm-load failed (will retry on first turn)");
+                    }
+                    tracing::info!(
+                        warm_ms = warm_t.elapsed().as_millis() as u64,
+                        "models warm-load finished"
+                    );
+
                     begin_session(
                         &store,
                         &mut active_session,
                         &mut agent,
                         &config.system_prompt,
                     );
+                    picture.engine = EngineState::On;
+                    picture.detail = None;
                     picture.set_phase(Phase::Armed);
                     tracing::info!("engine started");
                 }
@@ -376,8 +393,9 @@ fn run(
             continue;
         }
 
-        // Read — load STT once and keep warm across turns (no unload on success).
+        // Read — STT should already be warm after Start; keep loaded across turns.
         picture.set_phase(Phase::Reading);
+        let stt_t = std::time::Instant::now();
         if let Err(e) = stt.load() {
             tracing::error!(error = %e, %turn, "stt load failed");
             picture.detail = Some(format!("stt load: {e}"));
@@ -395,7 +413,14 @@ fn run(
                 continue;
             }
         };
-        tracing::debug!(%turn, "stt kept loaded for next turn");
+        let stt_ms = stt_t.elapsed().as_millis() as u64;
+        tracing::info!(
+            %turn,
+            stt_ms,
+            clip_samples = clip.len(),
+            clip_ms = (clip.len() as u64 * 1000) / 16_000,
+            "stt done"
+        );
         picture.heard = Some(text.clone());
         picture.publish();
         tracing::info!(%turn, %text, "heard");
@@ -432,6 +457,7 @@ fn run(
 
         // Think
         picture.set_phase(Phase::Thinking);
+        let agent_t = std::time::Instant::now();
         let outcome = match agent.run_turn(&text) {
             Ok(o) => o,
             Err(e) => {
@@ -442,6 +468,8 @@ fn run(
                 continue;
             }
         };
+        let agent_ms = agent_t.elapsed().as_millis() as u64;
+        tracing::info!(%turn, agent_ms, "agent done");
 
         let (reply, expect_reply) = match outcome {
             AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {
@@ -484,6 +512,7 @@ fn run(
 
         // Talk
         picture.set_phase(Phase::Talking);
+        let tts_t = std::time::Instant::now();
         if let Err(e) = tts.load() {
             tracing::error!(error = %e, %turn, "tts load failed");
             picture.detail = Some(format!("tts load: {e}"));
@@ -501,7 +530,11 @@ fn run(
                 continue;
             }
         };
+        let tts_ms = tts_t.elapsed().as_millis() as u64;
+        let play_samples = pcm.len();
+        tracing::info!(%turn, tts_ms, play_samples, "tts synth done");
 
+        let play_t = std::time::Instant::now();
         while output_events.try_recv().is_ok() {}
         audio.play(pcm);
         wait_playback_or_stop(
@@ -511,6 +544,7 @@ fn run(
             &mut audio,
             &mut picture,
         );
+        let play_ms = play_t.elapsed().as_millis() as u64;
 
         if !running {
             go_off(&mut picture, &audio, &store, &mut active_session);
@@ -534,7 +568,15 @@ fn run(
             await_reply = false;
         }
 
-        tracing::info!(%turn, "turn complete");
+        tracing::info!(
+            %turn,
+            stt_ms,
+            agent_ms,
+            tts_ms,
+            play_ms,
+            total_post_capture_ms = stt_ms + agent_ms + tts_ms + play_ms,
+            "turn complete (latency breakdown)"
+        );
     }
 }
 

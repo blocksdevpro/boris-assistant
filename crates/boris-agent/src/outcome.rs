@@ -1,10 +1,12 @@
-//! What the agent decided after one user message (tool loop finished).
+//! What the agent decided after one user message (tool loop finished or paused).
 //!
 //! The host maps this into pipeline phases; `boris-agent` never emits speech
 //! or touches the app event bus.
 
-/// What the agent decided after one user message (tool loop finished).
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::runtime::PendingToolCall;
+
+/// What the agent decided after one user message (tool loop finished or paused).
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentOutcome {
     /// Final plain-text reply — host should synthesize and play this.
     Speak {
@@ -15,6 +17,12 @@ pub enum AgentOutcome {
     },
     /// Model returned no speakable content.
     Silent,
+    /// Tool loop paused for HITL. Host should speak `text`, collect yes/no,
+    /// then call [`crate::AgentEngine::resume_confirmation`].
+    NeedsConfirmation {
+        text: String,
+        pending: PendingToolCall,
+    },
 }
 
 impl AgentOutcome {
@@ -36,7 +44,7 @@ impl AgentOutcome {
 
     pub fn text(&self) -> Option<&str> {
         match self {
-            Self::Speak { text, .. } => Some(text.as_str()),
+            Self::Speak { text, .. } | Self::NeedsConfirmation { text, .. } => Some(text.as_str()),
             Self::Silent => None,
         }
     }
@@ -44,8 +52,14 @@ impl AgentOutcome {
     pub fn expect_reply(&self) -> bool {
         match self {
             Self::Speak { expect_reply, .. } => *expect_reply,
+            // Confirm prompts always need a yes/no (or freeform) answer.
+            Self::NeedsConfirmation { .. } => true,
             Self::Silent => false,
         }
+    }
+
+    pub fn is_needs_confirmation(&self) -> bool {
+        matches!(self, Self::NeedsConfirmation { .. })
     }
 }
 
@@ -58,17 +72,14 @@ pub fn looks_like_question(text: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    // Must end with a question mark (after optional trailing junk).
     let core = t.trim_end_matches(|c: char| c == '!' || c == '.' || c == '…' || c.is_whitespace());
     if !core.ends_with('?') {
         return false;
     }
-    // Keep follow-ups short — long rants with a ? are not "await reply".
     let words = core.split_whitespace().count();
     if words == 0 || words > 28 {
         return false;
     }
-    // Avoid pure rhetorical stacked questions in long form (already word-capped).
     true
 }
 

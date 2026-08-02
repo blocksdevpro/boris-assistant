@@ -10,9 +10,10 @@ use std::thread::{self, JoinHandle};
 use boris_agent::context::Context;
 use boris_agent::session::store::SessionStore;
 use boris_agent::session::types::SessionId;
-use boris_agent::{AgentEngine, AgentOutcome, OpenRouterClient};
+use boris_agent::{AgentEngine, AgentOutcome, OpenRouterClient, SandboxConfig};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
+use boris_core::types::ArcAudioBuffer;
 use boris_core::TurnId;
 use boris_inference::{SpeechToText, TextToSpeech};
 use boris_sense::{init_onnx_runtime, LivekitWakeWord, WebRtcVad};
@@ -237,9 +238,25 @@ fn run(
     #[cfg(not(feature = "tts-supertone"))]
     let mut tts: Box<dyn TextToSpeech> = Box::new(NullTts);
 
+    // Long-lived Tokio runtime for the async agent plane (LLM + tools).
+    // Voice capture / STT / TTS stay on this sync engine thread.
+    let agent_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .thread_name("boris-agent")
+        .build()
+        .expect("failed to build Tokio runtime for agent");
+
     tracing::info!("building OpenRouter client + AgentEngine…");
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
     let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
+    if let Err(e) = paths::ensure_agent_dirs() {
+        tracing::warn!(error = %e, "ensure agent sandbox/audit dirs failed");
+    }
+    agent.configure_runtime(
+        SandboxConfig::for_boris_home(paths::boris_home()),
+        Some(paths::audit_path()),
+    );
     // Time/date, notes, and active personal context (profile tools + extract).
     boris_agent::tools::register_builtin_tools(
         &mut agent,
@@ -251,7 +268,8 @@ fn run(
     tracing::info!(
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
-        "builtin tools registered"
+        audit = %paths::audit_path().display(),
+        "builtin tools + tool runtime registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).
@@ -595,7 +613,11 @@ fn run(
         picture.set_phase(Phase::Thinking);
         let agent_t = std::time::Instant::now();
         let tts_job = spawn_tts_load(tts);
-        let outcome = agent.run_turn(&text);
+        agent.set_turn_id(Some(turn.to_string()));
+        if let Some(ref sid) = active_session {
+            agent.set_session_id(Some(sid.to_string()));
+        }
+        let outcome = agent_rt.block_on(agent.run_turn(&text));
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         tts = tts_owned;
 
@@ -603,6 +625,7 @@ fn run(
             Ok(o) => o,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
+                agent.cancel_pending();
                 let _ = tts.unload();
                 picture.detail = Some(format!("agent: {e}"));
                 follow_up_depth = 0;
@@ -610,6 +633,33 @@ fn run(
                 continue;
             }
         };
+
+        // Resolve HITL confirmations (voice yes/no) before final speech.
+        let outcome = match resolve_agent_outcome(
+            outcome,
+            &mut agent,
+            &agent_rt,
+            &mut tts,
+            &mut stt,
+            &mic,
+            &mut vad,
+            &mut audio,
+            &mut output_events,
+            &cmd_rx,
+            &mut running,
+            &mut picture,
+            &store,
+            &mut active_session,
+            turn,
+        ) {
+            OutcomeResolve::Stopped => continue,
+            OutcomeResolve::ReArm => {
+                follow_up_depth = 0;
+                continue;
+            }
+            OutcomeResolve::Done(o) => o,
+        };
+
         let agent_ms = agent_t.elapsed().as_millis() as u64;
         tracing::info!(%turn, agent_ms, "agent done");
 
@@ -617,7 +667,9 @@ fn run(
             AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {
                 (text, expect_reply)
             }
-            AgentOutcome::Speak { .. } | AgentOutcome::Silent => {
+            AgentOutcome::Speak { .. }
+            | AgentOutcome::Silent
+            | AgentOutcome::NeedsConfirmation { .. } => {
                 tracing::warn!(%turn, "agent produced no speech");
                 let _ = tts.unload();
                 picture.detail = Some("empty agent reply".into());
@@ -816,6 +868,248 @@ fn run(
             "turn complete (latency breakdown)"
         );
     }
+}
+
+enum OutcomeResolve {
+    Done(AgentOutcome),
+    ReArm,
+    Stopped,
+}
+
+/// Drive NeedsConfirmation → speak → freeform yes/no → resume until Speak/Silent.
+fn resolve_agent_outcome(
+    mut outcome: AgentOutcome,
+    agent: &mut AgentEngine,
+    agent_rt: &tokio::runtime::Runtime,
+    tts: &mut TtsBox,
+    stt: &mut SttBox,
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &mut impl boris_sense::Vad,
+    audio: &mut AudioService,
+    output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    picture: &mut Picture,
+    store: &SessionStore,
+    active_session: &mut Option<SessionId>,
+    turn: TurnId,
+) -> OutcomeResolve {
+    // Cap nested confirms (also enforced in agent policy).
+    for _ in 0..4 {
+        let AgentOutcome::NeedsConfirmation { text: prompt, pending } = outcome else {
+            return OutcomeResolve::Done(outcome);
+        };
+
+        tracing::info!(
+            %turn,
+            tool = %pending.name,
+            pending_id = %pending.id,
+            "agent needs confirmation"
+        );
+        picture.detail = Some(format!("confirm: {}", pending.args_summary));
+        picture.said = Some(prompt.clone());
+        picture.publish();
+
+        // Speak the confirm prompt.
+        if let Err(e) = tts.load() {
+            tracing::error!(error = %e, "tts load failed for confirm");
+            agent.cancel_pending();
+            picture.detail = Some(format!("tts: {e}"));
+            picture.set_phase(Phase::Armed);
+            return OutcomeResolve::ReArm;
+        }
+        let pcm = match tts.synthesize(&prompt) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "tts synth failed for confirm");
+                agent.cancel_pending();
+                let _ = tts.unload();
+                picture.detail = Some(format!("tts: {e}"));
+                picture.set_phase(Phase::Armed);
+                return OutcomeResolve::ReArm;
+            }
+        };
+        while output_events.try_recv().is_ok() {}
+        audio.play(pcm);
+        match wait_playback_started(output_events, cmd_rx, running, audio, picture) {
+            PlaybackWait::Stopped => {
+                agent.cancel_pending();
+                go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                return OutcomeResolve::Stopped;
+            }
+            PlaybackWait::Aborted => {}
+            PlaybackWait::Finished => {
+                picture.set_phase(Phase::Talking);
+                wait_playback_or_stop(output_events, cmd_rx, running, audio, picture);
+            }
+        }
+        if !*running {
+            agent.cancel_pending();
+            go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+            return OutcomeResolve::Stopped;
+        }
+
+        // Freeform listen for yes/no.
+        picture.set_phase(Phase::AwaitingConfirm);
+        if let Err(e) = hear::settle_after_playback(mic, cmd_rx, running) {
+            agent.cancel_pending();
+            return match e {
+                HearBreak::Stopped if !*running => {
+                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    OutcomeResolve::Stopped
+                }
+                HearBreak::Disconnected => {
+                    end_session(store, active_session);
+                    release_voice_models(stt.as_mut(), tts.as_mut(), "disconnected");
+                    picture.set_phase(Phase::Off);
+                    OutcomeResolve::Stopped
+                }
+                _ => {
+                    picture.set_phase(Phase::Armed);
+                    OutcomeResolve::ReArm
+                }
+            };
+        }
+
+        // Preload STT while preparing capture.
+        if let Err(e) = stt.load() {
+            tracing::error!(error = %e, "stt load failed for confirm");
+            agent.cancel_pending();
+            picture.detail = Some(format!("stt: {e}"));
+            picture.set_phase(Phase::Armed);
+            return OutcomeResolve::ReArm;
+        }
+
+        picture.set_phase(Phase::Hearing);
+        let clip = match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitReply)
+        {
+            Ok(c) => c,
+            Err(HearBreak::Stopped) if !*running => {
+                agent.cancel_pending();
+                go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                return OutcomeResolve::Stopped;
+            }
+            Err(_) => {
+                // Silence / cancel → treat as reject.
+                tracing::info!(%turn, "confirm capture failed — treating as reject");
+                outcome = match agent_rt.block_on(agent.resume_confirmation(&pending.id, false)) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::error!(error = %e, "resume reject failed");
+                        agent.cancel_pending();
+                        picture.detail = Some(format!("agent: {e}"));
+                        picture.set_phase(Phase::Armed);
+                        return OutcomeResolve::ReArm;
+                    }
+                };
+                picture.set_phase(Phase::Thinking);
+                continue;
+            }
+        };
+
+        picture.set_phase(Phase::Reading);
+        let heard = match stt.transcribe(&clip) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "confirm STT failed — reject");
+                String::new()
+            }
+        };
+        let _ = stt.unload();
+        picture.heard = Some(heard.clone());
+        picture.publish();
+
+        let approved = match interpret_yes_no(&heard) {
+            Some(v) => v,
+            None => {
+                // One re-ask then deny.
+                tracing::info!(%turn, heard = %heard, "confirm answer ambiguous — re-ask once");
+                let reask = "Was that a yes or a no?";
+                picture.said = Some(reask.into());
+                picture.publish();
+                if let Ok(pcm) = tts.synthesize(reask) {
+                    while output_events.try_recv().is_ok() {}
+                    audio.play(pcm);
+                    let _ = wait_playback_started(output_events, cmd_rx, running, audio, picture);
+                    wait_playback_or_stop(output_events, cmd_rx, running, audio, picture);
+                }
+                if !*running {
+                    agent.cancel_pending();
+                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    return OutcomeResolve::Stopped;
+                }
+                picture.set_phase(Phase::AwaitingConfirm);
+                let _ = hear::settle_after_playback(mic, cmd_rx, running);
+                let _ = stt.load();
+                picture.set_phase(Phase::Hearing);
+                let second = hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitReply)
+                    .ok()
+                    .and_then(|c| stt.transcribe(&c).ok())
+                    .unwrap_or_default();
+                let _ = stt.unload();
+                picture.heard = Some(second.clone());
+                interpret_yes_no(&second).unwrap_or(false)
+            }
+        };
+
+        tracing::info!(%turn, approved, heard = %heard, "confirm decision");
+        picture.set_phase(Phase::Thinking);
+        picture.detail = None;
+        outcome = match agent_rt.block_on(agent.resume_confirmation(&pending.id, approved)) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "resume confirmation failed");
+                agent.cancel_pending();
+                picture.detail = Some(format!("agent: {e}"));
+                picture.set_phase(Phase::Armed);
+                return OutcomeResolve::ReArm;
+            }
+        };
+    }
+
+    tracing::warn!(%turn, "confirm loop cap — cancelling pending");
+    agent.cancel_pending();
+    picture.detail = Some("too many confirmations".into());
+    picture.set_phase(Phase::Armed);
+    OutcomeResolve::ReArm
+}
+
+/// Interpret freeform STT as yes/no. `None` = ambiguous.
+fn interpret_yes_no(text: &str) -> Option<bool> {
+    let t = text.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return None;
+    }
+    // Take first few words for short answers.
+    let head: String = t.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+
+    const YES: &[&str] = &[
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "do it", "go ahead", "please",
+        "affirmative", "y", "yea", "alright", "all right", "go for it", "confirmed",
+    ];
+    const NO: &[&str] = &[
+        "no", "nope", "nah", "cancel", "stop", "don't", "do not", "never", "n", "negative",
+        "decline", "abort",
+    ];
+
+    for y in YES {
+        if head == *y || head.starts_with(&format!("{y} ")) || head.starts_with(&format!("{y},")) {
+            return Some(true);
+        }
+    }
+    for n in NO {
+        if head == *n || head.starts_with(&format!("{n} ")) || head.starts_with(&format!("{n},")) {
+            return Some(false);
+        }
+    }
+    // Contains clear tokens.
+    if t.split_whitespace().any(|w| matches!(w, "yes" | "yeah" | "yep" | "yup")) {
+        return Some(true);
+    }
+    if t.split_whitespace().any(|w| matches!(w, "no" | "nope" | "nah" | "cancel" | "stop")) {
+        return Some(false);
+    }
+    None
 }
 
 /// Start or resume a voice session and seed the agent context.

@@ -10,6 +10,7 @@ export type Phase =
   | "Quiet"
   | "Armed"
   | "AwaitingReply"
+  | "AwaitingConfirm"
   | "Hearing"
   | "Reading"
   | "Thinking"

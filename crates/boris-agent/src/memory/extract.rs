@@ -203,7 +203,7 @@ pub fn should_llm_extract(
 }
 
 /// Side-channel LLM extraction. Does **not** mutate conversation context.
-pub fn extract_with_llm(
+pub async fn extract_with_llm(
     client: &dyn LlmClient,
     user_text: &str,
     assistant_text: &str,
@@ -236,7 +236,7 @@ Rules:
         {"role": "user", "content": user},
     ]);
 
-    let response = client.complete(messages, Value::Null)?;
+    let response = client.complete(messages, Value::Null).await?;
     let content = response
         .get("content")
         .and_then(|c| c.as_str())

@@ -16,11 +16,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Tool, ToolError,
+    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
+    ToolError, ToolMeta, ToolRisk,
 };
 
 const DEFAULT_RECALL_LIMIT: usize = 5;
@@ -176,6 +178,7 @@ impl RememberNoteTool {
     }
 }
 
+#[async_trait]
 impl Tool for RememberNoteTool {
     fn name(&self) -> &str {
         "remember_note"
@@ -198,7 +201,11 @@ impl Tool for RememberNoteTool {
         })
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let note = require_string(obj, "note")?;
         self.store
@@ -228,6 +235,7 @@ impl RecallNotesTool {
     }
 }
 
+#[async_trait]
 impl Tool for RecallNotesTool {
     fn name(&self) -> &str {
         "recall_notes"
@@ -254,7 +262,11 @@ impl Tool for RecallNotesTool {
         })
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let limit = parse_limit(obj)?;
         let query = optional_string(obj, "query");
@@ -384,8 +396,8 @@ mod tests {
         cleanup(&path);
     }
 
-    #[test]
-    fn remember_and_recall_tools_roundtrip() {
+    #[tokio::test]
+    async fn remember_and_recall_tools_roundtrip() {
         let path = temp_notes_path("tools");
         let remember = RememberNoteTool::new(&path);
         let recall = RecallNotesTool::new(&path);
@@ -395,41 +407,43 @@ mod tests {
 
         let saved = remember
             .execute(json!({ "note": "user likes dark mode" }))
+            .await
             .expect("remember");
         assert_eq!(saved, "Saved note.");
 
-        let listed = recall.execute(json!({})).expect("recall");
+        let listed = recall.execute(json!({})).await.expect("recall");
         assert!(listed.contains("user likes dark mode"), "got: {listed}");
         assert!(listed.starts_with("- "), "got: {listed}");
 
         let searched = recall
             .execute(json!({ "query": "DARK", "limit": 5 }))
+            .await
             .expect("search");
         assert!(searched.contains("dark mode"), "got: {searched}");
 
         cleanup(&path);
     }
 
-    #[test]
-    fn recall_missing_file_is_empty_message() {
+    #[tokio::test]
+    async fn recall_missing_file_is_empty_message() {
         let path = temp_notes_path("missing");
         let recall = RecallNotesTool::new(&path);
-        let out = recall.execute(json!({})).unwrap();
+        let out = recall.execute(json!({})).await.unwrap();
         assert_eq!(out, "No notes found.");
         cleanup(&path);
     }
 
-    #[test]
-    fn remember_requires_note() {
+    #[tokio::test]
+    async fn remember_requires_note() {
         let path = temp_notes_path("req");
         let tool = RememberNoteTool::new(&path);
-        let err = tool.execute(json!({})).unwrap_err();
+        let err = tool.execute(json!({})).await.unwrap_err();
         assert!(err.message.contains("note"), "got: {}", err.message);
         cleanup(&path);
     }
 
-    #[test]
-    fn limit_defaults_and_caps() {
+    #[tokio::test]
+    async fn limit_defaults_and_caps() {
         let path = temp_notes_path("limit");
         let store = NotesStore::new(&path);
         for i in 0..25 {
@@ -438,16 +452,16 @@ mod tests {
         let recall = RecallNotesTool::new(&path);
 
         // default 5
-        let out = recall.execute(json!({})).unwrap();
+        let out = recall.execute(json!({})).await.unwrap();
         let count = out.lines().count();
         assert_eq!(count, 5, "got:\n{out}");
 
         // cap at 20
-        let out = recall.execute(json!({ "limit": 100 })).unwrap();
+        let out = recall.execute(json!({ "limit": 100 })).await.unwrap();
         assert_eq!(out.lines().count(), 20);
 
         // explicit 3
-        let out = recall.execute(json!({ "limit": 3 })).unwrap();
+        let out = recall.execute(json!({ "limit": 3 })).await.unwrap();
         assert_eq!(out.lines().count(), 3);
 
         cleanup(&path);

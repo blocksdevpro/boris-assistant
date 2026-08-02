@@ -3,12 +3,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::memory::profile::{FactCategory, UserFact, UserProfile};
 use crate::memory::store::ProfileStore;
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Tool, ToolError,
+    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
+    ToolError, ToolMeta, ToolRisk,
 };
 
 /// Shared mutable profile used by tools + engine (same process).
@@ -45,6 +47,7 @@ impl SaveUserFactTool {
     }
 }
 
+#[async_trait]
 impl Tool for SaveUserFactTool {
     fn name(&self) -> &str {
         "save_user_fact"
@@ -73,7 +76,11 @@ impl Tool for SaveUserFactTool {
         })
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let fact = require_string(obj, "fact")?;
         let category = optional_string(obj, "category")
@@ -106,6 +113,7 @@ impl UpdateUserProfileTool {
     }
 }
 
+#[async_trait]
 impl Tool for UpdateUserProfileTool {
     fn name(&self) -> &str {
         "update_user_profile"
@@ -135,7 +143,11 @@ impl Tool for UpdateUserProfileTool {
         })
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let mut changed = false;
         with_profile(&self.profile, &self.store, |p| {
@@ -181,6 +193,7 @@ impl GetUserContextTool {
     }
 }
 
+#[async_trait]
 impl Tool for GetUserContextTool {
     fn name(&self) -> &str {
         "get_user_context"
@@ -199,7 +212,11 @@ impl Tool for GetUserContextTool {
         })
     }
 
-    fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+    }
+
+    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
         let guard = self
             .profile
             .lock()

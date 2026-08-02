@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use async_trait::async_trait;
+use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::error::LlmError;
@@ -16,10 +17,11 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 // ── Trait ────────────────────────────────────────────────────────────────────
 
 /// Abstracts the HTTP transport so Engine stays provider-agnostic and testable.
-pub trait LlmClient: Send {
+#[async_trait]
+pub trait LlmClient: Send + Sync {
     /// Send the full conversation + tool definitions and return the raw
     /// `choices[0].message` JSON object.
-    fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError>;
+    async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError>;
 
     /// Model identifier used for this client (for logging / turn metadata).
     /// Defaults to `"unknown"` when a mock or adapter does not override it.
@@ -42,9 +44,6 @@ impl OpenRouterClient {
     }
 
     /// Override connect and overall request timeouts (builder-style).
-    ///
-    /// Rebuilds the underlying `reqwest` client. Falls back to
-    /// `Client::new()` (no custom timeouts) only if builder construction fails.
     pub fn with_timeouts(mut self, connect: Duration, total: Duration) -> Self {
         self.client = Client::builder()
             .connect_timeout(connect)
@@ -71,8 +70,6 @@ impl OpenRouterClient {
         connect_timeout: Duration,
         timeout: Duration,
     ) -> Self {
-        // Explicit connect/read timeouts so a stalled OpenRouter call cannot
-        // leave the session FSM stuck in Thinking forever.
         let client = Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(timeout)
@@ -86,7 +83,6 @@ impl OpenRouterClient {
         }
     }
 
-    /// Map reqwest errors into clear, classified `LlmError` kinds.
     fn map_request_error(err: reqwest::Error) -> LlmError {
         if err.is_timeout() {
             return LlmError::timeout(format!(
@@ -102,12 +98,11 @@ impl OpenRouterClient {
     }
 }
 
+#[async_trait]
 impl LlmClient for OpenRouterClient {
-    fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
+    async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
         let url = "https://openrouter.ai/api/v1/chat/completions";
 
-        // Only advertise tools when the engine actually registered some.
-        // Empty `tools: []` + `tool_choice: auto` confuses some providers.
         let body = if tools.is_null() || tools.as_array().is_some_and(|a| a.is_empty()) {
             json!({
                 "model": self.model,
@@ -128,17 +123,18 @@ impl LlmClient for OpenRouterClient {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
+            .await
             .map_err(Self::map_request_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().unwrap_or_default();
+            let body = response.text().await.unwrap_or_default();
             return Err(LlmError::http(format!(
                 "OpenRouter HTTP error {status}: {body}"
             )));
         }
 
-        let json: Value = response.json().map_err(|e| {
+        let json: Value = response.json().await.map_err(|e| {
             LlmError::parse(format!("failed to parse OpenRouter response JSON: {e}"))
         })?;
 

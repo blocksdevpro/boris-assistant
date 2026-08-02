@@ -1,5 +1,7 @@
 use std::fmt;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::{Map, Value};
 
 // ── ToolError ─────────────────────────────────────────────────────────────────
@@ -145,6 +147,99 @@ fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
+// ── Tool metadata (risk / permissions / timeout) ─────────────────────────────
+
+/// How dangerous a tool is for policy and HITL defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolRisk {
+    /// Read-only local facts (time, recall notes, get profile).
+    Safe = 0,
+    /// Local durable writes in Boris data (notes, profile updates).
+    Moderate = 1,
+    /// External or mutable side effects (shell, write outside memory, open URL).
+    Dangerous = 2,
+    /// Irreversible / high-impact (delete, send, admin) — always confirm.
+    Critical = 3,
+}
+
+impl ToolRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Moderate => "moderate",
+            Self::Dangerous => "dangerous",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Default wall-clock budget for tools at this risk level.
+    pub fn default_timeout(self) -> Duration {
+        match self {
+            Self::Safe => Duration::from_secs(5),
+            Self::Moderate => Duration::from_secs(15),
+            Self::Dangerous | Self::Critical => Duration::from_secs(60),
+        }
+    }
+}
+
+/// Capability scopes a tool may need. Policy gates these independently of risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    None,
+    FsRead,
+    FsWrite,
+    Network,
+    Shell,
+    Clipboard,
+    UiControl,
+}
+
+/// Static metadata the runtime uses for policy, timeout, and confirmation.
+#[derive(Debug, Clone)]
+pub struct ToolMeta {
+    pub risk: ToolRisk,
+    pub permissions: &'static [Permission],
+    pub default_timeout: Duration,
+    /// When true, runtime always pauses for HITL before execute (unless granted).
+    pub requires_confirmation: bool,
+}
+
+impl ToolMeta {
+    /// Safe, no special permissions, 5s timeout, no confirmation.
+    pub fn safe_default() -> Self {
+        Self {
+            risk: ToolRisk::Safe,
+            permissions: &[Permission::None],
+            default_timeout: ToolRisk::Safe.default_timeout(),
+            requires_confirmation: false,
+        }
+    }
+
+    pub fn with_risk(risk: ToolRisk) -> Self {
+        Self {
+            risk,
+            permissions: &[Permission::None],
+            default_timeout: risk.default_timeout(),
+            requires_confirmation: false,
+        }
+    }
+
+    pub fn permissions(mut self, permissions: &'static [Permission]) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = timeout;
+        self
+    }
+
+    pub fn confirm(mut self, requires: bool) -> Self {
+        self.requires_confirmation = requires;
+        self
+    }
+}
+
 // ── Tool trait ────────────────────────────────────────────────────────────────
 
 /// Capability the LLM may invoke during the engine tool loop.
@@ -158,6 +253,17 @@ fn value_type_name(v: &Value) -> &'static str {
 /// Keep results **short** (prefer under [`MAX_TOOL_RESULT_CHARS`]; use
 /// [`truncate_tool_result`]) — Boris is a voice agent and long tool payloads
 /// bloat context and slow the turn.
+///
+/// # Safety
+///
+/// Bodies stay dumb. Policy, sandbox, timeouts, truncation, audit, and HITL
+/// live in [`crate::runtime::ToolRuntime`] — not inside `execute`.
+///
+/// # Async
+///
+/// `execute` is async so I/O tools (web, shell, MCP) can await without blocking
+/// the agent runtime. Call only via [`crate::runtime::ToolRuntime`].
+#[async_trait]
 pub trait Tool: Send + Sync {
     /// Snake_case name the LLM uses to invoke this tool.
     fn name(&self) -> &str;
@@ -170,11 +276,19 @@ pub trait Tool: Send + Sync {
     /// for tools that take no arguments.
     fn parameters(&self) -> Value;
 
+    /// Risk / permission / timeout metadata for the tool runtime.
+    ///
+    /// Default: [`ToolMeta::safe_default`]. Override for any tool that writes,
+    /// networks, or needs confirmation.
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::safe_default()
+    }
+
     /// Run the tool with the JSON args the LLM supplied.
     ///
     /// The returned string is sent back to the LLM as the tool result only —
     /// never treated as user-facing speech. Prefer short, factual observations.
-    fn execute(&self, args: Value) -> Result<String, ToolError>;
+    async fn execute(&self, args: Value) -> Result<String, ToolError>;
 }
 
 #[cfg(test)]

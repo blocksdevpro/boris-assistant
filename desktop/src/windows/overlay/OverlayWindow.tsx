@@ -454,6 +454,7 @@ function pickSubtitle(
       return "Say the wake word";
     }
     if (status.phase === "AwaitingReply") return "Your turn to answer";
+    if (status.phase === "AwaitingConfirm") return "Yes or no?";
     return "Speaking…";
   }
   return "Listening…";
@@ -464,7 +465,9 @@ function pickCaption(status: StatusPicture): Caption | null {
     return { kind: "error", text: status.detail.trim() };
   }
   if (
-    (status.phase === "Talking" || status.phase === "AwaitingReply") &&
+    (status.phase === "Talking" ||
+      status.phase === "AwaitingReply" ||
+      status.phase === "AwaitingConfirm") &&
     status.said?.trim()
   ) {
     return { kind: "said", text: status.said.trim() };
@@ -474,11 +477,14 @@ function pickCaption(status: StatusPicture): Caption | null {
       status.phase === "Reading" ||
       status.phase === "Hearing" ||
       status.phase === "Talking" ||
-      status.phase === "AwaitingReply") &&
+      status.phase === "AwaitingReply" ||
+      status.phase === "AwaitingConfirm") &&
     status.heard?.trim()
   ) {
     if (
-      (status.phase !== "Talking" && status.phase !== "AwaitingReply") ||
+      (status.phase !== "Talking" &&
+        status.phase !== "AwaitingReply" &&
+        status.phase !== "AwaitingConfirm") ||
       !status.said?.trim()
     ) {
       return { kind: "heard", text: status.heard.trim() };

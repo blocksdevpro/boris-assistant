@@ -9,6 +9,9 @@
 //!   memory/
 //!     notes.jsonl        # durable notes for builtin memory tools
 //!     profile.json       # active personal context (name, prefs, facts)
+//!   sandbox/             # default write root for future file tools
+//!   audit/
+//!     tool_calls.jsonl   # tool runtime audit log
 //!   logs/                # desktop + pipeline file logs (release builds)
 //!   models/
 //!     parakeet/          # STT
@@ -110,6 +113,28 @@ pub fn notes_path() -> PathBuf {
 /// Durable personal context profile (`~/.boris/memory/profile.json`).
 pub fn profile_path() -> PathBuf {
     memory_dir().join("profile.json")
+}
+
+/// Default sandbox root for agent file tools (`~/.boris/sandbox`).
+pub fn sandbox_dir() -> PathBuf {
+    boris_home().join("sandbox")
+}
+
+/// Tool audit log directory (`~/.boris/audit`).
+pub fn audit_dir() -> PathBuf {
+    boris_home().join("audit")
+}
+
+/// Append-only tool call audit (`~/.boris/audit/tool_calls.jsonl`).
+pub fn audit_path() -> PathBuf {
+    audit_dir().join("tool_calls.jsonl")
+}
+
+/// Ensure sandbox + audit directories exist.
+pub fn ensure_agent_dirs() -> std::io::Result<()> {
+    fs::create_dir_all(sandbox_dir())?;
+    fs::create_dir_all(audit_dir())?;
+    Ok(())
 }
 
 /// Ensure the directory tree exists under `~/.boris/models`.

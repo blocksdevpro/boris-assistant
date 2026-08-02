@@ -505,10 +505,12 @@ dependencies = [
 name = "boris-agent"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -572,6 +574,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

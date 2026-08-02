@@ -20,6 +20,8 @@ pub enum Phase {
     Armed,
     /// Waiting for a freeform user reply without another wake word.
     AwaitingReply,
+    /// Waiting for yes/no after a dangerous tool confirmation prompt.
+    AwaitingConfirm,
     Hearing,
     Reading,
     Thinking,

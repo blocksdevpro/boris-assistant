@@ -53,6 +53,14 @@ const PHASE: Record<Phase, PhaseTone> = {
     alive: true,
     motion: "listen",
   },
+  AwaitingConfirm: {
+    label: "Confirm?",
+    hint: "Say yes or no — no wake word",
+    accent: "oklch(0.82 0.16 55)",
+    glow: "oklch(0.55 0.14 55 / 50%)",
+    alive: true,
+    motion: "listen",
+  },
   Hearing: {
     label: "Listening",
     hint: "Hearing you…",

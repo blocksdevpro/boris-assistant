@@ -1,10 +1,13 @@
 //! LLM tool-calling agent used by Boris.
 //!
-//! Pure library: HTTP + context + optional tools → [`AgentOutcome`].
-//! The assistant binary owns threads, channels, and speech I/O.
+//! Pure library: async HTTP + context + optional tools → [`AgentOutcome`].
+//! The host (pipeline) owns the Tokio runtime boundary, audio I/O, and speech.
 //!
 //! Personal context ([`memory`]) is a durable model of the human user, injected
 //! into the system prompt and updated actively after turns.
+//!
+//! Tool execution always goes through [`runtime::ToolRuntime`] (policy, timeout,
+//! audit, HITL). Tool bodies stay observation-only and dumb.
 
 pub mod client;
 pub mod context;
@@ -13,6 +16,7 @@ pub mod error;
 pub mod memory;
 pub mod observe;
 pub mod outcome;
+pub mod runtime;
 pub mod session;
 pub mod tool;
 pub mod tools;
@@ -24,8 +28,11 @@ pub use error::{AgentError, AgentErrorKind, LlmError, LlmErrorKind};
 pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
+pub use runtime::{
+    PendingToolCall, SandboxConfig, ToolRuntime, JsonlAuditSink, NullAuditSink,
+};
 pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
-pub use tool::{Tool, ToolError};
+pub use tool::{Permission, Tool, ToolError, ToolMeta, ToolRisk};
 pub use tools::{
     builtin_tools, register_builtin_tools, register_builtin_tools_with_options, BuiltinToolPaths,
 };

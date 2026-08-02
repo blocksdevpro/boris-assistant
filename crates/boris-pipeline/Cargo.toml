@@ -21,6 +21,7 @@ tracing           = { workspace = true }
 serde             = { version = "1", features = ["derive"] }
 serde_json        = { workspace = true }
 reqwest           = { version = "0.13", default-features = true, features = ["blocking", "json"] }
+tokio             = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 boris-stt-parakeet  = { path = "../boris-stt-parakeet", optional = true }
 boris-tts-supertone = { path = "../boris-tts-supertone", optional = true }

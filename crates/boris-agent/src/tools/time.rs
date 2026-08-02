@@ -1,14 +1,16 @@
 //! Local date/time tools (no network).
 
+use async_trait::async_trait;
 use chrono::{Datelike, Local, Timelike};
 use serde_json::{json, Value};
 
-use crate::tool::{truncate_tool_result, Tool, ToolError};
+use crate::tool::{truncate_tool_result, Tool, ToolError, ToolMeta, ToolRisk};
 
 /// Returns the current local wall-clock time.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GetTimeTool;
 
+#[async_trait]
 impl Tool for GetTimeTool {
     fn name(&self) -> &str {
         "get_time"
@@ -26,7 +28,11 @@ impl Tool for GetTimeTool {
         })
     }
 
-    fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Safe)
+    }
+
+    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
         let now = Local::now();
         let (is_pm, hour) = now.hour12();
         let minute = now.minute();
@@ -40,6 +46,7 @@ impl Tool for GetTimeTool {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GetDateTool;
 
+#[async_trait]
 impl Tool for GetDateTool {
     fn name(&self) -> &str {
         "get_date"
@@ -57,9 +64,12 @@ impl Tool for GetDateTool {
         })
     }
 
-    fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Safe)
+    }
+
+    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
         let now = Local::now();
-        // e.g. "Today's date: Monday, March 15, 2026"
         let weekday = now.format("%A");
         let month = now.format("%B");
         let day = now.day();
@@ -74,20 +84,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn get_time_returns_ok_non_empty() {
+    #[tokio::test]
+    async fn get_time_returns_ok_non_empty() {
         let tool = GetTimeTool;
         assert_eq!(tool.name(), "get_time");
-        let out = tool.execute(json!({})).expect("get_time should succeed");
+        let out = tool.execute(json!({})).await.expect("get_time should succeed");
         assert!(!out.is_empty());
         assert!(out.starts_with("Local time: "), "got: {out}");
     }
 
-    #[test]
-    fn get_date_returns_ok_non_empty() {
+    #[tokio::test]
+    async fn get_date_returns_ok_non_empty() {
         let tool = GetDateTool;
         assert_eq!(tool.name(), "get_date");
-        let out = tool.execute(json!({})).expect("get_date should succeed");
+        let out = tool.execute(json!({})).await.expect("get_date should succeed");
         assert!(!out.is_empty());
         assert!(out.starts_with("Today's date: "), "got: {out}");
     }

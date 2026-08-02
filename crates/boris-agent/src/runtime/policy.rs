@@ -63,7 +63,7 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Build a config rooted under a Boris home directory.
+    /// Build a config rooted under a Boris home directory (closed network/shell).
     pub fn for_boris_home(home: impl Into<PathBuf>) -> Self {
         let home = home.into();
         Self {
@@ -78,6 +78,35 @@ impl SandboxConfig {
             max_confirms_per_turn: 3,
         }
     }
+
+    /// Desktop MVP defaults: user read folders, open network, shell with confirm.
+    pub fn for_desktop_mvp(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        let mut cfg = Self::for_boris_home(&home);
+        cfg.network = NetworkPolicy::Open;
+        cfg.shell = ShellPolicy::OpenConfirm;
+        cfg.allow_read = default_user_read_roots();
+        // Writable only via sandbox_root (+ boris_data_roots for memory tools).
+        cfg.allow_write = vec![];
+        cfg
+    }
+}
+
+/// Common Windows/user document folders for read-only file tools.
+pub fn default_user_read_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let user = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    if let Some(home) = user {
+        for name in ["Desktop", "Documents", "Downloads"] {
+            let p = home.join(name);
+            if p.is_dir() {
+                roots.push(p);
+            }
+        }
+    }
+    roots
 }
 
 /// Result of policy evaluation before tool execution.
@@ -178,7 +207,15 @@ enum PathAccess {
 
 fn args_path_string(args: &Value) -> Option<&str> {
     let obj = args.as_object()?;
-    for key in ["path", "file", "filepath", "file_path", "dir", "directory"] {
+    for key in [
+        "path",
+        "file",
+        "filepath",
+        "file_path",
+        "dir",
+        "directory",
+        "cwd",
+    ] {
         if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
             if !s.is_empty() {
                 return Some(s);

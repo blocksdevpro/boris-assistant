@@ -254,22 +254,28 @@ fn run(
         tracing::warn!(error = %e, "ensure agent sandbox/audit dirs failed");
     }
     agent.configure_runtime(
-        SandboxConfig::for_boris_home(paths::boris_home()),
+        SandboxConfig::for_desktop_mvp(paths::boris_home()),
         Some(paths::audit_path()),
     );
-    // Time/date, notes, and active personal context (profile tools + extract).
+    // Core + OS + files + web + shell (MVP power tools) + personal context.
     boris_agent::tools::register_builtin_tools(
         &mut agent,
         boris_agent::tools::BuiltinToolPaths {
             notes_path: paths::notes_path(),
             profile_path: paths::profile_path(),
+            sandbox_root: paths::sandbox_dir(),
+            data_roots: vec![paths::memory_dir(), paths::sessions_dir()],
+            allow_read: boris_agent::default_user_read_roots(),
+            allow_write: vec![],
+            boris_home: paths::boris_home(),
         },
     );
     tracing::info!(
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
+        sandbox = %paths::sandbox_dir().display(),
         audit = %paths::audit_path().display(),
-        "builtin tools + tool runtime registered"
+        "builtin + power tools + tool runtime registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).

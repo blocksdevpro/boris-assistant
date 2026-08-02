@@ -18,8 +18,8 @@ pub use audit::{
 };
 pub use pending::{PendingToolCall, PendingTurn, RawToolCall};
 pub use policy::{
-    decide, normalize_path, path_is_within, resolve_in_roots, NetworkPolicy, PolicyDecision,
-    SandboxConfig, ShellPolicy,
+    decide, default_user_read_roots, normalize_path, path_is_within, resolve_in_roots,
+    NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,
 };
 pub use timeout::{is_timeout, run_with_timeout};
 

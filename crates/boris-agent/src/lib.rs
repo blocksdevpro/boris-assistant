@@ -29,10 +29,12 @@ pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CON
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
 pub use runtime::{
-    PendingToolCall, SandboxConfig, ToolRuntime, JsonlAuditSink, NullAuditSink,
+    default_user_read_roots, PendingToolCall, SandboxConfig, ToolRuntime, JsonlAuditSink,
+    NullAuditSink, NetworkPolicy, ShellPolicy,
 };
 pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
 pub use tool::{Permission, Tool, ToolError, ToolMeta, ToolRisk};
 pub use tools::{
-    builtin_tools, register_builtin_tools, register_builtin_tools_with_options, BuiltinToolPaths,
+    builtin_tools, fs_tools, os_tools, register_builtin_tools, register_builtin_tools_with_options,
+    shell_tools, web_tools, BuiltinToolPaths,
 };

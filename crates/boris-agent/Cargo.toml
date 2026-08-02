@@ -11,7 +11,10 @@ serde        = { version = "1", features = ["derive"] }
 reqwest      = { version = "0.13", default-features = true, features = ["json"] }
 chrono       = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait  = "0.1"
-tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "io-util"] }
+open         = "5"
+arboard      = "3"
+htmd         = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util", "fs"] }

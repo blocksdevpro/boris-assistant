@@ -27,6 +27,8 @@
     "allow-models-status",
     "allow-download-models",
     "allow-get-settings",
-    "allow-save-app-settings"
+    "allow-save-app-settings",
+    "allow-get-log-path",
+    "allow-frontend-log"
   ]
 }

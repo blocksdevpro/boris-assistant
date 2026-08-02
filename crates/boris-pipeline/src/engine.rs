@@ -120,11 +120,37 @@ fn run(
     cmd_rx: Receiver<EngineCommand>,
     status_tx: Sender<StatusPicture>,
 ) -> Result<(), String> {
-    init_onnx_runtime();
+    tracing::info!("engine thread entered run()");
+    crate::diagnostics::log_environment("engine_run");
+    crate::diagnostics::log_writable_check("boris_home", paths::boris_home());
+    crate::diagnostics::log_writable_check("sessions", paths::sessions_dir());
+    crate::diagnostics::log_writable_check("logs", paths::logs_dir());
 
+    tracing::info!("init_onnx_runtime…");
+    init_onnx_runtime();
+    tracing::info!("init_onnx_runtime done");
+
+    tracing::info!(
+        play_source_rate = config.play_source_rate,
+        wake_bytes = config.wakeword_model.len(),
+        stt = %config.stt_model_dir.display(),
+        tts = %config.tts_model_dir.display(),
+        voices = %config.tts_voice_dir.display(),
+        voice_id = %config.tts_voice_id,
+        openrouter_model = ?config.openrouter_model,
+        has_api_key = !config.openrouter_api_key.trim().is_empty(),
+        "pipeline config (key redacted)"
+    );
+
+    tracing::info!("opening AudioService (default mic + speaker)…");
     let mut audio = match AudioService::with_source_rate(config.play_source_rate) {
-        Ok(audio) => audio,
+        Ok(audio) => {
+            tracing::info!("AudioService ready");
+            audio
+        }
         Err(e) => {
+            tracing::error!(error = %e, "AudioService::with_source_rate FAILED");
+            crate::diagnostics::log_environment("audio_init_failed");
             let _ = status_tx.send(StatusPicture {
                 engine: EngineState::Fault,
                 phase: Phase::Off,
@@ -146,20 +172,54 @@ fn run(
     };
     let mic = audio.subscribe_input(Some(MIC_QUEUE));
     let mut output_events = audio.subscribe_output();
-
-    let mut wake = LivekitWakeWord::new(
-        "boris",
-        &config.wakeword_model,
-        boris_audio::AUDIO_TARGET_RATE,
-    );
-    let mut vad = WebRtcVad::new();
+    tracing::info!(mic_queue = MIC_QUEUE, "subscribed to mic + output events");
 
     tracing::info!(
-        stt = %config.stt_model_dir.display(),
-        tts = %config.tts_model_dir.display(),
-        voices = %config.tts_voice_dir.display(),
-        "model paths"
+        wake_bytes = config.wakeword_model.len(),
+        sample_rate = boris_audio::AUDIO_TARGET_RATE,
+        "loading LivekitWakeWord (ORT sessions)…"
     );
+    let mut wake = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LivekitWakeWord::new(
+            "boris",
+            &config.wakeword_model,
+            boris_audio::AUDIO_TARGET_RATE,
+        )
+    })) {
+        Ok(w) => {
+            tracing::info!("LivekitWakeWord loaded");
+            w
+        }
+        Err(payload) => {
+            let msg = panic_payload_str(&payload);
+            tracing::error!(
+                error = %msg,
+                wake_bytes = config.wakeword_model.len(),
+                "LivekitWakeWord::new PANICKED — often missing onnxruntime.dll / DirectML.dll beside the exe"
+            );
+            crate::diagnostics::log_environment("wakeword_panic");
+            let detail = format!("wakeword init panic: {msg}");
+            let _ = status_tx.send(StatusPicture {
+                engine: EngineState::Fault,
+                phase: Phase::Off,
+                detail: Some(detail.clone()),
+                heard: None,
+                said: None,
+                mic: DeviceHealth {
+                    label: config.mic_label.clone(),
+                    ok: false,
+                },
+                speaker: DeviceHealth {
+                    label: config.speaker_label.clone(),
+                    ok: false,
+                },
+                turn: None,
+            });
+            return Err(detail);
+        }
+    };
+    let mut vad = WebRtcVad::new();
+    tracing::info!("WebRtcVad ready");
 
     #[cfg(feature = "stt-parakeet")]
     let mut stt: Box<dyn SpeechToText> = Box::new(boris_stt_parakeet::ParakeetStt::with_model_dir(
@@ -177,6 +237,7 @@ fn run(
     #[cfg(not(feature = "tts-supertone"))]
     let mut tts: Box<dyn TextToSpeech> = Box::new(NullTts);
 
+    tracing::info!("building OpenRouter client + AgentEngine…");
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
     let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
     // Time/date, notes, and active personal context (profile tools + extract).
@@ -186,6 +247,11 @@ fn run(
             notes_path: paths::notes_path(),
             profile_path: paths::profile_path(),
         },
+    );
+    tracing::info!(
+        notes = %paths::notes_path().display(),
+        profile = %paths::profile_path().display(),
+        "builtin tools registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).
@@ -213,6 +279,7 @@ fn run(
         status_tx,
     };
     picture.publish();
+    tracing::info!("engine idle (Off) — waiting for Start command");
 
     let mut running = false;
     let mut next_turn: u64 = 1;
@@ -227,6 +294,7 @@ fn run(
             follow_up_depth = 0;
             match cmd_rx.recv() {
                 Ok(EngineCommand::Start) => {
+                    tracing::info!("EngineCommand::Start received");
                     running = true;
                     picture.heard = None;
                     picture.said = None;
@@ -243,7 +311,9 @@ fn run(
                     );
                     picture.engine = EngineState::On;
                     picture.set_phase(Phase::Armed);
-                    tracing::info!("engine started (STT/TTS on-demand, preload one step ahead)");
+                    tracing::info!(
+                        "engine started — Armed, listening for wake (STT/TTS on-demand)"
+                    );
                 }
                 Ok(EngineCommand::Stop) => continue,
                 Ok(EngineCommand::Shutdown) | Err(_) => {
@@ -446,6 +516,7 @@ fn run(
 
         if let Err(e) = stt_load {
             tracing::error!(error = %e, %turn, "stt load failed");
+            crate::diagnostics::log_model_load_failure("parakeet", &config.stt_model_dir, &e);
             let _ = stt.unload();
             picture.detail = Some(format!("stt load: {e}"));
             follow_up_depth = 0;
@@ -594,6 +665,7 @@ fn run(
 
         if let Err(e) = tts_load {
             tracing::error!(error = %e, %turn, "tts load failed");
+            crate::diagnostics::log_model_load_failure("supertone", &config.tts_model_dir, &e);
             let _ = tts.unload();
             picture.detail = Some(format!("tts load: {e}"));
             follow_up_depth = 0;
@@ -1095,6 +1167,16 @@ fn wait_playback_or_stop(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".into()
     }
 }
 

@@ -5,6 +5,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { logger } from "@/lib/logger";
 import { invokeErrorMessage } from "./errors";
 import {
   EMPTY_SETTINGS,
@@ -24,7 +25,8 @@ export async function getStatus(): Promise<StatusPicture> {
   try {
     const raw = await invoke<StatusPicture>("get_status");
     return normalizeStatus(raw);
-  } catch {
+  } catch (e) {
+    logger.warn("get_status failed", invokeErrorMessage(e));
     return { ...OFF_STATUS };
   }
 }
@@ -34,7 +36,9 @@ export async function preflightCheck(): Promise<PreflightReport> {
   try {
     return await invoke<PreflightReport>("preflight_check");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("preflight_check failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -50,7 +54,8 @@ export async function onStatus(
     unlisten = await listen<StatusPicture>("status", (e) => {
       handler(normalizeStatus(e.payload));
     });
-  } catch {
+  } catch (e) {
+    logger.warn("onStatus listen failed", invokeErrorMessage(e));
     return () => {};
   }
   return () => {
@@ -62,21 +67,32 @@ export async function startEngine(
   apiKey = "",
   model?: string,
 ): Promise<void> {
+  logger.info("startEngine", {
+    hasKey: Boolean(apiKey.trim()),
+    model: model?.trim() || null,
+  });
   try {
     await invoke("start_engine", {
       apiKey,
       model: model?.trim() ? model.trim() : null,
     });
+    logger.info("startEngine ok");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("startEngine failed", msg);
+    throw new Error(msg);
   }
 }
 
 export async function stopEngine(): Promise<void> {
+  logger.info("stopEngine");
   try {
     await invoke("stop_engine");
+    logger.info("stopEngine ok");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("stopEngine failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -84,7 +100,9 @@ export async function listInputDevices(): Promise<DeviceDto[]> {
   try {
     return await invoke<DeviceDto[]>("list_input_devices");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("list_input_devices failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -92,23 +110,31 @@ export async function listOutputDevices(): Promise<DeviceDto[]> {
   try {
     return await invoke<DeviceDto[]>("list_output_devices");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("list_output_devices failed", msg);
+    throw new Error(msg);
   }
 }
 
 export async function switchInput(deviceId: string): Promise<void> {
+  logger.info("switchInput", { deviceId });
   try {
     await invoke("switch_input", { deviceId });
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("switchInput failed", msg);
+    throw new Error(msg);
   }
 }
 
 export async function switchOutput(deviceId: string): Promise<void> {
+  logger.info("switchOutput", { deviceId });
   try {
     await invoke("switch_output", { deviceId });
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("switchOutput failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -117,7 +143,9 @@ export async function getModelsStatus(): Promise<ModelsStatus> {
   try {
     return await invoke<ModelsStatus>("models_status");
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("models_status failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -126,10 +154,19 @@ export async function getModelsStatus(): Promise<ModelsStatus> {
  * Subscribe with {@link onModelsProgress} for per-file updates.
  */
 export async function downloadModels(): Promise<ModelsInstallReport> {
+  logger.info("downloadModels start");
   try {
-    return await invoke<ModelsInstallReport>("download_models");
+    const report = await invoke<ModelsInstallReport>("download_models");
+    logger.info("downloadModels done", {
+      ok: report.ok,
+      files_downloaded: report.files_downloaded,
+      files_failed: report.files_failed,
+    });
+    return report;
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("downloadModels failed", msg);
+    throw new Error(msg);
   }
 }
 
@@ -142,7 +179,8 @@ export async function onModelsProgress(
     unlisten = await listen<DownloadProgress>("models-progress", (e) => {
       handler(e.payload);
     });
-  } catch {
+  } catch (e) {
+    logger.warn("onModelsProgress listen failed", invokeErrorMessage(e));
     return () => {};
   }
   return () => {
@@ -158,7 +196,8 @@ export async function getSettings(): Promise<AppSettings> {
       openrouter_api_key: raw?.openrouter_api_key ?? "",
       openrouter_model: raw?.openrouter_model ?? "",
     };
-  } catch {
+  } catch (e) {
+    logger.warn("get_settings failed", invokeErrorMessage(e));
     return { ...EMPTY_SETTINGS };
   }
 }
@@ -172,7 +211,13 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
         openrouter_model: settings.openrouter_model ?? "",
       },
     });
+    logger.info("saveSettings ok", {
+      hasKey: Boolean(settings.openrouter_api_key?.trim()),
+      model: settings.openrouter_model || null,
+    });
   } catch (e) {
-    throw new Error(invokeErrorMessage(e));
+    const msg = invokeErrorMessage(e);
+    logger.error("saveSettings failed", msg);
+    throw new Error(msg);
   }
 }

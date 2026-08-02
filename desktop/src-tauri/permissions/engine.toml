@@ -59,3 +59,13 @@ commands.allow = ["get_settings"]
 identifier = "allow-save-app-settings"
 description = "Persist OpenRouter key and model to ~/.boris/settings.json"
 commands.allow = ["save_app_settings"]
+
+[[permission]]
+identifier = "allow-get-log-path"
+description = "Return the path to the desktop log file under ~/.boris/logs"
+commands.allow = ["get_log_path"]
+
+[[permission]]
+identifier = "allow-frontend-log"
+description = "Write a frontend log line into the desktop log file"
+commands.allow = ["frontend_log"]

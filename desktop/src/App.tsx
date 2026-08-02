@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { logger } from "@/lib/logger";
 import { MainWindow } from "@/windows/main/MainWindow";
 import { OverlayWindow } from "@/windows/overlay/OverlayWindow";
 
@@ -28,7 +29,10 @@ function App() {
   const [surface, setSurface] = useState<Surface | null>(null);
 
   useEffect(() => {
-    void resolveSurface().then(setSurface);
+    void resolveSurface().then((s) => {
+      logger.info("surface resolved", { surface: s });
+      setSurface(s);
+    });
   }, []);
 
   // Overlay paints pure-black chrome (Windows color-key); main keeps dark theme.

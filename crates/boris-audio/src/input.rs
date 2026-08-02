@@ -33,10 +33,20 @@ impl InputPipeline {
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(10);
 
         // device params
-        let device_id = device.id().unwrap();
-        let config = device.default_input_config().unwrap();
+        let device_id = device.id().expect("input device id");
+        let config = device
+            .default_input_config()
+            .expect("default_input_config — mic may be in use or denied");
         let channels = config.channels();
         let sample_rate = config.sample_rate();
+        let sample_format = config.sample_format();
+        tracing::info!(
+            ?device_id,
+            channels,
+            ?sample_rate,
+            ?sample_format,
+            "InputPipeline::from_device"
+        );
 
         let stream_config = cpal::StreamConfig {
             channels,
@@ -44,15 +54,22 @@ impl InputPipeline {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let stream = match config.sample_format() {
+        let stream = match sample_format {
             cpal::SampleFormat::F32 => Self::build_stream::<f32>(device, stream_config, audio_tx),
             cpal::SampleFormat::I16 => Self::build_stream::<i16>(device, stream_config, audio_tx),
             cpal::SampleFormat::U16 => Self::build_stream::<u16>(device, stream_config, audio_tx),
-            _ => panic!("Unsupported sample format for InputStream"),
+            other => {
+                tracing::error!(?other, "unsupported input sample format");
+                panic!("Unsupported sample format for InputStream: {other:?}");
+            }
         };
 
         // play the stream;
-        stream.play().unwrap();
+        if let Err(e) = stream.play() {
+            tracing::error!(error = %e, "input stream.play() failed");
+            panic!("input stream.play() failed: {e}");
+        }
+        tracing::info!("input stream playing");
 
         // Capture stays interleaved at device channel count; InputResampler
         // downmixes to mono then converts rate → AUDIO_TARGET_RATE.

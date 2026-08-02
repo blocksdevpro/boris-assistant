@@ -9,6 +9,7 @@
 //!   memory/
 //!     notes.jsonl        # durable notes for builtin memory tools
 //!     profile.json       # active personal context (name, prefs, facts)
+//!   logs/                # desktop + pipeline file logs (release builds)
 //!   models/
 //!     parakeet/          # STT
 //!     supertone/
@@ -77,6 +78,16 @@ pub fn livekit_dir() -> PathBuf {
 /// Directory for voice session metadata + transcripts (`~/.boris/sessions`).
 pub fn sessions_dir() -> PathBuf {
     boris_home().join("sessions")
+}
+
+/// Directory for desktop / pipeline log files (`~/.boris/logs`).
+pub fn logs_dir() -> PathBuf {
+    boris_home().join("logs")
+}
+
+/// Ensure `~/.boris/logs` exists (called at desktop startup).
+pub fn ensure_logs_dir() -> std::io::Result<()> {
+    fs::create_dir_all(logs_dir())
 }
 
 /// Ensure `~/.boris/sessions` exists.

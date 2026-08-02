@@ -37,6 +37,7 @@ const OVERLAY_INIT: &str = r#"
 
 /// Create the overlay window if it was declared with `"create": false` in config.
 pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    tracing::info!("building overlay window");
     // Prefer config entry (size, alwaysOnTop, etc.) then force transparency bits.
     let template = app
         .config()
@@ -47,8 +48,10 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
         .cloned();
 
     let builder = if let Some(conf) = template {
+        tracing::debug!("overlay: using tauri.conf window template");
         WebviewWindowBuilder::from_config(app, &conf)?
     } else {
+        tracing::warn!("overlay: no config entry — using hardcoded defaults");
         WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
             .title("Boris")
             .inner_size(380.0, 120.0)
@@ -66,7 +69,11 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
         // Webview + window bg: alpha 0 is required on Win8+ for clear pixels.
         .background_color(tauri::window::Color(0, 0, 0, 0))
         .initialization_script(OVERLAY_INIT)
-        .build()?;
+        .build()
+        .map_err(|e| {
+            tracing::error!(error = %e, "overlay WebviewWindowBuilder::build failed");
+            e
+        })?;
 
     // Belt-and-suspenders: re-assert webview clear after create.
     let webview: &tauri::Webview<R> = overlay.as_ref();

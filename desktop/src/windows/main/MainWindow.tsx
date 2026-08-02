@@ -38,6 +38,7 @@ import {
   type ModelsStatus,
   type StatusPicture,
 } from "@/bridge";
+import { getLogPath, logger } from "@/lib/logger";
 import { toneFor } from "@/lib/phaseVisual";
 import { cn } from "@/lib/utils";
 
@@ -79,6 +80,7 @@ export function MainWindow() {
   const [installProgress, setInstallProgress] = useState<DownloadProgress | null>(
     null,
   );
+  const [logPath, setLogPath] = useState("");
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
@@ -101,7 +103,9 @@ export function MainWindow() {
         return outs.find((d) => d.is_default)?.id ?? outs[0]?.id ?? "";
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("refreshDevices failed", msg);
+      setError(msg);
     }
   }, []);
 
@@ -110,13 +114,18 @@ export function MainWindow() {
       const m = await getModelsStatus();
       setModels(m);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("refreshModels failed", msg);
+      setError(msg);
     }
   }, []);
 
   useEffect(() => {
     void refreshDevices();
     void refreshModels();
+    void getLogPath().then((p) => {
+      if (p) setLogPath(p);
+    });
   }, [refreshDevices, refreshModels]);
 
   // Restore last OpenRouter key + model from ~/.boris/settings.json
@@ -151,6 +160,14 @@ export function MainWindow() {
   const onStart = async () => {
     setBusy(true);
     setError(null);
+    logger.info("UI onStart", {
+      hasKey: Boolean(apiKey.trim()),
+      model: model || null,
+      selectedInput,
+      selectedOutput,
+      modelsReady,
+      logPath: logPath || null,
+    });
     try {
       // Save before start so relaunch restores credentials even if engine fails later
       await persistCredentials(apiKey, model);
@@ -160,7 +177,9 @@ export function MainWindow() {
       if (selectedOutput) await switchOutput(selectedOutput);
       await startEngine(apiKey, model || undefined);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("UI onStart failed", msg);
+      setError(msg);
     } finally {
       setBusy(false);
     }
@@ -334,6 +353,14 @@ export function MainWindow() {
           {engineFault ? (
             <p className="relative mt-3 text-[12px] text-amber-200/80">
               Engine reported a fault — try Stop, then Start again.
+            </p>
+          ) : null}
+          {logPath ? (
+            <p
+              className="relative mt-2 truncate text-[10.5px] text-white/30"
+              title={logPath}
+            >
+              Debug log: {logPath}
             </p>
           ) : null}
         </section>

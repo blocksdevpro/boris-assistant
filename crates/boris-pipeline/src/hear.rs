@@ -93,27 +93,70 @@ pub fn wait_for_wake(
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
 ) -> Result<(), HearBreak> {
+    tracing::info!(
+        threshold = WAKEWORD_THRESHOLD,
+        window = WAKEWORD_WINDOW_SIZE,
+        "wait_for_wake: listening (heartbeat every ~5s with max score)"
+    );
     let mut window = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
     let score_every = duration_to_samples(WAKEWORD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
     let mut samples_since_score: usize = 0;
+    let mut frames: u64 = 0;
+    let mut scores: u64 = 0;
+    let mut max_score: f32 = 0.0;
+    let mut last_heartbeat = std::time::Instant::now();
+    let mut mic_samples: u64 = 0;
 
     loop {
         let frame = next_frame(mic, cmd_rx, running)?;
+        frames = frames.saturating_add(1);
+        mic_samples = mic_samples.saturating_add(frame.len() as u64);
         window.push(&frame);
         samples_since_score = samples_since_score.saturating_add(frame.len());
 
         if samples_since_score < score_every || !window.ready() {
+            // Still useful: prove mic is delivering audio even before first score.
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(5) {
+                tracing::info!(
+                    frames,
+                    mic_samples,
+                    scores,
+                    max_score,
+                    window_ready = window.ready(),
+                    "wake wait heartbeat (no hit yet)"
+                );
+                last_heartbeat = std::time::Instant::now();
+                max_score = 0.0;
+            }
             continue;
         }
         samples_since_score = 0;
 
         match wake.predict(&window.read()) {
             Ok(score) if score >= WAKEWORD_THRESHOLD => {
-                tracing::info!(score, "wake hit");
+                tracing::info!(score, frames, scores, "wake hit");
                 return Ok(());
             }
-            Ok(_) => {}
+            Ok(score) => {
+                scores = scores.saturating_add(1);
+                if score > max_score {
+                    max_score = score;
+                }
+            }
             Err(e) => tracing::error!(error = %e, "wake predict failed"),
+        }
+
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(5) {
+            tracing::info!(
+                frames,
+                mic_samples,
+                scores,
+                max_score,
+                threshold = WAKEWORD_THRESHOLD,
+                "wake wait heartbeat (no hit yet)"
+            );
+            last_heartbeat = std::time::Instant::now();
+            max_score = 0.0;
         }
     }
 }
@@ -149,6 +192,7 @@ pub fn capture_utterance(
     kind: CaptureKind,
 ) -> Result<AudioBuffer, HearBreak> {
     const MAX_UTTERANCE_SECS: u32 = 30;
+    tracing::info!(?kind, "capture_utterance begin");
     let mut record = RecordingBuffer::new(
         AUDIO_TARGET_RATE as usize * 2,
         AUDIO_TARGET_RATE as usize * MAX_UTTERANCE_SECS as usize,
@@ -172,9 +216,16 @@ pub fn capture_utterance(
         let frame = next_frame(mic, cmd_rx, running)?;
         record.push(&frame);
         if record.exceeded_max() {
-            tracing::warn!("utterance hit max length — cutting clip");
-            record.set_recording(false);
-            return Ok(record.take_audio());
+            let clip = {
+                record.set_recording(false);
+                record.take_audio()
+            };
+            tracing::warn!(
+                samples = clip.len(),
+                has_spoken,
+                "utterance hit max length — cutting clip"
+            );
+            return Ok(clip);
         }
 
         frame_buf.extend_from_slice(&frame);
@@ -188,6 +239,9 @@ pub fn capture_utterance(
 
             match vad.predict(&chunk) {
                 Ok(true) => {
+                    if !has_spoken {
+                        tracing::debug!("vad: speech started");
+                    }
                     has_spoken = true;
                     samples_since_speech = 0;
                 }
@@ -199,8 +253,18 @@ pub fn capture_utterance(
                         silence_before
                     };
                     if samples_since_speech >= limit {
-                        record.set_recording(false);
-                        return Ok(record.take_audio());
+                        let clip = {
+                            record.set_recording(false);
+                            record.take_audio()
+                        };
+                        tracing::info!(
+                            samples = clip.len(),
+                            ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
+                            has_spoken,
+                            ?kind,
+                            "capture_utterance end (silence endpoint)"
+                        );
+                        return Ok(clip);
                     }
                 }
                 Err(e) => tracing::error!(error = %e, "vad predict failed"),

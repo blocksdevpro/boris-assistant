@@ -54,6 +54,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 /// Bring the main console window back (unminimize + show + focus).
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
+        tracing::info!("tray: showing main window");
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -64,6 +65,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 /// Stop the voice engine if running, then exit the process.
 fn quit_app<R: Runtime>(app: &AppHandle<R>) {
+    tracing::info!("tray: quit requested");
     if let Some(state) = app.try_state::<AppState>() {
         if let Err(e) = state.stop() {
             tracing::warn!(error = %e, "stop engine on quit");

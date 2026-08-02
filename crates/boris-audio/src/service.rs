@@ -103,19 +103,34 @@ impl AudioService {
     /// permission, or no hardware) so callers can surface a fault instead of panicking.
     pub fn with_source_rate(source_rate: u32) -> Result<Self, String> {
         let host = cpal::default_host();
+        tracing::info!(source_rate, "AudioService::with_source_rate");
+
         // setup input pipeline
         let input_device = host.default_input_device().ok_or_else(|| {
+            tracing::error!("no default input device from cpal host");
             "No default microphone found. Connect a mic or grant audio input permission."
                 .to_string()
         })?;
+        let input_name = input_device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
+        tracing::info!(%input_name, "opening default input device");
         let input_subscribers = Arc::new(Mutex::new(vec![]));
         let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone());
+        tracing::info!(%input_name, "input pipeline open");
 
         // setup output pipeline
         let output_device = host.default_output_device().ok_or_else(|| {
+            tracing::error!("no default output device from cpal host");
             "No default speaker found. Connect a speaker/headphones or grant audio output permission."
                 .to_string()
         })?;
+        let output_name = output_device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
+        tracing::info!(%output_name, source_rate, "opening default output device");
         let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
         let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
 
@@ -127,6 +142,7 @@ impl AudioService {
             output_event_tx,
             source_rate,
         );
+        tracing::info!(%output_name, "output pipeline open");
         Ok(Self {
             input_pipeline,
             input_subscribers,

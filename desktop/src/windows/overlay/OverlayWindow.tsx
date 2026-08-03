@@ -31,6 +31,11 @@ const fadeSwap = {
  *
  * Every phase / caption / accent / size change is eased via Framer Motion.
  * Avoid remount keys that churn on streaming text (that causes visible jumps).
+ *
+ * Input: the native window is click-through by default (see overlay_win.rs) so
+ * FPS aim clicks pass through to the game. `data-tauri-drag-region` only matters
+ * after tray → "Unlock overlay to move". Do not put interactive controls here
+ * without temporarily disabling ignore-cursor-events.
  */
 export function OverlayWindow() {
   const status = useStatus();

@@ -55,7 +55,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   AwaitingConfirm: {
     label: "Confirm?",
-    hint: "Say yes or no — no wake word",
+    hint: "Yes / no / sure / cancel — no wake word",
     accent: "oklch(0.82 0.16 55)",
     glow: "oklch(0.55 0.14 55 / 50%)",
     alive: true,
@@ -79,7 +79,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Thinking: {
     label: "Thinking",
-    hint: "Working on a reply",
+    hint: "Working…",
     accent: "oklch(0.72 0.18 295)",
     glow: "oklch(0.5 0.16 295 / 50%)",
     alive: true,

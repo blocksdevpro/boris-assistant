@@ -18,6 +18,7 @@ export {
 export { useStatus } from "./useStatus";
 export {
   EMPTY_SETTINGS,
+  formatContextMeter,
   normalizeStatus,
   OFF_STATUS,
   type AppSettings,

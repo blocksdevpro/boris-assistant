@@ -1,23 +1,29 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
-import { useStatus, type StatusPicture } from "@/bridge";
+import { formatContextMeter, useStatus, type StatusPicture } from "@/bridge";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
 
 /** Soft ease-out — calm, no bounce. */
 const soft = [0.22, 1, 0.36, 1] as const;
-
-/** Slightly longer for Speaking → Ready so idle doesn't snap. */
 const softIdle = [0.16, 1, 0.3, 1] as const;
 
-/** Shared duration scale for phase chrome. */
 const DUR = {
   fast: 0.28,
   base: 0.42,
   slow: 0.55,
   idle: 0.7,
 } as const;
+
+/** Collapse to orb-only after this idle on Ready/Quiet. */
+const IDLE_ORB_MS = 15_000;
 
 const fadeSwap = {
   initial: { opacity: 0, y: 3, filter: "blur(2px)" },
@@ -29,13 +35,10 @@ const fadeSwap = {
 /**
  * OVERLAY — always-on-top voice island.
  *
- * Every phase / caption / accent / size change is eased via Framer Motion.
- * Avoid remount keys that churn on streaming text (that causes visible jumps).
- *
- * Input: the native window is click-through by default (see overlay_win.rs) so
- * FPS aim clicks pass through to the game. `data-tauri-drag-region` only matters
- * after tray → "Unlock overlay to move". Do not put interactive controls here
- * without temporarily disabling ignore-cursor-events.
+ * - Progressive tool/confirm activity (compact chip)
+ * - Context window meter (e.g. 12K / 500K)
+ * - Collapses to a lone orb after ~15s idle on Ready
+ * - Turn id is intentionally not shown (noisy)
  */
 export function OverlayWindow() {
   const status = useStatus();
@@ -48,6 +51,37 @@ export function OverlayWindow() {
     status.engine === "On" &&
     (status.phase === "Armed" || status.phase === "Quiet");
   const subtitle = pickSubtitle(status, tone, caption);
+  const contextMeter = formatContextMeter(
+    status.context_used,
+    status.context_limit,
+  );
+  const activity = status.activity?.trim() || null;
+
+  const [orbOnly, setOrbOnly] = useState(false);
+
+  // Idle → orb: only when Ready/Quiet, engine On, no caption/activity.
+  useEffect(() => {
+    const canCollapse =
+      status.engine === "On" &&
+      (status.phase === "Armed" || status.phase === "Quiet") &&
+      !caption &&
+      !activity;
+
+    if (!canCollapse) {
+      setOrbOnly(false);
+      return;
+    }
+    const t = window.setTimeout(() => setOrbOnly(true), IDLE_ORB_MS);
+    return () => window.clearTimeout(t);
+  }, [
+    status.engine,
+    status.phase,
+    status.said,
+    status.heard,
+    status.detail,
+    activity,
+    caption,
+  ]);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -60,6 +94,34 @@ export function OverlayWindow() {
       if (prev != null) meta?.setAttribute("content", prev);
     };
   }, []);
+
+  // ── Orb-only idle presence ─────────────────────────────────────────────
+  if (orbOnly) {
+    return (
+      <div className="overlay-surface flex h-full w-full items-center justify-center bg-transparent p-3">
+        <motion.div
+          data-tauri-drag-region
+          layout
+          className="overlay-island relative flex items-center justify-center rounded-full p-2.5"
+          initial={{ opacity: 0, scale: 0.85 }}
+          animate={{
+            opacity: 1,
+            scale: 1,
+            borderColor: `color-mix(in oklch, ${tone.accent} 28%, rgba(255,255,255,0.12))`,
+            boxShadow: `
+              0 8px 22px rgba(12, 14, 20, 0.4),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 16px color-mix(in oklch, ${tone.glow} 40%, transparent)
+            `,
+          }}
+          transition={{ duration: DUR.idle, ease: softIdle }}
+          title={tone.hint}
+        >
+          <PresenceOrb motion={tone.motion} accent={tone.accent} size="md" />
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="overlay-surface flex h-full w-full items-center justify-center bg-transparent p-3">
@@ -86,13 +148,9 @@ export function OverlayWindow() {
           }}
         >
           {/* ── Primary row ─────────────────────────────────────────── */}
-          <div
-            data-tauri-drag-region
-            className="flex h-9 items-center gap-3"
-          >
+          <div data-tauri-drag-region className="flex h-9 items-center gap-3">
             <PresenceOrb motion={tone.motion} accent={tone.accent} />
 
-            {/* Fixed-height text column keeps vertical alignment stable */}
             <div
               data-tauri-drag-region
               className="flex min-w-0 flex-1 flex-col justify-center gap-0.5"
@@ -102,7 +160,6 @@ export function OverlayWindow() {
                 className="flex h-[1.125rem] items-center gap-2"
               >
                 <div className="relative min-w-0 flex-1 overflow-hidden">
-                  {/* Crossfade labels in-place (no empty gap from mode="wait") */}
                   <AnimatePresence mode="sync" initial={false}>
                     <motion.span
                       key={`label-${tone.label}`}
@@ -119,7 +176,6 @@ export function OverlayWindow() {
                       {tone.label}
                     </motion.span>
                   </AnimatePresence>
-                  {/* Spacer so the absolute label still occupies flow height */}
                   <span
                     aria-hidden
                     className="invisible block truncate text-[13px] font-semibold leading-[1.125rem]"
@@ -128,37 +184,39 @@ export function OverlayWindow() {
                   </span>
                 </div>
 
+                {/* Context window meter (Grok-style 12K / 500K) — not turn id */}
                 <AnimatePresence initial={false}>
-                  {status.turn ? (
+                  {contextMeter ? (
                     <motion.span
-                      key={`turn-${status.turn}`}
+                      key={`ctx-${contextMeter}`}
                       data-tauri-drag-region
-                      className="shrink-0 font-mono text-[10px] tabular-nums text-white/35"
+                      className="shrink-0 font-mono text-[10px] tabular-nums text-white/40"
                       initial={{ opacity: 0, scale: 0.92 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.92 }}
                       transition={{ duration: DUR.base, ease: soft }}
+                      title="Estimated context window"
                     >
-                      #{status.turn}
+                      {contextMeter}
                     </motion.span>
                   ) : null}
                 </AnimatePresence>
               </div>
 
               <div className="relative h-[1rem] overflow-hidden">
-                {/* Key on the visible string only — phase changes that keep
-                    the same subtitle no longer remount and jump. */}
                 <AnimatePresence mode="sync" initial={false}>
                   <motion.p
-                    key={`sub-${subtitle}`}
+                    key={`sub-${activity ?? subtitle}`}
                     data-tauri-drag-region
                     className="absolute inset-x-0 top-0 truncate text-[11px] leading-4"
                     initial={fadeSwap.initial}
                     animate={{
                       ...fadeSwap.animate,
-                      color: caption
-                        ? "rgba(255,255,255,0.3)"
-                        : "rgba(255,255,255,0.45)",
+                      color: activity
+                        ? "rgba(196, 181, 253, 0.85)"
+                        : caption
+                          ? "rgba(255,255,255,0.3)"
+                          : "rgba(255,255,255,0.45)",
                     }}
                     exit={fadeSwap.exit}
                     transition={{
@@ -166,7 +224,7 @@ export function OverlayWindow() {
                       ease: isReady ? softIdle : soft,
                     }}
                   >
-                    {subtitle}
+                    {activity ?? subtitle}
                   </motion.p>
                 </AnimatePresence>
               </div>
@@ -175,10 +233,31 @@ export function OverlayWindow() {
             <DevicePips status={status} />
           </div>
 
-          {/* ── Caption (You / Boris) ─────────────────────────────────
-              Stable keys by *kind* so streaming text updates in place
-              (no remount mid-utterance). Kind swaps crossfade; height
-              and ready-state chrome ease instead of snapping. */}
+          {/* Compact progressive tool strip (Thinking only, no extra card bulk) */}
+          <AnimatePresence initial={false}>
+            {status.phase === "Thinking" && activity ? (
+              <motion.div
+                key="think-progress"
+                data-tauri-drag-region
+                className="mt-1.5 flex items-center gap-2 overflow-hidden"
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: DUR.base, ease: soft }}
+              >
+                <span
+                  className="overlay-think-bar h-0.5 flex-1 rounded-full"
+                  style={
+                    {
+                      ["--think-accent" as string]: tone.accent,
+                    } as CSSProperties
+                  }
+                />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+
+          {/* ── Caption (You / Boris) ───────────────────────────────── */}
           <AnimatePresence initial={false} mode="popLayout">
             {caption ? (
               <motion.div
@@ -219,7 +298,7 @@ export function OverlayWindow() {
                 <CaptionBody
                   caption={caption}
                   isReady={isReady}
-                  turnKey={status.turn ?? "none"}
+                  streamKey={status.turn ?? status.phase}
                 />
               </motion.div>
             ) : null}
@@ -233,11 +312,11 @@ export function OverlayWindow() {
 function CaptionBody({
   caption,
   isReady,
-  turnKey,
+  streamKey,
 }: {
   caption: Caption;
   isReady: boolean;
-  turnKey: string;
+  streamKey: string;
 }) {
   const textColor =
     caption.kind === "error"
@@ -248,14 +327,12 @@ function CaptionBody({
           : "rgba(255,255,255,0.8)"
         : "rgba(255,255,255,0.65)";
 
-  // Stable identity per turn for streaming heard text (no flash on partials
-  // or Hearing→Reading). Said keys on content so a brand-new line soft-fades.
   const textKey =
     caption.kind === "error"
       ? `err-${caption.text.slice(0, 48)}`
       : caption.kind === "said"
         ? `said-${caption.text.slice(0, 96)}`
-        : `heard-${turnKey}`;
+        : `heard-${streamKey}`;
 
   return (
     <motion.p
@@ -276,8 +353,6 @@ function CaptionBody({
           {caption.kind === "said" ? "Boris" : "You"}
         </motion.span>
       ) : null}
-      {/* Soft crossfade when the utterance itself is replaced, without
-          remounting the outer card (height/layout stay continuous). */}
       <AnimatePresence mode="sync" initial={false}>
         <motion.span
           key={textKey}
@@ -296,18 +371,21 @@ function CaptionBody({
 function PresenceOrb({
   motion: motionKind,
   accent,
+  size = "sm",
 }: {
   motion: ReturnType<typeof toneFor>["motion"];
   accent: string;
+  size?: "sm" | "md";
 }) {
+  const box = size === "md" ? "size-10" : "size-9";
+  const core = size === "md" ? "size-3.5" : "size-3";
+
   return (
     <div
       data-tauri-drag-region
-      className="relative flex size-9 shrink-0 items-center justify-center"
+      className={cn("relative flex shrink-0 items-center justify-center", box)}
       aria-hidden
     >
-      {/* Outer ring — wrapper fades enter/exit; inner runs CSS loop so
-          Framer opacity and keyframe opacity never fight. Accent eases. */}
       <AnimatePresence initial={false}>
         {motionKind !== "none" ? (
           <motion.span
@@ -333,7 +411,6 @@ function PresenceOrb({
         ) : null}
       </AnimatePresence>
 
-      {/* Secondary pulse ring for listen / speak */}
       <AnimatePresence initial={false}>
         {motionKind === "listen" || motionKind === "speak" ? (
           <motion.span
@@ -353,12 +430,10 @@ function PresenceOrb({
         ) : null}
       </AnimatePresence>
 
-      {/* Core — crossfade when motion style changes so CSS keyframe
-          restarts don't hard-snap scale mid-loop. */}
       <AnimatePresence mode="sync" initial={false}>
         <motion.span
           key={`core-wrap-${motionKind}`}
-          className="absolute flex size-3 items-center justify-center"
+          className={cn("absolute flex items-center justify-center", core)}
           initial={{ opacity: 0, scale: 0.7 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 1.15 }}
@@ -366,7 +441,8 @@ function PresenceOrb({
         >
           <motion.span
             className={cn(
-              "size-3 rounded-full",
+              "rounded-full",
+              core,
               motionKind === "breathe" && "overlay-core-breathe",
               motionKind === "listen" && "overlay-core-listen",
               motionKind === "think" && "overlay-core-think",
@@ -459,13 +535,14 @@ function pickSubtitle(
       return "Say the wake word";
     }
     if (status.phase === "AwaitingReply") return "Your turn to answer";
-    if (status.phase === "AwaitingConfirm") return "Yes or no?";
+    if (status.phase === "AwaitingConfirm") return "Yes, no, sure, cancel…";
     return "Speaking…";
   }
   return "Listening…";
 }
 
 function pickCaption(status: StatusPicture): Caption | null {
+  // detail is errors only (confirm text lives in activity / said)
   if (status.detail?.trim()) {
     return { kind: "error", text: status.detail.trim() };
   }

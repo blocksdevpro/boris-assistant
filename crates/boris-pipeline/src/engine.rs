@@ -93,6 +93,9 @@ struct Picture {
     mic: DeviceHealth,
     speaker: DeviceHealth,
     turn: Option<TurnId>,
+    activity: Option<String>,
+    context_used: Option<u32>,
+    context_limit: Option<u32>,
     status_tx: Sender<StatusPicture>,
 }
 
@@ -107,11 +110,28 @@ impl Picture {
             mic: self.mic.clone(),
             speaker: self.speaker.clone(),
             turn: self.turn.map(|t| t.to_string()),
+            activity: self.activity.clone(),
+            context_used: self.context_used,
+            context_limit: self.context_limit,
         });
     }
 
     fn set_phase(&mut self, phase: Phase) {
         self.phase = phase;
+        self.publish();
+    }
+
+    fn clear_activity(&mut self) {
+        if self.activity.take().is_some() {
+            self.publish();
+        }
+    }
+
+    fn update_context_from_chars(&mut self, approx_chars: usize) {
+        // Rough token estimate (chars/4), for the overlay meter only.
+        let used = (approx_chars as u32 / 4).max(1);
+        self.context_used = Some(used);
+        self.context_limit = Some(crate::status::DEFAULT_CONTEXT_LIMIT_TOKENS);
         self.publish();
     }
 }
@@ -167,6 +187,9 @@ fn run(
                     ok: false,
                 },
                 turn: None,
+                activity: None,
+                context_used: None,
+                context_limit: None,
             });
             return Err(format!("audio init failed: {e}"));
         }
@@ -215,6 +238,9 @@ fn run(
                     ok: false,
                 },
                 turn: None,
+                activity: None,
+                context_used: None,
+                context_limit: None,
             });
             return Err(detail);
         }
@@ -339,6 +365,9 @@ fn run(
             ok: true,
         },
         turn: None,
+        activity: None,
+        context_used: None,
+        context_limit: Some(crate::status::DEFAULT_CONTEXT_LIMIT_TOKENS),
         status_tx,
     };
     picture.publish();
@@ -655,29 +684,114 @@ fn run(
         }
 
         // Think + preload TTS in parallel (one step ahead of synthesize).
+        picture.activity = Some("thinking…".into());
         picture.set_phase(Phase::Thinking);
+        // Seed context meter from current conversation size.
+        let approx_in = agent.export_messages().iter().fold(0usize, |acc, m| {
+            acc + m.content.to_string().len()
+        });
+        picture.update_context_from_chars(approx_in + text.len());
+
         let agent_t = std::time::Instant::now();
         let tts_job = spawn_tts_load(tts);
         agent.set_turn_id(Some(turn.to_string()));
         if let Some(ref sid) = active_session {
             agent.set_session_id(Some(sid.to_string()));
         }
-        let outcome = agent_rt.block_on(agent.prompt(&text));
+
+        // Live tool activity → overlay (subscribe emits on this thread inside block_on).
+        let activity_bridge = std::sync::Arc::new(std::sync::Mutex::new(picture.status_tx.clone()));
+        let activity_snap = std::sync::Arc::new(std::sync::Mutex::new((
+            picture.engine,
+            picture.phase,
+            picture.detail.clone(),
+            picture.heard.clone(),
+            picture.said.clone(),
+            picture.mic.clone(),
+            picture.speaker.clone(),
+            picture.turn,
+            picture.context_used,
+            picture.context_limit,
+        )));
+        let snap_w = activity_snap.clone();
+        let tx_w = activity_bridge.clone();
+        let _unsub = agent.subscribe(move |ev| {
+            use boris_agent::AgentEvent;
+            let label = match ev {
+                AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                    Some(format!("tool · {tool_name}"))
+                }
+                AgentEvent::ToolExecutionEnd {
+                    tool_name, ok, ..
+                } => Some(if *ok {
+                    format!("done · {tool_name}")
+                } else {
+                    format!("fail · {tool_name}")
+                }),
+                AgentEvent::TurnStart { round } if *round > 0 => {
+                    Some(format!("thinking · round {}", round + 1))
+                }
+                AgentEvent::NeedsConfirmation { pending } => {
+                    Some(format!("confirm · {}", pending.name))
+                }
+                _ => None,
+            };
+            let Some(label) = label else { return };
+            let Ok(g) = snap_w.lock() else { return };
+            let (
+                engine,
+                phase,
+                detail,
+                heard,
+                said,
+                mic,
+                speaker,
+                turn_id,
+                context_used,
+                context_limit,
+            ) = g.clone();
+            drop(g);
+            if let Ok(tx) = tx_w.lock() {
+                let _ = tx.send(StatusPicture {
+                    engine,
+                    phase,
+                    detail,
+                    heard,
+                    said,
+                    mic,
+                    speaker,
+                    turn: turn_id.map(|t| t.to_string()),
+                    activity: Some(label),
+                    context_used,
+                    context_limit,
+                });
+            }
+        });
+
+        let outcome = agent_rt.block_on(agent.prompt_with_report(&text));
+        _unsub(); // drop live tool listener
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         tts = tts_owned;
 
-        let outcome = match outcome {
-            Ok(o) => o,
+        let (outcome, report) = match outcome {
+            Ok(pair) => pair,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
                 agent.cancel_pending();
                 let _ = tts.unload();
                 picture.detail = Some(format!("agent: {e}"));
+                picture.clear_activity();
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
             }
         };
+        picture.activity = if report.tools_used.is_empty() {
+            None
+        } else {
+            Some(format!("{} tools", report.tools_used.len()))
+        };
+        picture.update_context_from_chars(report.approx_chars_in);
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
         let outcome = match resolve_agent_outcome(
@@ -951,7 +1065,9 @@ fn resolve_agent_outcome(
             pending_id = %pending.id,
             "agent needs confirmation"
         );
-        picture.detail = Some(format!("confirm: {}", pending.args_summary));
+        // Never put confirm text in `detail` (overlay treats detail as error).
+        picture.detail = None;
+        picture.activity = Some(format!("confirm · {}", pending.name));
         picture.said = Some(prompt.clone());
         picture.publish();
 
@@ -994,10 +1110,11 @@ fn resolve_agent_outcome(
             return OutcomeResolve::Stopped;
         }
 
-        // Freeform listen for yes/no.
+        // Listen for yes/no with longer post-TTS settle + confirm-specific VAD.
         picture.set_phase(Phase::AwaitingConfirm);
-        if let Err(e) = hear::settle_after_playback(mic, cmd_rx, running) {
+        if let Err(e) = hear::settle_after_confirm(mic, cmd_rx, running) {
             agent.cancel_pending();
+            picture.clear_activity();
             return match e {
                 HearBreak::Stopped if !*running => {
                     go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
@@ -1016,18 +1133,23 @@ fn resolve_agent_outcome(
             };
         }
 
-        // Preload STT while preparing capture.
         if let Err(e) = stt.load() {
             tracing::error!(error = %e, "stt load failed for confirm");
             agent.cancel_pending();
             picture.detail = Some(format!("stt: {e}"));
+            picture.clear_activity();
             picture.set_phase(Phase::Armed);
             return OutcomeResolve::ReArm;
         }
 
         picture.set_phase(Phase::Hearing);
-        let clip = match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitReply)
-        {
+        let clip = match hear::capture_utterance(
+            mic,
+            vad,
+            cmd_rx,
+            running,
+            CaptureKind::AwaitConfirm,
+        ) {
             Ok(c) => c,
             Err(HearBreak::Stopped) if !*running => {
                 agent.cancel_pending();
@@ -1035,20 +1157,48 @@ fn resolve_agent_outcome(
                 return OutcomeResolve::Stopped;
             }
             Err(_) => {
-                // Silence / cancel → treat as reject.
-                tracing::info!(%turn, "confirm capture failed — treating as reject");
-                outcome = match agent_rt.block_on(agent.resume_confirmation(&pending.id, false)) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::error!(error = %e, "resume reject failed");
-                        agent.cancel_pending();
-                        picture.detail = Some(format!("agent: {e}"));
-                        picture.set_phase(Phase::Armed);
-                        return OutcomeResolve::ReArm;
+                // Silence: re-prompt once instead of silently rejecting.
+                tracing::info!(%turn, "confirm capture empty — re-prompt");
+                let reask = "I need a yes or no on that.";
+                picture.said = Some(reask.into());
+                picture.activity = Some("confirm · say yes or no".into());
+                picture.publish();
+                if let Ok(pcm) = tts.synthesize(reask) {
+                    while output_events.try_recv().is_ok() {}
+                    audio.play(pcm);
+                    let _ = wait_playback_started(output_events, cmd_rx, running, audio, picture);
+                    wait_playback_or_stop(output_events, cmd_rx, running, audio, picture);
+                }
+                if !*running {
+                    agent.cancel_pending();
+                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    return OutcomeResolve::Stopped;
+                }
+                let _ = hear::settle_after_confirm(mic, cmd_rx, running);
+                picture.set_phase(Phase::Hearing);
+                match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitConfirm)
+                {
+                    Ok(c) => c,
+                    Err(_) => {
+                        tracing::info!(%turn, "confirm second capture failed — reject");
+                        outcome = match agent_rt
+                            .block_on(agent.resume_confirmation(&pending.id, false))
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                tracing::error!(error = %e, "resume reject failed");
+                                agent.cancel_pending();
+                                picture.detail = Some(format!("agent: {e}"));
+                                picture.clear_activity();
+                                picture.set_phase(Phase::Armed);
+                                return OutcomeResolve::ReArm;
+                            }
+                        };
+                        picture.activity = Some("thinking…".into());
+                        picture.set_phase(Phase::Thinking);
+                        continue;
                     }
-                };
-                picture.set_phase(Phase::Thinking);
-                continue;
+                }
             }
         };
 
@@ -1056,7 +1206,7 @@ fn resolve_agent_outcome(
         let heard = match stt.transcribe(&clip) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!(error = %e, "confirm STT failed — reject");
+                tracing::warn!(error = %e, "confirm STT failed");
                 String::new()
             }
         };
@@ -1067,10 +1217,10 @@ fn resolve_agent_outcome(
         let approved = match interpret_yes_no(&heard) {
             Some(v) => v,
             None => {
-                // One re-ask then deny.
                 tracing::info!(%turn, heard = %heard, "confirm answer ambiguous — re-ask once");
                 let reask = "Was that a yes or a no?";
                 picture.said = Some(reask.into());
+                picture.activity = Some("confirm · yes or no".into());
                 picture.publish();
                 if let Ok(pcm) = tts.synthesize(reask) {
                     while output_events.try_recv().is_ok() {}
@@ -1084,20 +1234,28 @@ fn resolve_agent_outcome(
                     return OutcomeResolve::Stopped;
                 }
                 picture.set_phase(Phase::AwaitingConfirm);
-                let _ = hear::settle_after_playback(mic, cmd_rx, running);
+                let _ = hear::settle_after_confirm(mic, cmd_rx, running);
                 let _ = stt.load();
                 picture.set_phase(Phase::Hearing);
-                let second = hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitReply)
-                    .ok()
-                    .and_then(|c| stt.transcribe(&c).ok())
-                    .unwrap_or_default();
+                let second = hear::capture_utterance(
+                    mic,
+                    vad,
+                    cmd_rx,
+                    running,
+                    CaptureKind::AwaitConfirm,
+                )
+                .ok()
+                .and_then(|c| stt.transcribe(&c).ok())
+                .unwrap_or_default();
                 let _ = stt.unload();
                 picture.heard = Some(second.clone());
+                picture.publish();
                 interpret_yes_no(&second).unwrap_or(false)
             }
         };
 
         tracing::info!(%turn, approved, heard = %heard, "confirm decision");
+        picture.activity = Some("thinking…".into());
         picture.set_phase(Phase::Thinking);
         picture.detail = None;
         outcome = match agent_rt.block_on(agent.resume_confirmation(&pending.id, approved)) {
@@ -1119,42 +1277,120 @@ fn resolve_agent_outcome(
     OutcomeResolve::ReArm
 }
 
+/// Normalize STT: lowercase, strip most punctuation, collapse spaces.
+fn normalize_confirm_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch.is_whitespace() || ch == '\'' {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' {
+            out.push(' ');
+        } else {
+            out.push(' ');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Interpret freeform STT as yes/no. `None` = ambiguous.
+///
+/// Accepts natural variants ("yeah go ahead", "nope cancel that", "yes.") not only
+/// bare yes/no.
 fn interpret_yes_no(text: &str) -> Option<bool> {
-    let t = text.trim().to_ascii_lowercase();
+    let t = normalize_confirm_text(text);
     if t.is_empty() {
         return None;
     }
-    // Take first few words for short answers.
-    let head: String = t.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+    let words: Vec<&str> = t.split_whitespace().collect();
+    let head: String = words.iter().take(5).cloned().collect::<Vec<_>>().join(" ");
 
-    const YES: &[&str] = &[
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "do it", "go ahead", "please",
-        "affirmative", "y", "yea", "alright", "all right", "go for it", "confirmed",
+    // Multi-word phrases first (order matters for "do not" / "go ahead").
+    const YES_PHRASES: &[&str] = &[
+        "go ahead",
+        "go for it",
+        "do it",
+        "do that",
+        "sounds good",
+        "all right",
+        "alright",
+        "for sure",
+        "why not",
+        "yes please",
+        "yeah sure",
+        "yep sure",
+        "ok go",
+        "okay go",
     ];
-    const NO: &[&str] = &[
-        "no", "nope", "nah", "cancel", "stop", "don't", "do not", "never", "n", "negative",
-        "decline", "abort",
+    const NO_PHRASES: &[&str] = &[
+        "do not",
+        "don't",
+        "no way",
+        "no thanks",
+        "not now",
+        "hell no",
+        "nope cancel",
+        "cancel that",
+        "stop that",
+        "don't do",
+        "do not do",
     ];
 
-    for y in YES {
-        if head == *y || head.starts_with(&format!("{y} ")) || head.starts_with(&format!("{y},")) {
-            return Some(true);
-        }
-    }
-    for n in NO {
-        if head == *n || head.starts_with(&format!("{n} ")) || head.starts_with(&format!("{n},")) {
+    for p in NO_PHRASES {
+        if head == *p || head.starts_with(&format!("{p} ")) || t.contains(p) {
             return Some(false);
         }
     }
-    // Contains clear tokens.
-    if t.split_whitespace().any(|w| matches!(w, "yes" | "yeah" | "yep" | "yup")) {
-        return Some(true);
+    for p in YES_PHRASES {
+        if head == *p || head.starts_with(&format!("{p} ")) || t.contains(p) {
+            return Some(true);
+        }
     }
-    if t.split_whitespace().any(|w| matches!(w, "no" | "nope" | "nah" | "cancel" | "stop")) {
-        return Some(false);
+
+    const YES: &[&str] = &[
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "affirmative", "y", "yea",
+        "confirmed", "confirm", "approve", "approved", "fine", "proceed", "continue", "absolutely",
+        "definitely", "correct", "right", "true", "uh huh", "mhmm", "mm hmm",
+    ];
+    const NO: &[&str] = &[
+        "no", "nope", "nah", "cancel", "stop", "never", "n", "negative", "decline", "abort",
+        "refuse", "reject", "denied", "pass", "skip",
+    ];
+
+    // First-word / head match.
+    for n in NO {
+        if head == *n || head.starts_with(&format!("{n} ")) {
+            return Some(false);
+        }
     }
-    None
+    for y in YES {
+        if head == *y || head.starts_with(&format!("{y} ")) {
+            return Some(true);
+        }
+    }
+
+    // Any clear token in the utterance (handles "uh yes bro", "mm no thanks").
+    let mut saw_yes = false;
+    let mut saw_no = false;
+    for w in &words {
+        if matches!(
+            *w,
+            "yes" | "yeah" | "yep" | "yup" | "yea" | "sure" | "ok" | "okay" | "affirmative"
+        ) {
+            saw_yes = true;
+        }
+        if matches!(
+            *w,
+            "no" | "nope" | "nah" | "cancel" | "stop" | "never" | "negative" | "abort" | "decline"
+        ) {
+            saw_no = true;
+        }
+    }
+    // Prefer deny if both appear ("yes no wait" → ambiguous → None, re-ask).
+    match (saw_yes, saw_no) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
 }
 
 /// Start or resume a voice session and seed the agent context.
@@ -1646,5 +1882,20 @@ mod tests {
         assert!(transcript_usable("ok"));
         assert!(transcript_usable("hello world"));
         assert!(transcript_usable("  yo  "));
+    }
+
+    #[test]
+    fn interpret_yes_no_variants() {
+        assert_eq!(interpret_yes_no("yes"), Some(true));
+        assert_eq!(interpret_yes_no("Yes."), Some(true));
+        assert_eq!(interpret_yes_no("yeah go ahead"), Some(true));
+        assert_eq!(interpret_yes_no("sure thing bro"), Some(true));
+        assert_eq!(interpret_yes_no("ok do it"), Some(true));
+        assert_eq!(interpret_yes_no("no"), Some(false));
+        assert_eq!(interpret_yes_no("Nope!"), Some(false));
+        assert_eq!(interpret_yes_no("nah cancel that"), Some(false));
+        assert_eq!(interpret_yes_no("don't"), Some(false));
+        assert_eq!(interpret_yes_no("uh maybe later"), None);
+        assert_eq!(interpret_yes_no(""), None);
     }
 }

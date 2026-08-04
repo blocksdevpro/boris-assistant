@@ -30,6 +30,12 @@ export type StatusPicture = {
   mic: DeviceHealth;
   speaker: DeviceHealth;
   turn?: string | null;
+  /** Progressive tool / confirm chip (compact). */
+  activity?: string | null;
+  /** Estimated context tokens used (chars/4). */
+  context_used?: number | null;
+  /** Soft context window for the meter. */
+  context_limit?: number | null;
 };
 
 /** Device list entry from `list_input_devices` / `list_output_devices`. */
@@ -98,11 +104,13 @@ export type ModelsInstallReport = {
 export type AppSettings = {
   openrouter_api_key: string;
   openrouter_model: string;
+  capability_preset?: string;
 };
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
   openrouter_model: "",
+  capability_preset: "",
 };
 
 /** Safe default before Rust emits anything. */
@@ -115,6 +123,9 @@ export const OFF_STATUS: StatusPicture = {
   mic: { label: "—", ok: false },
   speaker: { label: "—", ok: false },
   turn: null,
+  activity: null,
+  context_used: null,
+  context_limit: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -129,5 +140,22 @@ export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined):
     mic: raw.mic ?? OFF_STATUS.mic,
     speaker: raw.speaker ?? OFF_STATUS.speaker,
     turn: raw.turn ?? null,
+    activity: raw.activity ?? null,
+    context_used: raw.context_used ?? null,
+    context_limit: raw.context_limit ?? null,
   };
+}
+
+/** Format token counts for the overlay meter: `233K / 500K`. */
+export function formatContextMeter(
+  used: number | null | undefined,
+  limit: number | null | undefined,
+): string | null {
+  if (used == null || limit == null || limit <= 0) return null;
+  const fmt = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+    if (n >= 1000) return `${Math.round(n / 1000)}K`;
+    return `${n}`;
+  };
+  return `${fmt(used)} / ${fmt(limit)}`;
 }

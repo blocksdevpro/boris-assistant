@@ -293,6 +293,33 @@
   animation: overlay-speak-core 0.55s ease-in-out infinite;
 }
 
+/* Thin progressive bar while tools run (Thinking phase) */
+@keyframes overlay-think-bar {
+  0% {
+    background-position: 100% 0;
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+  100% {
+    background-position: 0% 0;
+    opacity: 0.35;
+  }
+}
+
+.overlay-think-bar {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--think-accent, oklch(0.72 0.18 295)) 40%,
+    var(--think-accent, oklch(0.72 0.18 295)) 60%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: overlay-think-bar 1.4s ease-in-out infinite;
+}
+
 /* ── Main voice console ───────────────────────────────────────────────────── */
 
 .main-console {

@@ -21,8 +21,14 @@ use crate::engine::EngineCommand;
 /// How long the user has to *start* speaking when Boris is awaiting a freeform reply.
 const AWAIT_REPLY_START_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// Yes/no confirm: slightly shorter start window (answers are short).
+const AWAIT_CONFIRM_START_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Discard residual playback / room echo before opening VAD after TTS.
 const POST_TTS_SETTLE: Duration = Duration::from_millis(350);
+
+/// Longer settle after a confirm prompt so TTS tail / room echo does not trip VAD.
+const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(900);
 
 /// Why a hear step returned early.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +50,8 @@ pub enum CaptureKind {
     AfterWake,
     /// Freeform follow-up (name, choice, full sentence) — longer time to start.
     AwaitReply,
+    /// Yes/no after tool confirmation — short answers, careful VAD settle.
+    AwaitConfirm,
 }
 
 /// Poll host commands while blocking on audio.
@@ -167,7 +175,25 @@ pub fn settle_after_playback(
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
 ) -> Result<(), HearBreak> {
-    let deadline = std::time::Instant::now() + POST_TTS_SETTLE;
+    settle_after_playback_for(mic, cmd_rx, running, POST_TTS_SETTLE)
+}
+
+/// Longer settle used after HITL confirm prompts (echo-sensitive).
+pub fn settle_after_confirm(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+) -> Result<(), HearBreak> {
+    settle_after_playback_for(mic, cmd_rx, running, POST_CONFIRM_SETTLE)
+}
+
+fn settle_after_playback_for(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    settle: Duration,
+) -> Result<(), HearBreak> {
+    let deadline = std::time::Instant::now() + settle;
     while std::time::Instant::now() < deadline {
         still_running(cmd_rx, running)?;
         match mic.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -191,11 +217,14 @@ pub fn capture_utterance(
     running: &mut bool,
     kind: CaptureKind,
 ) -> Result<AudioBuffer, HearBreak> {
-    const MAX_UTTERANCE_SECS: u32 = 30;
-    tracing::info!(?kind, "capture_utterance begin");
+    let max_secs: u32 = match kind {
+        CaptureKind::AwaitConfirm => 12, // short yes/no — do not hold the mic forever
+        _ => 30,
+    };
+    tracing::info!(?kind, max_secs, "capture_utterance begin");
     let mut record = RecordingBuffer::new(
         AUDIO_TARGET_RATE as usize * 2,
-        AUDIO_TARGET_RATE as usize * MAX_UTTERANCE_SECS as usize,
+        AUDIO_TARGET_RATE as usize * max_secs as usize,
     );
     record.set_recording(true);
 
@@ -204,11 +233,20 @@ pub fn capture_utterance(
     let mut frame_buf: Vec<f32> = Vec::new();
     let score_every = duration_to_samples(VAD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
     let mut samples_since_score: usize = 0;
-    let silence_after = vad_silence_samples();
+    // Confirm: require a bit more trailing silence so "yeah…" isn't cut mid-word.
+    let silence_after = match kind {
+        CaptureKind::AwaitConfirm => {
+            vad_silence_samples().saturating_mul(3).saturating_div(2).max(vad_silence_samples())
+        }
+        _ => vad_silence_samples(),
+    };
     let silence_before = match kind {
         CaptureKind::AfterWake => vad_initial_timeout_samples(),
         CaptureKind::AwaitReply => {
             duration_to_samples(AWAIT_REPLY_START_TIMEOUT, AUDIO_TARGET_RATE)
+        }
+        CaptureKind::AwaitConfirm => {
+            duration_to_samples(AWAIT_CONFIRM_START_TIMEOUT, AUDIO_TARGET_RATE)
         }
     };
 

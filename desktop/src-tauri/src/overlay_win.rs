@@ -123,7 +123,7 @@ fn place_overlay_top_center<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
 
     // ~3% down from top, horizontally centered on that monitor.
     let x = pos.x + (screen.width as i32 - win_size.width as i32) / 2;
-    let y = pos.y + (screen.height as f64 * 0.03) as i32;
+    let y = pos.y + (screen.height as f64 * 0.02) as i32;
 
     if let Err(e) = overlay.set_position(tauri::Position::Physical(PhysicalPosition::new(x, y))) {
         tracing::warn!(error = %e, "overlay set_position failed");

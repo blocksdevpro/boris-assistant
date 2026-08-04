@@ -20,6 +20,7 @@ use crate::memory::{
 };
 use crate::observe::TurnReport;
 use crate::outcome::AgentOutcome;
+use crate::prompt_profile::{PromptContext, UserInfo};
 use crate::runtime::{
     PendingTurn, SandboxConfig, ToolRuntime, JsonlAuditSink, NullAuditSink,
 };
@@ -58,6 +59,8 @@ pub struct Agent {
     tools: Vec<Box<dyn Tool>>,
     context: Context,
     base_system_prompt: String,
+    /// When true, inject live `<user_info>` (OS, cwd, date) into the system prompt.
+    include_user_info: bool,
     personal: Option<PersonalMemory>,
     runtime: ToolRuntime,
     pending_turn: Option<PendingTurn>,
@@ -104,6 +107,7 @@ impl Agent {
             tools: opts.tools,
             context,
             base_system_prompt: opts.system_prompt,
+            include_user_info: true,
             personal: None,
             runtime,
             pending_turn: None,
@@ -114,6 +118,12 @@ impl Agent {
             cancel: None,
             skills: None,
         }
+    }
+
+    /// Toggle `<user_info>` injection (default: on).
+    pub fn set_include_user_info(&mut self, include: bool) {
+        self.include_user_info = include;
+        self.refresh_system_prompt();
     }
 
     /// Install discovered skills: inject catalog into system prompt, register
@@ -264,33 +274,37 @@ impl Agent {
     }
 
     pub fn refresh_system_prompt(&mut self) {
-        let composed = self.composed_system_prompt();
+        let composed = self.prompt_context().render();
         self.context.set_system(composed);
     }
 
+    /// Build the inspectable prompt profile (Grok-style `PromptContext`).
+    pub fn prompt_context(&self) -> PromptContext {
+        let personal = self.personal.as_ref().and_then(|mem| {
+            mem.profile
+                .lock()
+                .ok()
+                .map(|p| p.render_block(PERSONAL_CONTEXT_MAX_CHARS))
+                .filter(|s| !s.is_empty())
+        });
+        let skills_catalog = self.skills.as_ref().and_then(|shared| {
+            shared
+                .lock()
+                .ok()
+                .map(|g| skills::format_skills_catalog(&g.skills))
+                .filter(|s| !s.is_empty())
+        });
+        let mut ctx = PromptContext::new(self.base_system_prompt.clone())
+            .with_personal(personal)
+            .with_skills(skills_catalog);
+        if self.include_user_info {
+            ctx = ctx.with_user_info(UserInfo::capture());
+        }
+        ctx
+    }
+
     fn composed_system_prompt(&self) -> String {
-        let mut parts = vec![self.base_system_prompt.clone()];
-
-        if let Some(mem) = &self.personal {
-            let block = match mem.profile.lock() {
-                Ok(p) => p.render_block(PERSONAL_CONTEXT_MAX_CHARS),
-                Err(_) => String::new(),
-            };
-            if !block.is_empty() {
-                parts.push(block);
-            }
-        }
-
-        if let Some(ref shared) = self.skills {
-            if let Ok(g) = shared.lock() {
-                let cat = skills::format_skills_catalog(&g.skills);
-                if !cat.is_empty() {
-                    parts.push(cat);
-                }
-            }
-        }
-
-        parts.join("\n\n")
+        self.prompt_context().render()
     }
 
     pub fn set_base_system_prompt(&mut self, system_prompt: &str) {

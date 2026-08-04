@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolMeta,
-    ToolRisk,
+    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
+    ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
 
@@ -40,11 +40,12 @@ impl Tool for OpenUrlTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(ToolKind::Web)
             .permissions(&[Permission::UiControl])
             .confirm(true)
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let url = require_string(obj, "url")?;
         let url = url.trim();
@@ -105,11 +106,12 @@ impl Tool for OpenPathTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(ToolKind::System)
             .permissions(&[Permission::FsRead, Permission::UiControl])
             .confirm(true)
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let path = resolve_under_roots(&raw, &self.read_roots)?;

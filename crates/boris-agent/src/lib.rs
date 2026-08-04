@@ -1,15 +1,19 @@
 //! LLM tool-calling agent harness used by Boris.
 //!
-//! Layered like tau's `agent` crate:
-//! - [`loop_`] — pure ReAct loop (complete + tools + events)
-//! - [`agent::Agent`] — stateful facade (memory, HITL, session helpers)
-//! - [`runtime`] — policy / timeout / audit / confirmation
+//! Layers (Grok-inspired, voice-sized):
+//! - [`loop_`] — pure ReAct loop (complete + tools + events; parallel safe batches)
+//! - [`agent::Agent`] — stateful facade (memory, HITL, session, prompt profile)
+//! - [`runtime`] — policy / timeout / audit / confirmation / reminders
+//! - [`tool_context`] — per-call cwd / cancel / session
+//! - [`prompt_profile`] — structured system prompt sections
+//! - [`capability`] — tool kinds + capability presets
 //!
 //! Provider HTTP lives in `boris-ai` and is re-exported here for hosts.
 //!
 //! Tool bodies stay observation-only; speech is always [`AgentOutcome`].
 
 pub mod agent;
+pub mod capability;
 pub mod client;
 pub mod context;
 pub mod error;
@@ -17,11 +21,14 @@ pub mod loop_;
 pub mod memory;
 pub mod observe;
 pub mod outcome;
+pub mod prompt_profile;
+pub mod reminder;
 pub mod runtime;
 pub mod session;
 pub mod skills;
 pub mod stats;
 pub mod tool;
+pub mod tool_context;
 pub mod tools;
 pub mod types;
 
@@ -29,12 +36,14 @@ pub mod types;
 pub use boris_ai::{LlmClient, LlmError, LlmErrorKind, OpenRouterClient};
 
 pub use agent::{Agent, AgentOptions};
+pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{Context, Message, Role};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_tool, LoopState};
 pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
+pub use prompt_profile::{PromptContext, UserInfo};
 pub use runtime::{
     default_user_read_roots, PendingToolCall, SandboxConfig, ToolRuntime, JsonlAuditSink,
     NullAuditSink, NetworkPolicy, ShellPolicy,
@@ -45,10 +54,12 @@ pub use skills::{
     LoadedSkills, Skill, SkillSource,
 };
 pub use stats::AgentStats;
-pub use tool::{Permission, Tool, ToolError, ToolMeta, ToolRisk};
+pub use tool::{Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk};
+pub use tool_context::ToolCallContext;
 pub use tools::{
     bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,
-    register_builtin_tools_with_options, shell_tools, web_tools, BuiltinToolPaths,
+    register_builtin_tools_with_options, register_builtin_tools_with_preset, shell_tools,
+    web_tools, BuiltinToolPaths,
 };
 pub use types::{
     AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS,

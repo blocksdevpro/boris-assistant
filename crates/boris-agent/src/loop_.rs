@@ -4,13 +4,14 @@
 //! [`ToolRuntime`] mediation. The [`crate::Agent`] facade owns state and learning.
 //!
 //! Tool batches that may need HITL run sequentially so remaining sibling calls
-//! can be paused. Auto-allow batches (safe/moderate) still run sequentially but
-//! never pause mid-batch.
+//! can be paused. Auto-allow batches (no confirmation needed) run in parallel
+//! via [`futures::future::join_all`], preserving original order in context.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use boris_ai::LlmClient;
+use futures::future::join_all;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -18,8 +19,8 @@ use crate::context::{Context, Role};
 use crate::error::AgentError;
 use crate::outcome::AgentOutcome;
 use crate::runtime::{
-    args_summary, InvokeOptions, InvokeResult, PendingTurn, RawToolCall, ToolInvocation,
-    ToolRuntime,
+    args_summary, InvokeOptions, InvokeResult, PendingTurn, PolicyDecision, RawToolCall,
+    ToolInvocation, ToolRuntime,
 };
 use crate::tool::Tool;
 use crate::types::{AgentEvent, AgentLoopConfig, LoopResult};
@@ -131,6 +132,7 @@ pub async fn agent_loop(
                     user_text,
                     config,
                     &emit,
+                    cancel.clone(),
                 )
                 .await?
                 {
@@ -197,7 +199,23 @@ pub async fn agent_loop(
     Err(AgentError::tool_loop("tool loop exhausted"))
 }
 
-/// Process a batch of tool calls sequentially (HITL-safe).
+fn make_invocation(
+    call: &RawToolCall,
+    config: &AgentLoopConfig,
+    cancel: Option<CancellationToken>,
+) -> ToolInvocation {
+    let mut inv = ToolInvocation::new(call.call_id.clone(), call.name.clone(), call.args.clone());
+    inv.session_id = config.session_id.clone();
+    inv.turn_id = config.turn_id.clone();
+    inv.cancel = cancel;
+    inv
+}
+
+/// Process a batch of tool calls.
+///
+/// - Length 1 → sequential path.
+/// - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call needs
+///   confirmation, fall back to sequential (HITL-safe). Otherwise run in parallel.
 async fn process_tool_calls(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
@@ -207,17 +225,68 @@ async fn process_tool_calls(
     user_text: &str,
     config: &AgentLoopConfig,
     emit: &EmitFn,
+    cancel: Option<CancellationToken>,
+) -> Result<ToolBatchResult, AgentError> {
+    if calls.len() > 1 {
+        let opts = InvokeOptions {
+            skip_confirmation: false,
+            confirms_used: *confirms_used,
+        };
+        let mut needs_confirm = false;
+        for call in &calls {
+            let tool = find_tool(state.tools, &call.name)?;
+            if matches!(
+                state.runtime.decide_only(tool, &call.args, opts),
+                PolicyDecision::NeedsConfirmation { .. }
+            ) {
+                needs_confirm = true;
+                break;
+            }
+        }
+        if !needs_confirm {
+            return process_tool_calls_parallel(
+                state,
+                calls,
+                tools_used,
+                *confirms_used,
+                config,
+                emit,
+                cancel,
+            )
+            .await;
+        }
+    }
+
+    process_tool_calls_sequential(
+        state,
+        calls,
+        tools_used,
+        tool_rounds,
+        confirms_used,
+        user_text,
+        config,
+        emit,
+        cancel,
+    )
+    .await
+}
+
+/// Sequential path — HITL-safe; can pause mid-batch with remaining siblings.
+async fn process_tool_calls_sequential(
+    state: &mut LoopState<'_>,
+    calls: Vec<RawToolCall>,
+    tools_used: &mut Vec<String>,
+    tool_rounds: u32,
+    confirms_used: &mut u32,
+    user_text: &str,
+    config: &AgentLoopConfig,
+    emit: &EmitFn,
+    cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
     let mut iter = calls.into_iter();
     while let Some(call) = iter.next() {
         let tool = find_tool(state.tools, &call.name)?;
-        let inv = ToolInvocation {
-            call_id: call.call_id.clone(),
-            name: call.name.clone(),
-            args: call.args.clone(),
-            session_id: config.session_id.clone(),
-            turn_id: config.turn_id.clone(),
-        };
+        let inv = make_invocation(&call, config, cancel.clone());
         let opts = InvokeOptions {
             skip_confirmation: false,
             confirms_used: *confirms_used,
@@ -287,6 +356,107 @@ async fn process_tool_calls(
             }
         }
     }
+    Ok(ToolBatchResult::Continue)
+}
+
+/// Parallel path for batches where every call is auto-allowed or denyable.
+///
+/// Invokes concurrently; only mutates context after all results are collected,
+/// preserving original call order.
+async fn process_tool_calls_parallel(
+    state: &mut LoopState<'_>,
+    calls: Vec<RawToolCall>,
+    tools_used: &mut Vec<String>,
+    confirms_used: u32,
+    config: &AgentLoopConfig,
+    emit: &EmitFn,
+    cancel: Option<CancellationToken>,
+) -> Result<ToolBatchResult, AgentError> {
+    let opts = InvokeOptions {
+        skip_confirmation: false,
+        confirms_used,
+    };
+
+    // Borrow tools/runtime only for the concurrent phase (no context mut).
+    let results = {
+        let tools = state.tools;
+        let runtime = state.runtime;
+
+        // Resolve tools + emit starts before concurrent work.
+        let mut tools_for_calls: Vec<&dyn Tool> = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let tool = find_tool(tools, &call.name)?;
+            let summary = args_summary(&call.name, &call.args);
+            emit(AgentEvent::ToolExecutionStart {
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
+                args_summary: summary,
+            });
+            tools_for_calls.push(tool);
+        }
+
+        let futs = calls.iter().zip(tools_for_calls).map(|(call, tool)| {
+            let inv = make_invocation(call, config, cancel.clone());
+            let started = Instant::now();
+            async move {
+                let result = runtime.invoke(tool, inv, opts).await;
+                (started.elapsed().as_millis() as u64, result)
+            }
+        });
+
+        join_all(futs).await
+    };
+
+    // Push observations in original call order after concurrent work finishes.
+    for (call, (duration_ms, result)) in calls.iter().zip(results) {
+        match result {
+            InvokeResult::Observation(obs) => {
+                emit(AgentEvent::ToolExecutionEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    ok: !obs.starts_with("Error:"),
+                    duration_ms,
+                });
+                tools_used.push(call.name.clone());
+                state.context.push(
+                    Role::Tool,
+                    json!({ "tool_call_id": call.call_id, "content": obs }),
+                );
+            }
+            InvokeResult::Denied { reason } => {
+                emit(AgentEvent::ToolExecutionEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    ok: false,
+                    duration_ms,
+                });
+                tools_used.push(call.name.clone());
+                state.context.push(
+                    Role::Tool,
+                    json!({
+                        "tool_call_id": call.call_id,
+                        "content": format!("Error: {reason}")
+                    }),
+                );
+            }
+            InvokeResult::NeedsConfirmation { .. } => {
+                // Preflight should have prevented this; treat as error observation.
+                let msg = "Error: unexpected confirmation required in parallel batch".to_string();
+                emit(AgentEvent::ToolExecutionEnd {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    ok: false,
+                    duration_ms,
+                });
+                tools_used.push(call.name.clone());
+                state.context.push(
+                    Role::Tool,
+                    json!({ "tool_call_id": call.call_id, "content": msg }),
+                );
+            }
+        }
+    }
+
     Ok(ToolBatchResult::Continue)
 }
 
@@ -363,13 +533,15 @@ pub async fn resume_pending_tool(
     let started = Instant::now();
 
     let observation = if approved {
-        let inv = ToolInvocation {
-            call_id: pending.call_id.clone(),
-            name: pending.name.clone(),
-            args: pending.args.clone(),
-            session_id: config.session_id.clone(),
-            turn_id: config.turn_id.clone(),
-        };
+        let mut inv = ToolInvocation::new(
+            pending.call_id.clone(),
+            pending.name.clone(),
+            pending.args.clone(),
+        );
+        inv.session_id = config.session_id.clone();
+        inv.turn_id = config.turn_id.clone();
+        inv.cwd = None;
+        inv.cancel = cancel.clone();
         let opts = InvokeOptions {
             skip_confirmation: true,
             confirms_used,
@@ -413,6 +585,7 @@ pub async fn resume_pending_tool(
         &user_text,
         config,
         &emit,
+        cancel.clone(),
     )
     .await?
     {
@@ -527,7 +700,7 @@ mod tests {
             fn meta(&self) -> ToolMeta {
                 ToolMeta::safe_default()
             }
-            async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+            async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
                 Ok("pong".into())
             }
         }
@@ -571,5 +744,121 @@ mod tests {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Done."),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn loop_runs_parallel_safe_tools_then_speaks() {
+        use crate::tool::{ToolError, ToolMeta};
+
+        struct Alpha;
+        #[async_trait]
+        impl Tool for Alpha {
+            fn name(&self) -> &str {
+                "alpha"
+            }
+            fn description(&self) -> &str {
+                "alpha"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{},"required":[]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default()
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("A".into())
+            }
+        }
+
+        struct Beta;
+        #[async_trait]
+        impl Tool for Beta {
+            fn name(&self) -> &str {
+                "beta"
+            }
+            fn description(&self) -> &str {
+                "beta"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{},"required":[]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default()
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("B".into())
+            }
+        }
+
+        let client = ScriptedClient {
+            responses: Mutex::new(vec![
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": { "name": "alpha", "arguments": "{}" }
+                        },
+                        {
+                            "id": "c2",
+                            "type": "function",
+                            "function": { "name": "beta", "arguments": "{}" }
+                        }
+                    ]
+                }),
+                json!({
+                    "role": "assistant",
+                    "content": "Both done."
+                }),
+            ]),
+        };
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "run both");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(Alpha), Box::new(Beta)];
+        let config = AgentLoopConfig::default();
+
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+        };
+        let result = agent_loop(state, "run both", &config, vec![], 0, 0, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.tools_used,
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+        assert_eq!(result.tool_rounds, 1);
+        match result.outcome {
+            AgentOutcome::Speak { text, .. } => assert_eq!(text, "Both done."),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Both tool observations present, in original batch order.
+        let tool_msgs: Vec<_> = context
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert_eq!(tool_msgs[0].content["tool_call_id"], "c1");
+        assert_eq!(tool_msgs[0].content["content"], "A");
+        assert_eq!(tool_msgs[1].content["tool_call_id"], "c2");
+        assert_eq!(tool_msgs[1].content["content"], "B");
     }
 }

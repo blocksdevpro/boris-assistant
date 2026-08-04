@@ -308,8 +308,9 @@ pub fn load_skill_body(skill: &Skill) -> Result<String, String> {
     if body.is_empty() {
         return Err(format!("skill '{}' has empty body", skill.name));
     }
+    // Grok-style envelope: name + description + path attributes, body inside.
     Ok(format!(
-        "<skill name=\"{}\" location=\"{}\">\n\
+        "<skill name=\"{}\" description=\"{}\" path=\"{}\">\n\
          Base directory for relative refs: {}\n\
          Source: {:?}\n\n\
          {}\n\
@@ -317,6 +318,7 @@ pub fn load_skill_body(skill: &Skill) -> Result<String, String> {
          Follow this skill's steps using your tools. Keep spoken replies short (1–2 sentences). \
          Work autonomously until the skill goal is done or you need a real user decision.",
         skill.name,
+        skill.description.replace('"', "'"),
         skill.file_path.display(),
         skill.base_dir.display(),
         skill.source,

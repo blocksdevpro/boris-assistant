@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolMeta, ToolRisk,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
 
@@ -181,12 +181,13 @@ impl Tool for BashTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(ToolKind::Execute)
             .permissions(&[Permission::Shell])
             .confirm(true)
             .timeout(Duration::from_secs(130))
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let command = require_string(obj, "command")?;
         let command = command.trim();
@@ -329,7 +330,7 @@ mod tests {
         #[cfg(not(windows))]
         let cmd = "echo bash-smoke-ok";
         let out = tool
-            .execute(json!({ "command": cmd }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "command": cmd }))
             .await
             .expect("run");
         assert!(

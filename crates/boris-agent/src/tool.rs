@@ -147,7 +147,48 @@ fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-// ── Tool metadata (risk / permissions / timeout) ─────────────────────────────
+// ── Tool metadata (risk / permissions / timeout / kind) ──────────────────────
+
+/// High-level tool category (Grok `ToolKind`, used for capability presets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ToolKind {
+    Read,
+    Write,
+    Search,
+    Execute,
+    Web,
+    Memory,
+    Skill,
+    System,
+    Plan,
+    #[default]
+    Other,
+}
+
+impl ToolKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Search => "search",
+            Self::Execute => "execute",
+            Self::Web => "web",
+            Self::Memory => "memory",
+            Self::Skill => "skill",
+            Self::System => "system",
+            Self::Plan => "plan",
+            Self::Other => "other",
+        }
+    }
+
+    /// True when the tool does not mutate external state by design.
+    pub fn is_read_only(self) -> bool {
+        matches!(
+            self,
+            Self::Read | Self::Search | Self::Memory | Self::Skill | Self::System | Self::Other
+        )
+    }
+}
 
 /// How dangerous a tool is for policy and HITL defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -202,6 +243,8 @@ pub struct ToolMeta {
     pub default_timeout: Duration,
     /// When true, runtime always pauses for HITL before execute (unless granted).
     pub requires_confirmation: bool,
+    /// Category for capability presets and parallel scheduling.
+    pub kind: ToolKind,
 }
 
 impl ToolMeta {
@@ -212,6 +255,7 @@ impl ToolMeta {
             permissions: &[Permission::None],
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
+            kind: ToolKind::Other,
         }
     }
 
@@ -221,6 +265,7 @@ impl ToolMeta {
             permissions: &[Permission::None],
             default_timeout: risk.default_timeout(),
             requires_confirmation: false,
+            kind: ToolKind::Other,
         }
     }
 
@@ -237,6 +282,16 @@ impl ToolMeta {
     pub fn confirm(mut self, requires: bool) -> Self {
         self.requires_confirmation = requires;
         self
+    }
+
+    pub fn kind(mut self, kind: ToolKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Prefer kind-derived read-only when set; else treat Safe risk as read-only.
+    pub fn is_read_only(&self) -> bool {
+        self.kind.is_read_only() && self.risk <= ToolRisk::Moderate && !self.requires_confirmation
     }
 }
 
@@ -263,6 +318,12 @@ impl ToolMeta {
 ///
 /// `execute` is async so I/O tools (web, shell, MCP) can await without blocking
 /// the agent runtime. Call only via [`crate::runtime::ToolRuntime`].
+///
+/// # Context
+///
+/// Every call receives [`crate::tool_context::ToolCallContext`] (call id,
+/// session, cwd, cancel). Most tools ignore it; long-running tools should
+/// poll [`ToolCallContext::is_cancelled`].
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Snake_case name the LLM uses to invoke this tool.
@@ -288,7 +349,11 @@ pub trait Tool: Send + Sync {
     ///
     /// The returned string is sent back to the LLM as the tool result only —
     /// never treated as user-facing speech. Prefer short, factual observations.
-    async fn execute(&self, args: Value) -> Result<String, ToolError>;
+    async fn execute(
+        &self,
+        ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError>;
 }
 
 #[cfg(test)]

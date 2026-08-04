@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolMeta, ToolRisk,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::{read_roots, resolve_under_roots, write_roots};
 
@@ -83,10 +83,12 @@ impl Tool for ListDirTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Read)
+            .permissions(&[Permission::FsRead])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = optional_string(obj, "path")
             .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
@@ -204,10 +206,12 @@ impl Tool for ReadFileTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Read)
+            .permissions(&[Permission::FsRead])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let path = resolve_under_roots(&raw, &self.roots.readers())?;
@@ -324,11 +328,12 @@ impl Tool for WriteFileTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(ToolKind::Write)
             .permissions(&[Permission::FsWrite])
             .confirm(true)
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let content = require_string(obj, "content")?;
@@ -406,11 +411,12 @@ impl Tool for EditFileTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(ToolKind::Write)
             .permissions(&[Permission::FsWrite])
             .confirm(true)
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let old_string = require_string(obj, "old_string")?;
@@ -560,7 +566,7 @@ mod tests {
         let edit = EditFileTool::new(roots);
 
         write
-            .execute(json!({
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({
                 "path": "hello.txt",
                 "content": "hi boris\nline2\n"
             }))
@@ -568,16 +574,16 @@ mod tests {
             .unwrap();
 
         let body = read
-            .execute(json!({ "path": "hello.txt" }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "path": "hello.txt" }))
             .await
             .unwrap();
         assert!(body.contains("hi boris"));
         assert!(body.contains("1\t") || body.contains("1\thi"));
 
-        let listing = list.execute(json!({})).await.unwrap();
+        let listing = list.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         assert!(listing.contains("hello.txt"));
 
-        edit.execute(json!({
+        edit.execute(&crate::tool_context::ToolCallContext::new("t"), json!({
             "path": "hello.txt",
             "old_string": "hi boris",
             "new_string": "hello world"
@@ -586,7 +592,7 @@ mod tests {
         .unwrap();
 
         let body2 = read
-            .execute(json!({ "path": "hello.txt" }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "path": "hello.txt" }))
             .await
             .unwrap();
         assert!(body2.contains("hello world"));
@@ -600,7 +606,7 @@ mod tests {
         let (roots, dir) = temp_roots();
         let read = ReadFileTool::new(roots);
         let err = read
-            .execute(json!({ "path": "C:\\Windows\\System32\\drivers\\etc\\hosts" }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "path": "C:\\Windows\\System32\\drivers\\etc\\hosts" }))
             .await
             .unwrap_err();
         assert!(err.message.contains("outside") || err.message.contains("path"));

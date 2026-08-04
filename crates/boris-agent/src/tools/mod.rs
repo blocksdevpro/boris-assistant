@@ -21,6 +21,7 @@ pub mod web;
 use std::path::PathBuf;
 
 use crate::agent::Agent;
+use crate::capability::{filter_tools_for_preset, CapabilityPreset};
 use crate::tool::Tool;
 use crate::tools::files::FsRoots;
 
@@ -134,7 +135,7 @@ pub fn register_time_and_notes(agent: &mut Agent, paths: &BuiltinToolPaths) {
 
 /// Full host setup: personal context + all MVP tool waves.
 pub fn register_builtin_tools(agent: &mut Agent, paths: BuiltinToolPaths) {
-    register_builtin_tools_with_options(agent, paths, true, true);
+    register_builtin_tools_with_preset(agent, paths, true, true, CapabilityPreset::Full);
 }
 
 /// Same as [`register_builtin_tools`] with control over LLM extract and power tools.
@@ -143,6 +144,23 @@ pub fn register_builtin_tools_with_options(
     paths: BuiltinToolPaths,
     llm_extract: bool,
     power_tools: bool,
+) {
+    register_builtin_tools_with_preset(
+        agent,
+        paths,
+        llm_extract,
+        power_tools,
+        CapabilityPreset::Full,
+    );
+}
+
+/// Full registration with a capability preset (Grok toolset filtering).
+pub fn register_builtin_tools_with_preset(
+    agent: &mut Agent,
+    paths: BuiltinToolPaths,
+    llm_extract: bool,
+    power_tools: bool,
+    preset: CapabilityPreset,
 ) {
     let mut tools = builtin_tools(&paths);
 
@@ -173,5 +191,6 @@ pub fn register_builtin_tools_with_options(
         tools.extend(bash_tools(&paths));
     }
 
+    let tools = filter_tools_for_preset(tools, preset);
     agent.register_tools(tools);
 }

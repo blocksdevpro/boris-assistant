@@ -10,7 +10,7 @@ use crate::memory::profile::{FactCategory, UserFact, UserProfile};
 use crate::memory::store::ProfileStore;
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolMeta, ToolRisk,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 
 /// Shared mutable profile used by tools + engine (same process).
@@ -77,10 +77,12 @@ impl Tool for SaveUserFactTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsWrite])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let fact = require_string(obj, "fact")?;
         let category = optional_string(obj, "category")
@@ -144,10 +146,12 @@ impl Tool for UpdateUserProfileTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsWrite])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let mut changed = false;
         with_profile(&self.profile, &self.store, |p| {
@@ -213,10 +217,12 @@ impl Tool for GetUserContextTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsRead])
     }
 
-    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
         let guard = self
             .profile
             .lock()

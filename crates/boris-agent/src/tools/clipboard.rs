@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolMeta,
-    ToolRisk,
+    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
+    ToolMeta, ToolRisk,
 };
 
 const MAX_CLIP_CHARS: usize = 2000;
@@ -33,10 +33,12 @@ impl Tool for ClipboardGetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::Clipboard])
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::System)
+            .permissions(&[Permission::Clipboard])
     }
 
-    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
         let text = tokio::task::spawn_blocking(|| {
             let mut clip = arboard::Clipboard::new()
                 .map_err(|e| format!("clipboard unavailable: {e}"))?;
@@ -88,10 +90,12 @@ impl Tool for ClipboardSetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::Clipboard])
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Write)
+            .permissions(&[Permission::Clipboard])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let text = require_string(obj, "text")?;
         if text.chars().count() > 20_000 {

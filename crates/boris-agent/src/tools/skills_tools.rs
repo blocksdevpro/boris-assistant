@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::skills::{self, LoadedSkills, Skill};
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Tool, ToolError,
-    ToolMeta, ToolRisk,
+    ToolKind, ToolMeta, ToolRisk,
 };
 
 /// Shared skill registry for tools (same Arc the Agent holds).
@@ -45,10 +45,10 @@ impl Tool for ListSkillsTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe)
+        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
     }
 
-    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
         let guard = self
             .skills
             .lock()
@@ -107,10 +107,10 @@ impl Tool for LoadSkillTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe)
+        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let name = require_string(obj, "name")?;
         let name = name.trim();

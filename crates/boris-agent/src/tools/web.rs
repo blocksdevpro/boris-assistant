@@ -7,8 +7,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolMeta,
-    ToolRisk,
+    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
+    ToolMeta, ToolRisk,
 };
 
 const MAX_FETCH_CHARS: usize = 12_000;
@@ -84,11 +84,12 @@ impl Tool for WebSearchTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Web)
             .permissions(&[Permission::Network])
             .timeout(Duration::from_secs(30))
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let query = require_string(obj, "query")?;
         if query.trim().is_empty() {
@@ -388,11 +389,12 @@ impl Tool for WebFetchTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Web)
             .permissions(&[Permission::Network])
             .timeout(Duration::from_secs(45))
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let url = require_string(obj, "url")?;
         ensure_http_url(&url)?;

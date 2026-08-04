@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolMeta, ToolRisk,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 
 const DEFAULT_RECALL_LIMIT: usize = 5;
@@ -202,10 +202,12 @@ impl Tool for RememberNoteTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite])
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsWrite])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let note = require_string(obj, "note")?;
         self.store
@@ -263,10 +265,12 @@ impl Tool for RecallNotesTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsRead])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let limit = parse_limit(obj)?;
         let query = optional_string(obj, "query");
@@ -406,17 +410,17 @@ mod tests {
         assert_eq!(recall.name(), "recall_notes");
 
         let saved = remember
-            .execute(json!({ "note": "user likes dark mode" }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "note": "user likes dark mode" }))
             .await
             .expect("remember");
         assert_eq!(saved, "Saved note.");
 
-        let listed = recall.execute(json!({})).await.expect("recall");
+        let listed = recall.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.expect("recall");
         assert!(listed.contains("user likes dark mode"), "got: {listed}");
         assert!(listed.starts_with("- "), "got: {listed}");
 
         let searched = recall
-            .execute(json!({ "query": "DARK", "limit": 5 }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "query": "DARK", "limit": 5 }))
             .await
             .expect("search");
         assert!(searched.contains("dark mode"), "got: {searched}");
@@ -428,7 +432,7 @@ mod tests {
     async fn recall_missing_file_is_empty_message() {
         let path = temp_notes_path("missing");
         let recall = RecallNotesTool::new(&path);
-        let out = recall.execute(json!({})).await.unwrap();
+        let out = recall.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         assert_eq!(out, "No notes found.");
         cleanup(&path);
     }
@@ -437,7 +441,7 @@ mod tests {
     async fn remember_requires_note() {
         let path = temp_notes_path("req");
         let tool = RememberNoteTool::new(&path);
-        let err = tool.execute(json!({})).await.unwrap_err();
+        let err = tool.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap_err();
         assert!(err.message.contains("note"), "got: {}", err.message);
         cleanup(&path);
     }
@@ -452,16 +456,16 @@ mod tests {
         let recall = RecallNotesTool::new(&path);
 
         // default 5
-        let out = recall.execute(json!({})).await.unwrap();
+        let out = recall.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         let count = out.lines().count();
         assert_eq!(count, 5, "got:\n{out}");
 
         // cap at 20
-        let out = recall.execute(json!({ "limit": 100 })).await.unwrap();
+        let out = recall.execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "limit": 100 })).await.unwrap();
         assert_eq!(out.lines().count(), 20);
 
         // explicit 3
-        let out = recall.execute(json!({ "limit": 3 })).await.unwrap();
+        let out = recall.execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "limit": 3 })).await.unwrap();
         assert_eq!(out.lines().count(), 3);
 
         cleanup(&path);

@@ -78,7 +78,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("get_time", async {
             GetTimeTool
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -87,7 +87,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("get_date", async {
             GetDateTool
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -98,7 +98,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("remember_note", async {
             RememberNoteTool::new(notes_path.clone())
-                .execute(json!({"note": "smoke test note from tool_live_smoke"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"note": "smoke test note from tool_live_smoke"}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -107,7 +107,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("recall_notes", async {
             RecallNotesTool::new(notes_path.clone())
-                .execute(json!({"limit": 5}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"limit": 5}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -119,7 +119,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("save_user_fact", async {
             SaveUserFactTool::with_path(profile.clone(), profile_path.clone())
-                .execute(json!({"fact": "likes smoke tests", "category": "preference"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"fact": "likes smoke tests", "category": "preference"}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -128,7 +128,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("update_user_profile", async {
             UpdateUserProfileTool::with_path(profile.clone(), profile_path.clone())
-                .execute(json!({"preferred_name": "Smoke Tester", "address_as": "Tester"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"preferred_name": "Smoke Tester", "address_as": "Tester"}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -137,7 +137,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("get_user_context", async {
             GetUserContextTool::new(profile.clone())
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -148,7 +148,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("get_system_info", async {
             GetSystemInfoTool::new(root.display().to_string())
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -159,7 +159,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("clipboard_set", async {
             ClipboardSetTool
-                .execute(json!({"text": "boris-smoke-clipboard"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"text": "boris-smoke-clipboard"}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -168,7 +168,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("clipboard_get", async {
             ClipboardGetTool
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -179,7 +179,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("todo_write", async {
             TodoWriteTool::new(&sandbox)
-                .execute(json!({
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({
                     "items": [
                         {"id": "1", "content": "smoke item", "status": "pending"}
                     ]
@@ -192,7 +192,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("todo_read", async {
             TodoReadTool::new(&sandbox)
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -203,7 +203,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_write", async {
             WriteFileTool::new(roots.clone())
-                .execute(json!({
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({
                     "path": "hello.txt",
                     "content": "hello from boris smoke\nfindme-token\n"
                 }))
@@ -215,7 +215,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_read", async {
             ReadFileTool::new(roots.clone())
-                .execute(json!({ "path": "hello.txt" }))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "path": "hello.txt" }))
                 .await
                 .map_err(|e| e.message)
         })
@@ -224,7 +224,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_edit", async {
             EditFileTool::new(roots.clone())
-                .execute(json!({
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({
                     "path": "hello.txt",
                     "old_string": "hello from boris smoke",
                     "new_string": "hello edited"
@@ -237,7 +237,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("list_dir", async {
             ListDirTool::new(roots.clone())
-                .execute(json!({}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -246,7 +246,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("glob", async {
             GlobTool::new(roots.clone())
-                .execute(json!({ "pattern": "*.txt" }))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "pattern": "*.txt" }))
                 .await
                 .map_err(|e| e.message)
         })
@@ -255,7 +255,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("grep", async {
             GrepTool::new(roots.clone())
-                .execute(json!({ "pattern": "findme-token" }))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "pattern": "findme-token" }))
                 .await
                 .map_err(|e| e.message)
         })
@@ -266,7 +266,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("bash", async {
             BashTool::new(vec![sandbox.clone()], sandbox.clone())
-                .execute(json!({
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({
                     "command": "echo bash-smoke-ok",
                     "cwd": sandbox.to_string_lossy()
                 }))
@@ -281,7 +281,7 @@ async fn live_smoke_all_boris_tools() {
         run_one("web_search", async {
             WebSearchTool::new()
                 .map_err(|e| e.message)?
-                .execute(json!({"query": "rust programming language", "limit": 3}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"query": "rust programming language", "limit": 3}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -291,7 +291,7 @@ async fn live_smoke_all_boris_tools() {
         run_one("web_fetch", async {
             WebFetchTool::new()
                 .map_err(|e| e.message)?
-                .execute(json!({"url": "https://example.com"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"url": "https://example.com"}))
                 .await
                 .map_err(|e| e.message)
         })
@@ -303,7 +303,7 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("open_url (invalid scheme denied)", async {
             match OpenUrlTool
-                .execute(json!({"url": "ftp://example.com"}))
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({"url": "ftp://example.com"}))
                 .await
             {
                 Err(e) if e.message.contains("http") => {
@@ -319,7 +319,7 @@ async fn live_smoke_all_boris_tools() {
         run_one("open_path", async {
             // Opening may launch Explorer/editor; still verifies OS handoff works.
             OpenPathTool::new(vec![sandbox.clone()])
-                .execute(json!({
+                .execute(&boris_agent::ToolCallContext::new("t"), json!({
                     "path": sandbox.join("hello.txt").to_string_lossy()
                 }))
                 .await

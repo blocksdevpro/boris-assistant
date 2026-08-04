@@ -10,7 +10,9 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+use crate::reminder::with_reminder;
 use crate::tool::{truncate_tool_result, Tool, ToolMeta};
+use crate::tool_context::ToolCallContext;
 
 pub use audit::{
     args_digest, args_summary, now_ms, AuditEvent, AuditSink, JsonlAuditSink, MemoryAuditSink,
@@ -31,6 +33,31 @@ pub struct ToolInvocation {
     pub args: Value,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
+    /// Optional working directory for this call.
+    pub cwd: Option<std::path::PathBuf>,
+    /// Optional cancel token (cloned into [`ToolCallContext`]).
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl ToolInvocation {
+    pub fn new(call_id: impl Into<String>, name: impl Into<String>, args: Value) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            args,
+            session_id: None,
+            turn_id: None,
+            cwd: None,
+            cancel: None,
+        }
+    }
+
+    pub fn call_context(&self) -> ToolCallContext {
+        ToolCallContext::new(self.call_id.clone())
+            .with_session(self.session_id.clone(), self.turn_id.clone())
+            .with_cwd(self.cwd.clone())
+            .with_cancel(self.cancel.clone())
+    }
 }
 
 /// Options for a single invoke.
@@ -103,6 +130,25 @@ impl ToolRuntime {
         format!("p-{n}-{}", now_ms())
     }
 
+    /// Policy-only decision (no execute). Used to plan parallel batches.
+    pub fn decide_only(
+        &self,
+        tool: &dyn Tool,
+        args: &Value,
+        opts: InvokeOptions,
+    ) -> PolicyDecision {
+        let meta = tool.meta();
+        if opts.skip_confirmation {
+            return PolicyDecision::Allow;
+        }
+        let args = if args.is_object() {
+            args.clone()
+        } else {
+            Value::Object(Default::default())
+        };
+        decide(&self.policy, &meta, &args, opts.confirms_used)
+    }
+
     /// Run policy + optional execute for one tool (async).
     pub async fn invoke(
         &self,
@@ -168,13 +214,14 @@ impl ToolRuntime {
         } else {
             "allow"
         };
+        let ctx = inv.call_context();
         let started = Instant::now();
-        let result = run_with_timeout(tool, args, meta.default_timeout).await;
+        let result = run_with_timeout(tool, &ctx, args, meta.default_timeout).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         match result {
             Ok(output) => {
-                let obs = truncate_tool_result(output);
+                let obs = with_reminder(&inv.name, truncate_tool_result(output));
                 self.audit_event(
                     &inv,
                     &meta,
@@ -200,7 +247,10 @@ impl ToolRuntime {
                     Some(false),
                     Some(kind),
                 );
-                let obs = truncate_tool_result(format!("Error: {}", e.message));
+                let obs = with_reminder(
+                    &inv.name,
+                    truncate_tool_result(format!("Error: {}", e.message)),
+                );
                 InvokeResult::Observation(obs)
             }
         }
@@ -283,7 +333,11 @@ mod tests {
         fn parameters(&self) -> Value {
             json!({"type":"object","properties":{},"required":[]})
         }
-        async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+        async fn execute(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: Value,
+        ) -> Result<String, ToolError> {
             Ok("x".repeat(MAX_TOOL_RESULT_CHARS + 100))
         }
     }
@@ -306,26 +360,27 @@ mod tests {
         fn meta(&self) -> ToolMeta {
             ToolMeta::with_risk(ToolRisk::Dangerous)
         }
-        async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+        async fn execute(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: Value,
+        ) -> Result<String, ToolError> {
             *self.ran.lock().unwrap() = true;
             Ok("ran".into())
         }
+    }
+
+    fn inv(id: &str, name: &str) -> ToolInvocation {
+        ToolInvocation::new(id, name, json!({}))
     }
 
     #[tokio::test]
     async fn invoke_truncates() {
         let audit = MemoryAuditSink::new();
         let rt = ToolRuntime::new(SandboxConfig::default(), Box::new(audit));
-        let inv = ToolInvocation {
-            call_id: "1".into(),
-            name: "long".into(),
-            args: json!({}),
-            session_id: None,
-            turn_id: None,
-        };
-        match rt.invoke(&LongTool, inv, InvokeOptions::default()).await {
+        match rt.invoke(&LongTool, inv("1", "long"), InvokeOptions::default()).await {
             InvokeResult::Observation(s) => {
-                assert!(s.chars().count() <= MAX_TOOL_RESULT_CHARS);
+                // Reminder may append; truncation applies to the tool body first.
                 assert!(s.contains("[truncated]"));
             }
             other => panic!("unexpected {other:?}"),
@@ -338,14 +393,10 @@ mod tests {
             ran: Mutex::new(false),
         };
         let rt = ToolRuntime::null();
-        let inv = ToolInvocation {
-            call_id: "c1".into(),
-            name: "danger".into(),
-            args: json!({}),
-            session_id: None,
-            turn_id: None,
-        };
-        match rt.invoke(&tool, inv, InvokeOptions::default()).await {
+        match rt
+            .invoke(&tool, inv("c1", "danger"), InvokeOptions::default())
+            .await
+        {
             InvokeResult::NeedsConfirmation { pending, .. } => {
                 assert_eq!(pending.name, "danger");
                 assert!(!*tool.ran.lock().unwrap());
@@ -360,20 +411,13 @@ mod tests {
             ran: Mutex::new(false),
         };
         let rt = ToolRuntime::null();
-        let inv = ToolInvocation {
-            call_id: "c1".into(),
-            name: "danger".into(),
-            args: json!({}),
-            session_id: None,
-            turn_id: None,
-        };
         let opts = InvokeOptions {
             skip_confirmation: true,
             confirms_used: 1,
         };
-        match rt.invoke(&tool, inv, opts).await {
+        match rt.invoke(&tool, inv("c1", "danger"), opts).await {
             InvokeResult::Observation(s) => {
-                assert_eq!(s, "ran");
+                assert!(s.starts_with("ran"));
                 assert!(*tool.ran.lock().unwrap());
             }
             other => panic!("unexpected {other:?}"),
@@ -397,20 +441,17 @@ mod tests {
             fn meta(&self) -> ToolMeta {
                 ToolMeta::safe_default().timeout(Duration::from_millis(40))
             }
-            async fn execute(&self, _: Value) -> Result<String, ToolError> {
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _: Value,
+            ) -> Result<String, ToolError> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 Ok("nope".into())
             }
         }
         let rt = ToolRuntime::null();
-        let inv = ToolInvocation {
-            call_id: "1".into(),
-            name: "slow".into(),
-            args: json!({}),
-            session_id: None,
-            turn_id: None,
-        };
-        match rt.invoke(&Slow, inv, InvokeOptions::default()).await {
+        match rt.invoke(&Slow, inv("1", "slow"), InvokeOptions::default()).await {
             InvokeResult::Observation(s) => assert!(s.contains("timed out") || s.contains("Error")),
             other => panic!("unexpected {other:?}"),
         }

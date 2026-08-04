@@ -10,7 +10,7 @@ use tokio::process::Command;
 
 use crate::tool::{
     optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolMeta, ToolRisk,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::files::FsRoots;
 use crate::tools::fs_common::resolve_under_roots;
@@ -71,11 +71,12 @@ impl Tool for GrepTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Search)
             .permissions(&[Permission::FsRead])
             .timeout(Duration::from_secs(30))
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let pattern = require_string(obj, "pattern")?;
         if pattern.trim().is_empty() {
@@ -355,7 +356,7 @@ mod tests {
         };
         let tool = GrepTool::new(roots);
         let out = tool
-            .execute(json!({ "pattern": "findme", "path": dir.to_string_lossy() }))
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({ "pattern": "findme", "path": dir.to_string_lossy() }))
             .await
             .unwrap();
         assert!(out.contains("findme"), "got: {out}");

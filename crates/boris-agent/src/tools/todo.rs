@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::tool::{
-    optional_string, require_object, truncate_tool_result, Permission, Tool, ToolError, ToolMeta,
-    ToolRisk,
+    optional_string, require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
+    ToolMeta, ToolRisk,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,10 +102,12 @@ impl Tool for TodoReadTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsRead])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Plan)
+            .permissions(&[Permission::FsRead])
     }
 
-    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
         let items = load_todos(&self.path).await?;
         Ok(truncate_tool_result(format_todos(&items)))
     }
@@ -162,10 +164,12 @@ impl Tool for TodoWriteTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).permissions(&[Permission::FsWrite])
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Plan)
+            .permissions(&[Permission::FsWrite])
     }
 
-    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let items = if let Some(arr) = obj.get("items").and_then(|v| v.as_array()) {
             parse_items_value(arr)?
@@ -244,7 +248,7 @@ mod tests {
         let read = TodoReadTool::new(&dir);
 
         let out = write
-            .execute(json!({
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({
                 "items": [
                     {"id": "1", "content": "ship tools", "status": "pending"},
                     {"id": "2", "content": "test", "status": "done"}
@@ -254,7 +258,7 @@ mod tests {
             .unwrap();
         assert!(out.contains("ship tools"));
 
-        let listed = read.execute(json!({})).await.unwrap();
+        let listed = read.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         assert!(listed.contains("[ ] 1"));
         assert!(listed.contains("[x] 2"));
 

@@ -377,6 +377,7 @@ mod tests {
             permissions: &[Permission::Shell],
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
+            kind: crate::tool::ToolKind::Execute,
         };
         let d = decide(&cfg(), &meta, &json!({}), 0);
         assert!(matches!(d, PolicyDecision::Deny { .. }));

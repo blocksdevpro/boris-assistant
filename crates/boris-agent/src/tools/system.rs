@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::tool::{truncate_tool_result, Tool, ToolError, ToolMeta, ToolRisk};
+use crate::tool::{truncate_tool_result, Tool, ToolError, ToolKind, ToolMeta, ToolRisk};
 
 /// Returns a short snapshot of the host machine.
 #[derive(Debug, Clone)]
@@ -38,10 +38,10 @@ impl Tool for GetSystemInfoTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe)
+        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::System)
     }
 
-    async fn execute(&self, _args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
         let username = std::env::var("USERNAME")
@@ -73,7 +73,7 @@ mod tests {
     #[tokio::test]
     async fn system_info_ok() {
         let t = GetSystemInfoTool::new("/tmp/.boris");
-        let out = t.execute(json!({})).await.unwrap();
+        let out = t.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         assert!(out.contains("OS:"));
         assert!(out.contains("Boris home:"));
     }

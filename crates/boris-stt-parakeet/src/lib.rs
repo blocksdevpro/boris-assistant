@@ -45,6 +45,7 @@ impl SpeechToText for ParakeetStt {
 
         let dir = &self.model_dir;
         if !dir.is_dir() {
+            tracing::error!(path = %dir.display(), "parakeet model dir missing");
             return Err(boris_core::error::Error::Other(format!(
                 "parakeet model dir not found: {}",
                 dir.display()
@@ -53,8 +54,20 @@ impl SpeechToText for ParakeetStt {
 
         // Prefer int8 when present (transcribe-rs falls back itself; we log path clearly).
         tracing::info!(path = %dir.display(), "loading Parakeet STT");
-        let model = ParakeetModel::load(dir, &Quantization::Int8)
-            .map_err(|e| boris_core::error::Error::Other(format!("{e} (dir={})", dir.display())))?;
+        let t0 = std::time::Instant::now();
+        let model = ParakeetModel::load(dir, &Quantization::Int8).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                path = %dir.display(),
+                "ParakeetModel::load failed"
+            );
+            boris_core::error::Error::Other(format!("{e} (dir={})", dir.display()))
+        })?;
+        tracing::info!(
+            path = %dir.display(),
+            ms = t0.elapsed().as_millis() as u64,
+            "Parakeet STT loaded"
+        );
         self.model = Some(model);
         Ok(())
     }

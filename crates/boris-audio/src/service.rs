@@ -1,7 +1,4 @@
-use std::{
-    println,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use boris_core::{types::ArcAudioBuffer, AudioBuffer};
 use cpal::{
@@ -78,38 +75,62 @@ impl AudioService {
         Self::list_devices(Direction::Output)
     }
 
-    pub fn find_input_device_or_default(id: &DeviceId) -> Option<Device> {
+    pub fn find_input_device(id: &DeviceId) -> Option<Device> {
         let host = cpal::default_host();
-        if let Some(device) = host.device_by_id(id) {
-            if device.supports_input() {
-                return Some(device);
-            }
-        }
-        host.default_input_device()
+        host.device_by_id(id)
+            .filter(|device| device.supports_input())
+    }
+
+    pub fn find_output_device(id: &DeviceId) -> Option<Device> {
+        let host = cpal::default_host();
+        host.device_by_id(id)
+            .filter(|device| device.supports_output())
+    }
+
+    pub fn find_input_device_or_default(id: &DeviceId) -> Option<Device> {
+        Self::find_input_device(id).or_else(|| cpal::default_host().default_input_device())
     }
 
     pub fn find_output_device_or_default(id: &DeviceId) -> Option<Device> {
-        let host = cpal::default_host();
-        if let Some(device) = host.device_by_id(id) {
-            if device.supports_output() {
-                return Some(device);
-            }
-        }
-        host.default_output_device()
+        Self::find_output_device(id).or_else(|| cpal::default_host().default_output_device())
     }
 
     /// Build with default devices. `source_rate` is the rate of buffers given to [`Self::play`].
     ///
     /// Use the TTS native rate (Supertone = 44_100, Kokoro = 24_000). Wrong rate = slow/fast audio.
-    pub fn with_source_rate(source_rate: u32) -> Self {
+    ///
+    /// Returns `Err` when no default input/output device is available (headless, denied
+    /// permission, or no hardware) so callers can surface a fault instead of panicking.
+    pub fn with_source_rate(source_rate: u32) -> Result<Self, String> {
         let host = cpal::default_host();
+        tracing::info!(source_rate, "AudioService::with_source_rate");
+
         // setup input pipeline
-        let input_device = host.default_input_device().unwrap();
+        let input_device = host.default_input_device().ok_or_else(|| {
+            tracing::error!("no default input device from cpal host");
+            "No default microphone found. Connect a mic or grant audio input permission."
+                .to_string()
+        })?;
+        let input_name = input_device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
+        tracing::info!(%input_name, "opening default input device");
         let input_subscribers = Arc::new(Mutex::new(vec![]));
         let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone());
+        tracing::info!(%input_name, "input pipeline open");
 
         // setup output pipeline
-        let output_device = host.default_output_device().unwrap();
+        let output_device = host.default_output_device().ok_or_else(|| {
+            tracing::error!("no default output device from cpal host");
+            "No default speaker found. Connect a speaker/headphones or grant audio output permission."
+                .to_string()
+        })?;
+        let output_name = output_device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
+        tracing::info!(%output_name, source_rate, "opening default output device");
         let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
         let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
 
@@ -121,18 +142,19 @@ impl AudioService {
             output_event_tx,
             source_rate,
         );
-        Self {
+        tracing::info!(%output_name, "output pipeline open");
+        Ok(Self {
             input_pipeline,
             input_subscribers,
             output_pipeline,
             output_event_channel,
             output_command_channel,
             source_rate,
-        }
+        })
     }
 
     /// Defaults to 44.1 kHz play source (Supertone). Prefer [`Self::with_source_rate`] when known.
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, String> {
         Self::with_source_rate(44_100)
     }
 
@@ -149,38 +171,60 @@ impl AudioService {
         rx
     }
 
-    pub fn switch_input(&mut self, id: &DeviceId) {
-        if &self.input_pipeline.device_id != id {
-            if let Some(device) = Self::find_input_device_or_default(id) {
-                let input_pipeline =
-                    InputPipeline::from_device(&device, self.input_subscribers.clone());
-                self.input_pipeline = input_pipeline;
-            }
-        } else {
-            println!("already using device {}", id);
+    /// Switch capture to `id`. Does **not** silently fall back to the default
+    /// device — callers get `Err` if the id is missing or not an input.
+    pub fn switch_input(&mut self, id: &DeviceId) -> Result<(), String> {
+        if &self.input_pipeline.device_id == id {
+            tracing::debug!(?id, "input already selected");
+            return Ok(());
         }
+        let device = Self::find_input_device(id).ok_or_else(|| {
+            format!("input device not found (id={id:?}) — unplugged or no longer available")
+        })?;
+        let name = device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| format!("{id:?}"));
+        tracing::info!(%name, "opening input device");
+        // Drop old pipeline (stops stream) then open the new one; subscribers stay.
+        self.input_pipeline = InputPipeline::from_device(&device, self.input_subscribers.clone());
+        Ok(())
     }
 
-    pub fn switch_output(&mut self, id: &DeviceId) {
-        if &self.output_pipeline.device_id != id {
-            if let Some(device) = Self::find_output_device_or_default(id) {
-                let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
-                let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
-
-                let output_event_tx = output_event_channel.0.clone();
-                let output_command_rx = output_command_channel.1.clone();
-
-                let output_pipeline = OutputPipeline::from_device(
-                    &device,
-                    output_command_rx,
-                    output_event_tx,
-                    self.source_rate,
-                );
-                self.output_command_channel = output_command_channel;
-                self.output_event_channel = output_event_channel;
-                self.output_pipeline = output_pipeline;
-            }
+    /// Switch playback to `id`. Does **not** silently fall back to default.
+    ///
+    /// Returns `Ok(true)` when the pipeline was rebuilt (any in-flight Play is
+    /// dropped). Returns `Ok(false)` when `id` was already selected.
+    pub fn switch_output(&mut self, id: &DeviceId) -> Result<bool, String> {
+        if &self.output_pipeline.device_id == id {
+            tracing::debug!(?id, "output already selected");
+            return Ok(false);
         }
+        let device = Self::find_output_device(id).ok_or_else(|| {
+            format!("output device not found (id={id:?}) — unplugged or no longer available")
+        })?;
+        let name = device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| format!("{id:?}"));
+        tracing::info!(%name, "opening output device");
+
+        let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
+        let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
+
+        let output_event_tx = output_event_channel.0.clone();
+        let output_command_rx = output_command_channel.1.clone();
+
+        let output_pipeline = OutputPipeline::from_device(
+            &device,
+            output_command_rx,
+            output_event_tx,
+            self.source_rate,
+        );
+        self.output_command_channel = output_command_channel;
+        self.output_event_channel = output_event_channel;
+        self.output_pipeline = output_pipeline;
+        Ok(true)
     }
 
     pub fn play(&self, audio: AudioBuffer) {
@@ -202,12 +246,6 @@ impl AudioService {
     }
 }
 
-impl Default for AudioService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -217,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_audio_service_input() {
-        let mut service = AudioService::new();
+        let mut service = AudioService::new().expect("default audio devices required for test");
         let rx = service.subscribe_input(None);
 
         if let Some(_audio) = rx.recv().ok() {
@@ -227,12 +265,14 @@ mod tests {
 
     #[test]
     fn test_audio_service_input_switch() {
-        let mut service = AudioService::new();
+        let mut service = AudioService::new().expect("default audio devices required for test");
         let rx = service.subscribe_input(None);
         let devices = AudioService::list_input_devices();
         let device = devices.get(1).unwrap();
         println!("switching input to {}", device.name);
-        service.switch_input(&device.id);
+        service
+            .switch_input(&device.id)
+            .expect("switch to second input");
         if let Some(_audio) = rx.recv().ok() {
             println!("working ",)
         }
@@ -240,7 +280,8 @@ mod tests {
 
     #[test]
     fn test_audio_service_output_switch() {
-        let mut service = AudioService::with_source_rate(16_000);
+        let mut service = AudioService::with_source_rate(16_000)
+            .expect("default audio devices required for test");
 
         let mut count = 0;
 
@@ -250,13 +291,17 @@ mod tests {
             if count == 200 {
                 let devices = AudioService::list_input_devices();
                 let device = devices.get(1).unwrap();
-                service.switch_input(&device.id);
+                service
+                    .switch_input(&device.id)
+                    .expect("switch input mid-stream");
                 println!("switching input device")
             }
             if count == 400 {
                 let devices = AudioService::list_input_devices();
                 let device = devices.get(2).unwrap();
-                service.switch_input(&device.id);
+                service
+                    .switch_input(&device.id)
+                    .expect("switch input mid-stream");
                 println!("switching input device")
             }
             println!("playing audio, {:?}, {}", audio.len(), count);

@@ -5,6 +5,7 @@ members = [
     "crates/boris-audio",
     "crates/boris-sense",
     "crates/boris-inference",
+    "crates/boris-ai",
     "crates/boris-agent",
     "crates/boris-stt-parakeet",
     "crates/boris-tts-kokoro",
@@ -22,6 +23,7 @@ boris-core        = { path = "crates/boris-core" }
 boris-sense       = { path = "crates/boris-sense" }
 boris-audio       = { path = "crates/boris-audio" }
 boris-inference   = { path = "crates/boris-inference" }
+boris-ai          = { path = "crates/boris-ai" }
 boris-pipeline    = { path = "crates/boris-pipeline" }
 
 # Root package is intentionally not a voice host. Product entrypoint: boris-desktop.

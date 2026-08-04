@@ -22,6 +22,8 @@ pub enum OutputCommand {
 }
 
 pub enum OutputEvent {
+    /// Samples are in the device queue — audible audio is about to start (or just started).
+    Started,
     /// Software + short device-buffer drain after a real Play job finished.
     Drained,
     /// Stopped by Flush; not a successful natural finish.
@@ -54,7 +56,7 @@ impl OutputPipeline {
         source_rate: u32,
     ) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
-        let device_id = device.id().unwrap();
+        let device_id = device.id().expect("output device id");
         let state = Arc::new(Mutex::new(OutputStreamState {
             pending: VecDeque::new(),
             empty_callbacks: 0,
@@ -62,12 +64,23 @@ impl OutputPipeline {
             started: false,
         }));
 
-        let config = device.default_output_config().unwrap();
+        let config = device
+            .default_output_config()
+            .expect("default_output_config — speaker may be denied");
         let stream_config = config.config();
+        let sample_format = config.sample_format();
+        tracing::info!(
+            ?device_id,
+            channels = stream_config.channels,
+            sample_rate = ?stream_config.sample_rate,
+            ?sample_format,
+            source_rate,
+            "OutputPipeline::from_device"
+        );
 
         let state_clone = state.clone();
         let event_tx_clone = event_tx.clone();
-        let stream = match config.sample_format() {
+        let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 Self::build_stream::<f32>(device, stream_config, state_clone, event_tx_clone)
             }
@@ -77,10 +90,17 @@ impl OutputPipeline {
             cpal::SampleFormat::U32 => {
                 Self::build_stream::<u32>(device, stream_config, state_clone, event_tx_clone)
             }
-            _ => panic!("unsupported sample format"),
+            other => {
+                tracing::error!(?other, "unsupported output sample format");
+                panic!("unsupported sample format: {other:?}");
+            }
         };
 
-        stream.play().unwrap();
+        if let Err(e) = stream.play() {
+            tracing::error!(error = %e, "output stream.play() failed");
+            panic!("output stream.play() failed: {e}");
+        }
+        tracing::info!("output stream playing");
 
         let flag_clone = flag.clone();
         let state_clone = state.clone();
@@ -123,6 +143,9 @@ impl OutputPipeline {
                         state.active = !state.pending.is_empty();
                         if !state.active {
                             tracing::warn!("OutputPipeline: Play produced empty buffer");
+                        } else {
+                            // Host can flip UI to "Speaking" only after this — not during TTS synth.
+                            let _ = event_tx.send(OutputEvent::Started);
                         }
                     }
                     OutputCommand::Flush => {

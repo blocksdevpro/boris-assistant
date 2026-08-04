@@ -12,10 +12,29 @@ pub struct LivekitWakeWord {
 
 impl LivekitWakeWord {
     pub fn new(model_name: &str, model_bytes: &[u8], sample_rate: u32) -> Self {
-        Self {
-            model: WakeWordModel::with_bytes(model_name, model_bytes, sample_rate)
-                .expect("failed to initialise wakeword model from embedded bytes"),
-        }
+        tracing::info!(
+            %model_name,
+            bytes = model_bytes.len(),
+            sample_rate,
+            "LivekitWakeWord::new — loading ORT sessions from embedded bytes"
+        );
+        let model = match WakeWordModel::with_bytes(model_name, model_bytes, sample_rate) {
+            Ok(m) => {
+                tracing::info!(%model_name, "LivekitWakeWord model ready");
+                m
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %model_name,
+                    bytes = model_bytes.len(),
+                    sample_rate,
+                    "LivekitWakeWord load FAILED (check onnxruntime.dll / DirectML.dll next to exe)"
+                );
+                panic!("failed to initialise wakeword model from embedded bytes: {e}");
+            }
+        };
+        Self { model }
     }
 }
 

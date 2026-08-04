@@ -1,0 +1,16 @@
+[package]
+name    = "boris-ai"
+version = "0.1.0"
+edition = "2021"
+description = "LLM provider plane: client trait, OpenRouter, stream primitives"
+
+[dependencies]
+serde_json  = { workspace = true }
+async-trait = "0.1"
+reqwest       = { version = "0.13", default-features = true, features = ["json", "stream"] }
+futures-util  = { version = "0.3", default-features = false, features = ["std"] }
+tokio         = { version = "1", features = ["sync"] }
+tracing       = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

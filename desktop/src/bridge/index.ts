@@ -1,9 +1,15 @@
 export { invokeErrorMessage } from "./errors";
 export {
+  downloadModels,
+  getModelsStatus,
+  getSettings,
   getStatus,
   listInputDevices,
   listOutputDevices,
+  onModelsProgress,
   onStatus,
+  preflightCheck,
+  saveSettings,
   startEngine,
   stopEngine,
   switchInput,
@@ -11,11 +17,20 @@ export {
 } from "./status";
 export { useStatus } from "./useStatus";
 export {
+  EMPTY_SETTINGS,
+  formatContextMeter,
   normalizeStatus,
   OFF_STATUS,
+  type AppSettings,
   type DeviceDto,
   type DeviceHealth,
+  type DownloadFileStatus,
+  type DownloadProgress,
   type EngineState,
+  type ModelComponent,
+  type ModelsInstallReport,
+  type ModelsStatus,
   type Phase,
+  type PreflightReport,
   type StatusPicture,
 } from "./types";

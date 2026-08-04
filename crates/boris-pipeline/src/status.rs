@@ -18,6 +18,10 @@ pub enum Phase {
     Off,
     Quiet,
     Armed,
+    /// Waiting for a freeform user reply without another wake word.
+    AwaitingReply,
+    /// Waiting for yes/no after a dangerous tool confirmation prompt.
+    AwaitingConfirm,
     Hearing,
     Reading,
     Thinking,
@@ -34,7 +38,7 @@ pub struct DeviceHealth {
 pub struct StatusPicture {
     pub engine: EngineState,
     pub phase: Phase,
-    /// Always present for the TS bridge (`null` when unset).
+    /// Error / fault text only (not confirm prompts — those use `activity`).
     #[serde(default)]
     pub detail: Option<String>,
     #[serde(default)]
@@ -45,7 +49,19 @@ pub struct StatusPicture {
     pub speaker: DeviceHealth,
     #[serde(default)]
     pub turn: Option<String>,
+    /// Compact progressive status (tool name, confirm summary) for the overlay.
+    #[serde(default)]
+    pub activity: Option<String>,
+    /// Estimated context tokens used (chars/4 heuristic).
+    #[serde(default)]
+    pub context_used: Option<u32>,
+    /// Soft context window for the meter (tokens).
+    #[serde(default)]
+    pub context_limit: Option<u32>,
 }
+
+/// Default soft context window for the overlay meter (token estimate).
+pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 500_000;
 
 impl StatusPicture {
     pub fn off() -> Self {
@@ -64,6 +80,9 @@ impl StatusPicture {
                 ok: false,
             },
             turn: None,
+            activity: None,
+            context_used: None,
+            context_limit: None,
         }
     }
 }

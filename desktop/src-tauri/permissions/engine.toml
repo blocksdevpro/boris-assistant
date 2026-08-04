@@ -6,6 +6,11 @@ description = "Read the latest StatusPicture"
 commands.allow = ["get_status"]
 
 [[permission]]
+identifier = "allow-preflight-check"
+description = "Check whether required models are present under ~/.boris"
+commands.allow = ["preflight_check"]
+
+[[permission]]
 identifier = "allow-start-engine"
 description = "Start the voice engine"
 commands.allow = ["start_engine"]
@@ -34,3 +39,33 @@ commands.allow = ["switch_input"]
 identifier = "allow-switch-output"
 description = "Switch speaker device"
 commands.allow = ["switch_output"]
+
+[[permission]]
+identifier = "allow-models-status"
+description = "Read local STT/TTS model install status"
+commands.allow = ["models_status"]
+
+[[permission]]
+identifier = "allow-download-models"
+description = "Download STT/TTS models into ~/.boris/models"
+commands.allow = ["download_models"]
+
+[[permission]]
+identifier = "allow-get-settings"
+description = "Load OpenRouter key and model from ~/.boris/settings.json"
+commands.allow = ["get_settings"]
+
+[[permission]]
+identifier = "allow-save-app-settings"
+description = "Persist OpenRouter key and model to ~/.boris/settings.json"
+commands.allow = ["save_app_settings"]
+
+[[permission]]
+identifier = "allow-get-log-path"
+description = "Return the path to the desktop log file under ~/.boris/logs"
+commands.allow = ["get_log_path"]
+
+[[permission]]
+identifier = "allow-frontend-log"
+description = "Write a frontend log line into the desktop log file"
+commands.allow = ["frontend_log"]

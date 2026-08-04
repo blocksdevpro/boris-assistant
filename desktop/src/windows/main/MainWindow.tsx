@@ -7,6 +7,8 @@ import {
   type ReactNode,
 } from "react";
 import {
+  Download,
+  HardDrive,
   KeyRound,
   Mic,
   Power,
@@ -19,16 +21,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  downloadModels,
+  getModelsStatus,
+  getSettings,
   listInputDevices,
   listOutputDevices,
+  onModelsProgress,
+  saveSettings,
   startEngine,
   stopEngine,
   switchInput,
   switchOutput,
   useStatus,
   type DeviceDto,
+  type DownloadProgress,
+  type ModelsStatus,
   type StatusPicture,
 } from "@/bridge";
+import { getLogPath, logger } from "@/lib/logger";
 import { toneFor } from "@/lib/phaseVisual";
 import { cn } from "@/lib/utils";
 
@@ -65,9 +75,16 @@ export function MainWindow() {
   const [selectedOutput, setSelectedOutput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelsStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState<DownloadProgress | null>(
+    null,
+  );
+  const [logPath, setLogPath] = useState("");
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
+  const modelsReady = Boolean(models?.parakeet_ready && models?.supertone_ready);
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -86,23 +103,83 @@ export function MainWindow() {
         return outs.find((d) => d.is_default)?.id ?? outs[0]?.id ?? "";
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("refreshDevices failed", msg);
+      setError(msg);
+    }
+  }, []);
+
+  const refreshModels = useCallback(async () => {
+    try {
+      const m = await getModelsStatus();
+      setModels(m);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("refreshModels failed", msg);
+      setError(msg);
     }
   }, []);
 
   useEffect(() => {
     void refreshDevices();
-  }, [refreshDevices]);
+    void refreshModels();
+    void getLogPath().then((p) => {
+      if (p) setLogPath(p);
+    });
+  }, [refreshDevices, refreshModels]);
+
+  // Restore last OpenRouter key + model from ~/.boris/settings.json
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await getSettings();
+        if (cancelled) return;
+        if (s.openrouter_api_key) setApiKey(s.openrouter_api_key);
+        if (s.openrouter_model) setModel(s.openrouter_model);
+      } catch {
+        // Missing or unreadable settings → leave fields empty
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persistCredentials = useCallback(async (key: string, modelId: string) => {
+    try {
+      await saveSettings({
+        openrouter_api_key: key,
+        openrouter_model: modelId,
+      });
+    } catch {
+      // Non-fatal: start should still proceed if disk write fails
+    }
+  }, []);
 
   const onStart = async () => {
     setBusy(true);
     setError(null);
+    logger.info("UI onStart", {
+      hasKey: Boolean(apiKey.trim()),
+      model: model || null,
+      selectedInput,
+      selectedOutput,
+      modelsReady,
+      logPath: logPath || null,
+    });
     try {
-      await startEngine(apiKey, model || undefined);
+      // Save before start so relaunch restores credentials even if engine fails later
+      await persistCredentials(apiKey, model);
+      // Host also re-applies preferred devices after Start; send them first so
+      // they are stored even if engine spawn is slow.
       if (selectedInput) await switchInput(selectedInput);
       if (selectedOutput) await switchOutput(selectedOutput);
+      await startEngine(apiKey, model || undefined);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("UI onStart failed", msg);
+      setError(msg);
     } finally {
       setBusy(false);
     }
@@ -122,10 +199,10 @@ export function MainWindow() {
 
   const onInputChange = async (id: string) => {
     setSelectedInput(id);
-    if (status.engine === "Off") return;
     setBusy(true);
     setError(null);
     try {
+      // Always notify host — stores preference when Off, switches when On.
       await switchInput(id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -136,7 +213,6 @@ export function MainWindow() {
 
   const onOutputChange = async (id: string) => {
     setSelectedOutput(id);
-    if (status.engine === "Off") return;
     setBusy(true);
     setError(null);
     try {
@@ -148,54 +224,85 @@ export function MainWindow() {
     }
   };
 
+  const onInstallModels = async () => {
+    setInstalling(true);
+    setError(null);
+    setInstallProgress(null);
+    const unsub = await onModelsProgress((p) => setInstallProgress(p));
+    try {
+      const report = await downloadModels();
+      await refreshModels();
+      if (!report.ok) {
+        const detail =
+          report.errors[0] ??
+          `Install incomplete (failed ${report.files_failed} file(s))`;
+        setError(detail);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      await refreshModels();
+    } finally {
+      unsub();
+      setInstalling(false);
+    }
+  };
+
   return (
     <div className="main-console flex h-screen flex-col overflow-hidden text-white">
       <TitleBar
         trailing={
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11px] text-white/50 ring-1 ring-white/[0.06]">
+          <span className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium leading-none tracking-tight text-white/55 ring-1 ring-white/[0.06]">
             <span
-              className="size-1.5 rounded-full"
+              className="size-1.5 shrink-0 rounded-full"
               style={{ background: tone.accent, boxShadow: `0 0 8px ${tone.glow}` }}
             />
-            {tone.label}
+            <span className="truncate">{tone.label}</span>
           </span>
         }
       />
 
-      <main className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-6 py-5">
-        {/* ── Hero presence ───────────────────────────────────────────── */}
-        <section
-          className="main-hero relative overflow-hidden rounded-2xl px-5 py-5"
-          style={
-            {
-              "--hero-accent": tone.accent,
-              "--hero-glow": tone.glow,
-            } as CSSProperties
-          }
-        >
-          <div
-            aria-hidden
-            className="pointer-events-none absolute -right-16 -top-20 size-56 rounded-full opacity-50 blur-3xl"
-            style={{ background: tone.glow }}
-          />
+      {/*
+        Scroll container is block-level (not flex-col). Flex children of a
+        constrained flex parent default to shrink, which let Conversation
+        collapse and Connection paint over the bubbles.
+      */}
+      <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex flex-col gap-5">
+          {/* ── Hero presence ─────────────────────────────────────────── */}
+          <section
+            className="main-hero relative rounded-2xl px-5 py-5 sm:px-6 sm:py-6"
+            style={
+              {
+                "--hero-accent": tone.accent,
+                "--hero-glow": tone.glow,
+              } as CSSProperties
+            }
+          >
+          {/* Glow clipped separately so the phase title never loses ascenders */}
+          <div aria-hidden className="main-hero-glow absolute inset-0">
+            <div
+              className="absolute -right-16 -top-20 size-56 rounded-full opacity-50 blur-3xl"
+              style={{ background: tone.glow }}
+            />
+          </div>
 
           <div className="relative flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-4">
               <HeroOrb accent={tone.accent} motion={tone.motion} />
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <h1 className="text-xl font-semibold tracking-tight text-white">
-                    {tone.label}
-                  </h1>
+              <div className="min-w-0 flex-1 py-0.5">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                  <h1 className="main-hero-title">{tone.label}</h1>
                   {status.turn ? (
-                    <span className="font-mono text-[11px] tabular-nums text-white/30">
+                    <span className="main-type-meta main-type-tabular text-white/30">
                       turn #{status.turn}
                     </span>
                   ) : null}
                 </div>
-                <p className="mt-0.5 text-[13px] text-white/45">{tone.hint}</p>
+                <p className="main-hero-hint mt-1">{tone.hint}</p>
                 {status.detail ? (
-                  <p className="mt-1.5 text-[12px] text-red-300/90">{status.detail}</p>
+                  <p className="mt-2 text-[12.5px] font-medium leading-snug text-red-300/90">
+                    {status.detail}
+                  </p>
                 ) : null}
               </div>
             </div>
@@ -204,13 +311,18 @@ export function MainWindow() {
               <Button
                 type="button"
                 size="lg"
-                disabled={busy || engineOn}
+                disabled={busy || engineOn || !modelsReady}
                 onClick={() => void onStart()}
                 className={cn(
-                  "h-10 gap-2 rounded-xl px-5 font-semibold",
+                  "h-10 gap-2 rounded-xl px-5 text-[13px] font-semibold tracking-tight",
                   "bg-white text-[#0c0d10] hover:bg-white/90",
                   "disabled:bg-white/20 disabled:text-white/40",
                 )}
+                title={
+                  modelsReady
+                    ? undefined
+                    : "Install speech models before starting the engine"
+                }
               >
                 <Power className="size-4" strokeWidth={2.25} />
                 Start
@@ -222,7 +334,7 @@ export function MainWindow() {
                 disabled={busy || status.engine === "Off"}
                 onClick={() => void onStop()}
                 className={cn(
-                  "h-10 gap-2 rounded-xl border-white/10 bg-white/[0.04] px-5 text-white/80",
+                  "h-10 gap-2 rounded-xl border-white/10 bg-white/[0.04] px-5 text-[13px] font-medium text-white/80",
                   "hover:bg-white/[0.08] hover:text-white",
                   "disabled:opacity-30",
                 )}
@@ -243,7 +355,24 @@ export function MainWindow() {
               Engine reported a fault — try Stop, then Start again.
             </p>
           ) : null}
+          {logPath ? (
+            <p
+              className="relative mt-2 truncate text-[10.5px] text-white/30"
+              title={logPath}
+            >
+              Debug log: {logPath}
+            </p>
+          ) : null}
         </section>
+
+        {/* ── Models ──────────────────────────────────────────────────── */}
+        <ModelsPanel
+          models={models}
+          installing={installing}
+          progress={installProgress}
+          onRefresh={() => void refreshModels()}
+          onInstall={() => void onInstallModels()}
+        />
 
         {/* ── Conversation ────────────────────────────────────────────── */}
         <ConversationPanel status={status} />
@@ -355,6 +484,7 @@ export function MainWindow() {
             </div>
           </Panel>
         </div>
+        </div>
       </main>
     </div>
   );
@@ -392,34 +522,231 @@ function HeroOrb({
   );
 }
 
-function ConversationPanel({ status }: { status: StatusPicture }) {
-  const hasLines = Boolean(status.heard?.trim() || status.said?.trim());
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function ModelsPanel({
+  models,
+  installing,
+  progress,
+  onRefresh,
+  onInstall,
+}: {
+  models: ModelsStatus | null;
+  installing: boolean;
+  progress: DownloadProgress | null;
+  onRefresh: () => void;
+  onInstall: () => void;
+}) {
+  const ready = Boolean(models?.parakeet_ready && models?.supertone_ready);
+  const missingCount = models?.missing?.length ?? 0;
+
+  const pct =
+    installing && progress?.total_bytes && progress.total_bytes > 0
+      ? Math.min(
+          100,
+          Math.round((progress.bytes_downloaded / progress.total_bytes) * 100),
+        )
+      : null;
+
+  const componentLabel =
+    progress?.component === "parakeet"
+      ? "Parakeet STT"
+      : progress?.component === "supertone"
+        ? "Supertone TTS"
+        : progress?.component ?? null;
+
+  const statusLabel = progress
+    ? progress.status === "downloading"
+      ? "Downloading"
+      : progress.status === "starting"
+        ? "Starting"
+        : progress.status === "skipped"
+          ? "Skipped"
+          : progress.status === "done"
+            ? "Done"
+            : progress.status === "failed"
+              ? "Failed"
+              : progress.status
+    : null;
 
   return (
-    <section className="main-panel flex min-h-[120px] flex-col rounded-2xl">
-      <header className="flex items-center justify-between border-b border-white/[0.05] px-4 py-3">
+    <Panel
+      icon={<HardDrive className="size-3.5" strokeWidth={2} />}
+      title="Speech models"
+      description="Parakeet (STT) and Supertone (TTS) install under ~/.boris/models — about 900 MB the first time."
+      action={
+        <button
+          type="button"
+          disabled={installing}
+          onClick={onRefresh}
+          className="main-type-meta inline-flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-white/[0.06] hover:text-white/80 disabled:opacity-40"
+        >
+          <RefreshCw className="size-3" strokeWidth={2} />
+          Refresh
+        </button>
+      }
+    >
+      <div className="flex flex-col gap-3.5">
+        <div className="flex flex-wrap gap-2">
+          <ModelChip
+            label="Parakeet STT"
+            ok={models?.parakeet_ready ?? false}
+          />
+          <ModelChip
+            label="Supertone TTS"
+            ok={models?.supertone_ready ?? false}
+          />
+        </div>
+
+        {models && !ready ? (
+          <p className="text-[12.5px] font-medium leading-snug text-amber-200/90">
+            {missingCount > 0
+              ? `${missingCount} files missing — install before starting the engine.`
+              : "Models incomplete — install before starting the engine."}
+          </p>
+        ) : null}
+
+        {ready ? (
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <p className="main-type-meta">Models ready</p>
+            <p className="main-type-path truncate" title={models?.models_dir ?? undefined}>
+              {models?.models_dir ?? "~/.boris/models"}
+            </p>
+          </div>
+        ) : null}
+
+        {installing ? (
+          <div className="flex flex-col gap-2 rounded-xl bg-white/[0.03] px-3.5 py-3 ring-1 ring-white/[0.06]">
+            <div className="flex min-w-0 items-baseline justify-between gap-3">
+              <p className="min-w-0 truncate text-[13px] font-medium tracking-tight text-white/90">
+                {progress?.file_name ?? "Preparing download…"}
+              </p>
+              {pct != null ? (
+                <span className="main-type-tabular shrink-0 text-[12px] font-semibold text-white/70">
+                  {pct}%
+                </span>
+              ) : null}
+            </div>
+
+            <div className="main-progress-track">
+              <div
+                className="main-progress-fill"
+                style={{ width: `${pct ?? (progress ? 4 : 0)}%` }}
+              />
+            </div>
+
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+              {componentLabel ? (
+                <span className="main-type-meta text-white/55">{componentLabel}</span>
+              ) : null}
+              {statusLabel ? (
+                <>
+                  <span className="text-white/20" aria-hidden>
+                    ·
+                  </span>
+                  <span className="main-type-meta capitalize text-white/50">
+                    {statusLabel}
+                  </span>
+                </>
+              ) : null}
+              {progress ? (
+                <>
+                  <span className="text-white/20" aria-hidden>
+                    ·
+                  </span>
+                  <span className="main-type-meta main-type-tabular text-white/50">
+                    {progress.total_bytes != null
+                      ? `${formatBytes(progress.bytes_downloaded)} / ${formatBytes(progress.total_bytes)}`
+                      : formatBytes(progress.bytes_downloaded)}
+                  </span>
+                </>
+              ) : (
+                <span className="main-type-meta">Connecting…</span>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        {!ready || installing ? (
+          <Button
+            type="button"
+            size="sm"
+            disabled={installing}
+            onClick={onInstall}
+            className={cn(
+              "h-9 w-fit gap-2 rounded-lg px-4 text-[13px] font-medium tracking-tight",
+              "bg-white/10 text-white hover:bg-white/15",
+              "disabled:opacity-40",
+            )}
+          >
+            <Download className="size-3.5" strokeWidth={2} />
+            {installing ? "Installing…" : "Install models"}
+          </Button>
+        ) : null}
+      </div>
+    </Panel>
+  );
+}
+
+function ModelChip({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ring-1",
+        "text-[12px] font-medium tracking-tight",
+        ok
+          ? "bg-emerald-500/10 text-emerald-300/90 ring-emerald-500/20"
+          : "bg-white/[0.04] text-white/50 ring-white/[0.08]",
+      )}
+    >
+      <span
+        className={cn(
+          "size-1.5 shrink-0 rounded-full",
+          ok ? "bg-emerald-400" : "bg-white/25",
+        )}
+      />
+      {label}
+      <span
+        className={cn(
+          "text-[11px] font-normal",
+          ok ? "text-emerald-300/55" : "text-white/30",
+        )}
+      >
+        {ok ? "ready" : "missing"}
+      </span>
+    </span>
+  );
+}
+
+function ConversationPanel({ status }: { status: StatusPicture }) {
+  const heard = status.heard?.trim() || "";
+  const said = status.said?.trim() || "";
+  const hasLines = Boolean(heard || said);
+
+  return (
+    <section className="main-panel flex min-h-[120px] flex-col overflow-hidden rounded-2xl">
+      <header className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3.5">
         <div>
-          <h2 className="text-[13px] font-medium tracking-tight text-white/90">
-            Conversation
-          </h2>
-          <p className="text-[11px] text-white/35">
+          <h2 className="main-type-title">Conversation</h2>
+          <p className="main-type-desc mt-0.5">
             Last turn — mirrors the floating island
           </p>
         </div>
       </header>
-      <div className="flex flex-1 flex-col gap-3 px-4 py-4">
+      <div className="flex flex-col gap-3 px-4 py-4">
         {!hasLines ? (
-          <p className="text-[13px] leading-relaxed text-white/30">
+          <p className="main-type-body text-white/32">
             When Boris is listening, your words and his reply show up here.
           </p>
         ) : (
           <>
-            {status.heard?.trim() ? (
-              <Bubble who="You" text={status.heard.trim()} />
-            ) : null}
-            {status.said?.trim() ? (
-              <Bubble who="Boris" text={status.said.trim()} accent />
-            ) : null}
+            {heard ? <Bubble who="You" text={heard} /> : null}
+            {said ? <Bubble who="Boris" text={said} accent /> : null}
           </>
         )}
       </div>
@@ -440,7 +767,7 @@ function Bubble({
     <div className="flex flex-col gap-1">
       <span
         className={cn(
-          "text-[10px] font-semibold uppercase tracking-wider",
+          "text-[10px] font-semibold uppercase tracking-[0.08em]",
           accent ? "text-white/50" : "text-white/30",
         )}
       >
@@ -448,7 +775,7 @@ function Bubble({
       </span>
       <p
         className={cn(
-          "rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed",
+          "break-words rounded-xl px-3.5 py-2.5 text-[13px] font-normal leading-[1.5] tracking-[-0.005em]",
           accent
             ? "bg-white/[0.07] text-white/90 ring-1 ring-white/[0.06]"
             : "bg-white/[0.03] text-white/70 ring-1 ring-white/[0.04]",
@@ -475,17 +802,15 @@ function Panel({
 }) {
   return (
     <section className="main-panel flex flex-col rounded-2xl">
-      <header className="flex items-start justify-between gap-3 border-b border-white/[0.05] px-4 py-3">
+      <header className="flex items-start justify-between gap-3 border-b border-white/[0.05] px-4 py-3.5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="flex size-6 items-center justify-center rounded-md bg-white/[0.05] text-white/55 ring-1 ring-white/[0.06]">
               {icon}
             </span>
-            <h2 className="text-[13px] font-medium tracking-tight text-white/90">
-              {title}
-            </h2>
+            <h2 className="main-type-title">{title}</h2>
           </div>
-          <p className="mt-1 text-[11px] leading-snug text-white/35">{description}</p>
+          <p className="main-type-desc mt-1 max-w-prose">{description}</p>
         </div>
         {action}
       </header>
@@ -505,7 +830,10 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <Label htmlFor={htmlFor} className="text-[11px] font-medium text-white/45">
+      <Label
+        htmlFor={htmlFor}
+        className="text-[11px] font-medium tracking-wide text-white/45"
+      >
         {label}
       </Label>
       {children}

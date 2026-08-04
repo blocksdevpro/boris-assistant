@@ -79,7 +79,13 @@ pub async fn agent_loop(
         // Mechanical compaction before each LLM call.
         state.context.compact_mechanical();
 
-        let tools_json = tools_json(state.tools);
+        // On the final allowed round, withhold tools so the model must speak.
+        let at_cap = round >= max_rounds;
+        let tools_json = if at_cap {
+            Value::Null
+        } else {
+            tools_json(state.tools)
+        };
         let response = state
             .client
             .complete(state.context.as_json(), tools_json)
@@ -87,12 +93,10 @@ pub async fn agent_loop(
 
         let tool_calls = &response["tool_calls"];
         if let Some(calls) = tool_calls.as_array() {
-            if !calls.is_empty() {
-                if round == max_rounds {
-                    return Err(AgentError::tool_loop(format!(
-                        "tool loop exceeded {max_rounds} rounds without a final reply"
-                    )));
-                }
+            if !calls.is_empty() && !at_cap {
+                // One round before cap: run tools, then inject a finish nudge and
+                // continue so the next iteration (at_cap) produces a spoken reply.
+                let force_finish_next = round + 1 >= max_rounds;
 
                 tool_rounds += 1;
                 state.context.push(Role::Assistant, response.clone());
@@ -137,6 +141,19 @@ pub async fn agent_loop(
                 .await?
                 {
                     ToolBatchResult::Continue => {
+                        if force_finish_next {
+                            // Nudge so the final no-tools call wraps up in speech.
+                            state.context.push(
+                                Role::User,
+                                json!(
+                                    "<system-reminder>\n\
+                                     Tool budget is nearly exhausted. Stop calling tools. \
+                                     Give a short spoken status of what you finished and what \
+                                     (if anything) is left. 1–2 sentences only.\n\
+                                     </system-reminder>"
+                                ),
+                            );
+                        }
                         emit(AgentEvent::TurnEnd {
                             round: round as u32,
                         });
@@ -166,12 +183,39 @@ pub async fn agent_loop(
             }
         }
 
-        let reply = response["content"]
+        // Content-only response (or tools withheld / ignored at cap).
+        let mut reply = response["content"]
             .as_str()
             .unwrap_or("")
             .trim()
             .to_string();
-        state.context.push(Role::Assistant, reply.clone());
+
+        // At cap with only tool_calls and empty content: force one more speak attempt.
+        if reply.is_empty() && at_cap {
+            state.context.push(
+                Role::User,
+                json!(
+                    "<system-reminder>\n\
+                     Reply now with a short spoken status (no tools). What got done?\n\
+                     </system-reminder>"
+                ),
+            );
+            let forced = state
+                .client
+                .complete(state.context.as_json(), Value::Null)
+                .await?;
+            reply = forced["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !reply.is_empty() {
+                state.context.push(Role::Assistant, reply.clone());
+            }
+        } else {
+            state.context.push(Role::Assistant, reply.clone());
+        }
+
         emit(AgentEvent::MessageEnd {
             role: Role::Assistant,
             preview: log_preview(&reply, 80),
@@ -181,7 +225,14 @@ pub async fn agent_loop(
         });
 
         let outcome = if reply.is_empty() {
-            AgentOutcome::Silent
+            // Never return Silent after tool work if we can offer a fallback line.
+            if tools_used.is_empty() {
+                AgentOutcome::Silent
+            } else {
+                AgentOutcome::speak(
+                    "I hit a snag wrapping up, but I did run some tools. Ask me to continue.",
+                )
+            }
         } else {
             AgentOutcome::speak(reply)
         };
@@ -196,7 +247,15 @@ pub async fn agent_loop(
         });
     }
 
-    Err(AgentError::tool_loop("tool loop exhausted"))
+    // Unreachable with 0..=max_rounds + return inside, but keep a soft landing.
+    Ok(LoopResult {
+        outcome: AgentOutcome::speak(
+            "I ran out of steps on that. Ask me to pick it up again.",
+        ),
+        tool_rounds,
+        tools_used,
+        pending_turn: None,
+    })
 }
 
 fn make_invocation(

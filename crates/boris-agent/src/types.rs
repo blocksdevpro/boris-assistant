@@ -7,10 +7,13 @@ use crate::outcome::AgentOutcome;
 use crate::runtime::PendingToolCall;
 
 /// Default hard cap on tool-call rounds per user turn.
-pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 5;
+///
+/// Voice multi-step work (files, web, todos) needs headroom; the loop forces a
+/// final spoken reply if the model is still calling tools at this cap.
+pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 16;
 
 /// Higher cap when skills are enabled so multi-step playbooks can finish.
-pub const SKILLS_MAX_TOOL_ROUNDS: u32 = 12;
+pub const SKILLS_MAX_TOOL_ROUNDS: u32 = 28;
 
 /// Snapshot passed into each loop invocation (messages already include prompts).
 #[derive(Debug, Clone)]

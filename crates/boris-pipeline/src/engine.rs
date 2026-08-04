@@ -26,7 +26,8 @@ use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture};
 
 const MIC_QUEUE: usize = 64;
 /// Max freeform follow-ups without re-wake (name, choice, full sentence, yes/no, …).
-const MAX_FOLLOW_UPS: u32 = 3;
+/// Multi-step voice chores need more than a couple of back-and-forths.
+const MAX_FOLLOW_UPS: u32 = 24;
 
 #[derive(Debug)]
 pub enum EngineCommand {
@@ -312,12 +313,7 @@ fn run(
         Err(e) => tracing::warn!(error = %e, "ensure default skills failed"),
     }
     let cwd = std::env::current_dir().ok();
-    let loaded = boris_agent::load_skills(
-        cwd.as_deref(),
-        &paths::boris_home(),
-        &[],
-        true,
-    );
+    let loaded = boris_agent::load_skills(cwd.as_deref(), &paths::boris_home(), &[], true);
     let skill_count = loaded.skills.len();
     agent.enable_skills(loaded);
 
@@ -557,8 +553,7 @@ fn run(
         tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
 
         let stt_job = spawn_stt_load(stt);
-        let capture =
-            hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind);
+        let capture = hear::capture_utterance(&mic, &mut vad, &cmd_rx, &mut running, capture_kind);
         let (stt_owned, stt_load) = join_stt_load(stt_job);
         stt = stt_owned;
 
@@ -687,9 +682,10 @@ fn run(
         picture.activity = Some("thinking…".into());
         picture.set_phase(Phase::Thinking);
         // Seed context meter from current conversation size.
-        let approx_in = agent.export_messages().iter().fold(0usize, |acc, m| {
-            acc + m.content.to_string().len()
-        });
+        let approx_in = agent
+            .export_messages()
+            .iter()
+            .fold(0usize, |acc, m| acc + m.content.to_string().len());
         picture.update_context_from_chars(approx_in + text.len());
 
         let agent_t = std::time::Instant::now();
@@ -721,9 +717,7 @@ fn run(
                 AgentEvent::ToolExecutionStart { tool_name, .. } => {
                     Some(format!("tool · {tool_name}"))
                 }
-                AgentEvent::ToolExecutionEnd {
-                    tool_name, ok, ..
-                } => Some(if *ok {
+                AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
                     format!("done · {tool_name}")
                 } else {
                     format!("fail · {tool_name}")
@@ -778,9 +772,34 @@ fn run(
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
                 agent.cancel_pending();
-                let _ = tts.unload();
-                picture.detail = Some(format!("agent: {e}"));
+                picture.detail = None;
                 picture.clear_activity();
+                // Recoverable spoken line instead of silent Ready.
+                let recovery =
+                    "I glitched mid-task. Wake me and say continue if you want me to finish.";
+                picture.said = Some(recovery.into());
+                picture.publish();
+                if tts.load().is_ok() {
+                    if let Ok(pcm) = tts.synthesize(recovery) {
+                        while output_events.try_recv().is_ok() {}
+                        audio.play(pcm);
+                        let _ = wait_playback_started(
+                            &mut output_events,
+                            &cmd_rx,
+                            &mut running,
+                            &mut audio,
+                            &mut picture,
+                        );
+                        wait_playback_or_stop(
+                            &mut output_events,
+                            &cmd_rx,
+                            &mut running,
+                            &mut audio,
+                            &mut picture,
+                        );
+                    }
+                    let _ = tts.unload();
+                }
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
@@ -826,12 +845,22 @@ fn run(
             AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {
                 (text, expect_reply)
             }
+            AgentOutcome::Silent if !report.tools_used.is_empty() => {
+                // Tools ran but model returned empty — still tell the user.
+                (
+                    "I ran tools but lost the spoken wrap-up. Say continue and I'll pick up."
+                        .to_string(),
+                    true, // keep freeform listen so they can say "continue"
+                )
+            }
             AgentOutcome::Speak { .. }
             | AgentOutcome::Silent
             | AgentOutcome::NeedsConfirmation { .. } => {
                 tracing::warn!(%turn, "agent produced no speech");
                 let _ = tts.unload();
-                picture.detail = Some("empty agent reply".into());
+                picture.detail = None;
+                picture.said = Some("I didn't get a reply out. Wake me and try again.".into());
+                picture.publish();
                 follow_up_depth = 0;
                 picture.set_phase(Phase::Armed);
                 continue;
@@ -1055,7 +1084,11 @@ fn resolve_agent_outcome(
 ) -> OutcomeResolve {
     // Cap nested confirms (also enforced in agent policy).
     for _ in 0..4 {
-        let AgentOutcome::NeedsConfirmation { text: prompt, pending } = outcome else {
+        let AgentOutcome::NeedsConfirmation {
+            text: prompt,
+            pending,
+        } = outcome
+        else {
             return OutcomeResolve::Done(outcome);
         };
 
@@ -1095,7 +1128,14 @@ fn resolve_agent_outcome(
         match wait_playback_started(output_events, cmd_rx, running, audio, picture) {
             PlaybackWait::Stopped => {
                 agent.cancel_pending();
-                go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                go_off(
+                    picture,
+                    audio,
+                    store,
+                    active_session,
+                    stt.as_mut(),
+                    tts.as_mut(),
+                );
                 return OutcomeResolve::Stopped;
             }
             PlaybackWait::Aborted => {}
@@ -1106,7 +1146,14 @@ fn resolve_agent_outcome(
         }
         if !*running {
             agent.cancel_pending();
-            go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+            go_off(
+                picture,
+                audio,
+                store,
+                active_session,
+                stt.as_mut(),
+                tts.as_mut(),
+            );
             return OutcomeResolve::Stopped;
         }
 
@@ -1117,7 +1164,14 @@ fn resolve_agent_outcome(
             picture.clear_activity();
             return match e {
                 HearBreak::Stopped if !*running => {
-                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    go_off(
+                        picture,
+                        audio,
+                        store,
+                        active_session,
+                        stt.as_mut(),
+                        tts.as_mut(),
+                    );
                     OutcomeResolve::Stopped
                 }
                 HearBreak::Disconnected => {
@@ -1143,64 +1197,79 @@ fn resolve_agent_outcome(
         }
 
         picture.set_phase(Phase::Hearing);
-        let clip = match hear::capture_utterance(
-            mic,
-            vad,
-            cmd_rx,
-            running,
-            CaptureKind::AwaitConfirm,
-        ) {
-            Ok(c) => c,
-            Err(HearBreak::Stopped) if !*running => {
-                agent.cancel_pending();
-                go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
-                return OutcomeResolve::Stopped;
-            }
-            Err(_) => {
-                // Silence: re-prompt once instead of silently rejecting.
-                tracing::info!(%turn, "confirm capture empty — re-prompt");
-                let reask = "I need a yes or no on that.";
-                picture.said = Some(reask.into());
-                picture.activity = Some("confirm · say yes or no".into());
-                picture.publish();
-                if let Ok(pcm) = tts.synthesize(reask) {
-                    while output_events.try_recv().is_ok() {}
-                    audio.play(pcm);
-                    let _ = wait_playback_started(output_events, cmd_rx, running, audio, picture);
-                    wait_playback_or_stop(output_events, cmd_rx, running, audio, picture);
-                }
-                if !*running {
+        let clip =
+            match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitConfirm) {
+                Ok(c) => c,
+                Err(HearBreak::Stopped) if !*running => {
                     agent.cancel_pending();
-                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    go_off(
+                        picture,
+                        audio,
+                        store,
+                        active_session,
+                        stt.as_mut(),
+                        tts.as_mut(),
+                    );
                     return OutcomeResolve::Stopped;
                 }
-                let _ = hear::settle_after_confirm(mic, cmd_rx, running);
-                picture.set_phase(Phase::Hearing);
-                match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitConfirm)
-                {
-                    Ok(c) => c,
-                    Err(_) => {
-                        tracing::info!(%turn, "confirm second capture failed — reject");
-                        outcome = match agent_rt
-                            .block_on(agent.resume_confirmation(&pending.id, false))
-                        {
-                            Ok(o) => o,
-                            Err(e) => {
-                                tracing::error!(error = %e, "resume reject failed");
-                                agent.cancel_pending();
-                                picture.detail = Some(format!("agent: {e}"));
-                                picture.clear_activity();
-                                picture.set_phase(Phase::Armed);
-                                return OutcomeResolve::ReArm;
-                            }
-                        };
-                        picture.activity = Some("thinking…".into());
-                        picture.set_phase(Phase::Thinking);
-                        continue;
+                Err(_) => {
+                    // Silence: re-prompt once instead of silently rejecting.
+                    tracing::info!(%turn, "confirm capture empty — re-prompt");
+                    let reask = "I need a yes or no on that.";
+                    picture.said = Some(reask.into());
+                    picture.activity = Some("confirm · say yes or no".into());
+                    picture.publish();
+                    if let Ok(pcm) = tts.synthesize(reask) {
+                        while output_events.try_recv().is_ok() {}
+                        audio.play(pcm);
+                        let _ =
+                            wait_playback_started(output_events, cmd_rx, running, audio, picture);
+                        wait_playback_or_stop(output_events, cmd_rx, running, audio, picture);
+                    }
+                    if !*running {
+                        agent.cancel_pending();
+                        go_off(
+                            picture,
+                            audio,
+                            store,
+                            active_session,
+                            stt.as_mut(),
+                            tts.as_mut(),
+                        );
+                        return OutcomeResolve::Stopped;
+                    }
+                    let _ = hear::settle_after_confirm(mic, cmd_rx, running);
+                    picture.set_phase(Phase::Hearing);
+                    match hear::capture_utterance(
+                        mic,
+                        vad,
+                        cmd_rx,
+                        running,
+                        CaptureKind::AwaitConfirm,
+                    ) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            tracing::info!(%turn, "confirm second capture failed — reject");
+                            outcome = match agent_rt
+                                .block_on(agent.resume_confirmation(&pending.id, false))
+                            {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "resume reject failed");
+                                    agent.cancel_pending();
+                                    picture.detail = Some(format!("agent: {e}"));
+                                    picture.clear_activity();
+                                    picture.set_phase(Phase::Armed);
+                                    return OutcomeResolve::ReArm;
+                                }
+                            };
+                            picture.activity = Some("thinking…".into());
+                            picture.set_phase(Phase::Thinking);
+                            continue;
+                        }
                     }
                 }
-            }
-        };
+            };
 
         picture.set_phase(Phase::Reading);
         let heard = match stt.transcribe(&clip) {
@@ -1230,23 +1299,25 @@ fn resolve_agent_outcome(
                 }
                 if !*running {
                     agent.cancel_pending();
-                    go_off(picture, audio, store, active_session, stt.as_mut(), tts.as_mut());
+                    go_off(
+                        picture,
+                        audio,
+                        store,
+                        active_session,
+                        stt.as_mut(),
+                        tts.as_mut(),
+                    );
                     return OutcomeResolve::Stopped;
                 }
                 picture.set_phase(Phase::AwaitingConfirm);
                 let _ = hear::settle_after_confirm(mic, cmd_rx, running);
                 let _ = stt.load();
                 picture.set_phase(Phase::Hearing);
-                let second = hear::capture_utterance(
-                    mic,
-                    vad,
-                    cmd_rx,
-                    running,
-                    CaptureKind::AwaitConfirm,
-                )
-                .ok()
-                .and_then(|c| stt.transcribe(&c).ok())
-                .unwrap_or_default();
+                let second =
+                    hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AwaitConfirm)
+                        .ok()
+                        .and_then(|c| stt.transcribe(&c).ok())
+                        .unwrap_or_default();
                 let _ = stt.unload();
                 picture.heard = Some(second.clone());
                 picture.publish();
@@ -1347,9 +1418,32 @@ fn interpret_yes_no(text: &str) -> Option<bool> {
     }
 
     const YES: &[&str] = &[
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "affirmative", "y", "yea",
-        "confirmed", "confirm", "approve", "approved", "fine", "proceed", "continue", "absolutely",
-        "definitely", "correct", "right", "true", "uh huh", "mhmm", "mm hmm",
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "please",
+        "affirmative",
+        "y",
+        "yea",
+        "confirmed",
+        "confirm",
+        "approve",
+        "approved",
+        "fine",
+        "proceed",
+        "continue",
+        "absolutely",
+        "definitely",
+        "correct",
+        "right",
+        "true",
+        "uh huh",
+        "mhmm",
+        "mm hmm",
     ];
     const NO: &[&str] = &[
         "no", "nope", "nah", "cancel", "stop", "never", "n", "negative", "decline", "abort",

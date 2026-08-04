@@ -9,6 +9,8 @@
 //!   memory/
 //!     notes.jsonl        # durable notes for builtin memory tools
 //!     profile.json       # active personal context (name, prefs, facts)
+//!     MEMORY.md          # curated cross-session knowledge (markdown)
+//!     sessions/          # append-only voice turn logs (markdown)
 //!   sandbox/             # default write root for future file tools
 //!   skills/              # user skill playbooks (`<name>/SKILL.md`)
 //!   audit/
@@ -116,6 +118,16 @@ pub fn profile_path() -> PathBuf {
     memory_dir().join("profile.json")
 }
 
+/// Curated long-term knowledge (`~/.boris/memory/MEMORY.md`).
+pub fn memory_md_path() -> PathBuf {
+    memory_dir().join("MEMORY.md")
+}
+
+/// Markdown session logs (`~/.boris/memory/sessions`).
+pub fn memory_sessions_dir() -> PathBuf {
+    memory_dir().join("sessions")
+}
+
 /// Default sandbox root for agent file tools (`~/.boris/sandbox`).
 pub fn sandbox_dir() -> PathBuf {
     boris_home().join("sandbox")
@@ -136,11 +148,13 @@ pub fn skills_dir() -> PathBuf {
     boris_home().join("skills")
 }
 
-/// Ensure sandbox + audit + skills directories exist.
+/// Ensure sandbox + audit + skills + memory directories exist.
 pub fn ensure_agent_dirs() -> std::io::Result<()> {
     fs::create_dir_all(sandbox_dir())?;
     fs::create_dir_all(audit_dir())?;
     fs::create_dir_all(skills_dir())?;
+    fs::create_dir_all(memory_dir())?;
+    fs::create_dir_all(memory_sessions_dir())?;
     Ok(())
 }
 

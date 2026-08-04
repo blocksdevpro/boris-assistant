@@ -1,17 +1,15 @@
-//! Personal context: durable profile + active extraction.
+//! Personal context + long-term markdown memory.
 //!
-//! Boris keeps a compact, high-signal model of the human user (name, prefs,
-//! projects, facts) separate from the rolling session transcript. That model
-//! is injected into the system prompt every turn and updated actively via:
-//! - heuristics on user speech
-//! - model tools (`save_user_fact`, …)
-//! - optional side-channel LLM extraction after turns
+//! - **Profile** (`profile.json`): compact who-is-the-human facts for every turn.
+//! - **Long-term** (`MEMORY.md` + `sessions/*.md`): Grok-lite cross-session knowledge.
 
 pub mod extract;
+pub mod long_term;
 pub mod profile;
 pub mod store;
 
 pub use extract::{extract_heuristic, extract_with_llm, should_llm_extract, ProfileDelta};
+pub use long_term::{LongTermMemory, MemoryHit};
 pub use profile::{FactCategory, UserFact, UserProfile};
 pub use store::ProfileStore;
 

@@ -9,6 +9,7 @@ pub mod files;
 pub mod fs_common;
 pub mod glob;
 pub mod grep;
+pub mod memory_tools;
 pub mod notes;
 pub mod open_tool;
 pub mod profile;

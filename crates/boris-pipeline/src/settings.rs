@@ -25,6 +25,10 @@ pub struct AppSettings {
     /// Preferred OpenRouter model id. Empty means backend default.
     #[serde(default)]
     pub openrouter_model: String,
+    /// Tool capability preset: `full` | `local_power` | `voice_safe`.
+    /// Empty → engine default (Full). Override also via `BORIS_CAPABILITY`.
+    #[serde(default)]
+    pub capability_preset: String,
 }
 
 impl std::fmt::Debug for AppSettings {
@@ -39,6 +43,7 @@ impl std::fmt::Debug for AppSettings {
                 },
             )
             .field("openrouter_model", &self.openrouter_model)
+            .field("capability_preset", &self.capability_preset)
             .finish()
     }
 }

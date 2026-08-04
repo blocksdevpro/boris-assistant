@@ -15,8 +15,8 @@ use crate::context::{Context, Message, Role};
 use crate::error::AgentError;
 use crate::loop_::{self, LoopState};
 use crate::memory::{
-    extract_heuristic, extract_with_llm, should_llm_extract, ProfileStore, UserProfile,
-    PERSONAL_CONTEXT_MAX_CHARS,
+    extract_heuristic, extract_with_llm, should_llm_extract, LongTermMemory, ProfileStore,
+    UserProfile, PERSONAL_CONTEXT_MAX_CHARS,
 };
 use crate::observe::TurnReport;
 use crate::outcome::AgentOutcome;
@@ -26,6 +26,7 @@ use crate::runtime::{
 };
 use crate::skills::{self, LoadedSkills};
 use crate::tool::Tool;
+use crate::tools::memory_tools::{memory_tools, SharedLongTermMemory};
 use crate::tools::skills_tools::{skill_tools, SharedSkills};
 use crate::types::{
     AgentEvent, AgentLoopConfig, EventListener, LoopResult, DEFAULT_MAX_TOOL_ROUNDS,
@@ -71,6 +72,8 @@ pub struct Agent {
     cancel: Option<CancellationToken>,
     /// Shared skill registry (catalog + load_skill tool).
     skills: Option<SharedSkills>,
+    /// Cross-session markdown memory (MEMORY.md + session logs).
+    long_term: Option<SharedLongTermMemory>,
 }
 
 impl Agent {
@@ -117,6 +120,7 @@ impl Agent {
             listeners: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
             skills: None,
+            long_term: None,
         }
     }
 
@@ -124,6 +128,35 @@ impl Agent {
     pub fn set_include_user_info(&mut self, include: bool) {
         self.include_user_info = include;
         self.refresh_system_prompt();
+    }
+
+    /// Enable Grok-lite markdown memory under `memory_root` (e.g. `~/.boris/memory`).
+    ///
+    /// Registers `memory_search` / `memory_get`, injects a `<memory>` prompt hint,
+    /// and appends each completed turn to a daily session log.
+    pub fn enable_long_term_memory(
+        &mut self,
+        memory_root: impl Into<PathBuf>,
+    ) -> Result<SharedLongTermMemory, String> {
+        let ltm = LongTermMemory::new(memory_root);
+        ltm.ensure_dirs().map_err(|e| format!("memory dirs: {e}"))?;
+        ltm.set_session_id(self.session_id.clone());
+        let shared: SharedLongTermMemory = Arc::new(ltm);
+        let already = self.tools.iter().any(|t| t.name() == "memory_search");
+        if !already {
+            self.register_tools(memory_tools(shared.clone()));
+        }
+        self.long_term = Some(shared.clone());
+        self.refresh_system_prompt();
+        info!(
+            root = %shared.root().display(),
+            "long-term markdown memory enabled"
+        );
+        Ok(shared)
+    }
+
+    pub fn long_term_memory(&self) -> Option<SharedLongTermMemory> {
+        self.long_term.clone()
     }
 
     /// Install discovered skills: inject catalog into system prompt, register
@@ -186,7 +219,10 @@ impl Agent {
     }
 
     pub fn set_session_id(&mut self, id: Option<String>) {
-        self.session_id = id;
+        self.session_id = id.clone();
+        if let Some(ltm) = &self.long_term {
+            ltm.set_session_id(id);
+        }
     }
 
     pub fn set_turn_id(&mut self, id: Option<String>) {
@@ -294,9 +330,11 @@ impl Agent {
                 .map(|g| skills::format_skills_catalog(&g.skills))
                 .filter(|s| !s.is_empty())
         });
+        let memory_hint = self.long_term.as_ref().map(|m| m.prompt_hint());
         let mut ctx = PromptContext::new(self.base_system_prompt.clone())
             .with_personal(personal)
-            .with_skills(skills_catalog);
+            .with_skills(skills_catalog)
+            .with_memory_hint(memory_hint);
         if self.include_user_info {
             ctx = ctx.with_user_info(UserInfo::capture());
         }
@@ -584,6 +622,11 @@ impl Agent {
                 AgentOutcome::Silent => "",
                 AgentOutcome::NeedsConfirmation { .. } => "",
             };
+            if let Some(ltm) = &self.long_term {
+                if let Err(e) = ltm.append_turn(user_text, assistant_text) {
+                    warn!(error = %e, "long-term memory append failed");
+                }
+            }
             self.after_turn_learn(user_text, assistant_text, &loop_out.tools_used)
                 .await;
         }

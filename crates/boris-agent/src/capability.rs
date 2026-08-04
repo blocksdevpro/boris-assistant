@@ -1,9 +1,11 @@
 //! Tool kinds + capability presets (Grok toolset filtering, voice-sized).
 
+use crate::runtime::{NetworkPolicy, SandboxConfig, ShellPolicy};
 use crate::tool::{Tool, ToolKind, ToolRisk};
 
 /// How much of the tool surface the host exposes to the model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityPreset {
     /// Safe / moderate local facts only (time, notes, profile, skills list).
     /// No shell, network, or arbitrary filesystem writes outside memory.
@@ -21,6 +23,41 @@ impl CapabilityPreset {
             Self::VoiceSafe => "voice_safe",
             Self::LocalPower => "local_power",
             Self::Full => "full",
+        }
+    }
+
+    /// Parse `voice_safe` / `local_power` / `full` (case-insensitive). Unknown → `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "voice_safe" | "voicesafe" | "safe" | "lite" => Some(Self::VoiceSafe),
+            "local_power" | "localpower" | "local" => Some(Self::LocalPower),
+            "full" | "power" | "mvp" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// Whether power-tool waves (os/fs/web/bash) are registered before kind filtering.
+    ///
+    /// Always `true`: the preset filter drops disallowed tools. Core tools are
+    /// always registered first; this only controls the power waves.
+    pub fn wants_power_tools(self) -> bool {
+        true
+    }
+
+    /// Adjust sandbox network/shell to match the preset (defense in depth).
+    pub fn apply_to_sandbox(self, cfg: &mut SandboxConfig) {
+        match self {
+            Self::VoiceSafe => {
+                cfg.network = NetworkPolicy::Off;
+                cfg.shell = ShellPolicy::Denied;
+            }
+            Self::LocalPower => {
+                cfg.network = NetworkPolicy::Off;
+                cfg.shell = ShellPolicy::Denied;
+            }
+            Self::Full => {
+                // Host may already have opened network/shell for desktop MVP.
+            }
         }
     }
 
@@ -128,5 +165,18 @@ mod tests {
         };
         assert!(!CapabilityPreset::LocalPower.allows_tool(&web));
         assert!(CapabilityPreset::LocalPower.allows_tool(&read));
+    }
+
+    #[test]
+    fn parse_aliases() {
+        assert_eq!(
+            CapabilityPreset::parse("voice_safe"),
+            Some(CapabilityPreset::VoiceSafe)
+        );
+        assert_eq!(
+            CapabilityPreset::parse("FULL"),
+            Some(CapabilityPreset::Full)
+        );
+        assert_eq!(CapabilityPreset::parse("nope"), None);
     }
 }

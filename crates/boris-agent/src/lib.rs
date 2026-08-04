@@ -40,7 +40,10 @@ pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{Context, Message, Role};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_tool, LoopState};
-pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS};
+pub use memory::{
+    FactCategory, LongTermMemory, MemoryHit, ProfileStore, UserFact, UserProfile,
+    PERSONAL_CONTEXT_MAX_CHARS,
+};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};

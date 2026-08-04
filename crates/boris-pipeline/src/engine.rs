@@ -253,12 +253,15 @@ fn run(
     if let Err(e) = paths::ensure_agent_dirs() {
         tracing::warn!(error = %e, "ensure agent sandbox/audit dirs failed");
     }
-    agent.configure_runtime(
-        SandboxConfig::for_desktop_mvp(paths::boris_home()),
-        Some(paths::audit_path()),
-    );
-    // Core + OS + files + web + bash (MVP power tools) + personal context.
-    boris_agent::tools::register_builtin_tools(
+
+    let preset = config.capability_preset;
+    let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
+    preset.apply_to_sandbox(&mut sandbox);
+    agent.configure_runtime(sandbox, Some(paths::audit_path()));
+
+    // Core + (optional) power tools filtered by capability preset + personal context.
+    let power = preset.wants_power_tools();
+    boris_agent::tools::register_builtin_tools_with_preset(
         &mut agent,
         boris_agent::tools::BuiltinToolPaths {
             notes_path: paths::notes_path(),
@@ -269,6 +272,9 @@ fn run(
             allow_write: vec![],
             boris_home: paths::boris_home(),
         },
+        true,
+        power,
+        preset,
     );
 
     // Skills: install defaults into ~/.boris/skills if missing, then enable catalog + tools.
@@ -288,6 +294,17 @@ fn run(
     );
     let skill_count = loaded.skills.len();
     agent.enable_skills(loaded);
+
+    if config.long_term_memory {
+        match agent.enable_long_term_memory(paths::memory_dir()) {
+            Ok(_) => tracing::info!(
+                memory_md = %paths::memory_md_path().display(),
+                "long-term markdown memory enabled"
+            ),
+            Err(e) => tracing::warn!(error = %e, "long-term memory enable failed"),
+        }
+    }
+
     tracing::info!(
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
@@ -295,7 +312,9 @@ fn run(
         audit = %paths::audit_path().display(),
         skills = skill_count,
         skills_dir = %paths::skills_dir().display(),
-        "builtin + power tools + skills + tool runtime registered"
+        capability = preset.as_str(),
+        long_term_memory = config.long_term_memory,
+        "builtin tools + skills + memory + tool runtime registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).

@@ -23,9 +23,12 @@ use crate::outcome::AgentOutcome;
 use crate::runtime::{
     PendingTurn, SandboxConfig, ToolRuntime, JsonlAuditSink, NullAuditSink,
 };
+use crate::skills::{self, LoadedSkills};
 use crate::tool::Tool;
+use crate::tools::skills_tools::{skill_tools, SharedSkills};
 use crate::types::{
     AgentEvent, AgentLoopConfig, EventListener, LoopResult, DEFAULT_MAX_TOOL_ROUNDS,
+    SKILLS_MAX_TOOL_ROUNDS,
 };
 
 /// Max characters of user text included in turn-start logs.
@@ -63,6 +66,8 @@ pub struct Agent {
     max_tool_rounds: u32,
     listeners: Arc<Mutex<Vec<EventListener>>>,
     cancel: Option<CancellationToken>,
+    /// Shared skill registry (catalog + load_skill tool).
+    skills: Option<SharedSkills>,
 }
 
 impl Agent {
@@ -107,7 +112,58 @@ impl Agent {
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
             listeners: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
+            skills: None,
         }
+    }
+
+    /// Install discovered skills: inject catalog into system prompt, register
+    /// `list_skills` / `load_skill`, and raise the tool-round budget for playbooks.
+    pub fn enable_skills(&mut self, loaded: LoadedSkills) -> SharedSkills {
+        let shared: SharedSkills = Arc::new(Mutex::new(loaded));
+        // Avoid double-registering skill tools if called twice.
+        let already = self.tools.iter().any(|t| t.name() == "load_skill");
+        if !already {
+            self.register_tools(skill_tools(shared.clone()));
+        }
+        if self.max_tool_rounds < SKILLS_MAX_TOOL_ROUNDS {
+            self.max_tool_rounds = SKILLS_MAX_TOOL_ROUNDS;
+        }
+        self.skills = Some(shared.clone());
+        self.refresh_system_prompt();
+        if let Ok(g) = shared.lock() {
+            info!(
+                count = g.skills.len(),
+                names = ?g.names(),
+                "skills enabled"
+            );
+            for d in &g.diagnostics {
+                warn!(path = %d.path.display(), message = %d.message, "skill diagnostic");
+            }
+        }
+        shared
+    }
+
+    /// Reload skills from disk paths (project + user home).
+    pub fn reload_skills(
+        &mut self,
+        cwd: Option<&std::path::Path>,
+        boris_home: &std::path::Path,
+    ) -> SharedSkills {
+        let loaded = skills::load_skills(cwd, boris_home, &[], true);
+        let existing = self.skills.clone();
+        if let Some(shared) = existing {
+            if let Ok(mut g) = shared.lock() {
+                *g = loaded;
+            }
+            self.refresh_system_prompt();
+            shared
+        } else {
+            self.enable_skills(loaded)
+        }
+    }
+
+    pub fn skills(&self) -> Option<SharedSkills> {
+        self.skills.clone()
     }
 
     /// Configure sandbox policy + optional JSONL audit path.
@@ -213,18 +269,28 @@ impl Agent {
     }
 
     fn composed_system_prompt(&self) -> String {
-        let Some(mem) = &self.personal else {
-            return self.base_system_prompt.clone();
-        };
-        let block = match mem.profile.lock() {
-            Ok(p) => p.render_block(PERSONAL_CONTEXT_MAX_CHARS),
-            Err(_) => String::new(),
-        };
-        if block.is_empty() {
-            self.base_system_prompt.clone()
-        } else {
-            format!("{}\n\n{block}", self.base_system_prompt)
+        let mut parts = vec![self.base_system_prompt.clone()];
+
+        if let Some(mem) = &self.personal {
+            let block = match mem.profile.lock() {
+                Ok(p) => p.render_block(PERSONAL_CONTEXT_MAX_CHARS),
+                Err(_) => String::new(),
+            };
+            if !block.is_empty() {
+                parts.push(block);
+            }
         }
+
+        if let Some(ref shared) = self.skills {
+            if let Ok(g) = shared.lock() {
+                let cat = skills::format_skills_catalog(&g.skills);
+                if !cat.is_empty() {
+                    parts.push(cat);
+                }
+            }
+        }
+
+        parts.join("\n\n")
     }
 
     pub fn set_base_system_prompt(&mut self, system_prompt: &str) {

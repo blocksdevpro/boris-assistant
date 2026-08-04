@@ -270,12 +270,32 @@ fn run(
             boris_home: paths::boris_home(),
         },
     );
+
+    // Skills: install defaults into ~/.boris/skills if missing, then enable catalog + tools.
+    match boris_agent::ensure_default_skills(&paths::boris_home()) {
+        Ok(written) if !written.is_empty() => {
+            tracing::info!(count = written.len(), "installed default skill playbooks");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "ensure default skills failed"),
+    }
+    let cwd = std::env::current_dir().ok();
+    let loaded = boris_agent::load_skills(
+        cwd.as_deref(),
+        &paths::boris_home(),
+        &[],
+        true,
+    );
+    let skill_count = loaded.skills.len();
+    agent.enable_skills(loaded);
     tracing::info!(
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
         sandbox = %paths::sandbox_dir().display(),
         audit = %paths::audit_path().display(),
-        "builtin + power tools + tool runtime registered"
+        skills = skill_count,
+        skills_dir = %paths::skills_dir().display(),
+        "builtin + power tools + skills + tool runtime registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).

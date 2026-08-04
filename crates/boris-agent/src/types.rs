@@ -9,6 +9,9 @@ use crate::runtime::PendingToolCall;
 /// Default hard cap on tool-call rounds per user turn.
 pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 5;
 
+/// Higher cap when skills are enabled so multi-step playbooks can finish.
+pub const SKILLS_MAX_TOOL_ROUNDS: u32 = 12;
+
 /// Snapshot passed into each loop invocation (messages already include prompts).
 #[derive(Debug, Clone)]
 pub struct AgentContextSnapshot {

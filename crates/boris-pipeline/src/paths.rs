@@ -10,6 +10,7 @@
 //!     notes.jsonl        # durable notes for builtin memory tools
 //!     profile.json       # active personal context (name, prefs, facts)
 //!   sandbox/             # default write root for future file tools
+//!   skills/              # user skill playbooks (`<name>/SKILL.md`)
 //!   audit/
 //!     tool_calls.jsonl   # tool runtime audit log
 //!   logs/                # desktop + pipeline file logs (release builds)
@@ -130,10 +131,16 @@ pub fn audit_path() -> PathBuf {
     audit_dir().join("tool_calls.jsonl")
 }
 
-/// Ensure sandbox + audit directories exist.
+/// User skill playbooks (`~/.boris/skills/<name>/SKILL.md`).
+pub fn skills_dir() -> PathBuf {
+    boris_home().join("skills")
+}
+
+/// Ensure sandbox + audit + skills directories exist.
 pub fn ensure_agent_dirs() -> std::io::Result<()> {
     fs::create_dir_all(sandbox_dir())?;
     fs::create_dir_all(audit_dir())?;
+    fs::create_dir_all(skills_dir())?;
     Ok(())
 }
 

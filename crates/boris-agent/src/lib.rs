@@ -19,6 +19,7 @@ pub mod observe;
 pub mod outcome;
 pub mod runtime;
 pub mod session;
+pub mod skills;
 pub mod stats;
 pub mod tool;
 pub mod tools;
@@ -39,13 +40,19 @@ pub use runtime::{
     NullAuditSink, NetworkPolicy, ShellPolicy,
 };
 pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
+pub use skills::{
+    ensure_default_skills, format_skills_catalog, load_skills, load_skill_body, user_skills_dir,
+    LoadedSkills, Skill, SkillSource,
+};
 pub use stats::AgentStats;
 pub use tool::{Permission, Tool, ToolError, ToolMeta, ToolRisk};
 pub use tools::{
     bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,
     register_builtin_tools_with_options, shell_tools, web_tools, BuiltinToolPaths,
 };
-pub use types::{AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS};
+pub use types::{
+    AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS,
+};
 
 // ── Temporary aliases (migration window) ─────────────────────────────────────
 

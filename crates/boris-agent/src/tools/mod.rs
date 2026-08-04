@@ -14,6 +14,7 @@ pub mod notes;
 pub mod open_tool;
 pub mod profile;
 pub mod skills_tools;
+pub mod subagent;
 pub mod system;
 pub mod time;
 pub mod todo;

@@ -33,7 +33,7 @@ pub struct AuditEvent {
 }
 
 /// Sink for audit events (file, null, or test capture).
-pub trait AuditSink: Send {
+pub trait AuditSink: Send + Sync {
     fn write(&self, event: &AuditEvent);
 }
 

@@ -275,8 +275,28 @@ fn run(
         .expect("failed to build Tokio runtime for agent");
 
     tracing::info!("building OpenRouter client + Agent…");
-    let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
-    let mut agent = Agent::new(Box::new(client), &config.system_prompt);
+    // P1 model routing: fast for simple facts, strong for multi-step work.
+    let strong_model = config
+        .openrouter_model
+        .clone()
+        .unwrap_or_else(|| "google/gemini-2.5-flash-lite".into());
+    let fast_model = std::env::var("BORIS_FAST_MODEL").unwrap_or_else(|_| {
+        // Cheap/fast default; override with BORIS_FAST_MODEL.
+        "google/gemini-2.5-flash-lite".into()
+    });
+    let strong = OpenRouterClient::new(
+        config.openrouter_api_key.clone(),
+        Some(strong_model.clone()),
+    );
+    let fast = OpenRouterClient::new(config.openrouter_api_key.clone(), Some(fast_model.clone()));
+    let client: Box<dyn boris_agent::LlmClient> = if fast_model == strong_model {
+        tracing::info!(model = %strong_model, "single-model LLM (set BORIS_FAST_MODEL for routing)");
+        Box::new(strong)
+    } else {
+        tracing::info!(fast = %fast_model, strong = %strong_model, "dual-model routing enabled");
+        Box::new(boris_agent::RoutingClient::new(Box::new(fast), Box::new(strong)))
+    };
+    let mut agent = Agent::new(client, &config.system_prompt);
     if let Err(e) = paths::ensure_agent_dirs() {
         tracing::warn!(error = %e, "ensure agent sandbox/audit dirs failed");
     }
@@ -284,6 +304,15 @@ fn run(
     let preset = config.capability_preset;
     let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
     preset.apply_to_sandbox(&mut sandbox);
+    // Trusted auto-allow for Moderate tools (notes, sandbox writes, clipboard…).
+    // Dangerous (bash, open url) still confirm. Disable with BORIS_TRUSTED=0.
+    let trusted = std::env::var("BORIS_TRUSTED")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "no")
+        })
+        .unwrap_or(true);
+    sandbox = sandbox.with_trusted_auto_moderate(trusted);
     agent.configure_runtime(sandbox, Some(paths::audit_path()));
 
     // Core + (optional) power tools filtered by capability preset + personal context.
@@ -327,6 +356,9 @@ fn run(
         }
     }
 
+    // P3 lean subagent (read-mostly child loop).
+    agent.enable_subagents();
+
     tracing::info!(
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
@@ -336,7 +368,8 @@ fn run(
         skills_dir = %paths::skills_dir().display(),
         capability = preset.as_str(),
         long_term_memory = config.long_term_memory,
-        "builtin tools + skills + memory + tool runtime registered"
+        trusted_auto_moderate = trusted,
+        "builtin tools + skills + memory + subagent + tool runtime registered"
     );
 
     // Session persistence under ~/.boris/sessions (soft-fail on I/O).

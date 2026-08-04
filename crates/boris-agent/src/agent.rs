@@ -45,6 +45,8 @@ pub struct AgentOptions {
     pub sandbox: Option<SandboxConfig>,
     pub audit_path: Option<PathBuf>,
     pub session_id: Option<String>,
+    /// When true, Moderate tools auto-allow (see [`SandboxConfig::trusted_auto_moderate`]).
+    pub trusted_auto_moderate: bool,
 }
 
 /// Optional durable personal context attached to the agent.
@@ -56,8 +58,8 @@ struct PersonalMemory {
 
 /// Stateful voice agent: context, tools, runtime, HITL, personal memory.
 pub struct Agent {
-    client: Box<dyn LlmClient>,
-    tools: Vec<Box<dyn Tool>>,
+    client: Arc<dyn LlmClient>,
+    tools: Vec<Arc<dyn Tool>>,
     context: Context,
     base_system_prompt: String,
     /// When true, inject live `<user_info>` (OS, cwd, date) into the system prompt.
@@ -74,6 +76,10 @@ pub struct Agent {
     skills: Option<SharedSkills>,
     /// Cross-session markdown memory (MEMORY.md + session logs).
     long_term: Option<SharedLongTermMemory>,
+    /// Todo finish-gate fires remaining (cap).
+    finish_gate_remaining: u32,
+    /// Sandbox snapshot for subagents.
+    sandbox_snapshot: SandboxConfig,
 }
 
 impl Agent {
@@ -87,6 +93,7 @@ impl Agent {
             sandbox: None,
             audit_path: None,
             session_id: None,
+            trusted_auto_moderate: false,
         })
     }
 
@@ -94,20 +101,21 @@ impl Agent {
         let mut context = Context::new(20);
         context.push(Role::System, opts.system_prompt.as_str());
 
-        let runtime = match (opts.sandbox, opts.audit_path) {
-            (Some(policy), Some(path)) => {
-                ToolRuntime::new(policy, Box::new(JsonlAuditSink::new(path)))
-            }
-            (Some(policy), None) => ToolRuntime::new(policy, Box::new(NullAuditSink)),
-            (None, Some(path)) => {
-                ToolRuntime::new(SandboxConfig::default(), Box::new(JsonlAuditSink::new(path)))
-            }
-            (None, None) => ToolRuntime::null(),
+        let mut policy = opts.sandbox.unwrap_or_default();
+        if opts.trusted_auto_moderate {
+            policy.trusted_auto_moderate = true;
+        }
+        let sandbox_snapshot = policy.clone();
+        let runtime = match opts.audit_path {
+            Some(path) => ToolRuntime::new(policy, Box::new(JsonlAuditSink::new(path))),
+            None => ToolRuntime::new(policy, Box::new(NullAuditSink)),
         };
 
+        let tools: Vec<Arc<dyn Tool>> = opts.tools.into_iter().map(Arc::from).collect();
+
         Self {
-            client: opts.client,
-            tools: opts.tools,
+            client: Arc::from(opts.client),
+            tools,
             context,
             base_system_prompt: opts.system_prompt,
             include_user_info: true,
@@ -121,7 +129,29 @@ impl Agent {
             cancel: None,
             skills: None,
             long_term: None,
+            finish_gate_remaining: 2,
+            sandbox_snapshot,
         }
+    }
+
+    /// Shared LLM handle (for subagents / routing).
+    pub fn client_arc(&self) -> Arc<dyn LlmClient> {
+        Arc::clone(&self.client)
+    }
+
+    /// Register the lean `spawn_subagent` tool (read-mostly child loop).
+    pub fn enable_subagents(&mut self) {
+        if self.tools.iter().any(|t| t.name() == "spawn_subagent") {
+            return;
+        }
+        let shared_tools = Arc::new(Mutex::new(self.tools.clone()));
+        let tool = crate::tools::subagent::SpawnSubagentTool::new(
+            Arc::clone(&self.client),
+            shared_tools,
+            self.sandbox_snapshot.clone(),
+        );
+        self.tools.push(Arc::new(tool));
+        info!("spawn_subagent tool enabled");
     }
 
     /// Toggle `<user_info>` injection (default: on).
@@ -211,11 +241,47 @@ impl Agent {
 
     /// Configure sandbox policy + optional JSONL audit path.
     pub fn configure_runtime(&mut self, policy: SandboxConfig, audit_path: Option<PathBuf>) {
+        self.sandbox_snapshot = policy.clone();
         if let Some(path) = audit_path {
             self.runtime = ToolRuntime::new(policy, Box::new(JsonlAuditSink::new(path)));
         } else {
             self.runtime = ToolRuntime::new(policy, Box::new(NullAuditSink));
         }
+    }
+
+    /// Summarize older turns into a compact block (Grok-lite compaction).
+    async fn maybe_llm_compact(&mut self) -> Result<(), String> {
+        let digest = self.context.older_turns_digest(2);
+        if digest.trim().is_empty() {
+            return Ok(());
+        }
+        let messages = serde_json::json!([
+            {
+                "role": "system",
+                "content": "Summarize the conversation for an assistant. Keep names, decisions, open tasks, and file paths. Max 12 short bullet lines. No fluff."
+            },
+            {
+                "role": "user",
+                "content": digest
+            }
+        ]);
+        let msg = self
+            .client
+            .complete(messages, serde_json::Value::Null)
+            .await
+            .map_err(|e| e.to_string())?;
+        let summary = msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if summary.is_empty() {
+            return Ok(());
+        }
+        self.context.apply_summary_compact(&summary, 2);
+        info!(chars = summary.len(), "context llm-compact applied");
+        Ok(())
     }
 
     pub fn set_session_id(&mut self, id: Option<String>) {
@@ -351,7 +417,7 @@ impl Agent {
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+        self.tools.push(Arc::from(tool));
     }
 
     pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
@@ -361,7 +427,15 @@ impl Agent {
     }
 
     pub fn set_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
-        self.tools = tools;
+        self.tools = tools.into_iter().map(Arc::from).collect();
+    }
+
+    /// Toggle trusted auto-allow for Moderate tools (session YOLO-lite).
+    pub fn set_trusted_auto_moderate(&mut self, on: bool) {
+        let mut p = self.runtime.policy().clone();
+        p.trusted_auto_moderate = on;
+        self.sandbox_snapshot.trusted_auto_moderate = on;
+        self.runtime.set_policy(p);
     }
 
     /// Clear conversation to a fresh system-only context (new session).
@@ -444,6 +518,15 @@ impl Agent {
             self.refresh_system_prompt();
         }
 
+        // LLM summary compact when context is large (P0).
+        if self.context.needs_llm_compact() {
+            if let Err(e) = self.maybe_llm_compact().await {
+                warn!(error = %e, "llm compact skipped");
+            }
+        }
+        self.context.compact_mechanical();
+        self.finish_gate_remaining = 2;
+
         let started = Instant::now();
         let preview = log_preview(user_text, LOG_PREVIEW_CHARS);
         info!(
@@ -464,6 +547,7 @@ impl Agent {
         self.cancel = Some(ct.clone());
         let config = self.loop_config();
         let emit = self.make_emit();
+        let sandbox_for_gate = self.sandbox_snapshot.sandbox_root.clone();
 
         let loop_out = {
             let state = LoopState {
@@ -481,6 +565,8 @@ impl Agent {
                 0,
                 Some(ct),
                 Some(emit),
+                Some(sandbox_for_gate),
+                self.finish_gate_remaining,
             )
             .await
         };

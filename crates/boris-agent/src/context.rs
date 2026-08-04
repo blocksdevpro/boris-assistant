@@ -229,12 +229,29 @@ impl Context {
             .sum()
     }
 
+    /// Soft token budget before aggressive mechanical compact + LLM compact trigger.
+    pub const COMPACT_TOKEN_SOFT: usize = 24_000;
+    /// Hard token budget: always mask older tool noise aggressively.
+    pub const COMPACT_TOKEN_HARD: usize = 40_000;
+
     /// Apply mechanical reduction before an LLM call:
     /// 1. Truncate large tool observations in place
     /// 2. Mask tool results older than the last `keep_tool_turns` user turns
+    /// 3. At hard budget: collapse older assistant tool_calls blobs
     pub fn compact_mechanical(&mut self) {
-        const MAX_TOOL_CHARS: usize = 6_000;
-        const KEEP_TOOL_TURNS: usize = 2;
+        let tokens = self.estimate_tokens();
+        let max_tool_chars = if tokens > Self::COMPACT_TOKEN_HARD {
+            2_000
+        } else if tokens > Self::COMPACT_TOKEN_SOFT {
+            3_500
+        } else {
+            6_000
+        };
+        let keep_tool_turns = if tokens > Self::COMPACT_TOKEN_HARD {
+            1
+        } else {
+            2
+        };
 
         // Tier 1: truncate large tool results.
         for msg in &mut self.messages {
@@ -243,25 +260,23 @@ impl Context {
             }
             if let Some(content) = msg.content.get_mut("content") {
                 if let Some(s) = content.as_str() {
-                    if s.chars().count() > MAX_TOOL_CHARS {
-                        let head: String = s.chars().take(MAX_TOOL_CHARS / 2).collect();
+                    if s.chars().count() > max_tool_chars {
+                        let head: String = s.chars().take(max_tool_chars / 2).collect();
                         let tail: String = s
                             .chars()
                             .rev()
-                            .take(MAX_TOOL_CHARS / 2)
+                            .take(max_tool_chars / 2)
                             .collect::<String>()
                             .chars()
                             .rev()
                             .collect();
-                        *content = Value::String(format!(
-                            "{head}\n…[compacted]…\n{tail}"
-                        ));
+                        *content = Value::String(format!("{head}\n…[compacted]…\n{tail}"));
                     }
                 }
             }
         }
 
-        // Tier 2: mask tool results from turns older than KEEP_TOOL_TURNS.
+        // Tier 2: mask tool results from turns older than keep_tool_turns.
         let has_system = self
             .messages
             .first()
@@ -273,17 +288,139 @@ impl Context {
                 turn_starts.push(i);
             }
         }
-        if turn_starts.len() <= KEEP_TOOL_TURNS {
-            return;
-        }
-        let keep_from = turn_starts[turn_starts.len() - KEEP_TOOL_TURNS];
-        for msg in self.messages[body_start..keep_from].iter_mut() {
-            if matches!(msg.role, Role::Tool) {
-                if let Some(content) = msg.content.get_mut("content") {
-                    *content = Value::String("[older tool result omitted]".into());
+        if turn_starts.len() > keep_tool_turns {
+            let keep_from = turn_starts[turn_starts.len() - keep_tool_turns];
+            for msg in self.messages[body_start..keep_from].iter_mut() {
+                if matches!(msg.role, Role::Tool) {
+                    if let Some(content) = msg.content.get_mut("content") {
+                        *content = Value::String("[older tool result omitted]".into());
+                    }
+                }
+                // Shrink huge assistant tool_calls messages in old turns.
+                if matches!(msg.role, Role::Assistant) {
+                    if msg.content.get("tool_calls").is_some() {
+                        let n = msg
+                            .content
+                            .get("tool_calls")
+                            .and_then(|t| t.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        msg.content = json!({
+                            "role": "assistant",
+                            "content": format!("[prior tool batch: {n} call(s) — details omitted]")
+                        });
+                    }
                 }
             }
         }
+    }
+
+    /// True when the host should run an LLM summary compact pass.
+    pub fn needs_llm_compact(&self) -> bool {
+        self.estimate_tokens() > Self::COMPACT_TOKEN_SOFT && self.user_turn_count() >= 3
+    }
+
+    /// Count user turns (excludes system).
+    pub fn user_turn_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::User))
+            .count()
+    }
+
+    /// Replace middle history with a single summary user/assistant pair.
+    ///
+    /// Keeps: system, optional summary block, last `keep_turns` user turns.
+    pub fn apply_summary_compact(&mut self, summary: &str, keep_turns: usize) {
+        if summary.trim().is_empty() {
+            return;
+        }
+        let keep_turns = keep_turns.max(1);
+        let has_system = self
+            .messages
+            .first()
+            .is_some_and(|m| matches!(m.role, Role::System));
+        let body_start = if has_system { 1 } else { 0 };
+        let mut turn_starts: Vec<usize> = Vec::new();
+        for (i, msg) in self.messages.iter().enumerate().skip(body_start) {
+            if matches!(msg.role, Role::User) {
+                turn_starts.push(i);
+            }
+        }
+        if turn_starts.len() <= keep_turns + 1 {
+            return;
+        }
+        let keep_from = turn_starts[turn_starts.len() - keep_turns];
+        let system = if has_system {
+            Some(self.messages[0].clone())
+        } else {
+            None
+        };
+        let recent: Vec<Message> = self.messages[keep_from..].to_vec();
+        self.messages.clear();
+        if let Some(sys) = system {
+            self.messages.push(sys);
+        }
+        self.messages.push(Message {
+            role: Role::User,
+            content: Value::String(format!(
+                "<conversation_summary>\n{summary}\n</conversation_summary>"
+            )),
+        });
+        self.messages.push(Message {
+            role: Role::Assistant,
+            content: Value::String(
+                "Got it — I'll use that summary as prior context and keep going.".into(),
+            ),
+        });
+        self.messages.extend(recent);
+    }
+
+    /// Collect text from older turns for an LLM summarizer (capped).
+    pub fn older_turns_digest(&self, keep_recent_turns: usize) -> String {
+        let has_system = self
+            .messages
+            .first()
+            .is_some_and(|m| matches!(m.role, Role::System));
+        let body_start = if has_system { 1 } else { 0 };
+        let mut turn_starts: Vec<usize> = Vec::new();
+        for (i, msg) in self.messages.iter().enumerate().skip(body_start) {
+            if matches!(msg.role, Role::User) {
+                turn_starts.push(i);
+            }
+        }
+        if turn_starts.len() <= keep_recent_turns {
+            return String::new();
+        }
+        let end = turn_starts[turn_starts.len() - keep_recent_turns];
+        let mut out = String::new();
+        for msg in &self.messages[body_start..end] {
+            let line = match msg.role {
+                Role::User => format!("User: {}\n", value_preview(&msg.content, 400)),
+                Role::Assistant => format!("Assistant: {}\n", value_preview(&msg.content, 400)),
+                Role::Tool => format!("Tool: {}\n", value_preview(&msg.content, 200)),
+                Role::System => continue,
+            };
+            out.push_str(&line);
+            if out.len() > 12_000 {
+                out.push_str("…\n");
+                break;
+            }
+        }
+        out
+    }
+}
+
+fn value_preview(v: &Value, max: usize) -> String {
+    let s = match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if s.chars().count() <= max {
+        s
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
     }
 }
 

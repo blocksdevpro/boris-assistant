@@ -43,6 +43,9 @@ pub struct SandboxConfig {
     pub force_confirm_at_or_above: ToolRisk,
     /// Max HITL confirmations per user turn before remaining calls are denied.
     pub max_confirms_per_turn: u32,
+    /// When true, auto-allow tools up to Moderate even if `requires_confirmation`
+    /// is set — still force-confirm Dangerous/Critical (trusted session / YOLO-lite).
+    pub trusted_auto_moderate: bool,
 }
 
 impl Default for SandboxConfig {
@@ -58,6 +61,7 @@ impl Default for SandboxConfig {
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 3,
+            trusted_auto_moderate: false,
         }
     }
 }
@@ -76,6 +80,7 @@ impl SandboxConfig {
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 3,
+            trusted_auto_moderate: false,
         }
     }
 
@@ -89,6 +94,12 @@ impl SandboxConfig {
         // Writable only via sandbox_root (+ boris_data_roots for memory tools).
         cfg.allow_write = vec![];
         cfg
+    }
+
+    /// Enable trusted auto-allow for Moderate tools (sandbox writes, notes, clipboard…).
+    pub fn with_trusted_auto_moderate(mut self, on: bool) -> Self {
+        self.trusted_auto_moderate = on;
+        self
     }
 }
 
@@ -161,6 +172,16 @@ pub fn decide(
                 return PolicyDecision::Deny { reason };
             }
         }
+    }
+
+    // Trusted session: skip HITL for ≤ Moderate even when tool flags confirm.
+    // Shell/network Dangerous+ still force confirm below.
+    if config.trusted_auto_moderate
+        && meta.risk <= ToolRisk::Moderate
+        && meta.risk < config.force_confirm_at_or_above
+        && !meta.permissions.contains(&Permission::Shell)
+    {
+        return PolicyDecision::Allow;
     }
 
     if meta.requires_confirmation || meta.risk >= config.force_confirm_at_or_above {
@@ -345,6 +366,7 @@ mod tests {
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 3,
+            trusted_auto_moderate: false,
         }
     }
 

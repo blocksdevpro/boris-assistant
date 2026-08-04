@@ -247,23 +247,47 @@ fn score_file(
 ) -> Result<(), String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let lower = raw.to_ascii_lowercase();
+    let doc_len = lower.split_whitespace().count().max(1) as u32;
     let mut score = 0u32;
-    // Tokenize query on whitespace.
-    for tok in query_lc.split_whitespace() {
-        if tok.len() < 2 {
-            continue;
-        }
-        let c = lower.matches(tok).count() as u32;
-        score = score.saturating_add(c.saturating_mul(tok.len() as u32));
-    }
-    if score == 0 {
+    // BM25-ish: term frequency with length normalization + multi-token boost.
+    let tokens: Vec<&str> = query_lc
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .collect();
+    if tokens.is_empty() {
         return Ok(());
     }
+    let mut matched = 0u32;
+    for tok in &tokens {
+        let c = lower.matches(tok).count() as u32;
+        if c == 0 {
+            continue;
+        }
+        matched += 1;
+        // tf saturation
+        let tf = (c * 100) / (c + 2);
+        let idf = 3 + tok.len() as u32; // longer rare-ish terms score higher
+        score = score.saturating_add(tf.saturating_mul(idf));
+    }
+    if matched == 0 {
+        return Ok(());
+    }
+    // Prefer docs that match more query tokens.
+    score = score.saturating_add(matched.saturating_mul(40));
+    // Soft length penalty.
+    score = score.saturating_mul(100) / (80 + doc_len.min(200));
+    // Recency boost for session logs (filename starts with date).
     let rel = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
+    if rel.contains("sessions/") {
+        score = score.saturating_add(15);
+    }
+    if rel.ends_with("MEMORY.md") {
+        score = score.saturating_add(25); // curated knowledge wins ties
+    }
     let snippet = best_snippet(&raw, query_lc, 220);
     hits.push(MemoryHit {
         path: rel,

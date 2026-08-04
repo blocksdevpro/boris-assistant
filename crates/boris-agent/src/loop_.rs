@@ -35,7 +35,7 @@ fn noop_emit() -> EmitFn {
 /// Mutable state the loop may write back (context + tools + runtime).
 pub struct LoopState<'a> {
     pub context: &'a mut Context,
-    pub tools: &'a [Box<dyn Tool>],
+    pub tools: &'a [std::sync::Arc<dyn Tool>],
     pub runtime: &'a ToolRuntime,
     pub client: &'a dyn LlmClient,
 }
@@ -53,6 +53,8 @@ pub async fn agent_loop(
     confirms_used: u32,
     cancel: Option<CancellationToken>,
     emit: Option<EmitFn>,
+    sandbox_root: Option<std::path::PathBuf>,
+    mut finish_gate_left: u32,
 ) -> Result<LoopResult, AgentError> {
     let emit = emit.unwrap_or_else(noop_emit);
     emit(AgentEvent::AgentStart);
@@ -61,6 +63,7 @@ pub async fn agent_loop(
     let mut tool_rounds = tool_rounds;
     let mut confirms_used = confirms_used;
     let max_rounds = config.max_tool_rounds as usize;
+    let sandbox_root = sandbox_root.unwrap_or_else(crate::finish_gate::default_sandbox_guess);
 
     for round in 0..=max_rounds {
         if let Some(ref ct) = cancel {
@@ -214,6 +217,27 @@ pub async fn agent_loop(
             }
         } else {
             state.context.push(Role::Assistant, reply.clone());
+        }
+
+        // P0 finish gate: open todos → force another tool round (capped).
+        if !at_cap && finish_gate_left > 0 && !reply.is_empty() {
+            let pending = crate::finish_gate::pending_todo_count(&sandbox_root);
+            if pending > 0 {
+                finish_gate_left = finish_gate_left.saturating_sub(1);
+                tracing::info!(
+                    pending,
+                    left = finish_gate_left,
+                    "finish gate: open todos — continue tooling"
+                );
+                state.context.push(
+                    Role::User,
+                    crate::finish_gate::todo_gate_reminder(pending),
+                );
+                emit(AgentEvent::TurnEnd {
+                    round: round as u32,
+                });
+                continue;
+            }
         }
 
         emit(AgentEvent::MessageEnd {
@@ -529,7 +553,7 @@ async fn process_tool_calls_parallel(
     Ok(ToolBatchResult::Continue)
 }
 
-fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Result<&'a dyn Tool, AgentError> {
+fn find_tool<'a>(tools: &'a [std::sync::Arc<dyn Tool>], name: &str) -> Result<&'a dyn Tool, AgentError> {
     tools
         .iter()
         .find(|t| t.name() == name)
@@ -537,7 +561,7 @@ fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Result<&'a dyn Tool,
         .ok_or_else(|| AgentError::unknown_tool(format!("unknown tool requested by model: {name}")))
 }
 
-fn tools_json(tools: &[Box<dyn Tool>]) -> Value {
+fn tools_json(tools: &[std::sync::Arc<dyn Tool>]) -> Value {
     if tools.is_empty() {
         return Value::Null;
     }
@@ -687,6 +711,8 @@ pub async fn resume_pending_tool(
         confirms_used,
         cancel,
         Some(emit),
+        None,
+        0, // no finish-gate after HITL resume
     )
     .await
 }
@@ -730,7 +756,7 @@ mod tests {
         context.push(Role::System, "sys");
         context.push(Role::User, "hi");
         let runtime = ToolRuntime::null();
-        let tools: Vec<Box<dyn Tool>> = vec![];
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![];
         let config = AgentLoopConfig::default();
 
         let state = LoopState {
@@ -739,7 +765,7 @@ mod tests {
             runtime: &runtime,
             client: &client,
         };
-        let result = agent_loop(state, "hi", &config, vec![], 0, 0, None, None)
+        let result = agent_loop(state, "hi", &config, vec![], 0, 0, None, None, None, 0)
             .await
             .unwrap();
         match result.outcome {
@@ -795,7 +821,7 @@ mod tests {
         context.push(Role::System, "sys");
         context.push(Role::User, "ping");
         let runtime = ToolRuntime::null();
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(Echo)];
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Echo)];
         let config = AgentLoopConfig::default();
 
         let state = LoopState {
@@ -804,7 +830,7 @@ mod tests {
             runtime: &runtime,
             client: &client,
         };
-        let result = agent_loop(state, "ping", &config, vec![], 0, 0, None, None)
+        let result = agent_loop(state, "ping", &config, vec![], 0, 0, None, None, None, 0)
             .await
             .unwrap();
         assert_eq!(result.tools_used, vec!["echo".to_string()]);
@@ -895,7 +921,7 @@ mod tests {
         context.push(Role::System, "sys");
         context.push(Role::User, "run both");
         let runtime = ToolRuntime::null();
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(Alpha), Box::new(Beta)];
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Alpha), std::sync::Arc::new(Beta)];
         let config = AgentLoopConfig::default();
 
         let state = LoopState {
@@ -904,7 +930,7 @@ mod tests {
             runtime: &runtime,
             client: &client,
         };
-        let result = agent_loop(state, "run both", &config, vec![], 0, 0, None, None)
+        let result = agent_loop(state, "run both", &config, vec![], 0, 0, None, None, None, 0)
             .await
             .unwrap();
 

@@ -60,6 +60,7 @@ Use when helpful:
 - todo_read / todo_write — multi-step task list
 - bash — shell command only when needed (user always confirms)
 - list_skills / load_skill — multi-step playbooks (load a skill when the request matches, then follow its steps with tools)
+- spawn_subagent — deep read-only research side-task; returns a short summary (use for broad exploration)
 
 Not every tool is available every session (capability preset may hide shell/web/files). Only call tools you were given.
 

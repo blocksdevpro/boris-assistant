@@ -64,7 +64,8 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the live web for a query. Returns short titles, URLs, and snippets. Summarize for speech; do not read every result aloud."
+        "Search the live web for a query. Returns numbered titles, URLs, and short snippets. \
+         Prefer this over guessing URLs. Summarize for speech; do not read every result aloud."
     }
 
     fn parameters(&self) -> Value {
@@ -100,32 +101,43 @@ impl Tool for WebSearchTool {
             .unwrap_or(5)
             .clamp(1, MAX_SEARCH);
 
-        // DuckDuckGo HTML version (no JS). Best-effort parser.
-        let url = format!(
-            "https://html.duckduckgo.com/html/?q={}",
-            urlencoding_encode(query.trim())
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ToolError::failed(format!("search request failed: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(ToolError::failed(format!(
-                "search HTTP {}",
-                resp.status()
-            )));
+        // Prefer DDG lite (more stable markup), fall back to HTML endpoint.
+        let q = urlencoding_encode(query.trim());
+        let mut results = Vec::new();
+        for endpoint in [
+            format!("https://lite.duckduckgo.com/lite/?q={q}"),
+            format!("https://html.duckduckgo.com/html/?q={q}"),
+        ] {
+            let resp = match self.client.get(&endpoint).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(error = %e, %endpoint, "search request failed");
+                    continue;
+                }
+            };
+            if !resp.status().is_success() {
+                tracing::debug!(status = %resp.status(), %endpoint, "search HTTP non-success");
+                continue;
+            }
+            let html = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!(error = %e, "search body read failed");
+                    continue;
+                }
+            };
+            results = parse_ddg_html(&html, limit);
+            if results.is_empty() {
+                results = parse_ddg_lite(&html, limit);
+            }
+            if !results.is_empty() {
+                break;
+            }
         }
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| ToolError::failed(format!("search body: {e}")))?;
 
-        let results = parse_ddg_html(&html, limit);
         if results.is_empty() {
             return Ok(truncate_tool_result(format!(
-                "No search results for: {query}"
+                "No search results for: {query} (search backends returned empty — try a simpler query)"
             )));
         }
 
@@ -162,6 +174,59 @@ fn urlencoding_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// DuckDuckGo lite result table scraper.
+fn parse_ddg_lite(html: &str, limit: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut rest = html;
+    while hits.len() < limit {
+        // lite uses class="result-link" or plain result__a sometimes
+        let idx = rest
+            .find("class=\"result-link\"")
+            .or_else(|| rest.find("class='result-link'"))
+            .or_else(|| rest.find("result-link"));
+        let Some(idx) = idx else {
+            break;
+        };
+        rest = &rest[idx..];
+        let Some(href_i) = rest.find("href=\"") else {
+            rest = &rest[1..];
+            continue;
+        };
+        let after_href = &rest[href_i + 6..];
+        let Some(end_h) = after_href.find('"') else {
+            break;
+        };
+        let mut url = after_href[..end_h].to_string();
+        if let Some(uddg) = extract_uddg(&url) {
+            url = uddg;
+        }
+        let after_a = after_href.get(end_h..).unwrap_or("");
+        let Some(gt) = after_a.find('>') else {
+            rest = &rest[1..];
+            continue;
+        };
+        let title_start = &after_a[gt + 1..];
+        let Some(end_title) = title_start.find("</a>") else {
+            rest = &rest[1..];
+            continue;
+        };
+        let title = strip_tags(&title_start[..end_title]);
+        if !title.is_empty() && (url.starts_with("http") || url.starts_with("//")) {
+            if url.starts_with("//") {
+                url = format!("https:{url}");
+            }
+            hits.push(SearchHit {
+                title,
+                url,
+                snippet: String::new(),
+            });
+        }
+        // Advance past this match to avoid infinite loop.
+        rest = rest.get(10..).unwrap_or("");
+    }
+    hits
 }
 
 /// Very small HTML scraper for DDG result blocks.

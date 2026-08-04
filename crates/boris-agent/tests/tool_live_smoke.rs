@@ -7,13 +7,17 @@ use std::time::Instant;
 use boris_agent::memory::profile::UserProfile;
 use boris_agent::tool::Tool;
 use boris_agent::tools::clipboard::{ClipboardGetTool, ClipboardSetTool};
-use boris_agent::tools::files::{FsRoots, ListDirTool, ReadFileTool, WriteFileTool};
+use boris_agent::tools::bash::BashTool;
+use boris_agent::tools::files::{
+    EditFileTool, FsRoots, ListDirTool, ReadFileTool, WriteFileTool,
+};
+use boris_agent::tools::glob::GlobTool;
+use boris_agent::tools::grep::GrepTool;
 use boris_agent::tools::notes::{RecallNotesTool, RememberNoteTool};
 use boris_agent::tools::open_tool::{OpenPathTool, OpenUrlTool};
 use boris_agent::tools::profile::{
     GetUserContextTool, SaveUserFactTool, UpdateUserProfileTool,
 };
-use boris_agent::tools::shell::RunCommandTool;
 use boris_agent::tools::system::GetSystemInfoTool;
 use boris_agent::tools::time::{GetDateTool, GetTimeTool};
 use boris_agent::tools::todo::{TodoReadTool, TodoWriteTool};
@@ -197,11 +201,11 @@ async fn live_smoke_all_boris_tools() {
 
     // ── filesystem ────────────────────────────────────────────────────────
     results.push(
-        run_one("write_file", async {
+        run_one("file_write", async {
             WriteFileTool::new(roots.clone())
                 .execute(json!({
-                    "path": sandbox.join("hello.txt").to_string_lossy(),
-                    "content": "hello from boris smoke\n"
+                    "path": "hello.txt",
+                    "content": "hello from boris smoke\nfindme-token\n"
                 }))
                 .await
                 .map_err(|e| e.message)
@@ -209,10 +213,21 @@ async fn live_smoke_all_boris_tools() {
         .await,
     );
     results.push(
-        run_one("read_file", async {
+        run_one("file_read", async {
             ReadFileTool::new(roots.clone())
+                .execute(json!({ "path": "hello.txt" }))
+                .await
+                .map_err(|e| e.message)
+        })
+        .await,
+    );
+    results.push(
+        run_one("file_edit", async {
+            EditFileTool::new(roots.clone())
                 .execute(json!({
-                    "path": sandbox.join("hello.txt").to_string_lossy()
+                    "path": "hello.txt",
+                    "old_string": "hello from boris smoke",
+                    "new_string": "hello edited"
                 }))
                 .await
                 .map_err(|e| e.message)
@@ -222,21 +237,37 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("list_dir", async {
             ListDirTool::new(roots.clone())
-                .execute(json!({
-                    "path": sandbox.to_string_lossy()
-                }))
+                .execute(json!({}))
+                .await
+                .map_err(|e| e.message)
+        })
+        .await,
+    );
+    results.push(
+        run_one("glob", async {
+            GlobTool::new(roots.clone())
+                .execute(json!({ "pattern": "*.txt" }))
+                .await
+                .map_err(|e| e.message)
+        })
+        .await,
+    );
+    results.push(
+        run_one("grep", async {
+            GrepTool::new(roots.clone())
+                .execute(json!({ "pattern": "findme-token" }))
                 .await
                 .map_err(|e| e.message)
         })
         .await,
     );
 
-    // ── shell ─────────────────────────────────────────────────────────────
+    // ── bash ──────────────────────────────────────────────────────────────
     results.push(
-        run_one("run_command", async {
-            RunCommandTool::new(vec![sandbox.clone()], sandbox.clone())
+        run_one("bash", async {
+            BashTool::new(vec![sandbox.clone()], sandbox.clone())
                 .execute(json!({
-                    "command": "Write-Output 'shell-smoke-ok'",
+                    "command": "echo bash-smoke-ok",
                     "cwd": sandbox.to_string_lossy()
                 }))
                 .await

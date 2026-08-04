@@ -5,7 +5,7 @@
 //! - [`store`] — filesystem (or other) persistence backends
 //!
 //! Working memory remains [`crate::context::Context`]; session code loads and
-//! saves message snapshots via [`crate::AgentEngine`] session-facing methods.
+//! saves message snapshots via [`crate::Agent`] session-facing methods.
 //!
 //! Submodule bodies are owned by other P1 slices — declare modules here only.
 

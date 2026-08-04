@@ -218,6 +218,80 @@ impl Context {
         let messages: Vec<Value> = self.messages.iter().map(|m| m.dump()).collect();
         json!(messages)
     }
+
+    // ── Mechanical compaction (tau-inspired, no LLM) ─────────────────────────
+
+    /// Rough token estimate (chars / 4) across all messages.
+    pub fn estimate_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|m| estimate_message_chars(m) / 4)
+            .sum()
+    }
+
+    /// Apply mechanical reduction before an LLM call:
+    /// 1. Truncate large tool observations in place
+    /// 2. Mask tool results older than the last `keep_tool_turns` user turns
+    pub fn compact_mechanical(&mut self) {
+        const MAX_TOOL_CHARS: usize = 6_000;
+        const KEEP_TOOL_TURNS: usize = 2;
+
+        // Tier 1: truncate large tool results.
+        for msg in &mut self.messages {
+            if !matches!(msg.role, Role::Tool) {
+                continue;
+            }
+            if let Some(content) = msg.content.get_mut("content") {
+                if let Some(s) = content.as_str() {
+                    if s.chars().count() > MAX_TOOL_CHARS {
+                        let head: String = s.chars().take(MAX_TOOL_CHARS / 2).collect();
+                        let tail: String = s
+                            .chars()
+                            .rev()
+                            .take(MAX_TOOL_CHARS / 2)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        *content = Value::String(format!(
+                            "{head}\n…[compacted]…\n{tail}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Tier 2: mask tool results from turns older than KEEP_TOOL_TURNS.
+        let has_system = self
+            .messages
+            .first()
+            .is_some_and(|m| matches!(m.role, Role::System));
+        let body_start = if has_system { 1 } else { 0 };
+        let mut turn_starts: Vec<usize> = Vec::new();
+        for (i, msg) in self.messages.iter().enumerate().skip(body_start) {
+            if matches!(msg.role, Role::User) {
+                turn_starts.push(i);
+            }
+        }
+        if turn_starts.len() <= KEEP_TOOL_TURNS {
+            return;
+        }
+        let keep_from = turn_starts[turn_starts.len() - KEEP_TOOL_TURNS];
+        for msg in self.messages[body_start..keep_from].iter_mut() {
+            if matches!(msg.role, Role::Tool) {
+                if let Some(content) = msg.content.get_mut("content") {
+                    *content = Value::String("[older tool result omitted]".into());
+                }
+            }
+        }
+    }
+}
+
+fn estimate_message_chars(m: &Message) -> usize {
+    match &m.content {
+        Value::String(s) => s.len(),
+        other => other.to_string().len(),
+    }
 }
 
 #[cfg(test)]

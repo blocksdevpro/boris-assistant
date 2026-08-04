@@ -1,16 +1,17 @@
-//! Built-in agent tools and host registration helpers.
+//! Built-in agent tools (tau-inspired suite + Boris voice tools).
 //!
 //! Individual tools live in submodules; this module assembles the default set
-//! and exposes a small registration surface for the host (`boris-pipeline` /
-//! desktop).
+//! and exposes registration helpers for the host (`boris-pipeline` / desktop).
 
+pub mod bash;
 pub mod clipboard;
 pub mod files;
 pub mod fs_common;
+pub mod glob;
+pub mod grep;
 pub mod notes;
 pub mod open_tool;
 pub mod profile;
-pub mod shell;
 pub mod system;
 pub mod time;
 pub mod todo;
@@ -18,7 +19,7 @@ pub mod web;
 
 use std::path::PathBuf;
 
-use crate::engine::AgentEngine;
+use crate::agent::Agent;
 use crate::tool::Tool;
 use crate::tools::files::FsRoots;
 
@@ -84,13 +85,16 @@ pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Sandboxed filesystem tools.
+/// Filesystem tools (tau-style names + list_dir / glob / grep).
 pub fn fs_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     let roots = paths.fs_roots();
     vec![
         Box::new(files::ListDirTool::new(roots.clone())),
         Box::new(files::ReadFileTool::new(roots.clone())),
-        Box::new(files::WriteFileTool::new(roots)),
+        Box::new(files::WriteFileTool::new(roots.clone())),
+        Box::new(files::EditFileTool::new(roots.clone())),
+        Box::new(glob::GlobTool::new(roots.clone())),
+        Box::new(grep::GrepTool::new(roots)),
     ]
 }
 
@@ -108,35 +112,40 @@ pub fn web_tools() -> Vec<Box<dyn Tool>> {
     out
 }
 
-/// Shell tool (requires host shell policy OpenConfirm + HITL).
-pub fn shell_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+/// Bash tool (requires host shell policy OpenConfirm + HITL).
+pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     let cwd_roots = paths.read_roots_flat();
-    vec![Box::new(shell::RunCommandTool::new(
+    vec![Box::new(bash::BashTool::new(
         cwd_roots,
         paths.sandbox_root.clone(),
     ))]
 }
 
-/// Register time + notes tools. Prefer [`register_builtin_tools`].
-pub fn register_time_and_notes(engine: &mut AgentEngine, paths: &BuiltinToolPaths) {
-    engine.register_tools(builtin_tools(paths));
+/// Alias for [`bash_tools`].
+pub fn shell_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+    bash_tools(paths)
 }
 
-/// Full host setup: personal context + all MVP tool waves (core, OS, fs, web, shell).
-pub fn register_builtin_tools(engine: &mut AgentEngine, paths: BuiltinToolPaths) {
-    register_builtin_tools_with_options(engine, paths, true, true);
+/// Register time + notes tools. Prefer [`register_builtin_tools`].
+pub fn register_time_and_notes(agent: &mut Agent, paths: &BuiltinToolPaths) {
+    agent.register_tools(builtin_tools(paths));
+}
+
+/// Full host setup: personal context + all MVP tool waves.
+pub fn register_builtin_tools(agent: &mut Agent, paths: BuiltinToolPaths) {
+    register_builtin_tools_with_options(agent, paths, true, true);
 }
 
 /// Same as [`register_builtin_tools`] with control over LLM extract and power tools.
 pub fn register_builtin_tools_with_options(
-    engine: &mut AgentEngine,
+    agent: &mut Agent,
     paths: BuiltinToolPaths,
     llm_extract: bool,
     power_tools: bool,
 ) {
     let mut tools = builtin_tools(&paths);
 
-    match engine.enable_personal_context(&paths.profile_path, llm_extract) {
+    match agent.enable_personal_context(&paths.profile_path, llm_extract) {
         Ok(profile) => {
             tools.push(Box::new(profile::SaveUserFactTool::with_path(
                 profile.clone(),
@@ -160,8 +169,8 @@ pub fn register_builtin_tools_with_options(
         tools.extend(os_tools(&paths));
         tools.extend(fs_tools(&paths));
         tools.extend(web_tools());
-        tools.extend(shell_tools(&paths));
+        tools.extend(bash_tools(&paths));
     }
 
-    engine.register_tools(tools);
+    agent.register_tools(tools);
 }

@@ -18,7 +18,7 @@ pub enum AgentOutcome {
     /// Model returned no speakable content.
     Silent,
     /// Tool loop paused for HITL. Host should speak `text`, collect yes/no,
-    /// then call [`crate::AgentEngine::resume_confirmation`].
+    /// then call [`crate::Agent::resume_confirmation`].
     NeedsConfirmation {
         text: String,
         pending: PendingToolCall,

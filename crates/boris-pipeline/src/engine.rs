@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use boris_agent::context::Context;
 use boris_agent::session::store::SessionStore;
 use boris_agent::session::types::SessionId;
-use boris_agent::{AgentEngine, AgentOutcome, OpenRouterClient, SandboxConfig};
+use boris_agent::{Agent, AgentOutcome, OpenRouterClient, SandboxConfig};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::types::ArcAudioBuffer;
@@ -247,9 +247,9 @@ fn run(
         .build()
         .expect("failed to build Tokio runtime for agent");
 
-    tracing::info!("building OpenRouter client + AgentEngine…");
+    tracing::info!("building OpenRouter client + Agent…");
     let client = OpenRouterClient::new(config.openrouter_api_key, config.openrouter_model);
-    let mut agent = AgentEngine::new(Box::new(client), &config.system_prompt);
+    let mut agent = Agent::new(Box::new(client), &config.system_prompt);
     if let Err(e) = paths::ensure_agent_dirs() {
         tracing::warn!(error = %e, "ensure agent sandbox/audit dirs failed");
     }
@@ -257,7 +257,7 @@ fn run(
         SandboxConfig::for_desktop_mvp(paths::boris_home()),
         Some(paths::audit_path()),
     );
-    // Core + OS + files + web + shell (MVP power tools) + personal context.
+    // Core + OS + files + web + bash (MVP power tools) + personal context.
     boris_agent::tools::register_builtin_tools(
         &mut agent,
         boris_agent::tools::BuiltinToolPaths {
@@ -623,7 +623,7 @@ fn run(
         if let Some(ref sid) = active_session {
             agent.set_session_id(Some(sid.to_string()));
         }
-        let outcome = agent_rt.block_on(agent.run_turn(&text));
+        let outcome = agent_rt.block_on(agent.prompt(&text));
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         tts = tts_owned;
 
@@ -885,7 +885,7 @@ enum OutcomeResolve {
 /// Drive NeedsConfirmation → speak → freeform yes/no → resume until Speak/Silent.
 fn resolve_agent_outcome(
     mut outcome: AgentOutcome,
-    agent: &mut AgentEngine,
+    agent: &mut Agent,
     agent_rt: &tokio::runtime::Runtime,
     tts: &mut TtsBox,
     stt: &mut SttBox,
@@ -1124,7 +1124,7 @@ fn interpret_yes_no(text: &str) -> Option<bool> {
 fn begin_session(
     store: &SessionStore,
     active_session: &mut Option<SessionId>,
-    agent: &mut AgentEngine,
+    agent: &mut Agent,
     system_prompt: &str,
 ) {
     *active_session = None;

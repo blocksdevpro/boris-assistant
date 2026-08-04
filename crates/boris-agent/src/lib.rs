@@ -1,30 +1,36 @@
-//! LLM tool-calling agent used by Boris.
+//! LLM tool-calling agent harness used by Boris.
 //!
-//! Pure library: async HTTP + context + optional tools → [`AgentOutcome`].
-//! The host (pipeline) owns the Tokio runtime boundary, audio I/O, and speech.
+//! Layered like tau's `agent` crate:
+//! - [`loop_`] — pure ReAct loop (complete + tools + events)
+//! - [`agent::Agent`] — stateful facade (memory, HITL, session helpers)
+//! - [`runtime`] — policy / timeout / audit / confirmation
 //!
-//! Personal context ([`memory`]) is a durable model of the human user, injected
-//! into the system prompt and updated actively after turns.
+//! Provider HTTP lives in `boris-ai` and is re-exported here for hosts.
 //!
-//! Tool execution always goes through [`runtime::ToolRuntime`] (policy, timeout,
-//! audit, HITL). Tool bodies stay observation-only and dumb.
+//! Tool bodies stay observation-only; speech is always [`AgentOutcome`].
 
+pub mod agent;
 pub mod client;
 pub mod context;
-pub mod engine;
 pub mod error;
+pub mod loop_;
 pub mod memory;
 pub mod observe;
 pub mod outcome;
 pub mod runtime;
 pub mod session;
+pub mod stats;
 pub mod tool;
 pub mod tools;
+pub mod types;
 
-pub use client::{LlmClient, OpenRouterClient};
+// Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
+pub use boris_ai::{LlmClient, LlmError, LlmErrorKind, OpenRouterClient};
+
+pub use agent::{Agent, AgentOptions};
 pub use context::{Context, Message, Role};
-pub use engine::AgentEngine;
-pub use error::{AgentError, AgentErrorKind, LlmError, LlmErrorKind};
+pub use error::{AgentError, AgentErrorKind};
+pub use loop_::{agent_loop, resume_pending_tool, LoopState};
 pub use memory::{FactCategory, ProfileStore, UserFact, UserProfile, PERSONAL_CONTEXT_MAX_CHARS};
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
@@ -33,8 +39,16 @@ pub use runtime::{
     NullAuditSink, NetworkPolicy, ShellPolicy,
 };
 pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
+pub use stats::AgentStats;
 pub use tool::{Permission, Tool, ToolError, ToolMeta, ToolRisk};
 pub use tools::{
-    builtin_tools, fs_tools, os_tools, register_builtin_tools, register_builtin_tools_with_options,
-    shell_tools, web_tools, BuiltinToolPaths,
+    bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,
+    register_builtin_tools_with_options, shell_tools, web_tools, BuiltinToolPaths,
 };
+pub use types::{AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS};
+
+// ── Temporary aliases (migration window) ─────────────────────────────────────
+
+/// Deprecated name for [`Agent`]. Prefer `Agent`.
+#[deprecated(note = "renamed to Agent")]
+pub type AgentEngine = Agent;

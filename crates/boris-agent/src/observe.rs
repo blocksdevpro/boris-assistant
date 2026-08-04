@@ -4,7 +4,7 @@ use std::time::Duration;
 
 /// Structured summary of one completed agent turn.
 ///
-/// Produced by [`crate::AgentEngine::run_turn_with_report`]. Failures do not
+/// Produced by [`crate::Agent::prompt_with_report`]. Failures do not
 /// yield a report (context is rolled back and the error is returned instead).
 #[derive(Debug, Clone)]
 pub struct TurnReport {

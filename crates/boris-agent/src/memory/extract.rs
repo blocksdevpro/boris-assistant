@@ -12,8 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::profile::{FactCategory, UserFact, UserProfile};
-use crate::client::LlmClient;
-use crate::error::LlmError;
+use boris_ai::{LlmClient, LlmError};
 
 /// Proposed updates to merge into the durable profile.
 #[derive(Debug, Clone, Default)]

@@ -248,7 +248,7 @@ impl ToolMeta {
 ///
 /// Implementations return data **to the model** (tool observations). They must
 /// **never speak** to the user: no TTS, no playback, no app event bus. Final
-/// speech is always [`crate::AgentOutcome`] from [`crate::AgentEngine::chat`].
+/// speech is always [`crate::AgentOutcome`] from [`crate::Agent::prompt`].
 ///
 /// Keep results **short** (prefer under [`MAX_TOOL_RESULT_CHARS`]; use
 /// [`truncate_tool_result`]) — Boris is a voice agent and long tool payloads

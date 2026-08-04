@@ -305,6 +305,10 @@ async fn process_tool_calls(
             }
         }
         if !needs_confirm {
+            tracing::debug!(
+                batch = calls.len(),
+                "tool batch: parallel dispatch (no HITL in batch)"
+            );
             return process_tool_calls_parallel(
                 state,
                 calls,
@@ -316,6 +320,10 @@ async fn process_tool_calls(
             )
             .await;
         }
+        tracing::debug!(
+            batch = calls.len(),
+            "tool batch: sequential (HITL or confirm risk in batch)"
+        );
     }
 
     process_tool_calls_sequential(

@@ -394,17 +394,27 @@ impl Tool for WebFetchTool {
             .timeout(Duration::from_secs(45))
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+        if ctx.is_cancelled() {
+            return Err(ToolError::failed("fetch cancelled before start"));
+        }
         let obj = require_object(&args)?;
         let url = require_string(obj, "url")?;
         ensure_http_url(&url)?;
 
-        let resp = self
-            .client
-            .get(url.trim())
-            .send()
-            .await
-            .map_err(|e| ToolError::failed(format!("fetch failed: {e}")))?;
+        let send = self.client.get(url.trim()).send();
+        let resp = if let Some(token) = ctx.cancel.clone() {
+            tokio::select! {
+                biased;
+                r = send => r.map_err(|e| ToolError::failed(format!("fetch failed: {e}")))?,
+                _ = token.cancelled() => {
+                    return Err(ToolError::failed("fetch cancelled by host"));
+                }
+            }
+        } else {
+            send.await
+                .map_err(|e| ToolError::failed(format!("fetch failed: {e}")))?
+        };
         let status = resp.status();
         if !status.is_success() {
             return Err(ToolError::failed(format!("fetch HTTP {status}")));
@@ -416,10 +426,20 @@ impl Tool for WebFetchTool {
             .unwrap_or("")
             .to_ascii_lowercase();
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| ToolError::failed(format!("fetch body: {e}")))?;
+        let bytes_fut = resp.bytes();
+        let bytes = if let Some(token) = ctx.cancel.clone() {
+            tokio::select! {
+                biased;
+                r = bytes_fut => r.map_err(|e| ToolError::failed(format!("fetch body: {e}")))?,
+                _ = token.cancelled() => {
+                    return Err(ToolError::failed("fetch cancelled by host"));
+                }
+            }
+        } else {
+            bytes_fut
+                .await
+                .map_err(|e| ToolError::failed(format!("fetch body: {e}")))?
+        };
         if bytes.len() > 2_000_000 {
             return Err(ToolError::failed("response too large"));
         }

@@ -208,6 +208,8 @@ fn make_invocation(
     inv.session_id = config.session_id.clone();
     inv.turn_id = config.turn_id.clone();
     inv.cancel = cancel;
+    // Stamp process cwd so tools can resolve relative paths without closing over host state.
+    inv.cwd = std::env::current_dir().ok();
     inv
 }
 

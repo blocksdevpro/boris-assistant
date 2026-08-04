@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 
 use crate::skills::{self, LoadedSkills, Skill};
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Tool, ToolError,
-    ToolKind, ToolMeta, ToolRisk,
+    optional_string, require_object, require_string, truncate_tool_result, truncate_tool_result_to,
+    Tool, ToolError, ToolKind, ToolMeta, ToolRisk, MAX_SKILL_RESULT_CHARS,
 };
 
 /// Shared skill registry for tools (same Arc the Agent holds).
@@ -107,7 +107,10 @@ impl Tool for LoadSkillTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
+        // Skill playbooks must not be chopped by the default 4k observation cap.
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Skill)
+            .max_result_chars(MAX_SKILL_RESULT_CHARS)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -142,7 +145,7 @@ impl Tool for LoadSkillTool {
                 body.push_str(a.trim());
             }
         }
-        Ok(truncate_tool_result(body))
+        Ok(truncate_tool_result_to(body, MAX_SKILL_RESULT_CHARS))
     }
 }
 

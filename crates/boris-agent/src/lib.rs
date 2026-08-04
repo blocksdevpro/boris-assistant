@@ -54,7 +54,10 @@ pub use skills::{
     LoadedSkills, Skill, SkillSource,
 };
 pub use stats::AgentStats;
-pub use tool::{Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk};
+pub use tool::{
+    Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk, MAX_SKILL_RESULT_CHARS,
+    MAX_TOOL_RESULT_CHARS,
+};
 pub use tool_context::ToolCallContext;
 pub use tools::{
     bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,

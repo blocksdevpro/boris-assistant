@@ -11,7 +11,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::reminder::with_reminder;
-use crate::tool::{truncate_tool_result, Tool, ToolMeta};
+use crate::tool::{truncate_tool_result_to, Tool, ToolMeta};
 use crate::tool_context::ToolCallContext;
 
 pub use audit::{
@@ -219,9 +219,10 @@ impl ToolRuntime {
         let result = run_with_timeout(tool, &ctx, args, meta.default_timeout).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
+        let budget = meta.result_char_budget();
         match result {
             Ok(output) => {
-                let obs = with_reminder(&inv.name, truncate_tool_result(output));
+                let obs = with_reminder(&inv.name, truncate_tool_result_to(output, budget));
                 self.audit_event(
                     &inv,
                     &meta,
@@ -249,7 +250,7 @@ impl ToolRuntime {
                 );
                 let obs = with_reminder(
                     &inv.name,
-                    truncate_tool_result(format!("Error: {}", e.message)),
+                    truncate_tool_result_to(format!("Error: {}", e.message), budget),
                 );
                 InvokeResult::Observation(obs)
             }

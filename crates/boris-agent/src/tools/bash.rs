@@ -13,9 +13,10 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolKind, ToolMeta, ToolRisk,
+    optional_string, require_object, require_string, soft_wrap_text, truncate_tool_result,
+    DEFAULT_SOFT_WRAP_WIDTH, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
+use crate::tool_context::ToolCallContext;
 use crate::tools::fs_common::resolve_under_roots;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -187,7 +188,11 @@ impl Tool for BashTool {
             .timeout(Duration::from_secs(130))
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
+        if ctx.is_cancelled() {
+            return Err(ToolError::failed("command cancelled before start"));
+        }
+
         let obj = require_object(&args)?;
         let command = require_string(obj, "command")?;
         let command = command.trim();
@@ -203,11 +208,20 @@ impl Tool for BashTool {
             )));
         }
 
+        // Prefer explicit cwd arg, then session ToolCallContext cwd (if under roots),
+        // then sandbox default.
         let cwd = if let Some(raw) = optional_string(obj, "cwd") {
             resolve_under_roots(&raw, &self.cwd_roots)?
+        } else if let Some(ref session_cwd) = ctx.cwd {
+            if self.cwd_roots.iter().any(|r| session_cwd.starts_with(r)) {
+                session_cwd.clone()
+            } else {
+                self.default_cwd.clone()
+            }
         } else {
             self.default_cwd.clone()
         };
+
         if !cwd.is_dir() {
             // Create default sandbox cwd if missing.
             if cwd == self.default_cwd {
@@ -260,12 +274,27 @@ impl Tool for BashTool {
             buf
         });
 
+        let cancel = ctx.cancel.clone();
         let outcome = tokio::select! {
+            biased;
             status = child.wait() => {
                 match status {
                     Ok(s) => Ok(s),
                     Err(e) => Err(ToolError::failed(format!("wait failed: {e}"))),
                 }
+            }
+            _ = async {
+                if let Some(token) = cancel {
+                    token.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(ToolError::failed("command cancelled by host"));
             }
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
                 let _ = child.start_kill();
@@ -290,7 +319,8 @@ impl Tool for BashTool {
             combined = String::new();
         }
 
-        let mut text = truncate_output(combined);
+        // Soft-wrap long lines (preserve bytes) then line/byte cap.
+        let mut text = truncate_output(soft_wrap_text(&combined, DEFAULT_SOFT_WRAP_WIDTH));
         let exit_code = status.code().unwrap_or(-1);
         if exit_code != 0 {
             if !text.is_empty() && !text.ends_with('\n') {
@@ -336,6 +366,36 @@ mod tests {
         assert!(
             out.contains("bash-smoke-ok") || out.contains("Exit code"),
             "got: {out}"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_long_command() {
+        use tokio_util::sync::CancellationToken;
+
+        let dir = std::env::temp_dir().join(format!("boris-bash-cancel-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+        let token = CancellationToken::new();
+        let ctx = crate::tool_context::ToolCallContext::new("cancel-test").with_cancel(Some(token.clone()));
+
+        #[cfg(windows)]
+        let cmd = "powershell -NoProfile -Command \"Start-Sleep -Seconds 30\"";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+
+        let run = tool.execute(&ctx, json!({ "command": cmd, "timeout": 60 }));
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            token.cancel();
+        };
+        let (result, _) = tokio::join!(run, cancel);
+        let err = result.expect_err("should cancel");
+        assert!(
+            err.message.to_ascii_lowercase().contains("cancel"),
+            "got: {}",
+            err.message
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

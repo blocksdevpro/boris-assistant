@@ -87,8 +87,14 @@ impl std::error::Error for ToolError {}
 
 // ── Author helpers ────────────────────────────────────────────────────────────
 
-/// Cap tool observation length so context doesn't explode.
+/// Cap tool observation length so context doesn't explode (voice-sized default).
 pub const MAX_TOOL_RESULT_CHARS: usize = 4000;
+
+/// Higher cap for skill bodies (playbooks must stay intact for multi-step work).
+pub const MAX_SKILL_RESULT_CHARS: usize = 24_000;
+
+/// Soft-wrap width for long single lines (bash / dumps) — content preserved.
+pub const DEFAULT_SOFT_WRAP_WIDTH: usize = 2_000;
 
 const TRUNCATED_SUFFIX: &str = "\n…[truncated]";
 
@@ -96,13 +102,61 @@ const TRUNCATED_SUFFIX: &str = "\n…[truncated]";
 ///
 /// When cut, appends a short marker so the model knows the result was truncated.
 pub fn truncate_tool_result(s: String) -> String {
+    truncate_tool_result_to(s, MAX_TOOL_RESULT_CHARS)
+}
+
+/// Cap to an explicit character budget (UTF-8 safe by char count).
+///
+/// Output is always ≤ `max_chars` characters (including the truncation marker).
+pub fn truncate_tool_result_to(s: String, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     let count = s.chars().count();
-    if count <= MAX_TOOL_RESULT_CHARS {
+    if count <= max_chars {
         return s;
     }
-    let keep = MAX_TOOL_RESULT_CHARS.saturating_sub(TRUNCATED_SUFFIX.chars().count());
+    let suffix_len = TRUNCATED_SUFFIX.chars().count();
+    if max_chars <= suffix_len {
+        return TRUNCATED_SUFFIX.chars().take(max_chars).collect();
+    }
+    let keep = max_chars - suffix_len;
     let head: String = s.chars().take(keep).collect();
     format!("{head}{TRUNCATED_SUFFIX}")
+}
+
+/// Soft-wrap a long line by inserting newlines every `wrap_width` characters.
+/// **All content is preserved** (Grok bash strategy for long lines).
+pub fn soft_wrap_line(line: &str, wrap_width: usize) -> String {
+    if wrap_width == 0 || line.chars().count() <= wrap_width {
+        return line.to_string();
+    }
+    let mut result = String::with_capacity(line.len() + line.len() / wrap_width);
+    let mut on_line = 0;
+    for ch in line.chars() {
+        if on_line >= wrap_width {
+            result.push('\n');
+            on_line = 0;
+        }
+        result.push(ch);
+        on_line += 1;
+    }
+    result
+}
+
+/// Soft-wrap every line of a multi-line string that exceeds `wrap_width`.
+pub fn soft_wrap_text(text: &str, wrap_width: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&soft_wrap_line(line, wrap_width));
+    }
+    out
 }
 
 /// Require `args` to be a JSON object; return the map or [`ToolError::invalid_args`].
@@ -245,6 +299,8 @@ pub struct ToolMeta {
     pub requires_confirmation: bool,
     /// Category for capability presets and parallel scheduling.
     pub kind: ToolKind,
+    /// Override observation char cap after execute (`None` → [`MAX_TOOL_RESULT_CHARS`]).
+    pub max_result_chars: Option<usize>,
 }
 
 impl ToolMeta {
@@ -256,6 +312,7 @@ impl ToolMeta {
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
             kind: ToolKind::Other,
+            max_result_chars: None,
         }
     }
 
@@ -266,6 +323,7 @@ impl ToolMeta {
             default_timeout: risk.default_timeout(),
             requires_confirmation: false,
             kind: ToolKind::Other,
+            max_result_chars: None,
         }
     }
 
@@ -289,9 +347,18 @@ impl ToolMeta {
         self
     }
 
+    pub fn max_result_chars(mut self, max: usize) -> Self {
+        self.max_result_chars = Some(max);
+        self
+    }
+
     /// Prefer kind-derived read-only when set; else treat Safe risk as read-only.
     pub fn is_read_only(&self) -> bool {
         self.kind.is_read_only() && self.risk <= ToolRisk::Moderate && !self.requires_confirmation
+    }
+
+    pub fn result_char_budget(&self) -> usize {
+        self.max_result_chars.unwrap_or(MAX_TOOL_RESULT_CHARS)
     }
 }
 
@@ -382,6 +449,22 @@ mod tests {
         let out = truncate_tool_result(exact.clone());
         assert_eq!(out, exact);
         assert!(!out.contains("[truncated]"));
+    }
+
+    #[test]
+    fn truncate_to_custom_budget() {
+        let s = "abcdefghij".to_string();
+        let out = truncate_tool_result_to(s, 6);
+        assert!(out.chars().count() <= 6);
+        assert!(out.contains("…") || out.contains("truncated"));
+    }
+
+    #[test]
+    fn soft_wrap_preserves_content() {
+        let line = "a".repeat(5000);
+        let wrapped = soft_wrap_line(&line, 2000);
+        assert_eq!(wrapped.replace('\n', "").len(), 5000);
+        assert!(wrapped.contains('\n'));
     }
 
     #[test]

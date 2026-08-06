@@ -103,15 +103,65 @@ export type ModelsInstallReport = {
 /** Persisted under `~/.boris/settings.json` (Rust `AppSettings`). */
 export type AppSettings = {
   openrouter_api_key: string;
+  /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
+  /** Fast / cheap model for simple turns. */
+  openrouter_fast_model?: string;
+  /**
+   * OpenRouter **model-provider** order for the strong model
+   * (e.g. `coreweave` or `coreweave,baseten`) — inference host, not API brand.
+   */
+  openrouter_model_provider?: string;
+  /** Model-provider order for the fast model. */
+  openrouter_fast_provider?: string;
+  /** When true, do not fall back to other hosts if the preferred list fails. */
+  openrouter_pin_provider?: boolean;
   capability_preset?: string;
 };
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
   openrouter_model: "",
+  openrouter_fast_model: "",
+  openrouter_model_provider: "",
+  openrouter_fast_provider: "",
+  openrouter_pin_provider: false,
   capability_preset: "",
 };
+
+/** Common OpenRouter chat models for the preset dropdown. */
+export const MODEL_PRESETS: { id: string; label: string }[] = [
+  { id: "google/gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+  { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "openai/gpt-4o-mini", label: "GPT-4o mini" },
+  { id: "openai/gpt-4o", label: "GPT-4o" },
+  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
+  { id: "anthropic/claude-3.5-haiku", label: "Claude 3.5 Haiku" },
+  { id: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
+  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B" },
+  { id: "x-ai/grok-3-mini", label: "Grok 3 Mini" },
+];
+
+/**
+ * Common OpenRouter **model-provider** slugs (inference hosts on a model page).
+ * Copy exact slug from OpenRouter when in doubt (`coreweave`, `deepinfra/turbo`).
+ */
+export const PROVIDER_PRESETS: { id: string; label: string }[] = [
+  { id: "", label: "Auto (OpenRouter default)" },
+  { id: "coreweave", label: "CoreWeave" },
+  { id: "baseten", label: "Baseten" },
+  { id: "siliconflow", label: "SiliconFlow" },
+  { id: "novita", label: "NovitaAI" },
+  { id: "fireworks", label: "Fireworks" },
+  { id: "deepinfra", label: "DeepInfra" },
+  { id: "phala", label: "Phala" },
+  { id: "cloudflare", label: "Cloudflare" },
+  { id: "venice", label: "Venice" },
+  { id: "atlas-cloud", label: "AtlasCloud" },
+  { id: "together", label: "Together" },
+  { id: "groq", label: "Groq" },
+];
 
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {

@@ -35,7 +35,10 @@ pub mod tools;
 pub mod types;
 
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
-pub use boris_ai::{LlmClient, LlmError, LlmErrorKind, OpenRouterClient};
+pub use boris_ai::{
+    parse_provider_list, split_model_and_provider, LlmClient, LlmError, LlmErrorKind,
+    OpenRouterClient, TokenUsage,
+};
 
 pub use agent::{Agent, AgentOptions};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};

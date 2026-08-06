@@ -201,6 +201,10 @@ fn start_engine(
     state: State<'_, AppState>,
     api_key: String,
     model: Option<String>,
+    fast_model: Option<String>,
+    model_provider: Option<String>,
+    fast_provider: Option<String>,
+    pin_provider: Option<bool>,
 ) -> Result<(), String> {
     let key_from_env = api_key.trim().is_empty();
     let key = if key_from_env {
@@ -208,25 +212,39 @@ fn start_engine(
     } else {
         api_key
     };
+    // Env fallbacks also applied inside PipelineConfig; keep model env here for logs.
     let model = model.or_else(|| std::env::var("OPENROUTER_MODEL").ok());
 
     tracing::info!(
         key_source = if key_from_env { "env" } else { "ui" },
         key_present = !key.trim().is_empty(),
         model = ?model.as_deref(),
+        fast_model = ?fast_model.as_deref(),
+        model_provider = ?model_provider.as_deref(),
+        fast_provider = ?fast_provider.as_deref(),
+        pin_provider = ?pin_provider,
         "start_engine command"
     );
 
-    state.start(key, model, move |picture| {
-        let _ = app.emit("status", picture);
-    })
-    .map_err(|e| {
-        tracing::error!(error = %e, "start_engine failed");
-        e
-    })
-    .map(|()| {
-        tracing::info!("start_engine ok");
-    })
+    state
+        .start(
+            key,
+            model,
+            fast_model,
+            model_provider,
+            fast_provider,
+            pin_provider,
+            move |picture| {
+                let _ = app.emit("status", picture);
+            },
+        )
+        .map_err(|e| {
+            tracing::error!(error = %e, "start_engine failed");
+            e
+        })
+        .map(|()| {
+            tracing::info!("start_engine ok");
+        })
 }
 
 #[tauri::command]
@@ -315,7 +333,7 @@ async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, String> 
     Ok(report)
 }
 
-/// Restore OpenRouter key + model from `~/.boris/settings.json`.
+/// Restore OpenRouter key + models/providers from `~/.boris/settings.json`.
 #[tauri::command]
 fn get_settings() -> Result<AppSettings, String> {
     match load_settings() {
@@ -323,6 +341,9 @@ fn get_settings() -> Result<AppSettings, String> {
             tracing::debug!(
                 has_key = !s.openrouter_api_key.trim().is_empty(),
                 model = %s.openrouter_model,
+                fast_model = %s.openrouter_fast_model,
+                model_provider = %s.openrouter_model_provider,
+                fast_provider = %s.openrouter_fast_provider,
                 "get_settings ok"
             );
             Ok(s)
@@ -334,12 +355,16 @@ fn get_settings() -> Result<AppSettings, String> {
     }
 }
 
-/// Persist OpenRouter key + model to `~/.boris/settings.json` (never logged).
+/// Persist OpenRouter key + models/providers to `~/.boris/settings.json` (never logged).
 #[tauri::command]
 fn save_app_settings(settings: AppSettings) -> Result<(), String> {
     tracing::info!(
         has_key = !settings.openrouter_api_key.trim().is_empty(),
         model = %settings.openrouter_model,
+        fast_model = %settings.openrouter_fast_model,
+        model_provider = %settings.openrouter_model_provider,
+        fast_provider = %settings.openrouter_fast_provider,
+        pin_provider = settings.openrouter_pin_provider,
         "save_app_settings"
     );
     save_settings(&settings).map_err(|e| {

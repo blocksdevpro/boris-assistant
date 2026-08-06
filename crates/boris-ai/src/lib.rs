@@ -11,5 +11,8 @@ pub mod stream;
 
 pub use client::LlmClient;
 pub use error::{LlmError, LlmErrorKind};
+pub use providers::openrouter::{
+    parse_provider_list, split_model_and_provider, TokenUsage,
+};
 pub use providers::OpenRouterClient;
 pub use stream::{event_stream, EventStream, EventStreamSender};

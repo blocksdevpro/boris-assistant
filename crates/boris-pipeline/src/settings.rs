@@ -1,7 +1,7 @@
 //! Persistent user settings under `~/.boris/settings.json`.
 //!
-//! Stores OpenRouter credentials so the desktop shell can restore fields
-//! across launches. Never log the API key.
+//! Stores OpenRouter credentials + model/provider prefs so the desktop shell
+//! can restore fields across launches. Never log the API key.
 
 use std::fs;
 use std::io::{self, Write};
@@ -17,14 +17,34 @@ pub fn settings_path() -> PathBuf {
 }
 
 /// Desktop connection settings restored into the main window on launch.
+///
+/// **Model vs model-provider**
+/// - `openrouter_model` / `openrouter_fast_model` — OpenRouter model ids
+///   (`google/gemini-2.5-flash-lite`, `anthropic/claude-sonnet-4`, …)
+/// - `openrouter_model_provider` / `openrouter_fast_provider` — OpenRouter
+///   **inference hosts** for that model (CoreWeave, Baseten, DeepInfra, …),
+///   not the API brand. Comma-separated slugs, e.g. `coreweave,baseten`.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     /// OpenRouter API key (password field). Empty means "use env at start".
     #[serde(default)]
     pub openrouter_api_key: String,
-    /// Preferred OpenRouter model id. Empty means backend default.
+    /// Strong / primary OpenRouter model id. Empty means backend default.
     #[serde(default)]
     pub openrouter_model: String,
+    /// Fast / cheap model for simple turns. Empty → same as strong (or env).
+    #[serde(default)]
+    pub openrouter_fast_model: String,
+    /// Preferred OpenRouter model-provider(s) for the strong model.
+    /// Slugs like `coreweave`, `baseten`, `deepinfra` (comma-separated order).
+    #[serde(default)]
+    pub openrouter_model_provider: String,
+    /// Preferred OpenRouter model-provider(s) for the fast model.
+    #[serde(default)]
+    pub openrouter_fast_provider: String,
+    /// When true and a model-provider list is set, do not fall back to other hosts.
+    #[serde(default)]
+    pub openrouter_pin_provider: bool,
     /// Tool capability preset: `full` | `local_power` | `voice_safe`.
     /// Empty → engine default (Full). Override also via `BORIS_CAPABILITY`.
     #[serde(default)]
@@ -43,6 +63,10 @@ impl std::fmt::Debug for AppSettings {
                 },
             )
             .field("openrouter_model", &self.openrouter_model)
+            .field("openrouter_fast_model", &self.openrouter_fast_model)
+            .field("openrouter_model_provider", &self.openrouter_model_provider)
+            .field("openrouter_fast_provider", &self.openrouter_fast_provider)
+            .field("openrouter_pin_provider", &self.openrouter_pin_provider)
             .field("capability_preset", &self.capability_preset)
             .finish()
     }
@@ -130,5 +154,22 @@ mod tests {
     fn default_deserializes_empty_object() {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, AppSettings::default());
+    }
+
+    #[test]
+    fn deserializes_provider_fields() {
+        let s: AppSettings = serde_json::from_str(
+            r#"{
+                "openrouter_model": "google/gemini-2.5-flash-lite",
+                "openrouter_fast_model": "google/gemini-2.5-flash-lite",
+                "openrouter_model_provider": "coreweave",
+                "openrouter_fast_provider": "baseten,siliconflow",
+                "openrouter_pin_provider": true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(s.openrouter_model_provider, "coreweave");
+        assert_eq!(s.openrouter_fast_provider, "baseten,siliconflow");
+        assert!(s.openrouter_pin_provider);
     }
 }

@@ -26,7 +26,9 @@ import {
   getSettings,
   listInputDevices,
   listOutputDevices,
+  MODEL_PRESETS,
   onModelsProgress,
+  PROVIDER_PRESETS,
   saveSettings,
   startEngine,
   stopEngine,
@@ -68,7 +70,16 @@ export function MainWindow() {
   );
 
   const [apiKey, setApiKey] = useState("");
+  /** Strong / primary OpenRouter model id. */
   const [model, setModel] = useState("");
+  /** Fast model for simple turns (empty = same as strong). */
+  const [fastModel, setFastModel] = useState("");
+  /** OpenRouter model-provider for strong (e.g. coreweave). */
+  const [modelProvider, setModelProvider] = useState("");
+  /** OpenRouter model-provider for fast. */
+  const [fastProvider, setFastProvider] = useState("");
+  /** Hard-pin preferred providers (no OpenRouter fallbacks). */
+  const [pinProvider, setPinProvider] = useState(false);
   const [inputs, setInputs] = useState<DeviceDto[]>([]);
   const [outputs, setOutputs] = useState<DeviceDto[]>([]);
   const [selectedInput, setSelectedInput] = useState("");
@@ -128,7 +139,7 @@ export function MainWindow() {
     });
   }, [refreshDevices, refreshModels]);
 
-  // Restore last OpenRouter key + model from ~/.boris/settings.json
+  // Restore last OpenRouter key + models/providers from ~/.boris/settings.json
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -137,6 +148,10 @@ export function MainWindow() {
         if (cancelled) return;
         if (s.openrouter_api_key) setApiKey(s.openrouter_api_key);
         if (s.openrouter_model) setModel(s.openrouter_model);
+        if (s.openrouter_fast_model) setFastModel(s.openrouter_fast_model);
+        if (s.openrouter_model_provider) setModelProvider(s.openrouter_model_provider);
+        if (s.openrouter_fast_provider) setFastProvider(s.openrouter_fast_provider);
+        if (s.openrouter_pin_provider) setPinProvider(true);
       } catch {
         // Missing or unreadable settings → leave fields empty
       }
@@ -146,16 +161,20 @@ export function MainWindow() {
     };
   }, []);
 
-  const persistCredentials = useCallback(async (key: string, modelId: string) => {
+  const persistCredentials = useCallback(async () => {
     try {
       await saveSettings({
-        openrouter_api_key: key,
-        openrouter_model: modelId,
+        openrouter_api_key: apiKey,
+        openrouter_model: model,
+        openrouter_fast_model: fastModel,
+        openrouter_model_provider: modelProvider,
+        openrouter_fast_provider: fastProvider,
+        openrouter_pin_provider: pinProvider,
       });
     } catch {
       // Non-fatal: start should still proceed if disk write fails
     }
-  }, []);
+  }, [apiKey, model, fastModel, modelProvider, fastProvider, pinProvider]);
 
   const onStart = async () => {
     setBusy(true);
@@ -163,6 +182,10 @@ export function MainWindow() {
     logger.info("UI onStart", {
       hasKey: Boolean(apiKey.trim()),
       model: model || null,
+      fastModel: fastModel || null,
+      modelProvider: modelProvider || null,
+      fastProvider: fastProvider || null,
+      pinProvider,
       selectedInput,
       selectedOutput,
       modelsReady,
@@ -170,12 +193,19 @@ export function MainWindow() {
     });
     try {
       // Save before start so relaunch restores credentials even if engine fails later
-      await persistCredentials(apiKey, model);
+      await persistCredentials();
       // Host also re-applies preferred devices after Start; send them first so
       // they are stored even if engine spawn is slow.
       if (selectedInput) await switchInput(selectedInput);
       if (selectedOutput) await switchOutput(selectedOutput);
-      await startEngine(apiKey, model || undefined);
+      await startEngine({
+        apiKey,
+        model: model || undefined,
+        fastModel: fastModel || undefined,
+        modelProvider: modelProvider || undefined,
+        fastProvider: fastProvider || undefined,
+        pinProvider,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("UI onStart failed", msg);
@@ -382,19 +412,9 @@ export function MainWindow() {
           <Panel
             icon={<KeyRound className="size-3.5" strokeWidth={2} />}
             title="Connection"
-            description="OpenRouter credentials for chat. Empty key uses the process env."
+            description="OpenRouter key, models, and model-providers (inference hosts like CoreWeave — not the API brand)."
           >
             <div className="flex flex-col gap-3.5">
-              <Field label="Model" htmlFor="model-id">
-                <Input
-                  id="model-id"
-                  placeholder="e.g. google/gemini-2.5-flash-lite"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={engineOn}
-                  className="h-9 border-white/[0.08] bg-white/[0.03] text-[13px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
-                />
-              </Field>
               <Field label="API key" htmlFor="api-key">
                 <Input
                   id="api-key"
@@ -407,6 +427,77 @@ export function MainWindow() {
                   className="h-9 border-white/[0.08] bg-white/[0.03] text-[13px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
                 />
               </Field>
+
+              <div className="rounded-xl bg-white/[0.02] px-3 py-3 ring-1 ring-white/[0.05]">
+                <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-white/40">
+                  Strong model
+                </p>
+                <div className="flex flex-col gap-3">
+                  <ModelPicker
+                    id="model-id"
+                    value={model}
+                    disabled={engineOn}
+                    onChange={setModel}
+                    placeholder="google/gemini-2.5-flash-lite"
+                  />
+                  <ProviderPicker
+                    id="model-provider"
+                    value={modelProvider}
+                    disabled={engineOn}
+                    onChange={setModelProvider}
+                    hint="OpenRouter host for this model (e.g. coreweave). Empty = auto."
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-white/[0.02] px-3 py-3 ring-1 ring-white/[0.05]">
+                <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-white/40">
+                  Fast model
+                  <span className="ml-1.5 font-normal normal-case tracking-normal text-white/25">
+                    simple turns · leave empty to match strong
+                  </span>
+                </p>
+                <div className="flex flex-col gap-3">
+                  <ModelPicker
+                    id="fast-model-id"
+                    value={fastModel}
+                    disabled={engineOn}
+                    onChange={setFastModel}
+                    placeholder="same as strong"
+                  />
+                  <ProviderPicker
+                    id="fast-provider"
+                    value={fastProvider}
+                    disabled={engineOn}
+                    onChange={setFastProvider}
+                    hint="Host for the fast model. Empty = strong’s provider, then auto."
+                  />
+                </div>
+              </div>
+
+              <label className="flex cursor-pointer items-start gap-2.5 text-[12.5px] text-white/60">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-3.5 rounded border-white/20 bg-white/5"
+                  checked={pinProvider}
+                  disabled={engineOn || (!modelProvider.trim() && !fastProvider.trim())}
+                  onChange={(e) => setPinProvider(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium text-white/75">Pin provider</span>
+                  <span className="mt-0.5 block text-[11.5px] text-white/35">
+                    Don’t fall back to other OpenRouter hosts if the preferred list fails.
+                  </span>
+                </span>
+              </label>
+
+              <p className="text-[11px] leading-relaxed text-white/30">
+                Tip: you can also write{" "}
+                <code className="rounded bg-white/[0.06] px-1 py-0.5 text-white/45">
+                  model@coreweave
+                </code>{" "}
+                in the model field. Provider dropdown wins when both are set.
+              </p>
             </div>
           </Panel>
 
@@ -837,6 +928,131 @@ function Field({
         {label}
       </Label>
       {children}
+    </div>
+  );
+}
+
+/** Preset select + free-text model id (easier switching than a bare text box). */
+function ModelPicker({
+  id,
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  placeholder: string;
+}) {
+  const presetMatch = MODEL_PRESETS.some((p) => p.id === value);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={`${id}-preset`} className="text-[11px] font-medium tracking-wide text-white/45">
+        Model
+      </Label>
+      <select
+        id={`${id}-preset`}
+        className={selectClassName}
+        disabled={disabled}
+        value={presetMatch ? value : "__custom__"}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "__custom__") {
+            if (presetMatch) onChange("");
+            return;
+          }
+          onChange(v);
+        }}
+      >
+        {MODEL_PRESETS.map((p) => (
+          <option key={p.id} value={p.id} className="bg-[#1a1b20] text-white">
+            {p.label}
+          </option>
+        ))}
+        <option value="__custom__" className="bg-[#1a1b20] text-white">
+          Custom model id…
+        </option>
+      </select>
+      <Input
+        id={id}
+        list={`${id}-suggestions`}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="h-9 border-white/[0.08] bg-white/[0.03] font-mono text-[12px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
+      />
+      <datalist id={`${id}-suggestions`}>
+        {MODEL_PRESETS.map((p) => (
+          <option key={p.id} value={p.id} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+/** OpenRouter model-provider (inference host) picker. */
+function ProviderPicker({
+  id,
+  value,
+  onChange,
+  disabled,
+  hint,
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  hint: string;
+}) {
+  const firstSlug = value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)[0] ?? "";
+  const presetMatch = PROVIDER_PRESETS.some((p) => p.id === firstSlug && p.id !== "");
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={id} className="text-[11px] font-medium tracking-wide text-white/45">
+        Model provider
+      </Label>
+      <select
+        id={`${id}-preset`}
+        className={selectClassName}
+        disabled={disabled}
+        value={presetMatch ? firstSlug : value.trim() ? "__custom__" : ""}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "__custom__") {
+            if (presetMatch) onChange("");
+            return;
+          }
+          onChange(v);
+        }}
+      >
+        {PROVIDER_PRESETS.map((p) => (
+          <option key={p.id || "auto"} value={p.id} className="bg-[#1a1b20] text-white">
+            {p.label}
+            {p.id ? ` (${p.id})` : ""}
+          </option>
+        ))}
+        <option value="__custom__" className="bg-[#1a1b20] text-white">
+          Custom / ordered list…
+        </option>
+      </select>
+      <Input
+        id={id}
+        list={`${id}-suggestions`}
+        placeholder="coreweave  or  coreweave,baseten"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="h-9 border-white/[0.08] bg-white/[0.03] font-mono text-[12px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
+      />
+      <datalist id={`${id}-suggestions`}>
+        {PROVIDER_PRESETS.filter((p) => p.id).map((p) => (
+          <option key={p.id} value={p.id} />
+        ))}
+      </datalist>
+      <p className="text-[11px] leading-snug text-white/30">{hint}</p>
     </div>
   );
 }

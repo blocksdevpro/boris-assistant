@@ -51,15 +51,31 @@ impl AppState {
     /// Spawn the engine on first call, then send Start, then apply preferred devices.
     ///
     /// `on_status` is invoked on every status snapshot (use to `emit` to the UI).
+    ///
+    /// `model` / `fast_model` are OpenRouter model ids. `model_provider` /
+    /// `fast_provider` are OpenRouter **model-providers** (CoreWeave, Baseten, …),
+    /// not API brands — comma-separated slugs for `provider.order`.
     pub fn start(
         &self,
         api_key: String,
         model: Option<String>,
+        fast_model: Option<String>,
+        model_provider: Option<String>,
+        fast_provider: Option<String>,
+        pin_provider: Option<bool>,
         on_status: impl Fn(StatusPicture) + Send + 'static,
     ) -> Result<(), String> {
         let mut handle_g = self.handle.lock().unwrap();
         let already_spawned = handle_g.is_some();
-        info!(already_spawned, model = ?model, "AppState::start");
+        info!(
+            already_spawned,
+            model = ?model,
+            fast_model = ?fast_model,
+            model_provider = ?model_provider,
+            fast_provider = ?fast_provider,
+            pin_provider = ?pin_provider,
+            "AppState::start"
+        );
 
         if handle_g.is_none() {
             if api_key.trim().is_empty() {
@@ -86,9 +102,13 @@ impl AppState {
                 "spawning pipeline engine"
             );
 
-            let config = PipelineConfig::with_defaults(
+            let config = PipelineConfig::with_llm(
                 api_key,
                 model,
+                fast_model,
+                model_provider,
+                fast_provider,
+                pin_provider,
                 SUPERTONE_SAMPLE_RATE,
                 WAKEWORD_MODEL_BYTES.to_vec(),
             );

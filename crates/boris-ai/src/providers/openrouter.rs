@@ -14,9 +14,22 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// OpenRouter Chat Completions client.
+///
+/// Supports optional **model-provider** routing (`provider.order`) so hosts can
+/// pin to inference endpoints like CoreWeave / Baseten / SiliconFlow — not the
+/// LLM author (Google/OpenAI), but the OpenRouter hosting provider for that model.
+///
+/// When a `session_id` is set, OpenRouter sticky-routes turns to the same
+/// endpoint to maximize **prompt-cache hits** (`usage.prompt_tokens_details.cached_tokens`).
 pub struct OpenRouterClient {
     api_key: String,
     model: String,
+    /// OpenRouter provider slugs tried in order (e.g. `["coreweave", "baseten"]`).
+    provider_order: Vec<String>,
+    /// When `provider_order` is set: whether to fall back to other providers.
+    allow_fallbacks: bool,
+    /// Sticky routing key for cache-friendly multi-turn sessions.
+    session_id: Option<String>,
     client: Client,
 }
 
@@ -41,9 +54,50 @@ impl OpenRouterClient {
         self
     }
 
+    /// Prefer specific OpenRouter **model-providers** (inference hosts) in order.
+    ///
+    /// Empty list → OpenRouter default load-balancing / sticky routing.
+    /// Example: `["coreweave", "baseten"]` matches the Provider column on model pages.
+    pub fn with_provider_order(mut self, order: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.provider_order = order.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
+    /// Parse a free-form provider string (comma/space separated) into `provider.order`.
+    ///
+    /// Accepts slugs as shown on OpenRouter (`coreweave`, `deepinfra/turbo`, `novita`).
+    /// Empty / whitespace → no preference.
+    pub fn with_provider_pref(mut self, raw: impl AsRef<str>) -> Self {
+        self.provider_order = parse_provider_list(raw.as_ref());
+        self
+    }
+
+    /// Whether OpenRouter may try other providers when the preferred list fails.
+    /// Default `true`. Set `false` to hard-pin to `provider_order` only.
+    pub fn with_allow_fallbacks(mut self, allow: bool) -> Self {
+        self.allow_fallbacks = allow;
+        self
+    }
+
+    /// Session id for OpenRouter sticky routing (prompt-cache hits across turns).
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let s = session_id.into();
+        self.session_id = if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        };
+        self
+    }
+
     /// Model id configured for this client.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Configured OpenRouter model-provider order (may be empty).
+    pub fn provider_order(&self) -> &[String] {
+        &self.provider_order
     }
 
     fn build(
@@ -61,6 +115,9 @@ impl OpenRouterClient {
         Self {
             api_key,
             model: model.unwrap_or_else(|| "google/gemini-2.5-flash-lite".to_string()),
+            provider_order: Vec::new(),
+            allow_fallbacks: true,
+            session_id: None,
             client,
         }
     }
@@ -159,10 +216,119 @@ fn extract_text_content(v: &Value) -> String {
     }
 }
 
+/// Split a user-facing provider preference into OpenRouter slugs.
+///
+/// Accepts comma and/or whitespace separated lists:
+/// `coreweave, baseten` → `["coreweave", "baseten"]`.
+pub fn parse_provider_list(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+/// Optional split of `model@provider` / `model|provider` into (model, provider_pref).
+///
+/// Provider-only fields in settings take precedence when both are set; this is a
+/// convenience so a single string can carry both.
+pub fn split_model_and_provider(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return (String::new(), None);
+    }
+    // Prefer `@` (common "model@host" form); also accept `|`.
+    for sep in ['@', '|'] {
+        if let Some((model, provider)) = raw.split_once(sep) {
+            let model = model.trim();
+            let provider = provider.trim();
+            if !model.is_empty() && !provider.is_empty() {
+                return (model.to_string(), Some(provider.to_string()));
+            }
+        }
+    }
+    (raw.to_string(), None)
+}
+
+/// Token usage extracted from an OpenRouter response (cache-aware).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    /// Prompt tokens served from provider cache (`prompt_tokens_details.cached_tokens`).
+    pub cached_tokens: u64,
+    /// Tokens written into cache this request (when reported).
+    pub cache_write_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn from_usage_value(usage: &Value) -> Self {
+        let prompt_tokens = usage
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total_tokens = usage
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(prompt_tokens.saturating_add(completion_tokens));
+        let details = usage.get("prompt_tokens_details");
+        let cached_tokens = details
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_write_tokens = details
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_tokens,
+            cache_write_tokens,
+        }
+    }
+
+    pub fn cache_hit(&self) -> bool {
+        self.cached_tokens > 0
+    }
+}
+
+fn log_usage(model: &str, usage: &TokenUsage, path: &str) {
+    if usage.total_tokens == 0 && usage.cached_tokens == 0 {
+        return;
+    }
+    if usage.cache_hit() {
+        tracing::info!(
+            model = %model,
+            path,
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            cached_tokens = usage.cached_tokens,
+            cache_write_tokens = usage.cache_write_tokens,
+            "OpenRouter usage (cache hit)"
+        );
+    } else {
+        tracing::debug!(
+            model = %model,
+            path,
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            cache_write_tokens = usage.cache_write_tokens,
+            "OpenRouter usage"
+        );
+    }
+}
+
 impl OpenRouterClient {
     async fn complete_blocking(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
         let url = "https://openrouter.ai/api/v1/chat/completions";
-        let body = Self::request_body(&self.model, messages, tools, false);
+        let body = self.request_body(messages, tools, false);
 
         let response = self
             .client
@@ -184,6 +350,10 @@ impl OpenRouterClient {
         let json: Value = response.json().await.map_err(|e| {
             LlmError::parse(format!("failed to parse OpenRouter response JSON: {e}"))
         })?;
+
+        if let Some(usage) = json.get("usage") {
+            log_usage(&self.model, &TokenUsage::from_usage_value(usage), "blocking");
+        }
 
         let mut message = json
             .get("choices")
@@ -217,17 +387,20 @@ impl OpenRouterClient {
         use futures_util::StreamExt;
 
         let url = "https://openrouter.ai/api/v1/chat/completions";
-        let body = Self::request_body(&self.model, messages, tools, true);
+        let body = self.request_body(messages, tools, true);
 
-        let response = self
+        let mut req = self
             .client
             .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(Self::map_request_error)?;
+            .json(&body);
+        if let Some(sid) = self.session_id.as_deref() {
+            // Header form is also supported; body session_id takes precedence if both set.
+            req = req.header("x-session-id", sid);
+        }
+
+        let response = req.send().await.map_err(Self::map_request_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -242,6 +415,7 @@ impl OpenRouterClient {
         let mut tool_acc: std::collections::BTreeMap<u32, (String, String, String)> =
             std::collections::BTreeMap::new();
         let mut role = "assistant".to_string();
+        let mut last_usage: Option<TokenUsage> = None;
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -262,6 +436,9 @@ impl OpenRouterClient {
                 let Ok(v) = serde_json::from_str::<Value>(data) else {
                     continue;
                 };
+                if let Some(usage) = v.get("usage") {
+                    last_usage = Some(TokenUsage::from_usage_value(usage));
+                }
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
                 };
@@ -286,11 +463,7 @@ impl OpenRouterClient {
                         for tc in tcs {
                             let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
                             let entry = tool_acc.entry(idx).or_insert_with(|| {
-                                (
-                                    String::new(),
-                                    String::new(),
-                                    String::new(),
-                                )
+                                (String::new(), String::new(), String::new())
                             });
                             if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                 if !id.is_empty() {
@@ -311,6 +484,10 @@ impl OpenRouterClient {
                     }
                 }
             }
+        }
+
+        if let Some(usage) = last_usage.as_ref() {
+            log_usage(&self.model, usage, "stream");
         }
 
         // Prefer empty string over null: several OpenRouter providers reject
@@ -346,25 +523,111 @@ impl OpenRouterClient {
         Ok(message)
     }
 
-    fn request_body(model: &str, messages: Value, tools: Value, stream: bool) -> Value {
+    fn request_body(&self, messages: Value, tools: Value, stream: bool) -> Value {
         let mut body = if tools.is_null() || tools.as_array().is_some_and(|a| a.is_empty()) {
             json!({
-                "model": model,
+                "model": self.model,
                 "messages": messages,
             })
         } else {
             json!({
-                "model": model,
+                "model": self.model,
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
             })
         };
+        let obj = body.as_object_mut().unwrap();
         if stream {
-            body.as_object_mut()
-                .unwrap()
-                .insert("stream".into(), json!(true));
+            obj.insert("stream".into(), json!(true));
+            // Final SSE event includes usage (incl. cached_tokens) when supported.
+            obj.insert(
+                "stream_options".into(),
+                json!({ "include_usage": true }),
+            );
+        }
+        if !self.provider_order.is_empty() {
+            obj.insert(
+                "provider".into(),
+                json!({
+                    "order": self.provider_order,
+                    "allow_fallbacks": self.allow_fallbacks,
+                }),
+            );
+        }
+        if let Some(sid) = self.session_id.as_deref() {
+            if !sid.is_empty() {
+                obj.insert("session_id".into(), json!(sid));
+            }
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_provider_list_comma_and_space() {
+        assert_eq!(
+            parse_provider_list("coreweave, Baseten  siliconflow"),
+            vec![
+                "coreweave".to_string(),
+                "baseten".to_string(),
+                "siliconflow".to_string()
+            ]
+        );
+        assert!(parse_provider_list("  ").is_empty());
+    }
+
+    #[test]
+    fn split_model_at_provider() {
+        let (m, p) = split_model_and_provider("google/gemini-2.5-flash-lite@coreweave");
+        assert_eq!(m, "google/gemini-2.5-flash-lite");
+        assert_eq!(p.as_deref(), Some("coreweave"));
+
+        let (m, p) = split_model_and_provider("openai/gpt-4o|deepinfra/turbo");
+        assert_eq!(m, "openai/gpt-4o");
+        assert_eq!(p.as_deref(), Some("deepinfra/turbo"));
+
+        let (m, p) = split_model_and_provider("google/gemini-2.5-flash-lite");
+        assert_eq!(m, "google/gemini-2.5-flash-lite");
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn request_body_includes_provider_and_session() {
+        let client = OpenRouterClient::new("k".into(), Some("m".into()))
+            .with_provider_pref("coreweave, baseten")
+            .with_allow_fallbacks(false)
+            .with_session_id("sess-1");
+        let body = client.request_body(json!([]), Value::Null, true);
+        assert_eq!(body["model"], "m");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(
+            body["provider"]["order"],
+            json!(["coreweave", "baseten"])
+        );
+        assert_eq!(body["provider"]["allow_fallbacks"], false);
+        assert_eq!(body["session_id"], "sess-1");
+    }
+
+    #[test]
+    fn token_usage_parses_cached_tokens() {
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "total_tokens": 1050,
+            "prompt_tokens_details": {
+                "cached_tokens": 900,
+                "cache_write_tokens": 100
+            }
+        });
+        let u = TokenUsage::from_usage_value(&usage);
+        assert_eq!(u.cached_tokens, 900);
+        assert_eq!(u.cache_write_tokens, 100);
+        assert!(u.cache_hit());
     }
 }

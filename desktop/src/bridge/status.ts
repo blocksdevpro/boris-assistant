@@ -63,18 +63,55 @@ export async function onStatus(
   };
 }
 
+export type StartEngineOptions = {
+  apiKey?: string;
+  /** Strong / primary OpenRouter model id. */
+  model?: string;
+  /** Fast model for simple turns. */
+  fastModel?: string;
+  /**
+   * OpenRouter model-provider slug(s) for the strong model
+   * (e.g. `coreweave` or `coreweave,baseten`) — not the API brand.
+   */
+  modelProvider?: string;
+  /** Model-provider for the fast model. */
+  fastProvider?: string;
+  /** Hard-pin to preferred providers (no fallbacks). */
+  pinProvider?: boolean;
+};
+
 export async function startEngine(
-  apiKey = "",
+  apiKeyOrOpts: string | StartEngineOptions = "",
   model?: string,
 ): Promise<void> {
+  const opts: StartEngineOptions =
+    typeof apiKeyOrOpts === "string"
+      ? { apiKey: apiKeyOrOpts, model }
+      : apiKeyOrOpts;
+
+  const apiKey = opts.apiKey ?? "";
+  const modelId = opts.model?.trim() || null;
+  const fastModel = opts.fastModel?.trim() || null;
+  const modelProvider = opts.modelProvider?.trim() || null;
+  const fastProvider = opts.fastProvider?.trim() || null;
+  const pinProvider = opts.pinProvider ?? null;
+
   logger.info("startEngine", {
     hasKey: Boolean(apiKey.trim()),
-    model: model?.trim() || null,
+    model: modelId,
+    fastModel,
+    modelProvider,
+    fastProvider,
+    pinProvider,
   });
   try {
     await invoke("start_engine", {
       apiKey,
-      model: model?.trim() ? model.trim() : null,
+      model: modelId,
+      fastModel,
+      modelProvider,
+      fastProvider,
+      pinProvider,
     });
     logger.info("startEngine ok");
   } catch (e) {

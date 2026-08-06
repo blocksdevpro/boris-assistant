@@ -4,6 +4,7 @@ use boris_agent::CapabilityPreset;
 
 use crate::paths;
 use crate::prompt::BORIS_SYSTEM_PROMPT;
+use crate::settings::{self, AppSettings};
 
 /// Host-supplied configuration for [`crate::Engine::spawn`].
 ///
@@ -11,7 +12,16 @@ use crate::prompt::BORIS_SYSTEM_PROMPT;
 /// Does **not** read `config.toml`.
 pub struct PipelineConfig {
     pub openrouter_api_key: String,
+    /// Strong / primary model id (multi-step agent work).
     pub openrouter_model: Option<String>,
+    /// Fast / cheap model id for simple turns. `None` → resolve from settings/env/default.
+    pub openrouter_fast_model: Option<String>,
+    /// OpenRouter **model-provider** preference for strong (e.g. `coreweave`).
+    pub openrouter_model_provider: Option<String>,
+    /// OpenRouter model-provider preference for fast.
+    pub openrouter_fast_provider: Option<String>,
+    /// When true, do not fall back to other OpenRouter hosts if preferred list fails.
+    pub openrouter_pin_provider: bool,
     pub system_prompt: String,
     /// Rate of PCM passed to playback (must match TTS native rate).
     pub play_source_rate: u32,
@@ -35,9 +45,40 @@ pub struct PipelineConfig {
 
 impl PipelineConfig {
     /// Build with model paths under `~/.boris/models` and optional seed from workspace assets.
+    ///
+    /// Merges explicit args with `~/.boris/settings.json` and env vars:
+    /// - `OPENROUTER_MODEL` / `BORIS_STRONG_MODEL` — strong model
+    /// - `BORIS_FAST_MODEL` — fast model
+    /// - `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` — strong provider order
+    /// - `BORIS_FAST_PROVIDER` — fast provider order
+    /// - `BORIS_PIN_PROVIDER=1` — no fallbacks when provider list is set
     pub fn with_defaults(
         openrouter_api_key: String,
         openrouter_model: Option<String>,
+        play_source_rate: u32,
+        wakeword_model: Vec<u8>,
+    ) -> Self {
+        Self::with_llm(
+            openrouter_api_key,
+            openrouter_model,
+            None,
+            None,
+            None,
+            None,
+            play_source_rate,
+            wakeword_model,
+        )
+    }
+
+    /// Full LLM configuration (models + OpenRouter model-providers).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_llm(
+        openrouter_api_key: String,
+        openrouter_model: Option<String>,
+        openrouter_fast_model: Option<String>,
+        openrouter_model_provider: Option<String>,
+        openrouter_fast_provider: Option<String>,
+        openrouter_pin_provider: Option<bool>,
         play_source_rate: u32,
         wakeword_model: Vec<u8>,
     ) -> Self {
@@ -50,12 +91,20 @@ impl PipelineConfig {
         let home = paths::boris_home();
         tracing::info!(boris_home = %home.display(), "using Boris home");
 
-        let capability_preset = resolve_capability_preset();
+        let saved = settings::load_settings().unwrap_or_default();
+        let capability_preset = resolve_capability_preset(&saved);
         let long_term_memory = resolve_long_term_memory_flag();
+
+        let (strong, strong_prov, fast, fast_prov, pin) =
+            resolve_llm_prefs(&saved, openrouter_model, openrouter_fast_model, openrouter_model_provider, openrouter_fast_provider, openrouter_pin_provider);
 
         Self {
             openrouter_api_key,
-            openrouter_model,
+            openrouter_model: strong,
+            openrouter_fast_model: fast,
+            openrouter_model_provider: strong_prov,
+            openrouter_fast_provider: fast_prov,
+            openrouter_pin_provider: pin,
             system_prompt: BORIS_SYSTEM_PROMPT.to_string(),
             play_source_rate,
             wakeword_model,
@@ -71,8 +120,77 @@ impl PipelineConfig {
     }
 }
 
+/// Priority: explicit arg → env → settings.json → None (engine default).
+fn resolve_llm_prefs(
+    saved: &AppSettings,
+    model: Option<String>,
+    fast_model: Option<String>,
+    model_provider: Option<String>,
+    fast_provider: Option<String>,
+    pin: Option<bool>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+) {
+    let strong = first_nonempty([
+        model,
+        env_opt("OPENROUTER_MODEL"),
+        env_opt("BORIS_STRONG_MODEL"),
+        nonempty(saved.openrouter_model.clone()),
+    ]);
+    let fast = first_nonempty([
+        fast_model,
+        env_opt("BORIS_FAST_MODEL"),
+        nonempty(saved.openrouter_fast_model.clone()),
+        None,
+    ]);
+    let strong_prov = first_nonempty([
+        model_provider,
+        env_opt("BORIS_MODEL_PROVIDER"),
+        env_opt("BORIS_STRONG_PROVIDER"),
+        nonempty(saved.openrouter_model_provider.clone()),
+    ]);
+    let fast_prov = first_nonempty([
+        fast_provider,
+        env_opt("BORIS_FAST_PROVIDER"),
+        nonempty(saved.openrouter_fast_provider.clone()),
+        // Fall back to strong provider if only one is configured.
+        strong_prov.clone(),
+    ]);
+    let pin = pin.unwrap_or_else(|| {
+        env_truthy("BORIS_PIN_PROVIDER").unwrap_or(saved.openrouter_pin_provider)
+    });
+    (strong, strong_prov, fast, fast_prov, pin)
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(nonempty)
+}
+
+fn nonempty(s: String) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn first_nonempty(candidates: [Option<String>; 4]) -> Option<String> {
+    candidates.into_iter().flatten().next()
+}
+
+fn env_truthy(key: &str) -> Option<bool> {
+    let v = std::env::var(key).ok()?;
+    let v = v.trim().to_ascii_lowercase();
+    Some(matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// `BORIS_CAPABILITY` env, else settings.json, else Full.
-fn resolve_capability_preset() -> CapabilityPreset {
+fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     if let Ok(raw) = std::env::var("BORIS_CAPABILITY") {
         if let Some(p) = CapabilityPreset::parse(&raw) {
             tracing::info!(preset = p.as_str(), "capability from BORIS_CAPABILITY");
@@ -83,19 +201,15 @@ fn resolve_capability_preset() -> CapabilityPreset {
             "unknown BORIS_CAPABILITY; expected voice_safe|local_power|full"
         );
     }
-    match crate::settings::load_settings() {
-        Ok(s) if !s.capability_preset.trim().is_empty() => {
-            if let Some(p) = CapabilityPreset::parse(&s.capability_preset) {
-                tracing::info!(preset = p.as_str(), "capability from settings.json");
-                return p;
-            }
-            tracing::warn!(
-                value = %s.capability_preset,
-                "unknown capability_preset in settings; using full"
-            );
+    if !saved.capability_preset.trim().is_empty() {
+        if let Some(p) = CapabilityPreset::parse(&saved.capability_preset) {
+            tracing::info!(preset = p.as_str(), "capability from settings.json");
+            return p;
         }
-        Ok(_) => {}
-        Err(e) => tracing::debug!(error = %e, "settings load for capability skipped"),
+        tracing::warn!(
+            value = %saved.capability_preset,
+            "unknown capability_preset in settings; using full"
+        );
     }
     CapabilityPreset::Full
 }

@@ -276,14 +276,22 @@ fn run(
 
     tracing::info!("building OpenRouter client + Agent…");
     // P1 model routing: fast for simple facts, strong for multi-step work.
-    let strong_model = config
-        .openrouter_model
-        .clone()
-        .unwrap_or_else(|| "google/gemini-2.5-flash-lite".into());
-    let fast_model = std::env::var("BORIS_FAST_MODEL").unwrap_or_else(|_| {
-        // Cheap/fast default; override with BORIS_FAST_MODEL.
-        "google/gemini-2.5-flash-lite".into()
-    });
+    // Supports OpenRouter **model-provider** prefs (CoreWeave, Baseten, …) and
+    // session sticky routing so prompt-cache hits show up as cached_tokens.
+    let (strong_model, strong_provider_raw) = resolve_model_and_provider(
+        config.openrouter_model.as_deref(),
+        config.openrouter_model_provider.as_deref(),
+        "google/gemini-2.5-flash-lite",
+    );
+    let (fast_model, fast_provider_raw) = resolve_model_and_provider(
+        config
+            .openrouter_fast_model
+            .as_deref()
+            .or(config.openrouter_model.as_deref()),
+        config.openrouter_fast_provider.as_deref(),
+        &strong_model,
+    );
+    let pin = config.openrouter_pin_provider;
     // Morph apply / merge models cannot do tool calling — Boris always sends tools.
     if looks_like_non_agent_model(&strong_model) {
         tracing::warn!(
@@ -293,16 +301,43 @@ fn run(
              google/gemini-2.5-flash-lite. Routing will fall back when tool use is rejected."
         );
     }
-    let strong = OpenRouterClient::new(
-        config.openrouter_api_key.clone(),
-        Some(strong_model.clone()),
+    // One session id for the engine process → OpenRouter sticky-routes to the
+    // same host, improving cache hit rates on multi-turn agent work.
+    let session_id = format!("boris-{}", uuid_lite());
+    let strong = build_openrouter_client(
+        &config.openrouter_api_key,
+        &strong_model,
+        strong_provider_raw.as_deref(),
+        pin,
+        &session_id,
     );
-    let fast = OpenRouterClient::new(config.openrouter_api_key.clone(), Some(fast_model.clone()));
-    let client: Box<dyn boris_agent::LlmClient> = if fast_model == strong_model {
-        tracing::info!(model = %strong_model, "single-model LLM (set BORIS_FAST_MODEL for routing)");
+    let fast = build_openrouter_client(
+        &config.openrouter_api_key,
+        &fast_model,
+        fast_provider_raw.as_deref(),
+        pin,
+        &session_id,
+    );
+    let client: Box<dyn boris_agent::LlmClient> = if fast_model == strong_model
+        && strong_provider_raw == fast_provider_raw
+    {
+        tracing::info!(
+            model = %strong_model,
+            provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
+            session_id = %session_id,
+            "single-model LLM (set fast model + provider for dual routing)"
+        );
         Box::new(strong)
     } else {
-        tracing::info!(fast = %fast_model, strong = %strong_model, "dual-model routing enabled");
+        tracing::info!(
+            fast = %fast_model,
+            fast_provider = fast_provider_raw.as_deref().unwrap_or("(auto)"),
+            strong = %strong_model,
+            strong_provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
+            pin_provider = pin,
+            session_id = %session_id,
+            "dual-model routing enabled"
+        );
         Box::new(boris_agent::RoutingClient::new(Box::new(fast), Box::new(strong)))
     };
     let mut agent = Agent::new(client, &config.system_prompt);
@@ -1753,6 +1788,66 @@ fn looks_like_non_agent_model(model: &str) -> bool {
         || m.contains("morph-v")
         || m.contains("apply-model")
         || m.contains("/apply")
+}
+
+/// Resolve model id + optional OpenRouter model-provider preference.
+///
+/// Accepts `model@provider` in the model field; a separate provider arg wins when both set.
+fn resolve_model_and_provider(
+    model: Option<&str>,
+    provider: Option<&str>,
+    default_model: &str,
+) -> (String, Option<String>) {
+    let raw = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(default_model);
+    let (model_id, inline_provider) = boris_agent::split_model_and_provider(raw);
+    let model_id = if model_id.is_empty() {
+        default_model.to_string()
+    } else {
+        model_id
+    };
+    let provider = provider
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or(inline_provider);
+    (model_id, provider)
+}
+
+fn build_openrouter_client(
+    api_key: &str,
+    model: &str,
+    provider_pref: Option<&str>,
+    pin: bool,
+    session_id: &str,
+) -> OpenRouterClient {
+    let mut client = OpenRouterClient::new(api_key.to_string(), Some(model.to_string()))
+        .with_session_id(session_id);
+    if let Some(pref) = provider_pref {
+        if !pref.trim().is_empty() {
+            client = client
+                .with_provider_pref(pref)
+                .with_allow_fallbacks(!pin);
+            tracing::info!(
+                model = %model,
+                provider = %pref,
+                allow_fallbacks = !pin,
+                "OpenRouter model-provider preference set"
+            );
+        }
+    }
+    client
+}
+
+/// Lightweight session id without pulling in the `uuid` crate.
+fn uuid_lite() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Mix with address entropy so two engines started same tick differ.
+    let mix = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("{mix:016x}")
 }
 
 /// Result of draining host commands once.

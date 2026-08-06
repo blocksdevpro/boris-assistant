@@ -64,6 +64,8 @@ pub async fn agent_loop(
     let mut confirms_used = confirms_used;
     let max_rounds = config.max_tool_rounds as usize;
     let sandbox_root = sandbox_root.unwrap_or_else(crate::finish_gate::default_sandbox_guess);
+    // Last non-empty spoken line this turn (finish-gate re-entry must not discard it).
+    let mut last_speakable: Option<String> = None;
 
     for round in 0..=max_rounds {
         if let Some(ref ct) = cancel {
@@ -187,11 +189,7 @@ pub async fn agent_loop(
         }
 
         // Content-only response (or tools withheld / ignored at cap).
-        let mut reply = response["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let mut reply = extract_reply_text(&response);
 
         // At cap with only tool_calls and empty content: force one more speak attempt.
         if reply.is_empty() && at_cap {
@@ -207,20 +205,28 @@ pub async fn agent_loop(
                 .client
                 .complete(state.context.as_json(), Value::Null)
                 .await?;
-            reply = forced["content"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            reply = extract_reply_text(&forced);
             if !reply.is_empty() {
                 state.context.push(Role::Assistant, reply.clone());
             }
-        } else {
+        } else if !reply.is_empty() {
+            // Never push empty assistant content — OpenRouter returns
+            // `messages.N.content: Invalid input` for empty/null content.
             state.context.push(Role::Assistant, reply.clone());
         }
 
-        // P0 finish gate: open todos → force another tool round (capped).
-        if !at_cap && finish_gate_left > 0 && !reply.is_empty() {
+        if !reply.is_empty() {
+            last_speakable = Some(reply.clone());
+        }
+
+        // Finish gate: only when *this turn* used tools and open todos remain.
+        // Stale todos from a prior session must not force re-entry (and silence)
+        // on a casual "what are you doing?" reply.
+        if !at_cap
+            && finish_gate_left > 0
+            && !reply.is_empty()
+            && !tools_used.is_empty()
+        {
             let pending = crate::finish_gate::pending_todo_count(&sandbox_root);
             if pending > 0 {
                 finish_gate_left = finish_gate_left.saturating_sub(1);
@@ -240,6 +246,13 @@ pub async fn agent_loop(
             }
         }
 
+        // Prefer current reply; if finish-gate re-entry went silent, keep earlier speech.
+        if reply.is_empty() {
+            if let Some(prev) = last_speakable.clone() {
+                reply = prev;
+            }
+        }
+
         emit(AgentEvent::MessageEnd {
             role: Role::Assistant,
             preview: log_preview(&reply, 80),
@@ -251,7 +264,9 @@ pub async fn agent_loop(
         let outcome = if reply.is_empty() {
             // Never return Silent after tool work if we can offer a fallback line.
             if tools_used.is_empty() {
-                AgentOutcome::Silent
+                AgentOutcome::speak(
+                    "I blanked on that one — say it again and I'll pick it up.",
+                )
             } else {
                 AgentOutcome::speak(
                     "I hit a snag wrapping up, but I did run some tools. Ask me to continue.",
@@ -588,6 +603,25 @@ fn log_preview(s: &str, max: usize) -> String {
         format!("{preview}…")
     } else {
         preview
+    }
+}
+
+/// Pull speakable text from an assistant message (`content` string or parts array).
+fn extract_reply_text(response: &Value) -> String {
+    match response.get("content") {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Array(parts)) => {
+            let mut out = String::new();
+            for p in parts {
+                if let Some(s) = p.as_str() {
+                    out.push_str(s);
+                } else if let Some(s) = p.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(s);
+                }
+            }
+            out.trim().to_string()
+        }
+        _ => String::new(),
     }
 }
 

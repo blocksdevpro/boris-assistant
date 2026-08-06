@@ -149,13 +149,50 @@ impl LlmClient for RoutingClient {
             self.set_route(classify_route(&text));
         }
         let mode = self.route();
-        tracing::debug!(route = mode.as_str(), model = %self.active().model(), "llm route");
-        self.active().complete(messages, tools).await
+        let primary = self.active();
+        tracing::debug!(route = mode.as_str(), model = %primary.model(), "llm route");
+
+        match primary.complete(messages.clone(), tools.clone()).await {
+            Ok(v) => Ok(v),
+            Err(e) if tools_requested(&tools) && is_tool_unsupported_error(&e) => {
+                // e.g. morph/morph-v3-fast is a code-apply model — no tool endpoints.
+                // Fall back to the other tier so voice+tools keep working.
+                let fallback = match mode {
+                    RouteMode::Strong => self.fast.as_ref(),
+                    RouteMode::Fast => self.strong.as_ref(),
+                };
+                if fallback.model() == primary.model() {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    failed_model = %primary.model(),
+                    fallback_model = %fallback.model(),
+                    error = %e,
+                    "model does not support tools; retrying with other route"
+                );
+                fallback.complete(messages, tools).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn model(&self) -> &str {
         self.active().model()
     }
+}
+
+fn tools_requested(tools: &Value) -> bool {
+    tools.as_array().is_some_and(|a| !a.is_empty())
+}
+
+/// OpenRouter 404: "No endpoints found that support tool use…"
+fn is_tool_unsupported_error(e: &LlmError) -> bool {
+    let m = e.message.to_ascii_lowercase();
+    m.contains("no endpoints found that support tool")
+        || m.contains("support tool use")
+        || m.contains("does not support tool")
+        || m.contains("tools are not supported")
+        || m.contains("tool use is not supported")
 }
 
 fn last_user_text(messages: &Value) -> Option<String> {
@@ -200,5 +237,14 @@ mod tests {
             classify_route("research the latest Rust async runtimes"),
             RouteMode::Strong
         );
+    }
+
+    #[test]
+    fn detects_openrouter_tool_unsupported_errors() {
+        let e = LlmError::http(
+            "OpenRouter HTTP error 404 Not Found: {\"error\":{\"message\":\"No endpoints found that support tool use. Try disabling \\\"get_time\\\".\",\"code\":404}}",
+        );
+        assert!(is_tool_unsupported_error(&e));
+        assert!(!is_tool_unsupported_error(&LlmError::http("rate limited")));
     }
 }

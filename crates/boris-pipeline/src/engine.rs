@@ -284,6 +284,15 @@ fn run(
         // Cheap/fast default; override with BORIS_FAST_MODEL.
         "google/gemini-2.5-flash-lite".into()
     });
+    // Morph apply / merge models cannot do tool calling — Boris always sends tools.
+    if looks_like_non_agent_model(&strong_model) {
+        tracing::warn!(
+            model = %strong_model,
+            "configured OpenRouter model looks specialized (e.g. Morph apply) and usually \
+             cannot use tools (get_time, bash, …). Prefer a chat model such as \
+             google/gemini-2.5-flash-lite. Routing will fall back when tool use is rejected."
+        );
+    }
     let strong = OpenRouterClient::new(
         config.openrouter_api_key.clone(),
         Some(strong_model.clone()),
@@ -886,17 +895,21 @@ fn run(
                     true, // keep freeform listen so they can say "continue"
                 )
             }
-            AgentOutcome::Speak { .. }
-            | AgentOutcome::Silent
-            | AgentOutcome::NeedsConfirmation { .. } => {
-                tracing::warn!(%turn, "agent produced no speech");
-                let _ = tts.unload();
-                picture.detail = None;
-                picture.said = Some("I didn't get a reply out. Wake me and try again.".into());
-                picture.publish();
-                follow_up_depth = 0;
-                picture.set_phase(Phase::Armed);
-                continue;
+            AgentOutcome::Silent | AgentOutcome::Speak { .. } => {
+                // Always speak a recovery line — never end the turn in dead silence.
+                tracing::warn!(%turn, "agent produced no speech; speaking recovery line");
+                (
+                    "I didn't get a reply out. Wake me and try again.".to_string(),
+                    false,
+                )
+            }
+            AgentOutcome::NeedsConfirmation { .. } => {
+                // Should have been resolved above; soft-recover rather than mute.
+                tracing::warn!(%turn, "unresolved confirmation after resolve pass");
+                (
+                    "I needed a yes or no and lost the thread. Wake me and try again.".to_string(),
+                    false,
+                )
             }
         };
 
@@ -1731,6 +1744,15 @@ impl TextToSpeech for PanicLostTts {
 /// characters (noise, partial wake, accidental clicks).
 fn transcript_usable(text: &str) -> bool {
     text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
+}
+
+/// Heuristic: specialized apply/merge models (Morph, etc.) usually cannot tool-call.
+fn looks_like_non_agent_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("morph/")
+        || m.contains("morph-v")
+        || m.contains("apply-model")
+        || m.contains("/apply")
 }
 
 /// Result of draining host commands once.

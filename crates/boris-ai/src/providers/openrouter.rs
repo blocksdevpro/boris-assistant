@@ -85,8 +85,20 @@ impl LlmClient for OpenRouterClient {
     async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
         // Prefer SSE stream path: lower TTFB; tools start as soon as the body is assembled
         // (no waiting on a single giant JSON buffer when the provider streams early).
+        //
+        // Critical: some OpenRouter/Gemini streams return HTTP 200 with zero content
+        // deltas (thinking-only / empty assembly). Treat that as failure and fall back
+        // to the non-stream path so the agent does not go Silent with nothing to say.
         match self.complete_streaming(messages.clone(), tools.clone()).await {
-            Ok(msg) => Ok(msg),
+            Ok(msg) if message_has_usable_payload(&msg) => Ok(msg),
+            Ok(msg) => {
+                tracing::warn!(
+                    content_preview = %msg.get("content").map(|c| c.to_string()).unwrap_or_default(),
+                    has_tools = msg.get("tool_calls").and_then(|t| t.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+                    "stream complete returned empty payload; falling back to non-stream"
+                );
+                self.complete_blocking(messages, tools).await
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "stream complete failed; falling back to non-stream");
                 self.complete_blocking(messages, tools).await
@@ -96,6 +108,54 @@ impl LlmClient for OpenRouterClient {
 
     fn model(&self) -> &str {
         OpenRouterClient::model(self)
+    }
+}
+
+/// True when an assistant message has speakable text and/or tool calls.
+fn message_has_usable_payload(msg: &Value) -> bool {
+    let has_tools = msg
+        .get("tool_calls")
+        .and_then(|t| t.as_array())
+        .is_some_and(|a| !a.is_empty());
+    if has_tools {
+        return true;
+    }
+    !extract_text_content(msg.get("content").unwrap_or(&Value::Null)).is_empty()
+}
+
+/// Pull plain text from OpenAI-style `content` (string or multimodal parts array).
+fn extract_text_content(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for p in parts {
+                if let Some(s) = p.as_str() {
+                    out.push_str(s);
+                    continue;
+                }
+                if let Some(s) = p.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(s);
+                    continue;
+                }
+                // Gemini-style: { "type": "text", "text": "..." }
+                if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(s) = p.get("text").and_then(|t| t.as_str()) {
+                        out.push_str(s);
+                    }
+                }
+            }
+            out.trim().to_string()
+        }
+        Value::Null => String::new(),
+        other => {
+            // Last resort: ignore objects/bools that are not speakable.
+            if other.is_object() || other.is_boolean() || other.is_number() {
+                String::new()
+            } else {
+                other.to_string().trim().to_string()
+            }
+        }
     }
 }
 
@@ -125,7 +185,7 @@ impl OpenRouterClient {
             LlmError::parse(format!("failed to parse OpenRouter response JSON: {e}"))
         })?;
 
-        let message = json
+        let mut message = json
             .get("choices")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("message"))
@@ -135,6 +195,19 @@ impl OpenRouterClient {
                     "OpenRouter response missing choices[0].message (parse error): {json}"
                 ))
             })?;
+
+        // Normalize content parts array → plain string so the agent loop can always
+        // read `response["content"].as_str()`.
+        if let Some(obj) = message.as_object_mut() {
+            if let Some(c) = obj.get("content").cloned() {
+                if !c.is_string() && !c.is_null() {
+                    let text = extract_text_content(&c);
+                    obj.insert("content".into(), Value::String(text));
+                } else if c.is_null() {
+                    obj.insert("content".into(), Value::String(String::new()));
+                }
+            }
+        }
 
         Ok(message)
     }
@@ -192,12 +265,22 @@ impl OpenRouterClient {
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
                 };
-                if let Some(delta) = choice.get("delta") {
+                // Prefer incremental delta; some providers also emit a full `message`.
+                let piece = choice.get("delta").or_else(|| choice.get("message"));
+                if let Some(delta) = piece {
                     if let Some(r) = delta.get("role").and_then(|r| r.as_str()) {
                         role = r.to_string();
                     }
-                    if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
-                        content.push_str(c);
+                    // content may be a string or a parts array (Gemini / multimodal).
+                    if let Some(c) = delta.get("content") {
+                        let chunk = extract_text_content(c);
+                        // extract_text_content trims; for streaming pieces preserve raw string
+                        // when it is a plain string so we don't drop intentional spaces.
+                        if let Some(s) = c.as_str() {
+                            content.push_str(s);
+                        } else if !chunk.is_empty() {
+                            content.push_str(&chunk);
+                        }
                     }
                     if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                         for tc in tcs {
@@ -230,9 +313,11 @@ impl OpenRouterClient {
             }
         }
 
+        // Prefer empty string over null: several OpenRouter providers reject
+        // `content: null` on assistant messages (including tool-call turns).
         let mut message = json!({
             "role": role,
-            "content": if content.is_empty() { Value::Null } else { Value::String(content) },
+            "content": content,
         });
         if !tool_acc.is_empty() {
             let tools: Vec<Value> = tool_acc

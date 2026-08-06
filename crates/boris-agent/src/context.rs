@@ -62,22 +62,75 @@ pub struct Context {
 }
 
 impl Message {
+    /// Serialize to an OpenAI / OpenRouter chat-completions message object.
+    ///
+    /// Always coerces `content` to a string (or keeps a valid parts array). Nested
+    /// objects from older compaction bugs are flattened so providers never see
+    /// `messages.N.content: Invalid input`.
     pub fn dump(&self) -> Value {
         match self.role {
             // Tool result — must surface tool_call_id at the top level.
-            Role::Tool => json!({
-                "role": "tool",
-                "tool_call_id": self.content["tool_call_id"],
-                "content":      self.content["content"],
-            }),
-            // Assistant with tool_calls — forward the raw object (already has "role").
-            Role::Assistant if self.content.get("tool_calls").is_some() => self.content.clone(),
-            // Everything else.
+            Role::Tool => {
+                let tool_call_id = self
+                    .content
+                    .get("tool_call_id")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(String::new()));
+                let content = coerce_message_content(
+                    self.content.get("content").unwrap_or(&Value::Null),
+                );
+                json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                })
+            }
+            // Assistant with tool_calls — forward the raw object, normalize content.
+            Role::Assistant if self.content.get("tool_calls").is_some() => {
+                let mut msg = self.content.clone();
+                if let Some(obj) = msg.as_object_mut() {
+                    obj.insert("role".into(), json!("assistant"));
+                    let raw = obj.get("content").cloned().unwrap_or(Value::Null);
+                    // Prefer empty string over null — several OpenRouter routes reject null.
+                    obj.insert("content".into(), coerce_message_content(&raw));
+                }
+                msg
+            }
+            // Everything else (system / user / plain assistant).
             _ => json!({
                 "role":    self.role.to_string(),
-                "content": self.content,
+                "content": coerce_message_content(&self.content),
             }),
         }
+    }
+}
+
+/// Coerce stored message content into a wire-safe OpenAI `content` value.
+///
+/// - strings stay strings
+/// - null / missing → `""`
+/// - nested `{ "role", "content" }` (legacy compact bug) → unwrap inner content
+/// - other JSON → stringified (tools always need a string body)
+fn coerce_message_content(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(s.clone()),
+        Value::Null => Value::String(String::new()),
+        // Multimodal content parts — pass through when well-formed.
+        Value::Array(parts) if !parts.is_empty() => {
+            let looks_like_parts = parts.iter().all(|p| {
+                p.get("type").and_then(|t| t.as_str()).is_some()
+            });
+            if looks_like_parts {
+                v.clone()
+            } else {
+                Value::String(v.to_string())
+            }
+        }
+        // Botched compact / double-wrap: `{ "role": "assistant", "content": "..." }`.
+        Value::Object(map) if map.contains_key("content") => {
+            coerce_message_content(map.get("content").unwrap_or(&Value::Null))
+        }
+        other => Value::String(other.to_string()),
     }
 }
 
@@ -276,7 +329,13 @@ impl Context {
             }
         }
 
-        // Tier 2: mask tool results from turns older than keep_tool_turns.
+        // Tier 2: collapse tool chains from turns older than keep_tool_turns.
+        //
+        // Important: store a *plain string* for collapsed assistants (not a nested
+        // `{role, content}` object). `Message::dump` wraps `content` again, and a
+        // nested object becomes `messages.N.content: Invalid input` on OpenRouter.
+        // Also drop the matching tool messages so we never leave orphan `role:tool`
+        // rows without a preceding `tool_calls` assistant.
         let has_system = self
             .messages
             .first()
@@ -291,27 +350,28 @@ impl Context {
         if turn_starts.len() > keep_tool_turns {
             let keep_from = turn_starts[turn_starts.len() - keep_tool_turns];
             for msg in self.messages[body_start..keep_from].iter_mut() {
-                if matches!(msg.role, Role::Tool) {
-                    if let Some(content) = msg.content.get_mut("content") {
-                        *content = Value::String("[older tool result omitted]".into());
-                    }
-                }
-                // Shrink huge assistant tool_calls messages in old turns.
-                if matches!(msg.role, Role::Assistant) {
-                    if msg.content.get("tool_calls").is_some() {
-                        let n = msg
-                            .content
-                            .get("tool_calls")
-                            .and_then(|t| t.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        msg.content = json!({
-                            "role": "assistant",
-                            "content": format!("[prior tool batch: {n} call(s) — details omitted]")
-                        });
-                    }
+                if matches!(msg.role, Role::Assistant) && msg.content.get("tool_calls").is_some() {
+                    let n = msg
+                        .content
+                        .get("tool_calls")
+                        .and_then(|t| t.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    // Plain string — dump will emit `{ "role": "assistant", "content": "..." }`.
+                    msg.content = Value::String(format!(
+                        "[prior tool batch: {n} call(s) — details omitted]"
+                    ));
                 }
             }
+            // Remove tool results in the collapsed window (orphans after stripping tool_calls).
+            let mut idx = 0usize;
+            self.messages.retain(|m| {
+                let drop = idx >= body_start
+                    && idx < keep_from
+                    && matches!(m.role, Role::Tool);
+                idx += 1;
+                !drop
+            });
         }
     }
 
@@ -610,5 +670,115 @@ mod tests {
         assert!(matches!(Role::from_str("system"), Ok(Role::System)));
         assert!(matches!(Role::from_str("tool"), Ok(Role::Tool)));
         assert!(Role::from_str("nope").is_err());
+    }
+
+    #[test]
+    fn dump_coerces_nested_assistant_content_to_string() {
+        // Legacy compact stored a full message object as content; dump must not
+        // double-wrap it (OpenRouter: messages.N.content Invalid input).
+        let msg = Message {
+            role: Role::Assistant,
+            content: json!({
+                "role": "assistant",
+                "content": "[prior tool batch: 2 call(s) — details omitted]"
+            }),
+        };
+        let dumped = msg.dump();
+        assert_eq!(dumped["role"], "assistant");
+        assert!(
+            dumped["content"].is_string(),
+            "content must be string, got {}",
+            dumped["content"]
+        );
+        assert!(dumped["content"]
+            .as_str()
+            .unwrap()
+            .contains("prior tool batch"));
+    }
+
+    #[test]
+    fn dump_tool_calls_uses_empty_string_not_null() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": { "name": "bash", "arguments": "{}" }
+                }]
+            }),
+        };
+        let dumped = msg.dump();
+        assert_eq!(dumped["content"], json!(""));
+        assert!(dumped.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn compact_mechanical_collapses_old_tool_chains_to_plain_strings() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+
+        // Turn 1: tool chain (will be compacted once we have >2 user turns)
+        ctx.push(Role::User, "u1");
+        ctx.push(
+            Role::Assistant,
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "bash", "arguments": "{\"cmd\":\"ls\"}" }
+                }]
+            }),
+        );
+        ctx.push(
+            Role::Tool,
+            json!({ "tool_call_id": "call_1", "content": "file1\nfile2\nfile3" }),
+        );
+        ctx.push(Role::Assistant, "done u1");
+
+        // Turns 2–3 keep the tool window closed so turn 1 collapses.
+        ctx.push(Role::User, "u2");
+        ctx.push(Role::Assistant, "a2");
+        ctx.push(Role::User, "u3");
+        ctx.push(Role::Assistant, "a3");
+
+        ctx.compact_mechanical();
+
+        // Turn-1 assistant tool_calls → plain summary string (not nested object).
+        let collapsed = ctx
+            .messages
+            .iter()
+            .find(|m| {
+                matches!(m.role, Role::Assistant)
+                    && m.content
+                        .as_str()
+                        .is_some_and(|s| s.contains("prior tool batch"))
+            })
+            .expect("collapsed tool batch summary");
+        assert!(collapsed.content.is_string());
+
+        // Orphan tool results from the collapsed window must be gone.
+        assert!(
+            !ctx.messages
+                .iter()
+                .any(|m| matches!(m.role, Role::Tool)),
+            "old tool messages should be dropped after collapse"
+        );
+
+        // Wire dump must be OpenRouter-safe (string content everywhere).
+        let wire = ctx.as_json();
+        let arr = wire.as_array().unwrap();
+        for (i, m) in arr.iter().enumerate() {
+            let c = &m["content"];
+            assert!(
+                c.is_string() || c.is_array(),
+                "messages[{i}].content must be string/array, got {c}"
+            );
+            assert!(!c.is_object(), "messages[{i}].content must not be object");
+        }
     }
 }

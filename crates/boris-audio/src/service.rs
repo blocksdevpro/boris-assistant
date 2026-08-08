@@ -131,8 +131,11 @@ impl AudioService {
             .map(|d| d.name().to_string())
             .unwrap_or_else(|_| "<unknown>".into());
         tracing::info!(%output_name, source_rate, "opening default output device");
-        let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
-        let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
+        // Events: Started/Drained/Cleared — small is fine.
+        let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(32);
+        // Commands: Play carries large PCM; keep a little room so stop/play
+        // don't race-drop under device switch.
+        let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(16);
 
         let output_event_tx = output_event_channel.0.clone();
         let output_command_rx = output_command_channel.1.clone();
@@ -209,8 +212,8 @@ impl AudioService {
             .unwrap_or_else(|_| format!("{id:?}"));
         tracing::info!(%name, "opening output device");
 
-        let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(10);
-        let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(10);
+        let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(32);
+        let output_command_channel = crossbeam_channel::bounded::<OutputCommand>(16);
 
         let output_event_tx = output_event_channel.0.clone();
         let output_command_rx = output_command_channel.1.clone();
@@ -228,17 +231,30 @@ impl AudioService {
     }
 
     pub fn play(&self, audio: AudioBuffer) {
-        self.output_command_channel
+        // Blocking send: never drop a finished TTS buffer. try_send + unwrap
+        // would panic (or, if we ignored errors, silently skip speech).
+        if let Err(e) = self
+            .output_command_channel
             .0
-            .try_send(OutputCommand::Play(audio))
-            .unwrap();
+            .send(OutputCommand::Play(audio))
+        {
+            tracing::error!(error = %e, "AudioService::play — output worker gone");
+        }
     }
 
     pub fn stop(&self) {
-        self.output_command_channel
+        // Prefer Flush even if the channel is busy; fall back to blocking send.
+        if self
+            .output_command_channel
             .0
             .try_send(OutputCommand::Flush)
-            .unwrap();
+            .is_err()
+        {
+            let _ = self
+                .output_command_channel
+                .0
+                .send(OutputCommand::Flush);
+        }
     }
 
     pub fn subscribe_output(&self) -> crossbeam_channel::Receiver<OutputEvent> {

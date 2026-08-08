@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -30,7 +30,10 @@ impl InputPipeline {
     ) -> Self {
         // instance params
         let flag = Arc::new(AtomicBool::new(false));
-        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(10);
+        // Capture callbacks fire every ~10ms. A tiny queue (e.g. 10 ≈ 100ms)
+        // silently drops frames under even light worker stalls, which shows up
+        // as missing words/sentences in STT. Keep ~2–3s of headroom.
+        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<AudioBuffer>(256);
 
         // device params
         let device_id = device.id().expect("input device id");
@@ -54,10 +57,18 @@ impl InputPipeline {
             buffer_size: cpal::BufferSize::Default,
         };
 
+        // Shared with the RT callback (count only) and the worker (reports).
+        let capture_drops = Arc::new(AtomicU64::new(0));
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => Self::build_stream::<f32>(device, stream_config, audio_tx),
-            cpal::SampleFormat::I16 => Self::build_stream::<i16>(device, stream_config, audio_tx),
-            cpal::SampleFormat::U16 => Self::build_stream::<u16>(device, stream_config, audio_tx),
+            cpal::SampleFormat::F32 => {
+                Self::build_stream::<f32>(device, stream_config, audio_tx, capture_drops.clone())
+            }
+            cpal::SampleFormat::I16 => {
+                Self::build_stream::<i16>(device, stream_config, audio_tx, capture_drops.clone())
+            }
+            cpal::SampleFormat::U16 => {
+                Self::build_stream::<u16>(device, stream_config, audio_tx, capture_drops.clone())
+            }
             other => {
                 tracing::error!(?other, "unsupported input sample format");
                 panic!("Unsupported sample format for InputStream: {other:?}");
@@ -76,13 +87,26 @@ impl InputPipeline {
         let mut resampler = InputResampler::new(channels as u32, sample_rate);
         let flag_clone = flag.clone();
         let subscribers_clone = subscribers.clone();
+        let capture_drops_worker = capture_drops;
 
         // audio worker thread
         let handle = thread::spawn(move || {
+            let mut last_reported_capture_drops = 0u64;
+            let mut subscriber_drops: u64 = 0;
             while let Ok(audio) = audio_rx.recv() {
                 if flag_clone.load(Ordering::Relaxed) {
-                    println!("droped");
                     break;
+                }
+
+                // Report capture-side drops from the worker (not the RT callback).
+                let drops = capture_drops_worker.load(Ordering::Relaxed);
+                if drops > last_reported_capture_drops {
+                    tracing::warn!(
+                        new_drops = drops - last_reported_capture_drops,
+                        total_drops = drops,
+                        "InputPipeline: capture queue full — mic frames dropped"
+                    );
+                    last_reported_capture_drops = drops;
                 }
 
                 match resampler.process(&audio) {
@@ -94,7 +118,16 @@ impl InputPipeline {
                         let arc_resampled: ArcAudioBuffer = Arc::from(resampled);
                         let subs = subscribers_clone.lock().unwrap();
                         for sub in subs.iter() {
-                            let _ = sub.try_send(arc_resampled.clone());
+                            if sub.try_send(arc_resampled.clone()).is_err() {
+                                subscriber_drops = subscriber_drops.saturating_add(1);
+                                // Log occasionally — full spam during agent think is normal.
+                                if subscriber_drops == 1 || subscriber_drops.is_multiple_of(50) {
+                                    tracing::warn!(
+                                        subscriber_drops,
+                                        "InputPipeline: subscriber queue full — dropping resampled frame"
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -119,6 +152,7 @@ impl InputPipeline {
         device: &cpal::Device,
         config: cpal::StreamConfig,
         audio_tx: crossbeam_channel::Sender<AudioBuffer>,
+        capture_drops: Arc<AtomicU64>,
     ) -> cpal::Stream
     where
         T: cpal::Sample + cpal::SizedSample + 'static,
@@ -134,7 +168,10 @@ impl InputPipeline {
                         .iter()
                         .map(|sample| AudioSample::from_sample(*sample))
                         .collect();
-                    audio_tx.try_send(samples).ok();
+                    // Never block the real-time callback. Count drops; worker logs them.
+                    if audio_tx.try_send(samples).is_err() {
+                        capture_drops.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 |err| tracing::error!("InputStream error: {err}"),
                 None,

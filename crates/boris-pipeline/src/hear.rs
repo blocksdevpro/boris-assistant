@@ -25,10 +25,11 @@ const AWAIT_REPLY_START_TIMEOUT: Duration = Duration::from_secs(12);
 const AWAIT_CONFIRM_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Discard residual playback / room echo before opening VAD after TTS.
-const POST_TTS_SETTLE: Duration = Duration::from_millis(350);
+/// Too short → Boris's own voice (or room echo) gets transcribed as the user.
+const POST_TTS_SETTLE: Duration = Duration::from_millis(550);
 
 /// Longer settle after a confirm prompt so TTS tail / room echo does not trip VAD.
-const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(900);
+const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(1000);
 
 /// Why a hear step returned early.
 #[derive(Debug, Clone, PartialEq, Eq)]

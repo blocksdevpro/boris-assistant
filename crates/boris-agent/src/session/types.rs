@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -94,11 +95,34 @@ pub fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Generate a session id without external crates: `s-{millis}-{pid}`.
+/// Generate a Grok-like UUID session id (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
+///
+/// Uses wall-clock, process id, and a process-local counter for uniqueness —
+/// no extra crate. Matches the on-disk folder naming style of `~/.grok/sessions`.
 pub fn generate_session_id() -> SessionId {
-    let millis = now_unix_ms();
-    let pid = process::id();
-    SessionId(format!("s-{millis}-{pid}"))
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let t = now_unix_ms();
+    let pid = process::id() as u64;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Mix independent entropy sources into 128 bits (UUID layout).
+    let a = t
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(pid << 32)
+        .wrapping_add(n);
+    let b = (pid.wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+        .wrapping_add(n.wrapping_mul(0x1656_67B1))
+        .wrapping_add(t.rotate_left(17));
+
+    // RFC 4122 variant + version 4 shape (random-class UUID).
+    let time_low = (a >> 32) as u32;
+    let time_mid = ((a >> 16) & 0xffff) as u16;
+    let time_hi = (0x4000 | (a & 0x0fff)) as u16; // version 4
+    let clock_seq = (0x8000 | ((b >> 48) & 0x3fff)) as u16; // variant 10xx
+    let node = b & 0x0000_ffff_ffff_ffff;
+
+    SessionId(format!(
+        "{time_low:08x}-{time_mid:04x}-{time_hi:04x}-{clock_seq:04x}-{node:012x}"
+    ))
 }
 
 #[cfg(test)]
@@ -106,10 +130,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_session_id_is_non_empty() {
+    fn generate_session_id_is_uuid_shaped() {
         let id = generate_session_id();
         assert!(!id.as_str().is_empty());
-        assert!(id.as_str().starts_with("s-"));
+        let parts: Vec<_> = id.as_str().split('-').collect();
+        assert_eq!(parts.len(), 5, "uuid has 5 hyphen groups: {}", id.as_str());
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        // Version nibble is 4.
+        assert!(
+            parts[2].starts_with('4'),
+            "version 4 uuid: {}",
+            id.as_str()
+        );
+    }
+
+    #[test]
+    fn generate_session_id_is_unique() {
+        let a = generate_session_id();
+        let b = generate_session_id();
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -133,8 +176,8 @@ mod tests {
 
     #[test]
     fn session_id_display_and_as_ref() {
-        let id = SessionId::from("s-1-2");
-        assert_eq!(id.to_string(), "s-1-2");
-        assert_eq!(id.as_ref(), "s-1-2");
+        let id = SessionId::from("019f4633-5c50-7293-a20d-62505015e1a4");
+        assert_eq!(id.to_string(), "019f4633-5c50-7293-a20d-62505015e1a4");
+        assert_eq!(id.as_ref(), "019f4633-5c50-7293-a20d-62505015e1a4");
     }
 }

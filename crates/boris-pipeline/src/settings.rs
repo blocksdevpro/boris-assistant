@@ -1,7 +1,15 @@
-//! Persistent user settings under `~/.boris/settings.json`.
+//! User prefs + secrets under `~/.boris`, Grok-style.
 //!
-//! Stores OpenRouter credentials + model/provider prefs so the desktop shell
-//! can restore fields across launches. Never log the API key.
+//! | File | Role |
+//! |------|------|
+//! | `config.toml` | Prefs only (models, capability, audio, ui, logging) |
+//! | `auth.json`   | Secrets only (`openrouter_api_key`) |
+//!
+//! Desktop IPC still uses [`AppSettings`] (JSON-shaped). On disk we split like
+//! `~/.grok/config.toml` + `~/.grok/auth.json`.
+//!
+//! Migration: if legacy `settings.json` exists, merge into the new pair and
+//! rename the old file to `settings.json.bak`.
 
 use std::fs;
 use std::io::{self, Write};
@@ -9,44 +17,38 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::boris_home;
+use crate::paths::{self, auth_path, boris_home, config_path, legacy_settings_path};
 
-/// Path to the settings file (`~/.boris/settings.json`, or `$BORIS_HOME/settings.json`).
+/// Path to the prefs file (`~/.boris/config.toml`).
 pub fn settings_path() -> PathBuf {
-    boris_home().join("settings.json")
+    config_path()
+}
+
+/// Path to secrets (`~/.boris/auth.json`).
+pub fn secrets_path() -> PathBuf {
+    auth_path()
 }
 
 /// Desktop connection settings restored into the main window on launch.
 ///
 /// **Model vs model-provider**
 /// - `openrouter_model` / `openrouter_fast_model` — OpenRouter model ids
-///   (`google/gemini-2.5-flash-lite`, `anthropic/claude-sonnet-4`, …)
-/// - `openrouter_model_provider` / `openrouter_fast_provider` — OpenRouter
-///   **inference hosts** for that model (CoreWeave, Baseten, DeepInfra, …),
-///   not the API brand. Comma-separated slugs, e.g. `coreweave,baseten`.
+/// - `openrouter_model_provider` / `openrouter_fast_provider` — inference hosts
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
-    /// OpenRouter API key (password field). Empty means "use env at start".
     #[serde(default)]
     pub openrouter_api_key: String,
-    /// Strong / primary OpenRouter model id. Empty means backend default.
     #[serde(default)]
     pub openrouter_model: String,
-    /// Fast / cheap model for simple turns. Empty → same as strong (or env).
     #[serde(default)]
     pub openrouter_fast_model: String,
-    /// Preferred OpenRouter model-provider(s) for the strong model.
-    /// Slugs like `coreweave`, `baseten`, `deepinfra` (comma-separated order).
     #[serde(default)]
     pub openrouter_model_provider: String,
-    /// Preferred OpenRouter model-provider(s) for the fast model.
     #[serde(default)]
     pub openrouter_fast_provider: String,
-    /// When true and a model-provider list is set, do not fall back to other hosts.
     #[serde(default)]
     pub openrouter_pin_provider: bool,
     /// Tool capability preset: `full` | `local_power` | `voice_safe`.
-    /// Empty → engine default (Full). Override also via `BORIS_CAPABILITY`.
     #[serde(default)]
     pub capability_preset: String,
 }
@@ -72,56 +74,316 @@ impl std::fmt::Debug for AppSettings {
     }
 }
 
-/// Load settings from disk. Missing file → defaults. Corrupt JSON → error.
-pub fn load_settings() -> Result<AppSettings, String> {
-    let path = settings_path();
-    if !path.is_file() {
-        return Ok(AppSettings::default());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read settings: {e}"))?;
-    if raw.trim().is_empty() {
-        return Ok(AppSettings::default());
-    }
-    serde_json::from_str(&raw).map_err(|e| format!("parse settings: {e}"))
+// ── On-disk TOML / auth shapes (Grok-like) ───────────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ConfigFile {
+    #[serde(default)]
+    models: ModelsSection,
+    #[serde(default)]
+    capability: CapabilitySection,
+    #[serde(default)]
+    audio: AudioSection,
+    #[serde(default)]
+    ui: UiSection,
+    #[serde(default)]
+    logging: LoggingSection,
 }
 
-/// Persist settings atomically-ish (write temp then rename when possible).
-/// Creates `~/.boris` if needed. Does not log secrets.
-pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create ~/.boris: {e}"))?;
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ModelsSection {
+    #[serde(default)]
+    strong: String,
+    #[serde(default)]
+    fast: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    fast_provider: String,
+    #[serde(default)]
+    pin_provider: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct CapabilitySection {
+    #[serde(default)]
+    preset: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct AudioSection {
+    #[serde(default = "default_device")]
+    input_device: String,
+    #[serde(default = "default_device")]
+    output_device: String,
+}
+
+fn default_device() -> String {
+    "default".into()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct UiSection {
+    #[serde(default)]
+    show_overlay_on_wake: bool,
+    #[serde(default)]
+    start_engine_on_launch: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct LoggingSection {
+    #[serde(default)]
+    filter: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct AuthFile {
+    #[serde(default)]
+    openrouter_api_key: String,
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/// Load settings from disk. Missing files → defaults.
+/// Migrates legacy `settings.json` on first successful load.
+pub fn load_settings() -> Result<AppSettings, String> {
+    paths::migrate_home_if_needed();
+    migrate_legacy_settings_if_needed()?;
+
+    let mut out = AppSettings::default();
+
+    let cfg_path = config_path();
+    if cfg_path.is_file() {
+        let raw = fs::read_to_string(&cfg_path).map_err(|e| format!("read config.toml: {e}"))?;
+        if !raw.trim().is_empty() {
+            // Reject the *old* dead config.toml that pointed at workspace models.
+            if looks_like_legacy_config_toml(&raw) {
+                tracing::warn!(
+                    path = %cfg_path.display(),
+                    "legacy config.toml (model paths) ignored; use settings migration"
+                );
+            } else {
+                let cfg: ConfigFile =
+                    toml::from_str(&raw).map_err(|e| format!("parse config.toml: {e}"))?;
+                out.openrouter_model = cfg.models.strong;
+                out.openrouter_fast_model = cfg.models.fast;
+                out.openrouter_model_provider = cfg.models.provider;
+                out.openrouter_fast_provider = cfg.models.fast_provider;
+                out.openrouter_pin_provider = cfg.models.pin_provider;
+                out.capability_preset = cfg.capability.preset;
+            }
+        }
     }
 
-    let json =
-        serde_json::to_string_pretty(settings).map_err(|e| format!("serialize settings: {e}"))?;
+    let auth_p = auth_path();
+    if auth_p.is_file() {
+        let raw = fs::read_to_string(&auth_p).map_err(|e| format!("read auth.json: {e}"))?;
+        if !raw.trim().is_empty() {
+            let auth: AuthFile =
+                serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
+            out.openrouter_api_key = auth.openrouter_api_key;
+        }
+    }
 
-    write_atomic(&path, json.as_bytes()).map_err(|e| format!("write settings: {e}"))?;
+    Ok(out)
+}
 
-    tracing::debug!(path = %path.display(), "settings saved");
+/// Persist prefs to `config.toml` and secrets to `auth.json`.
+pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
+    paths::migrate_home_if_needed();
+    let home = boris_home();
+    fs::create_dir_all(&home).map_err(|e| format!("create ~/.boris: {e}"))?;
+
+    // If an old path-style config.toml exists, archive it once.
+    archive_legacy_config_toml_if_needed()?;
+
+    let cfg = ConfigFile {
+        models: ModelsSection {
+            strong: settings.openrouter_model.clone(),
+            fast: settings.openrouter_fast_model.clone(),
+            provider: settings.openrouter_model_provider.clone(),
+            fast_provider: settings.openrouter_fast_provider.clone(),
+            pin_provider: settings.openrouter_pin_provider,
+        },
+        capability: CapabilitySection {
+            preset: settings.capability_preset.clone(),
+        },
+        audio: AudioSection {
+            input_device: "default".into(),
+            output_device: "default".into(),
+        },
+        ui: UiSection {
+            show_overlay_on_wake: true,
+            start_engine_on_launch: false,
+        },
+        logging: LoggingSection {
+            filter: "warn,boris_desktop=info".into(),
+        },
+    };
+
+    let toml_body = toml::to_string_pretty(&cfg).map_err(|e| format!("serialize config.toml: {e}"))?;
+    // Header comment like a hand-edited Grok config.
+    let mut body = String::from(
+        "# Boris user config (prefs only — secrets live in auth.json)\n\
+         # Docs: models, capability, audio, ui, logging\n\n",
+    );
+    body.push_str(&toml_body);
+
+    write_atomic(&config_path(), body.as_bytes()).map_err(|e| format!("write config.toml: {e}"))?;
+
+    let auth = AuthFile {
+        openrouter_api_key: settings.openrouter_api_key.clone(),
+    };
+    let json = serde_json::to_string_pretty(&auth).map_err(|e| format!("serialize auth.json: {e}"))?;
+    write_atomic(&auth_path(), json.as_bytes()).map_err(|e| format!("write auth.json: {e}"))?;
+
+    tracing::debug!(
+        config = %config_path().display(),
+        auth = %auth_path().display(),
+        "settings saved (config.toml + auth.json)"
+    );
+    Ok(())
+}
+
+/// One-shot: `settings.json` → config.toml + auth.json, then `.bak`.
+fn migrate_legacy_settings_if_needed() -> Result<(), String> {
+    let legacy = legacy_settings_path();
+    if !legacy.is_file() {
+        return Ok(());
+    }
+    // Already have new files with content? Still merge key if auth empty.
+    let raw = fs::read_to_string(&legacy).map_err(|e| format!("read legacy settings: {e}"))?;
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let old: AppSettings =
+        serde_json::from_str(&raw).map_err(|e| format!("parse legacy settings.json: {e}"))?;
+
+    // If new config already exists and is non-legacy, only fill missing auth key.
+    let cfg_exists = config_path().is_file()
+        && fs::read_to_string(config_path())
+            .map(|s| !s.trim().is_empty() && !looks_like_legacy_config_toml(&s))
+            .unwrap_or(false);
+    let auth_has_key = auth_path().is_file()
+        && fs::read_to_string(auth_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<AuthFile>(&s).ok())
+            .map(|a| !a.openrouter_api_key.trim().is_empty())
+            .unwrap_or(false);
+
+    if cfg_exists && auth_has_key {
+        rename_legacy_settings(&legacy);
+        return Ok(());
+    }
+
+    let mut merged = if cfg_exists {
+        load_settings_raw_no_migrate().unwrap_or_default()
+    } else {
+        AppSettings::default()
+    };
+
+    if merged.openrouter_model.is_empty() {
+        merged.openrouter_model = old.openrouter_model;
+    }
+    if merged.openrouter_fast_model.is_empty() {
+        merged.openrouter_fast_model = old.openrouter_fast_model;
+    }
+    if merged.openrouter_model_provider.is_empty() {
+        merged.openrouter_model_provider = old.openrouter_model_provider;
+    }
+    if merged.openrouter_fast_provider.is_empty() {
+        merged.openrouter_fast_provider = old.openrouter_fast_provider;
+    }
+    if !merged.openrouter_pin_provider {
+        merged.openrouter_pin_provider = old.openrouter_pin_provider;
+    }
+    if merged.capability_preset.is_empty() {
+        merged.capability_preset = old.capability_preset;
+    }
+    if merged.openrouter_api_key.is_empty() {
+        merged.openrouter_api_key = old.openrouter_api_key;
+    }
+
+    save_settings(&merged)?;
+    rename_legacy_settings(&legacy);
+    tracing::info!("migrated settings.json → config.toml + auth.json");
+    Ok(())
+}
+
+fn load_settings_raw_no_migrate() -> Result<AppSettings, String> {
+    let mut out = AppSettings::default();
+    if config_path().is_file() {
+        let raw = fs::read_to_string(config_path()).map_err(|e| e.to_string())?;
+        if !looks_like_legacy_config_toml(&raw) {
+            if let Ok(cfg) = toml::from_str::<ConfigFile>(&raw) {
+                out.openrouter_model = cfg.models.strong;
+                out.openrouter_fast_model = cfg.models.fast;
+                out.openrouter_model_provider = cfg.models.provider;
+                out.openrouter_fast_provider = cfg.models.fast_provider;
+                out.openrouter_pin_provider = cfg.models.pin_provider;
+                out.capability_preset = cfg.capability.preset;
+            }
+        }
+    }
+    if auth_path().is_file() {
+        let raw = fs::read_to_string(auth_path()).map_err(|e| e.to_string())?;
+        if let Ok(auth) = serde_json::from_str::<AuthFile>(&raw) {
+            out.openrouter_api_key = auth.openrouter_api_key;
+        }
+    }
+    Ok(out)
+}
+
+fn rename_legacy_settings(legacy: &std::path::Path) {
+    let bak = legacy.with_extension("json.bak");
+    if let Err(e) = fs::rename(legacy, &bak) {
+        tracing::warn!(error = %e, "could not rename settings.json → .bak");
+    }
+}
+
+/// Old product config.toml had `[api]` / workspace model paths — not our schema.
+fn looks_like_legacy_config_toml(raw: &str) -> bool {
+    raw.contains("wakeword_path")
+        || raw.contains("stt_dir")
+        || raw.contains("tts_dir")
+        || (raw.contains("[api]") && raw.contains("chat_model"))
+}
+
+fn archive_legacy_config_toml_if_needed() -> Result<(), String> {
+    let path = config_path();
+    if !path.is_file() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
+    if !looks_like_legacy_config_toml(&raw) {
+        return Ok(());
+    }
+    let bak = boris_home().join("config.legacy.toml.bak");
+    if let Err(e) = fs::rename(&path, &bak) {
+        tracing::warn!(error = %e, "could not archive legacy config.toml");
+    } else {
+        tracing::info!(path = %bak.display(), "archived legacy config.toml");
+    }
     Ok(())
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension("tmp");
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    // On Windows, rename over existing may fail — remove first.
     if path.exists() {
         let _ = fs::remove_file(path);
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Fallback: direct write if rename failed.
             let _ = fs::remove_file(&tmp);
             let mut f = fs::File::create(path)?;
             f.write_all(bytes)?;
             f.sync_all()?;
-            // Preserve original error only if fallback also fails — already wrote.
             let _ = e;
             Ok(())
         }
@@ -131,21 +393,17 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that touch BORIS_HOME.
+    static LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn settings_path_under_boris() {
+    fn settings_path_is_config_toml() {
         let p = settings_path();
         assert!(
-            p.ends_with("settings.json"),
+            p.ends_with("config.toml"),
             "unexpected path {}",
-            p.display()
-        );
-        assert!(
-            p.parent()
-                .map(|d| d.ends_with(".boris")
-                    || std::env::var(crate::paths::BORIS_HOME_ENV).is_ok())
-                .unwrap_or(false),
-            "settings should live under boris home, got {}",
             p.display()
         );
     }
@@ -157,19 +415,87 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_provider_fields() {
-        let s: AppSettings = serde_json::from_str(
-            r#"{
-                "openrouter_model": "google/gemini-2.5-flash-lite",
-                "openrouter_fast_model": "google/gemini-2.5-flash-lite",
-                "openrouter_model_provider": "coreweave",
-                "openrouter_fast_provider": "baseten,siliconflow",
-                "openrouter_pin_provider": true
-            }"#,
+    fn roundtrip_config_and_auth() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-rt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+
+        let s = AppSettings {
+            openrouter_api_key: "sk-test".into(),
+            openrouter_model: "google/gemini-2.5-flash-lite".into(),
+            openrouter_fast_model: "fast-model".into(),
+            openrouter_model_provider: "coreweave".into(),
+            openrouter_fast_provider: "baseten".into(),
+            openrouter_pin_provider: true,
+            capability_preset: "voice_safe".into(),
+        };
+        save_settings(&s).expect("save");
+        assert!(config_path().is_file());
+        assert!(auth_path().is_file());
+
+        let raw_cfg = fs::read_to_string(config_path()).unwrap();
+        assert!(raw_cfg.contains("[models]"));
+        assert!(raw_cfg.contains("strong"));
+        assert!(!raw_cfg.contains("sk-test"), "key must not be in config.toml");
+
+        let raw_auth = fs::read_to_string(auth_path()).unwrap();
+        assert!(raw_auth.contains("sk-test"));
+        assert!(raw_auth.contains("openrouter_api_key"));
+
+        let loaded = load_settings().expect("load");
+        assert_eq!(loaded.openrouter_api_key, "sk-test");
+        assert_eq!(loaded.openrouter_model, "google/gemini-2.5-flash-lite");
+        assert_eq!(loaded.openrouter_fast_model, "fast-model");
+        assert_eq!(loaded.openrouter_model_provider, "coreweave");
+        assert!(loaded.openrouter_pin_provider);
+        assert_eq!(loaded.capability_preset, "voice_safe");
+
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrates_settings_json() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-mig-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+
+        let legacy = AppSettings {
+            openrouter_api_key: "sk-legacy".into(),
+            openrouter_model: "m1".into(),
+            ..Default::default()
+        };
+        fs::write(
+            legacy_settings_path(),
+            serde_json::to_string_pretty(&legacy).unwrap(),
         )
         .unwrap();
-        assert_eq!(s.openrouter_model_provider, "coreweave");
-        assert_eq!(s.openrouter_fast_provider, "baseten,siliconflow");
-        assert!(s.openrouter_pin_provider);
+
+        let loaded = load_settings().expect("load migrates");
+        assert_eq!(loaded.openrouter_api_key, "sk-legacy");
+        assert_eq!(loaded.openrouter_model, "m1");
+        assert!(auth_path().is_file());
+        assert!(config_path().is_file());
+        assert!(!legacy_settings_path().is_file());
+        assert!(dir.join("settings.json.bak").is_file());
+
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

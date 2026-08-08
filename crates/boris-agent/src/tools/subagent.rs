@@ -72,6 +72,8 @@ impl Tool for SpawnSubagentTool {
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Other)
             .timeout(std::time::Duration::from_secs(90))
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -96,7 +98,8 @@ impl Tool for SpawnSubagentTool {
                         return false;
                     }
                     let m = t.meta();
-                    m.kind.is_read_only() && m.risk <= ToolRisk::Moderate
+                    // Prefer explicit meta.read_only (concurrency annotations).
+                    m.is_read_only() && m.risk <= ToolRisk::Moderate
                 })
                 .cloned()
                 .collect()
@@ -122,6 +125,9 @@ impl Tool for SpawnSubagentTool {
             max_tool_rounds: max_rounds.min(DEFAULT_MAX_TOOL_ROUNDS),
             session_id: None,
             turn_id: None,
+            features: crate::runtime::ToolRuntimeFeatures::default(),
+            // Child registries are small; always list all child tools.
+            force_list_all: true,
         };
 
         let state = LoopState {
@@ -129,6 +135,7 @@ impl Tool for SpawnSubagentTool {
             tools: &child_tools,
             runtime: &runtime,
             client: self.client.as_ref(),
+            activated: None,
         };
 
         let result = agent_loop(state, &goal, &config, vec![], 0, 0, None, None, None, 0)

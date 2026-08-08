@@ -1,7 +1,11 @@
-//! Local perception primitives for Boris: wake-word scoring and VAD.
+//! Local perception primitives: wake-word scoring and VAD.
 //!
-//! No threads, no session policy, no STT/TTS. The engine (or legacy workers)
-//! owns loops; this crate only answers "wake score?" / "is this speech?".
+//! # Boundaries
+//!
+//! - **In scope:** "wake score?" / "is this frame speech?" + ORT init helpers.
+//! - **Out of scope:** threads, session policy, STT/TTS, agent tools.
+//!
+//! The voice engine owns the capture loop and decides when to call these ports.
 
 pub mod ort;
 pub mod pcm;

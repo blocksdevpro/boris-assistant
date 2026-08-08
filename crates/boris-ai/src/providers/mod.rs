@@ -1,5 +1,8 @@
+//! Concrete LLM providers.
+//!
+//! Today: OpenRouter. Add a sibling module (e.g. `openai`) and re-export from
+//! crate root when a second host is needed — keep [`crate::LlmClient`] stable.
+
 pub mod openrouter;
 
-pub use openrouter::{
-    parse_provider_list, split_model_and_provider, OpenRouterClient, TokenUsage,
-};
+pub use openrouter::OpenRouterClient;

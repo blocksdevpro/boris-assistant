@@ -36,6 +36,8 @@ impl Tool for ClipboardGetTool {
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::System)
             .permissions(&[Permission::Clipboard])
+            .read_only(true)
+            .max_concurrency(8)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
@@ -93,6 +95,8 @@ impl Tool for ClipboardSetTool {
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Write)
             .permissions(&[Permission::Clipboard])
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {

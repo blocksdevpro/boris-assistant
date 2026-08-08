@@ -47,7 +47,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::{
     boris_home, ensure_model_dirs, models_dir, parakeet_dir, parakeet_looks_ready,
-    supertone_looks_ready, supertone_onnx_dir, supertone_voices_dir,
+    supertone_looks_ready, supertone_onnx_dir, supertone_onnx_is_multilingual,
+    supertone_version_problem, supertone_voices_dir,
 };
 
 /// Env: override base URL; relative paths are appended (see module docs).
@@ -248,6 +249,29 @@ fn file_ok(path: &Path, min_bytes: u64) -> bool {
     }
 }
 
+/// Remove installed Supertone files so Install models can fetch Supertonic 3.
+fn purge_supertone_install(models_root: &Path) {
+    let rels = [
+        "supertone/onnx/tts.json",
+        "supertone/onnx/tts.yml",
+        "supertone/onnx/unicode_indexer.json",
+        "supertone/onnx/duration_predictor.onnx",
+        "supertone/onnx/text_encoder.onnx",
+        "supertone/onnx/vector_estimator.onnx",
+        "supertone/onnx/vocoder.onnx",
+        "supertone/voices/M4.json",
+    ];
+    for rel in rels {
+        let path = models_root.join(rel);
+        if path.is_file() {
+            match fs::remove_file(&path) {
+                Ok(()) => tracing::info!(path = %path.display(), "removed outdated Supertone file"),
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "failed to remove outdated Supertone file"),
+            }
+        }
+    }
+}
+
 fn resolve_url(entry: &CatalogEntry, base_override: Option<&str>) -> String {
     if let Some(base) = base_override {
         let base = base.trim_end_matches('/');
@@ -270,13 +294,20 @@ pub fn models_status() -> ModelsStatus {
     let onnx = supertone_onnx_dir();
     let voices = supertone_voices_dir();
     let base = models_dir();
+    let supertone_ready = supertone_looks_ready(&onnx, &voices);
+    // Wrong-generation weights pass size checks but must be treated as missing.
+    let force_supertone = !supertone_ready && onnx.join("tts.json").is_file();
 
     let mut missing = Vec::new();
     for e in CATALOG {
         let path = base.join(e.local_rel);
-        if !file_ok(&path, e.min_bytes) {
+        let wrong_gen = force_supertone && e.component == ModelComponent::Supertone;
+        if wrong_gen || !file_ok(&path, e.min_bytes) {
             missing.push(e.local_rel.to_string());
         }
+    }
+    if let Some(problem) = supertone_version_problem(&onnx) {
+        missing.push(format!("VERSION: {problem}"));
     }
 
     ModelsStatus {
@@ -284,7 +315,7 @@ pub fn models_status() -> ModelsStatus {
         models_dir: base.display().to_string(),
         parakeet_ready: parakeet_looks_ready(&pk),
         parakeet_dir: pk.display().to_string(),
-        supertone_ready: supertone_looks_ready(&onnx, &voices),
+        supertone_ready,
         supertone_onnx_dir: onnx.display().to_string(),
         supertone_voices_dir: voices.display().to_string(),
         missing,
@@ -319,6 +350,26 @@ pub fn install_models(
         .map_err(|e| format!("http client: {e}"))?;
 
     let root = models_dir();
+    let onnx_dir = supertone_onnx_dir();
+    // Old Supertonic 1 English-only graphs must be replaced (size checks pass).
+    let reinstall_supertone = onnx_dir.join("tts.json").is_file()
+        && !supertone_onnx_is_multilingual(&onnx_dir);
+    if reinstall_supertone {
+        if let Some(problem) = supertone_version_problem(&onnx_dir) {
+            tracing::warn!(%problem, "reinstalling Supertone models from Hugging Face");
+            on_progress(DownloadProgress {
+                component: ModelComponent::Supertone,
+                file_name: "tts.json".into(),
+                relative_path: "supertone/onnx/tts.json".into(),
+                bytes_downloaded: 0,
+                total_bytes: None,
+                status: DownloadFileStatus::Starting,
+                message: Some(problem),
+            });
+        }
+        purge_supertone_install(&root);
+    }
+
     let mut downloaded = 0u32;
     let mut skipped = 0u32;
     let mut failed = 0u32;

@@ -43,6 +43,8 @@ impl Tool for OpenUrlTool {
             .kind(ToolKind::Web)
             .permissions(&[Permission::UiControl])
             .confirm(true)
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -109,6 +111,8 @@ impl Tool for OpenPathTool {
             .kind(ToolKind::System)
             .permissions(&[Permission::FsRead, Permission::UiControl])
             .confirm(true)
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {

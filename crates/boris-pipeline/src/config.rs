@@ -1,3 +1,7 @@
+//! Host spawn configuration for [`crate::Engine`].
+//!
+//! Built from desktop args, `~/.boris` settings, and env overrides
+//! (`OPENROUTER_*`, `BORIS_*`). Model dirs default under `~/.boris/models`.
 use std::path::PathBuf;
 
 use boris_agent::CapabilityPreset;
@@ -9,7 +13,7 @@ use crate::settings::{self, AppSettings};
 /// Host-supplied configuration for [`crate::Engine::spawn`].
 ///
 /// Model dirs default to `~/.boris/models/...` (see [`crate::paths`]).
-/// Does **not** read `config.toml`.
+/// User prefs/secrets load from `config.toml` + `auth.json` via [`crate::settings`].
 pub struct PipelineConfig {
     pub openrouter_api_key: String,
     /// Strong / primary model id (multi-step agent work).
@@ -46,7 +50,7 @@ pub struct PipelineConfig {
 impl PipelineConfig {
     /// Build with model paths under `~/.boris/models` and optional seed from workspace assets.
     ///
-    /// Merges explicit args with `~/.boris/settings.json` and env vars:
+    /// Merges explicit args with `~/.boris/config.toml` + `auth.json` and env vars:
     /// - `OPENROUTER_MODEL` / `BORIS_STRONG_MODEL` — strong model
     /// - `BORIS_FAST_MODEL` — fast model
     /// - `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` — strong provider order
@@ -120,7 +124,7 @@ impl PipelineConfig {
     }
 }
 
-/// Priority: explicit arg → env → settings.json → None (engine default).
+/// Priority: explicit arg → env → config.toml → None (engine default).
 fn resolve_llm_prefs(
     saved: &AppSettings,
     model: Option<String>,
@@ -189,7 +193,7 @@ fn env_truthy(key: &str) -> Option<bool> {
     Some(matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
-/// `BORIS_CAPABILITY` env, else settings.json, else Full.
+/// `BORIS_CAPABILITY` env, else config.toml `[capability]`, else Full.
 fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     if let Ok(raw) = std::env::var("BORIS_CAPABILITY") {
         if let Some(p) = CapabilityPreset::parse(&raw) {
@@ -203,12 +207,12 @@ fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     }
     if !saved.capability_preset.trim().is_empty() {
         if let Some(p) = CapabilityPreset::parse(&saved.capability_preset) {
-            tracing::info!(preset = p.as_str(), "capability from settings.json");
+            tracing::info!(preset = p.as_str(), "capability from config.toml");
             return p;
         }
         tracing::warn!(
             value = %saved.capability_preset,
-            "unknown capability_preset in settings; using full"
+            "unknown capability_preset in config; using full"
         );
     }
     CapabilityPreset::Full
@@ -222,5 +226,71 @@ fn resolve_long_term_memory_flag() -> bool {
             !(v == "0" || v == "false" || v == "off" || v == "no")
         }
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonempty_trims_and_rejects_blank() {
+        assert_eq!(nonempty("  hi  ".into()).as_deref(), Some("hi"));
+        assert_eq!(nonempty("".into()), None);
+        assert_eq!(nonempty("   ".into()), None);
+    }
+
+    #[test]
+    fn first_nonempty_picks_first() {
+        assert_eq!(
+            first_nonempty([None, Some("a".into()), Some("b".into()), None]).as_deref(),
+            Some("a")
+        );
+        assert_eq!(first_nonempty([None, None, None, None]), None);
+    }
+
+    #[test]
+    fn resolve_llm_prefs_prefers_explicit_over_saved() {
+        let saved = AppSettings {
+            openrouter_model: "saved-strong".into(),
+            openrouter_fast_model: "saved-fast".into(),
+            openrouter_model_provider: "saved-prov".into(),
+            openrouter_fast_provider: "saved-fast-prov".into(),
+            openrouter_pin_provider: false,
+            ..Default::default()
+        };
+        let (strong, strong_p, fast, fast_p, pin) = resolve_llm_prefs(
+            &saved,
+            Some("arg-strong".into()),
+            Some("arg-fast".into()),
+            Some("arg-prov".into()),
+            Some("arg-fast-prov".into()),
+            Some(true),
+        );
+        assert_eq!(strong.as_deref(), Some("arg-strong"));
+        assert_eq!(fast.as_deref(), Some("arg-fast"));
+        assert_eq!(strong_p.as_deref(), Some("arg-prov"));
+        assert_eq!(fast_p.as_deref(), Some("arg-fast-prov"));
+        assert!(pin);
+    }
+
+    #[test]
+    fn resolve_llm_prefs_uses_saved_when_args_empty() {
+        let saved = AppSettings {
+            openrouter_model: "saved-strong".into(),
+            openrouter_fast_model: "saved-fast".into(),
+            openrouter_model_provider: "only-strong-prov".into(),
+            openrouter_fast_provider: String::new(),
+            openrouter_pin_provider: true,
+            ..Default::default()
+        };
+        let (strong, strong_p, fast, fast_p, pin) =
+            resolve_llm_prefs(&saved, None, None, None, None, None);
+        assert_eq!(strong.as_deref(), Some("saved-strong"));
+        assert_eq!(fast.as_deref(), Some("saved-fast"));
+        assert_eq!(strong_p.as_deref(), Some("only-strong-prov"));
+        // fast provider falls back to strong when unset
+        assert_eq!(fast_p.as_deref(), Some("only-strong-prov"));
+        assert!(pin);
     }
 }

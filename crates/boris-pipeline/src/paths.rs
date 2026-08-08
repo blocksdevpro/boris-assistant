@@ -1,30 +1,46 @@
-//! Boris home directory — user data lives under `~/.boris`.
+//! Boris home directory — user data under `~/.boris` (override: `$BORIS_HOME`).
 //!
-//! Layout (owned by us; not the legacy `config.toml`):
+//! Layout mirrors Grok Build's `$GROK_HOME` model (see `assets/grok-build`):
+//! one prefs file, secrets separate, sessions / memory / skills / logs as
+//! first-class roots. Boris keeps a local `models/` tree for offline STT/TTS.
 //!
 //! ```text
 //! ~/.boris/
-//!   settings.json        # OpenRouter key + model (desktop)
-//!   sessions/            # voice session meta + JSONL transcripts (agent store)
+//!   config.toml              # prefs only (TOML sections) — like ~/.grok/config.toml
+//!   auth.json                # secrets only — like ~/.grok/auth.json
+//!   sessions/
+//!     desktop/               # voice MVP bucket (Grok uses encode_cwd(cwd))
+//!       current.json
+//!       {uuid}/              # Grok-like UUID session id
+//!         summary.json       # Grok-like session summary
+//!         chat_history.jsonl # full transcript (user/assistant/tool_result/system)
+//!         events.jsonl       # lightweight turn events
 //!   memory/
-//!     notes.jsonl        # durable notes for builtin memory tools
-//!     profile.json       # active personal context (name, prefs, facts)
-//!     MEMORY.md          # curated cross-session knowledge (markdown)
-//!     sessions/          # append-only voice turn logs (markdown)
-//!   sandbox/             # default write root for future file tools
-//!   skills/              # user skill playbooks (`<name>/SKILL.md`)
-//!   audit/
-//!     tool_calls.jsonl   # tool runtime audit log
-//!   logs/                # desktop + pipeline file logs (release builds)
+//!     MEMORY.md              # global curated knowledge (Grok template style)
+//!     profile.json
+//!     notes.jsonl
+//!     desktop/               # workspace bucket when no project cwd
+//!       MEMORY.md
+//!       sessions/
+//!         YYYY-MM-DD-{sid8}.md
+//!   skills/                  # user skills (<name>/SKILL.md)
+//!   logs/
+//!     boris-desktop.*.log
+//!     audit/
+//!       tool_calls.jsonl
 //!   models/
-//!     parakeet/          # STT
-//!     supertone/
-//!       onnx/            # TTS graphs
-//!       voices/          # voice json (e.g. M4.json)
-//!     livekit/           # optional wake onnx on disk
+//!     parakeet/ | supertone/ | livekit/
+//!   state/
+//!     workspace/             # default agent write root (was top-level sandbox/)
 //! ```
 //!
-//! Override root with env `BORIS_HOME`. Never reads `config.toml`.
+//! Project-local (optional, Grok-style):
+//! ```text
+//! <repo>/.boris/skills/<name>/SKILL.md
+//! ```
+//!
+//! On first access after upgrade, [`migrate_home_if_needed`] rewrites the old
+//! flat layout (settings.json, top-level audit/, sandbox/, flat sessions/).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,6 +49,9 @@ use serde::{Deserialize, Serialize};
 
 /// Env override for the home root (default: `$HOME/.boris` / `%USERPROFILE%\.boris`).
 pub const BORIS_HOME_ENV: &str = "BORIS_HOME";
+
+/// Fixed sessions / memory workspace bucket for desktop voice (no project cwd).
+pub const DESKTOP_WORKSPACE: &str = "desktop";
 
 pub fn boris_home() -> PathBuf {
     if let Ok(p) = std::env::var(BORIS_HOME_ENV) {
@@ -47,7 +66,6 @@ pub fn boris_home() -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    // Prefer USERPROFILE on Windows (dirs not required).
     if let Ok(p) = std::env::var("USERPROFILE") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
@@ -60,6 +78,25 @@ fn home_dir() -> Option<PathBuf> {
     }
     None
 }
+
+// ── Config / auth ────────────────────────────────────────────────────────────
+
+/// Prefs file (`~/.boris/config.toml`).
+pub fn config_path() -> PathBuf {
+    boris_home().join("config.toml")
+}
+
+/// Secrets file (`~/.boris/auth.json`).
+pub fn auth_path() -> PathBuf {
+    boris_home().join("auth.json")
+}
+
+/// Legacy settings path (migrated → config.toml + auth.json).
+pub fn legacy_settings_path() -> PathBuf {
+    boris_home().join("settings.json")
+}
+
+// ── Models ───────────────────────────────────────────────────────────────────
 
 pub fn models_dir() -> PathBuf {
     boris_home().join("models")
@@ -81,84 +118,100 @@ pub fn livekit_dir() -> PathBuf {
     models_dir().join("livekit")
 }
 
-/// Directory for voice session metadata + transcripts (`~/.boris/sessions`).
-pub fn sessions_dir() -> PathBuf {
+// ── Sessions (Grok: sessions/{cwd-encoded}/) ─────────────────────────────────
+
+/// Root of all sessions (`~/.boris/sessions`).
+pub fn sessions_root() -> PathBuf {
     boris_home().join("sessions")
 }
 
-/// Directory for desktop / pipeline log files (`~/.boris/logs`).
+/// Active workspace sessions dir (desktop voice → `sessions/desktop`).
+pub fn sessions_dir() -> PathBuf {
+    sessions_root().join(DESKTOP_WORKSPACE)
+}
+
+// ── Logs + audit ─────────────────────────────────────────────────────────────
+
 pub fn logs_dir() -> PathBuf {
     boris_home().join("logs")
 }
 
-/// Ensure `~/.boris/logs` exists (called at desktop startup).
 pub fn ensure_logs_dir() -> std::io::Result<()> {
     fs::create_dir_all(logs_dir())
 }
 
-/// Ensure `~/.boris/sessions` exists.
 pub fn ensure_sessions_dir() -> std::io::Result<()> {
     fs::create_dir_all(sessions_dir())
 }
 
-/// Directory for durable agent memory (`~/.boris/memory`).
-///
-/// The notes tool may create this on first write; callers need not pre-create.
-pub fn memory_dir() -> PathBuf {
-    boris_home().join("memory")
-}
-
-/// Append-only notes store for builtin memory tools (`~/.boris/memory/notes.jsonl`).
-pub fn notes_path() -> PathBuf {
-    memory_dir().join("notes.jsonl")
-}
-
-/// Durable personal context profile (`~/.boris/memory/profile.json`).
-pub fn profile_path() -> PathBuf {
-    memory_dir().join("profile.json")
-}
-
-/// Curated long-term knowledge (`~/.boris/memory/MEMORY.md`).
-pub fn memory_md_path() -> PathBuf {
-    memory_dir().join("MEMORY.md")
-}
-
-/// Markdown session logs (`~/.boris/memory/sessions`).
-pub fn memory_sessions_dir() -> PathBuf {
-    memory_dir().join("sessions")
-}
-
-/// Default sandbox root for agent file tools (`~/.boris/sandbox`).
-pub fn sandbox_dir() -> PathBuf {
-    boris_home().join("sandbox")
-}
-
-/// Tool audit log directory (`~/.boris/audit`).
+/// Tool audit directory (`~/.boris/logs/audit`).
 pub fn audit_dir() -> PathBuf {
-    boris_home().join("audit")
+    logs_dir().join("audit")
 }
 
-/// Append-only tool call audit (`~/.boris/audit/tool_calls.jsonl`).
+/// Append-only tool call audit (`~/.boris/logs/audit/tool_calls.jsonl`).
 pub fn audit_path() -> PathBuf {
     audit_dir().join("tool_calls.jsonl")
 }
 
-/// User skill playbooks (`~/.boris/skills/<name>/SKILL.md`).
+// ── Memory (Grok: memory/ + workspace subdirs) ───────────────────────────────
+
+pub fn memory_dir() -> PathBuf {
+    boris_home().join("memory")
+}
+
+pub fn notes_path() -> PathBuf {
+    memory_dir().join("notes.jsonl")
+}
+
+pub fn profile_path() -> PathBuf {
+    memory_dir().join("profile.json")
+}
+
+/// Global curated knowledge (`~/.boris/memory/MEMORY.md`).
+pub fn memory_md_path() -> PathBuf {
+    memory_dir().join("MEMORY.md")
+}
+
+/// Workspace memory root for desktop voice (`~/.boris/memory/desktop`).
+pub fn memory_workspace_dir() -> PathBuf {
+    memory_dir().join(DESKTOP_WORKSPACE)
+}
+
+/// Markdown session logs under the desktop workspace.
+pub fn memory_sessions_dir() -> PathBuf {
+    memory_workspace_dir().join("sessions")
+}
+
+// ── Skills ───────────────────────────────────────────────────────────────────
+
 pub fn skills_dir() -> PathBuf {
     boris_home().join("skills")
 }
 
-/// Ensure sandbox + audit + skills + memory directories exist.
+// ── Agent write root (was top-level sandbox/) ────────────────────────────────
+
+/// Default agent write root (`~/.boris/state/workspace`).
+pub fn workspace_dir() -> PathBuf {
+    boris_home().join("state").join("workspace")
+}
+
+/// Alias kept for call sites that still say "sandbox".
+pub fn sandbox_dir() -> PathBuf {
+    workspace_dir()
+}
+
+/// Ensure agent-related dirs exist.
 pub fn ensure_agent_dirs() -> std::io::Result<()> {
-    fs::create_dir_all(sandbox_dir())?;
+    fs::create_dir_all(workspace_dir())?;
     fs::create_dir_all(audit_dir())?;
     fs::create_dir_all(skills_dir())?;
     fs::create_dir_all(memory_dir())?;
     fs::create_dir_all(memory_sessions_dir())?;
+    fs::create_dir_all(memory_workspace_dir())?;
     Ok(())
 }
 
-/// Ensure the directory tree exists under `~/.boris/models`.
 pub fn ensure_model_dirs() -> std::io::Result<()> {
     for d in [
         parakeet_dir(),
@@ -171,7 +224,156 @@ pub fn ensure_model_dirs() -> std::io::Result<()> {
     Ok(())
 }
 
-/// True if Parakeet has the real ONNX graphs needed to load (not just config).
+// ── Migration from flat legacy layout ────────────────────────────────────────
+
+/// Best-effort rewrite of the old flat `~/.boris` tree into the Grok-like layout.
+/// Safe to call every launch (no-ops when already migrated).
+pub fn migrate_home_if_needed() {
+    let home = boris_home();
+    if !home.is_dir() {
+        return;
+    }
+
+    // audit/ → logs/audit/
+    let old_audit = home.join("audit");
+    let new_audit = audit_dir();
+    if old_audit.is_dir() && !new_audit.join("tool_calls.jsonl").is_file() {
+        if let Err(e) = fs::create_dir_all(&new_audit) {
+            tracing::warn!(error = %e, "migrate: create logs/audit failed");
+        } else {
+            move_file_if_present(
+                &old_audit.join("tool_calls.jsonl"),
+                &new_audit.join("tool_calls.jsonl"),
+            );
+            // Remove empty old dir if possible.
+            let _ = fs::remove_dir(&old_audit);
+        }
+    }
+
+    // sandbox/ → state/workspace/
+    let old_sandbox = home.join("sandbox");
+    let new_ws = workspace_dir();
+    if old_sandbox.is_dir() {
+        if let Err(e) = fs::create_dir_all(&new_ws) {
+            tracing::warn!(error = %e, "migrate: create state/workspace failed");
+        } else {
+            move_dir_contents(&old_sandbox, &new_ws);
+            let _ = fs::remove_dir(&old_sandbox);
+        }
+    }
+
+    // sessions/{id}/ → sessions/desktop/{id}/ (any top-level session dir except desktop/)
+    // Also move top-level current.json into desktop/ if present.
+    let sess_root = sessions_root();
+    let desktop = sessions_dir();
+    if sess_root.is_dir() {
+        let needs_migrate = fs::read_dir(&sess_root)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok()).any(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let path = e.path();
+                    (path.is_dir() && name != DESKTOP_WORKSPACE)
+                        || (path.is_file() && name == "current.json")
+                })
+            })
+            .unwrap_or(false);
+        if needs_migrate {
+            if let Err(e) = fs::create_dir_all(&desktop) {
+                tracing::warn!(error = %e, "migrate: create sessions/desktop failed");
+            } else if let Ok(rd) = fs::read_dir(&sess_root) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let path = entry.path();
+                    if path.is_dir() && name != DESKTOP_WORKSPACE {
+                        let dest = desktop.join(&name);
+                        if !dest.exists() {
+                            if let Err(e) = fs::rename(&path, &dest) {
+                                tracing::warn!(error = %e, from = %path.display(), "migrate session dir");
+                            }
+                        }
+                    } else if path.is_file() && name == "current.json" {
+                        let dest = desktop.join("current.json");
+                        if !dest.exists() {
+                            move_file_if_present(&path, &dest);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // memory/sessions → memory/desktop/sessions
+    let old_mem_sess = memory_dir().join("sessions");
+    let new_mem_sess = memory_sessions_dir();
+    if old_mem_sess.is_dir() {
+        if let Err(e) = fs::create_dir_all(&new_mem_sess) {
+            tracing::warn!(error = %e, "migrate: create memory/desktop/sessions failed");
+        } else {
+            move_dir_contents(&old_mem_sess, &new_mem_sess);
+            let _ = fs::remove_dir(&old_mem_sess);
+        }
+    }
+
+    // Ensure desktop MEMORY.md scaffold exists if global does and desktop missing.
+    let desk_mem = memory_workspace_dir().join("MEMORY.md");
+    if memory_md_path().is_file() && !desk_mem.is_file() {
+        if let Err(e) = fs::create_dir_all(memory_workspace_dir()) {
+            tracing::warn!(error = %e, "migrate: create memory/desktop failed");
+        } else {
+            let _ = fs::write(
+                &desk_mem,
+                "# Project Memory — desktop\n\
+                 \n\
+                 > Auto-populated by Boris. Edit freely.\n\
+                 > Workspace-scoped notes for the desktop voice assistant.\n",
+            );
+        }
+    }
+}
+
+fn move_file_if_present(from: &Path, to: &Path) {
+    if !from.is_file() || to.exists() {
+        return;
+    }
+    if let Some(parent) = to.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(e) = fs::rename(from, to) {
+        // Cross-volume fallback: copy + remove.
+        if let Err(e2) = fs::copy(from, to).and_then(|_| fs::remove_file(from)) {
+            tracing::warn!(
+                error = %e,
+                copy_error = %e2,
+                from = %from.display(),
+                to = %to.display(),
+                "migrate file failed"
+            );
+        }
+    }
+}
+
+fn move_dir_contents(from: &Path, to: &Path) {
+    let Ok(rd) = fs::read_dir(from) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let dest = to.join(entry.file_name());
+        if dest.exists() {
+            continue;
+        }
+        let src = entry.path();
+        if let Err(e) = fs::rename(&src, &dest) {
+            if src.is_file() {
+                let _ = fs::copy(&src, &dest).and_then(|_| fs::remove_file(&src));
+            } else {
+                tracing::warn!(error = %e, from = %src.display(), "migrate dir entry failed");
+            }
+        }
+    }
+}
+
+// ── Model readiness (unchanged semantics) ────────────────────────────────────
+
 pub fn parakeet_looks_ready(dir: &Path) -> bool {
     let encoder =
         dir.join("encoder-model.int8.onnx").is_file() || dir.join("encoder-model.onnx").is_file();
@@ -180,23 +382,70 @@ pub fn parakeet_looks_ready(dir: &Path) -> bool {
         || dir.join("decoder-model.int8.onnx").is_file()
         || dir.join("decoder-model.onnx").is_file();
     let vocab = dir.join("vocab.txt").is_file();
-    // nemo128 is part of the onnx-asr feature pipeline; require it so a partial
-    // copy does not look "ready".
     let fe = dir.join("nemo128.onnx").is_file();
     encoder && decoder && vocab && fe
 }
 
-/// True if Supertone has loadable graphs + default voice (not config-only).
 pub fn supertone_looks_ready(onnx: &Path, voices: &Path) -> bool {
     onnx.join("vocoder.onnx").is_file()
         && onnx.join("text_encoder.onnx").is_file()
         && onnx.join("vector_estimator.onnx").is_file()
         && onnx.join("duration_predictor.onnx").is_file()
+        && onnx.join("unicode_indexer.json").is_file()
         && onnx.join("tts.json").is_file()
         && voices.join("M4.json").is_file()
+        // st-tts wraps every utterance as `<en>…</en>`. Supertonic 1
+        // (opensource-en) maps `<`/`>`/`/` to unknown tokens → garbage audio
+        // like "an an an an". Only accept multilingual v2/v3 graphs.
+        && supertone_onnx_is_multilingual(onnx)
 }
 
-/// Snapshot for UI preflight gate + host start defense-in-depth.
+/// True when `tts.json` is Supertonic 2/3 multilingual (compatible with st-tts lang tags).
+///
+/// Supertonic 1 is `"split": "opensource-en"` / `tts_version` v1.5.x and must be rejected.
+pub fn supertone_onnx_is_multilingual(onnx: &Path) -> bool {
+    let path = onnx.join("tts.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return false;
+    };
+    if raw.contains("opensource-en") {
+        return false;
+    }
+    raw.contains("opensource-multilingual")
+        || raw.contains("\"tts_version\": \"v1.6")
+        || raw.contains("\"tts_version\": \"v1.7")
+        || raw.contains("\"tts_version\":\"v1.6")
+        || raw.contains("\"tts_version\":\"v1.7")
+}
+
+/// Human-readable reason when Supertone files are present but unusable.
+pub fn supertone_version_problem(onnx: &Path) -> Option<String> {
+    let path = onnx.join("tts.json");
+    if !path.is_file() {
+        return None;
+    }
+    if supertone_onnx_is_multilingual(onnx) {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).unwrap_or_default();
+    let version = raw
+        .split("\"tts_version\"")
+        .nth(1)
+        .and_then(|s| s.split('"').nth(1))
+        .unwrap_or("unknown");
+    let split = if raw.contains("opensource-en") {
+        "opensource-en (Supertonic 1 English-only)"
+    } else {
+        "unknown / not multilingual"
+    };
+    Some(format!(
+        "Supertone models are {split}, tts_version={version}. \
+         Boris needs Supertonic 3 (opensource-multilingual from Hugging Face \
+         Supertone/supertonic-3). Re-run Install models — old v1 weights produce \
+         nonsense speech like \"an an an an\"."
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreflightReport {
     pub parakeet_ready: bool,
@@ -205,13 +454,12 @@ pub struct PreflightReport {
     pub parakeet_dir: String,
     pub supertone_onnx_dir: String,
     pub supertone_voices_dir: String,
-    /// Both STT and TTS model trees look ready.
     pub ok: bool,
     pub messages: Vec<String>,
 }
 
-/// Best-effort bootstrap then report whether required models are on disk.
 pub fn preflight() -> PreflightReport {
+    migrate_home_if_needed();
     if let Err(e) = bootstrap_models_if_needed() {
         tracing::warn!(error = %e, "model bootstrap during preflight failed");
     }
@@ -233,12 +481,16 @@ pub fn preflight() -> PreflightReport {
         ));
     }
     if !supertone_ready {
-        messages.push(format!(
-            "Supertone TTS models missing. Need full onnx graphs under {} \
-             and M4.json under {} — or use Install models in the app.",
-            onnx.display(),
-            voices.display()
-        ));
+        if let Some(problem) = supertone_version_problem(&onnx) {
+            messages.push(problem);
+        } else {
+            messages.push(format!(
+                "Supertone TTS models missing. Need Supertonic 3 onnx graphs under {} \
+                 and M4.json under {} — or use Install models in the app.",
+                onnx.display(),
+                voices.display()
+            ));
+        }
     }
     if messages.is_empty() {
         messages.push("Models look ready under ~/.boris.".into());
@@ -256,11 +508,6 @@ pub fn preflight() -> PreflightReport {
     }
 }
 
-/// One-time / best-effort seed: copy from a discovered workspace `assets/models`
-/// into `~/.boris/models` when the home models are empty.
-///
-/// Safe to call every launch — no-ops when already populated.
-/// Product path for missing models is HTTP install (`download` module).
 pub fn bootstrap_models_if_needed() -> Result<(), String> {
     ensure_model_dirs().map_err(|e| format!("create ~/.boris/models: {e}"))?;
 
@@ -284,12 +531,19 @@ pub fn bootstrap_models_if_needed() -> Result<(), String> {
     if !supertone_looks_ready(&onnx, &voices) {
         let from_onnx = src_root.join("supertone").join("onnx");
         let from_voices = src_root.join("supertone").join("voices");
-        if from_onnx.is_dir() {
+        // Never seed Supertonic 1 English-only assets — st-tts needs multilingual v2/v3.
+        if from_onnx.is_dir() && !supertone_onnx_is_multilingual(&from_onnx) {
+            tracing::warn!(
+                from = %from_onnx.display(),
+                "skipping supertone bootstrap: workspace assets are not multilingual \
+                 Supertonic 2/3 (use Install models → Hugging Face supertonic-3)"
+            );
+        } else if from_onnx.is_dir() {
             tracing::info!(from = %from_onnx.display(), to = %onnx.display(), "seeding supertone onnx into ~/.boris");
             copy_dir_recursive(&from_onnx, &onnx)
                 .map_err(|e| format!("copy supertone onnx: {e}"))?;
         }
-        if from_voices.is_dir() {
+        if from_voices.is_dir() && supertone_onnx_is_multilingual(&from_onnx) {
             tracing::info!(from = %from_voices.display(), to = %voices.display(), "seeding supertone voices into ~/.boris");
             copy_dir_recursive(&from_voices, &voices)
                 .map_err(|e| format!("copy supertone voices: {e}"))?;
@@ -308,7 +562,6 @@ pub fn bootstrap_models_if_needed() -> Result<(), String> {
     Ok(())
 }
 
-/// Walk CWD / parents / common Tauri cwd for `assets/models`.
 fn find_dev_assets_models() -> Option<PathBuf> {
     let mut starts = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -319,7 +572,6 @@ fn find_dev_assets_models() -> Option<PathBuf> {
             starts.push(p.to_path_buf());
         }
     }
-    // This crate lives at crates/boris-pipeline → workspace root is ../..
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     starts.push(manifest.join("../.."));
     starts.push(manifest.join("../../.."));
@@ -347,10 +599,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         let to = dst.join(entry.file_name());
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &to)?;
-        } else if ty.is_file() {
-            if !to.exists() {
-                fs::copy(entry.path(), &to)?;
-            }
+        } else if ty.is_file() && !to.exists() {
+            fs::copy(entry.path(), &to)?;
         }
     }
     Ok(())
@@ -368,5 +618,32 @@ mod tests {
             "unexpected home {}",
             h.display()
         );
+    }
+
+    #[test]
+    fn sessions_under_desktop_bucket() {
+        let s = sessions_dir();
+        assert!(
+            s.ends_with("sessions") || s.ends_with(DESKTOP_WORKSPACE),
+            "{}",
+            s.display()
+        );
+        assert!(s.to_string_lossy().contains("sessions"));
+        assert!(s.to_string_lossy().contains(DESKTOP_WORKSPACE));
+    }
+
+    #[test]
+    fn audit_nested_under_logs() {
+        let a = audit_path();
+        assert!(a.to_string_lossy().contains("logs"));
+        assert!(a.to_string_lossy().contains("audit"));
+        assert!(a.ends_with("tool_calls.jsonl"));
+    }
+
+    #[test]
+    fn sandbox_is_state_workspace() {
+        let s = sandbox_dir();
+        assert!(s.to_string_lossy().contains("state"));
+        assert!(s.to_string_lossy().contains("workspace"));
     }
 }

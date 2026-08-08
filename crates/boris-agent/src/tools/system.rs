@@ -39,6 +39,8 @@ impl Tool for GetSystemInfoTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::System)
+            .read_only(true)
+            .max_concurrency(8)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {

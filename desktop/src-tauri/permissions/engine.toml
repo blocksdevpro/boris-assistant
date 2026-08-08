@@ -1,4 +1,4 @@
-# ACL for app-level Tauri commands (boris-desktop lib.rs).
+# ACL for app-level Tauri commands (boris-desktop commands.rs).
 
 [[permission]]
 identifier = "allow-get-status"

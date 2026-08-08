@@ -1,10 +1,7 @@
 use std::time::Instant;
 
 use any_tts::{load_model, ModelType, SynthesisRequest, TtsConfig, TtsModel};
-use boris_core::{
-    error::{Error, Result},
-    AudioBuffer,
-};
+use boris_core::{AudioBuffer, Error, Result};
 use boris_inference::TextToSpeech;
 
 pub const KOKORO_SAMPLE_RATE: u32 = 24_000;

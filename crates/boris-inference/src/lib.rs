@@ -1,27 +1,25 @@
-//! Shared speech capability traits (STT / TTS).
+//! Speech model **ports** (traits) shared by STT/TTS adapters and the engine.
 //!
-//! Wake-word and VAD live in [`boris_sense`]. This crate keeps the model
-//! service ports so adapter crates (`boris-stt-*`, `boris-tts-*`) do not
-//! depend on perception.
+//! # Why a separate crate?
+//!
+//! Adapters (`boris-stt-*`, `boris-tts-*`) implement these traits against
+//! `boris-core` types only. Perception (wake / VAD) lives in `boris-sense` and
+//! must not become a dependency of model adapters.
+//!
+//! The voice engine in `boris-pipeline` holds `Box<dyn SpeechToText>` /
+//! `Box<dyn TextToSpeech>` and never imports a concrete vendor crate at the
+//! call site of `transcribe` / `synthesize` (feature gates pick the impl).
+//!
+//! # Object safety
+//!
+//! Both traits are object-safe (`&mut self` methods, no generics) so the engine
+//! can erase concrete backends behind `dyn`. Implementations only need
+//! [`Send`] — models are typically used from one engine thread.
 
-use boris_core::{error::Result, AudioBuffer, AudioSample};
+#![deny(missing_docs)]
 
-pub trait SpeechToText: Send {
-    fn load(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn unload(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn transcribe(&mut self, audio: &[AudioSample]) -> Result<String>;
-}
+mod stt;
+mod tts;
 
-pub trait TextToSpeech: Send {
-    fn load(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn unload(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn synthesize(&mut self, text: &str) -> Result<AudioBuffer>;
-}
+pub use stt::SpeechToText;
+pub use tts::TextToSpeech;

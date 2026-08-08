@@ -1,15 +1,27 @@
 //! LLM tool-calling agent harness used by Boris.
 //!
-//! Layers (Grok-inspired, voice-sized):
-//! - [`loop_`] — pure ReAct loop (complete + tools + events; parallel safe batches)
-//! - [`agent::Agent`] — stateful facade (memory, HITL, session, prompt profile)
-//! - [`runtime`] — policy / timeout / audit / confirmation / reminders
-//! - [`tool_context`] — per-call cwd / cancel / session
-//! - [`prompt_profile`] — structured system prompt sections
-//! - [`capability`] — tool kinds + capability presets
+//! # Architecture (read this first)
+//!
+//! ```text
+//! Host (pipeline/desktop)
+//!   â””â”€ Agent facade          agent/        memory, HITL, session, prompt profile
+//!        â””â”€ agent_loop       loop_         pure ReAct: complete â†’ tools â†’ events
+//!             â””â”€ ToolRuntime runtime/      policy, timeout, audit, confirmation
+//!                  â””â”€ dyn Tool             tools/* + tool.rs
+//! ```
+//!
+//! | Layer | Module(s) | Responsibility |
+//! |-------|-----------|----------------|
+//! | Loop | [`loop_`], [`finish_gate`], [`types`] | ReAct complete + tool batches |
+//! | Facade | [`agent`], [`outcome`], [`observe`], [`stats`] | Stateful host API |
+//! | Runtime | [`runtime`] | Policy / timeout / audit / HITL |
+//! | Tools | [`tools`], [`tool`], [`tool_context`], [`capability`] | Observation-only tools |
+//! | Memory | [`memory`] | Profile + long-term facts |
+//! | Session | [`session`] | Persist / transcript |
+//! | Skills | [`skills`] | Playbooks |
+//! | Routing | [`routing`], [`prompt_profile`], [`reminder`] | Prompt helpers |
 //!
 //! Provider HTTP lives in `boris-ai` and is re-exported here for hosts.
-//!
 //! Tool bodies stay observation-only; speech is always [`AgentOutcome`].
 
 pub mod agent;
@@ -42,7 +54,6 @@ pub use boris_ai::{
 
 pub use agent::{Agent, AgentOptions};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
-pub use routing::{classify_route, RouteMode, RoutingClient};
 pub use context::{Context, Message, Role};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_tool, LoopState};
@@ -53,13 +64,15 @@ pub use memory::{
 pub use observe::TurnReport;
 pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
+pub use routing::{classify_route, RouteMode, RoutingClient};
 pub use runtime::{
-    default_user_read_roots, PendingToolCall, SandboxConfig, ToolRuntime, JsonlAuditSink,
-    NullAuditSink, NetworkPolicy, ShellPolicy,
+    default_user_read_roots, ActivationSet, JsonlAuditSink, ListToolsContext, NetworkPolicy,
+    NullAuditSink, PendingToolCall, ProgressEvent, SandboxConfig, ShellPolicy, ToolRuntime,
+    ToolRuntimeFeatures,
 };
 pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
 pub use skills::{
-    ensure_default_skills, format_skills_catalog, load_skills, load_skill_body, user_skills_dir,
+    ensure_default_skills, format_skills_catalog, load_skill_body, load_skills, user_skills_dir,
     LoadedSkills, Skill, SkillSource,
 };
 pub use stats::AgentStats;
@@ -77,7 +90,7 @@ pub use types::{
     AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS,
 };
 
-// ── Temporary aliases (migration window) ─────────────────────────────────────
+// â”€â”€ Temporary aliases (migration window) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Deprecated name for [`Agent`]. Prefer `Agent`.
 #[deprecated(note = "renamed to Agent")]

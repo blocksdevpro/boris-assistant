@@ -1,7 +1,16 @@
-//! Desktop host for [`boris_pipeline::Engine`].
+//! Engine lifecycle host for [`boris_pipeline::Engine`].
 //!
-//! Owns lifecycle (start/stop), mirrors status for the UI, and maps Tauri
-//! commands onto the engine. No voice policy lives here.
+//! # Responsibility
+//!
+//! | This module (host) | `boris_pipeline` (pipeline) |
+//! |--------------------|-------------------------------|
+//! | Spawn engine thread once | Sequential voice turns, wake/VAD |
+//! | Mirror `StatusPicture` for UI | Produce status snapshots |
+//! | Map Start/Stop + device prefs → commands | Apply `EngineCommand`s |
+//! | Gate Start on empty key / preflight | Load models, run agent |
+//!
+//! No voice policy lives here — only process-local state and IPC-facing APIs
+//! used by [`crate::commands`].
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,10 +23,12 @@ use boris_tts_supertone::SUPERTONE_SAMPLE_RATE;
 use tracing::{debug, error, info, warn};
 
 /// Embedded wake model (path relative to this crate → workspace `assets/`).
+///
+/// Compile-time embed keeps always-on wake available without a first-run download.
 static WAKEWORD_MODEL_BYTES: &[u8] =
     include_bytes!("../../../assets/models/livekit/boris-large.onnx");
 
-/// Shared app state: engine handle + latest status snapshot.
+/// Shared app state: engine handle + latest status snapshot + device prefs.
 pub struct AppState {
     status: Arc<Mutex<StatusPicture>>,
     handle: Mutex<Option<EngineHandle>>,
@@ -43,7 +54,7 @@ impl AppState {
         self.status.lock().unwrap().clone()
     }
 
-    /// Model paths / readiness for the UI Start gate.
+    /// Model paths / readiness for the UI Start gate (`boris_pipeline::paths`).
     pub fn preflight() -> PreflightReport {
         paths::preflight()
     }
@@ -78,60 +89,16 @@ impl AppState {
         );
 
         if handle_g.is_none() {
-            if api_key.trim().is_empty() {
-                error!("start rejected: empty API key");
-                return Err(
-                    "API key is required. Paste an OpenRouter key or set OPENROUTER_API_KEY."
-                        .into(),
-                );
-            }
-
-            // Defense in depth: block engine spawn when models are missing.
-            let report = paths::preflight();
-            if !report.ok {
-                error!(messages = ?report.messages, "start rejected: preflight failed");
-                return Err(format!(
-                    "Cannot start — models not ready. {}",
-                    report.messages.join(" ")
-                ));
-            }
-
-            info!(
-                boris_home = %paths::boris_home().display(),
-                wake_model_bytes = WAKEWORD_MODEL_BYTES.len(),
-                "spawning pipeline engine"
-            );
-
-            let config = PipelineConfig::with_llm(
+            self.spawn_engine_once(
+                &mut handle_g,
                 api_key,
                 model,
                 fast_model,
                 model_provider,
                 fast_provider,
                 pin_provider,
-                SUPERTONE_SAMPLE_RATE,
-                WAKEWORD_MODEL_BYTES.to_vec(),
-            );
-
-            let (engine, handle, status_rx) = Engine::spawn(config);
-            *self._engine.lock().unwrap() = Some(engine);
-            *handle_g = Some(handle.clone());
-            info!("engine thread spawned");
-
-            let status_cache = self.status.clone();
-            thread::spawn(move || {
-                info!("status mirror thread started");
-                while let Ok(picture) = status_rx.recv() {
-                    debug!(
-                        engine = ?picture.engine,
-                        phase = ?picture.phase,
-                        "status snapshot"
-                    );
-                    *status_cache.lock().unwrap() = picture.clone();
-                    on_status(picture);
-                }
-                warn!("status channel closed — mirror thread exiting");
-            });
+                on_status,
+            )?;
         }
 
         let handle = handle_g
@@ -148,8 +115,91 @@ impl AppState {
                 msg
             })?;
 
-        // Apply any devices the user picked before/while Off. The engine now
-        // processes Switch* while Armed, so these take effect immediately.
+        self.apply_preferred_devices(&handle);
+
+        info!("AppState::start complete");
+        Ok(())
+    }
+
+    /// First-time engine spawn: validate key + preflight, build config, start mirror.
+    fn spawn_engine_once(
+        &self,
+        handle_g: &mut Option<EngineHandle>,
+        api_key: String,
+        model: Option<String>,
+        fast_model: Option<String>,
+        model_provider: Option<String>,
+        fast_provider: Option<String>,
+        pin_provider: Option<bool>,
+        on_status: impl Fn(StatusPicture) + Send + 'static,
+    ) -> Result<(), String> {
+        if api_key.trim().is_empty() {
+            error!("start rejected: empty API key");
+            return Err(
+                "API key is required. Paste an OpenRouter key or set OPENROUTER_API_KEY."
+                    .into(),
+            );
+        }
+
+        // Defense in depth: block engine spawn when models are missing.
+        let report = paths::preflight();
+        if !report.ok {
+            error!(messages = ?report.messages, "start rejected: preflight failed");
+            return Err(format!(
+                "Cannot start — models not ready. {}",
+                report.messages.join(" ")
+            ));
+        }
+
+        info!(
+            boris_home = %paths::boris_home().display(),
+            wake_model_bytes = WAKEWORD_MODEL_BYTES.len(),
+            "spawning pipeline engine"
+        );
+
+        let config = PipelineConfig::with_llm(
+            api_key,
+            model,
+            fast_model,
+            model_provider,
+            fast_provider,
+            pin_provider,
+            SUPERTONE_SAMPLE_RATE,
+            WAKEWORD_MODEL_BYTES.to_vec(),
+        );
+
+        let (engine, handle, status_rx) = Engine::spawn(config);
+        *self._engine.lock().unwrap() = Some(engine);
+        *handle_g = Some(handle.clone());
+        info!("engine thread spawned");
+
+        Self::spawn_status_mirror(self.status.clone(), status_rx, on_status);
+        Ok(())
+    }
+
+    /// Background thread: cache each snapshot and forward to the UI emit callback.
+    fn spawn_status_mirror(
+        status_cache: Arc<Mutex<StatusPicture>>,
+        status_rx: std::sync::mpsc::Receiver<StatusPicture>,
+        on_status: impl Fn(StatusPicture) + Send + 'static,
+    ) {
+        thread::spawn(move || {
+            info!("status mirror thread started");
+            while let Ok(picture) = status_rx.recv() {
+                debug!(
+                    engine = ?picture.engine,
+                    phase = ?picture.phase,
+                    "status snapshot"
+                );
+                *status_cache.lock().unwrap() = picture.clone();
+                on_status(picture);
+            }
+            warn!("status channel closed — mirror thread exiting");
+        });
+    }
+
+    /// Re-apply devices the user picked before/while Off (engine accepts Switch* while Armed).
+    fn apply_preferred_devices(&self, handle: &EngineHandle) {
         if let Some(id) = self.preferred_input.lock().unwrap().clone() {
             info!(%id, "applying preferred input on start");
             if let Err(e) = handle.send(EngineCommand::SwitchInput { device_id: id }) {
@@ -162,9 +212,6 @@ impl AppState {
                 warn!(error = %e, "preferred output switch failed");
             }
         }
-
-        info!("AppState::start complete");
-        Ok(())
     }
 
     pub fn stop(&self) -> Result<(), String> {

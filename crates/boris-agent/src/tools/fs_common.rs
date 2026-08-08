@@ -1,11 +1,19 @@
-//! Shared path resolution for file / open tools.
+//! Shared path resolution for file / open / glob / grep tools.
+//!
+//! All FS tools resolve model-supplied paths through [`resolve_under_roots`] so
+//! relative paths join an allowed root and absolute paths must sit under one.
 
 use std::path::{Path, PathBuf};
 
 use crate::runtime::policy::{normalize_path, path_is_within};
 use crate::tool::ToolError;
 
-/// Resolve `raw` to an absolute-ish normalized path that sits under one of `roots`.
+/// Resolve `raw` to a normalized absolute path that sits under one of `roots`.
+///
+/// # Rules
+/// - Empty / NUL-containing paths are rejected as invalid args.
+/// - Absolute paths must already fall under some root.
+/// - Relative paths are joined to each root in order; first in-bounds win.
 pub fn resolve_under_roots(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolError> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -18,7 +26,6 @@ pub fn resolve_under_roots(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, Tool
     let candidate = PathBuf::from(raw);
     let normalized = normalize_path(&candidate).map_err(ToolError::invalid_args)?;
 
-    // Also try absolute join if relative: relative paths are resolved against each root.
     if normalized.is_absolute() {
         for root in roots {
             let root_n = normalize_path(root).unwrap_or_else(|_| root.clone());
@@ -95,5 +102,43 @@ mod tests {
         let roots = vec![PathBuf::from("C:\\Users\\me\\.boris\\sandbox")];
         let p = resolve_under_roots("hello.txt", &roots).unwrap();
         assert!(p.ends_with("hello.txt"));
+    }
+
+    #[test]
+    fn rejects_empty_path() {
+        let roots = vec![PathBuf::from("C:\\Users\\me\\.boris\\sandbox")];
+        let err = resolve_under_roots("   ", &roots).unwrap_err();
+        assert!(err.message.contains("empty"));
+    }
+
+    #[test]
+    fn rejects_nul_in_path() {
+        let roots = vec![PathBuf::from("C:\\Users\\me\\.boris\\sandbox")];
+        let err = resolve_under_roots("foo\0bar", &roots).unwrap_err();
+        assert!(err.message.contains("NUL"));
+    }
+
+    #[test]
+    fn read_roots_includes_all() {
+        let sandbox = PathBuf::from("/s");
+        let data = vec![PathBuf::from("/d")];
+        let allow_read = vec![PathBuf::from("/r")];
+        let allow_write = vec![PathBuf::from("/w")];
+        let roots = read_roots(&sandbox, &data, &allow_read, &allow_write);
+        assert_eq!(roots.len(), 4);
+        assert!(roots.contains(&sandbox));
+        assert!(roots.contains(&PathBuf::from("/d")));
+        assert!(roots.contains(&PathBuf::from("/r")));
+        assert!(roots.contains(&PathBuf::from("/w")));
+    }
+
+    #[test]
+    fn write_roots_excludes_allow_read() {
+        let sandbox = PathBuf::from("/s");
+        let data = vec![PathBuf::from("/d")];
+        let allow_write = vec![PathBuf::from("/w")];
+        let roots = write_roots(&sandbox, &data, &allow_write);
+        assert_eq!(roots.len(), 3);
+        assert!(!roots.iter().any(|p| p == Path::new("/r")));
     }
 }

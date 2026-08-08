@@ -1,4 +1,11 @@
-//! Build the always-on-top overlay the Tauri-documented way.
+//! Always-on-top transparent overlay window (the “island”).
+//!
+//! # Responsibility (host shell)
+//!
+//! Create and position a click-through webview. React paints phase UI inside;
+//! this module only owns **window chrome** (transparency, ignore-cursor, park).
+//!
+//! # Tauri notes
 //!
 //! From [`WebviewWindowBuilder::transparent`]:
 //! > If this is true, writing colors with alpha values different than `1.0`
@@ -17,8 +24,11 @@
 
 use tauri::{AppHandle, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder};
 
+/// Fraction of monitor height from the top edge where the island is parked.
+const OVERLAY_TOP_MARGIN_FRAC: f64 = 0.02;
+
 /// Early script so the first paint is clear (before React mounts).
-const OVERLAY_INIT: &str = r#"
+const OVERLAY_INIT_SCRIPT: &str = r#"
 (function () {
   try {
     document.documentElement.classList.add('overlay-mode');
@@ -75,7 +85,7 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
         .focused(false)
         // Webview + window bg: alpha 0 is required on Win8+ for clear pixels.
         .background_color(tauri::window::Color(0, 0, 0, 0))
-        .initialization_script(OVERLAY_INIT)
+        .initialization_script(OVERLAY_INIT_SCRIPT)
         .build()
         .map_err(|e| {
             tracing::error!(error = %e, "overlay WebviewWindowBuilder::build failed");
@@ -121,9 +131,8 @@ fn place_overlay_top_center<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
         return;
     };
 
-    // ~3% down from top, horizontally centered on that monitor.
     let x = pos.x + (screen.width as i32 - win_size.width as i32) / 2;
-    let y = pos.y + (screen.height as f64 * 0.02) as i32;
+    let y = pos.y + (screen.height as f64 * OVERLAY_TOP_MARGIN_FRAC) as i32;
 
     if let Err(e) = overlay.set_position(tauri::Position::Physical(PhysicalPosition::new(x, y))) {
         tracing::warn!(error = %e, "overlay set_position failed");

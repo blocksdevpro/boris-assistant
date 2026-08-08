@@ -8,7 +8,7 @@ use webrtc_vad::{SampleRate, Vad as WebVad, VadMode};
 
 use crate::pcm::f32_to_pcm16_samples;
 use crate::vad::Vad;
-use boris_core::{error::Result, AudioSample};
+use boris_core::{AudioSample, Error, Result};
 
 pub struct WebRtcVad {
     model: WebVad,
@@ -42,6 +42,6 @@ impl Vad for WebRtcVad {
         let pcm = f32_to_pcm16_samples(audio);
         self.model
             .is_voice_segment(&pcm)
-            .map_err(|_| boris_core::error::Error::Other("webrtc-vad prediction failed".into()))
+            .map_err(|_| Error::other("webrtc-vad prediction failed"))
     }
 }

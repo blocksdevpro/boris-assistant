@@ -55,6 +55,12 @@ impl Tool for MemorySearchTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+            .read_only(true)
+            .max_concurrency(8)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -130,6 +136,12 @@ impl Tool for MemoryGetTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+            .read_only(true)
+            .max_concurrency(8)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {

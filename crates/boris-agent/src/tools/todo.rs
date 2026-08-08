@@ -105,6 +105,8 @@ impl Tool for TodoReadTool {
         ToolMeta::with_risk(ToolRisk::Safe)
             .kind(ToolKind::Plan)
             .permissions(&[Permission::FsRead])
+            .read_only(true)
+            .max_concurrency(8)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
@@ -167,6 +169,8 @@ impl Tool for TodoWriteTool {
         ToolMeta::with_risk(ToolRisk::Safe)
             .kind(ToolKind::Plan)
             .permissions(&[Permission::FsWrite])
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {

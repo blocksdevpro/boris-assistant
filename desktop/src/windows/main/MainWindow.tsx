@@ -139,7 +139,7 @@ export function MainWindow() {
     });
   }, [refreshDevices, refreshModels]);
 
-  // Restore last OpenRouter key + models/providers from ~/.boris/settings.json
+  // Restore last OpenRouter key + models/providers from ~/.boris/config.toml + auth.json
   useEffect(() => {
     let cancelled = false;
     void (async () => {

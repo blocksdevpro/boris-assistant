@@ -1,6 +1,8 @@
-//! Lightweight task list stored under the sandbox.
+//! Lightweight task list stored at an explicit todos file path (session file).
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,11 +27,35 @@ pub struct TodoItem {
     pub status: TodoStatus,
 }
 
-fn default_todos_path(sandbox: &std::path::Path) -> PathBuf {
+/// Compat: todos file under a sandbox root (`sandbox/todos.json`).
+fn default_todos_path(sandbox: &Path) -> PathBuf {
     sandbox.join("todos.json")
 }
 
-async fn load_todos(path: &std::path::Path) -> Result<Vec<TodoItem>, ToolError> {
+/// Atomic write: sibling `*.json.tmp` then rename (mirrors session/store/atomic).
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_e) => {
+            let _ = fs::remove_file(&tmp);
+            let mut f = fs::File::create(path)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            Ok(())
+        }
+    }
+}
+
+async fn load_todos(path: &Path) -> Result<Vec<TodoItem>, ToolError> {
     match tokio::fs::read_to_string(path).await {
         Ok(s) if s.trim().is_empty() => Ok(vec![]),
         Ok(s) => serde_json::from_str(&s)
@@ -39,7 +65,7 @@ async fn load_todos(path: &std::path::Path) -> Result<Vec<TodoItem>, ToolError> 
     }
 }
 
-async fn save_todos(path: &std::path::Path, items: &[TodoItem]) -> Result<(), ToolError> {
+async fn save_todos(path: &Path, items: &[TodoItem]) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -47,8 +73,10 @@ async fn save_todos(path: &std::path::Path, items: &[TodoItem]) -> Result<(), To
     }
     let s = serde_json::to_string_pretty(items)
         .map_err(|e| ToolError::failed(format!("serialize todos: {e}")))?;
-    tokio::fs::write(path, s)
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_atomic(&path, s.as_bytes()))
         .await
+        .map_err(|e| ToolError::failed(format!("write todos join: {e}")))?
         .map_err(|e| ToolError::failed(format!("write todos: {e}")))
 }
 
@@ -76,10 +104,14 @@ pub struct TodoReadTool {
 }
 
 impl TodoReadTool {
+    /// Exact todos file path (session-bound or sandbox file).
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Compat: `sandbox_root/todos.json`.
     pub fn new(sandbox_root: impl Into<PathBuf>) -> Self {
-        Self {
-            path: default_todos_path(&sandbox_root.into()),
-        }
+        Self::with_path(default_todos_path(&sandbox_root.into()))
     }
 }
 
@@ -122,10 +154,14 @@ pub struct TodoWriteTool {
 }
 
 impl TodoWriteTool {
+    /// Exact todos file path (session-bound or sandbox file).
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Compat: `sandbox_root/todos.json`.
     pub fn new(sandbox_root: impl Into<PathBuf>) -> Self {
-        Self {
-            path: default_todos_path(&sandbox_root.into()),
-        }
+        Self::with_path(default_todos_path(&sandbox_root.into()))
     }
 }
 
@@ -265,6 +301,37 @@ mod tests {
         let listed = read.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
         assert!(listed.contains("[ ] 1"));
         assert!(listed.contains("[x] 2"));
+
+        // Atomic write should leave no temp sibling after success.
+        assert!(!dir.join("todos.json.tmp").exists());
+        assert!(dir.join("todos.json").exists());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn with_path_uses_exact_file() {
+        let dir = std::env::temp_dir().join(format!("boris-todo-path-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join("session-todos.json");
+        let write = TodoWriteTool::with_path(&path);
+        let read = TodoReadTool::with_path(&path);
+
+        write
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"items": [{"id": "a", "content": "exact path", "status": "pending"}]}),
+            )
+            .await
+            .unwrap();
+
+        assert!(path.exists());
+        assert!(!dir.join("todos.json").exists());
+        let listed = read
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
+            .await
+            .unwrap();
+        assert!(listed.contains("exact path"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

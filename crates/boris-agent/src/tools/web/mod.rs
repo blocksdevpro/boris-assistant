@@ -47,6 +47,9 @@ use crate::tool::ToolError;
 pub use fetch::WebFetchTool;
 pub use search::WebSearchTool;
 
+/// Shared SSRF-safe HTTP(S) URL parse for web tools and `open_url`.
+pub(crate) use url::parse_safe_http_url;
+
 /// Max plain-text characters returned by `web_fetch` before local truncation.
 pub(crate) const MAX_FETCH_CHARS: usize = 12_000;
 

@@ -7,6 +7,8 @@ repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Shared foundation types for the Boris assistant (audio buffers, turn ids, errors)"
 readme      = "README.md"
 publish     = false
+keywords    = ["assistant", "audio", "types"]
+categories  = ["multimedia::audio"]
 
 [dependencies]
 thiserror = { workspace = true }

@@ -5,7 +5,10 @@ edition     = "2021"
 license     = "Apache-2.0"
 repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Local perception: WebRTC VAD, LiveKit wake-word ONNX scoring, ORT process init"
+readme      = "README.md"
 publish     = false
+keywords    = ["vad", "wake-word", "onnx", "audio"]
+categories  = ["multimedia::audio"]
 
 [features]
 default = ["vad", "wake"]

@@ -1,12 +1,14 @@
 [package]
-name    = "boris-agent"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-agent"
+version     = "0.1.0"
+edition     = "2021"
 description = "Voice-aware agent harness: loop, tools, runtime, memory, sessions"
-license = "Apache-2.0"
-repository = "https://github.com/blocksdevpro/boris-assistant"
-readme = "README.md"
-publish = false
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+readme      = "README.md"
+publish     = false
+keywords    = ["agent", "tools", "assistant"]
+categories  = ["asynchronous"]
 
 [dependencies]
 boris-ai   = { workspace = true }

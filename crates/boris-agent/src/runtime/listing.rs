@@ -37,7 +37,7 @@ pub struct ToolRuntimeFeatures {
     pub force_list_all: bool,
     /// Partition multi-tool batches into a parallel **read** wave then a sequential
     /// **write** wave (Grok-style fan-out). When false, falls back to legacy
-    /// unbounded `join_all` for every auto-allowed call.
+    /// parallel dispatch (chunked by `max_parallel_tools`) for every auto-allowed call.
     ///
     /// (Historically named `concurrency_v2` during the rollout; the name was
     /// just "second concurrency strategy", not a protocol version.)

@@ -29,6 +29,24 @@ pub(super) fn find_tool<'a>(
         })
 }
 
+/// Soft lookup — `None` when the model named a tool that is not registered
+/// (e.g. history / prompt drift vs capability preset). Callers should commit an
+/// error observation instead of aborting the whole turn.
+pub(super) fn find_tool_opt<'a>(
+    tools: &'a [Arc<dyn Tool>],
+    name: &str,
+) -> Option<&'a dyn Tool> {
+    tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+}
+
+/// Observation text when the model calls a tool that is not in the session table.
+pub(super) fn unknown_tool_observation(name: &str) -> String {
+    format!(
+        "Error: tool `{name}` is not available in this session. \
+         Continue with other registered tools or finish without it."
+    )
+}
+
 /// Build listing context (progressive disclosure / force-list-all).
 pub(super) fn build_list_ctx(
     config: &AgentLoopConfig,

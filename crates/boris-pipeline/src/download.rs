@@ -42,6 +42,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +63,16 @@ pub const DEFAULT_PARAKEET_HF_BASE: &str =
 /// Hugging Face resolve base for Supertonic 3.
 pub const DEFAULT_SUPERTONE_HF_BASE: &str =
     "https://huggingface.co/Supertone/supertonic-3/resolve/main";
+
+/// TCP connect budget for each model HTTP request.
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-operation / idle budget for headers and each body read.
+///
+/// Blocking reqwest applies this to `send()` and to each `Read` on the body, so
+/// a stalled connection fails without capping total time for multi‑hundred‑MB
+/// files that keep making progress.
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Logical product component for progress reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +293,29 @@ fn resolve_url(entry: &CatalogEntry, base_override: Option<&str>) -> String {
     format!("{base}/{}", entry.default_remote_rel)
 }
 
+/// `BORIS_MODEL_BASE_URL` must be an absolute http(s) URL when set.
+fn validate_model_base_url(base: &str) -> Result<(), String> {
+    let base = base.trim();
+    if base.starts_with("https://") || base.starts_with("http://") {
+        return Ok(());
+    }
+    let preview: String = base.chars().take(80).collect();
+    Err(format!(
+        "{BORIS_MODEL_BASE_URL_ENV} must be an http(s) URL, got '{preview}'"
+    ))
+}
+
+fn format_download_error(context: &str, err: impl std::fmt::Display) -> String {
+    let msg = err.to_string();
+    // reqwest / hyper timeouts surface as "timed out" / "operation timed out".
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        format!("{context}: timed out (stalled or too slow): {msg}")
+    } else {
+        format!("{context}: {msg}")
+    }
+}
+
 fn hf_token() -> Option<String> {
     std::env::var("HF_TOKEN")
         .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
@@ -340,13 +374,15 @@ pub fn install_models(
         .ok()
         .filter(|s| !s.trim().is_empty());
     if let Some(ref b) = base_override {
+        validate_model_base_url(b).map_err(PipelineError::download)?;
         tracing::info!(base = %b, "using BORIS_MODEL_BASE_URL for model install");
     }
 
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        // Large models (~650 MB); no overall request timeout — stream until done.
-        .timeout(None)
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        // Idle/per-read budget so a hung peer cannot block install forever.
+        // Progressing multi‑hundred‑MB downloads keep resetting this on each chunk.
+        .timeout(DOWNLOAD_IDLE_TIMEOUT)
         .user_agent(concat!("boris-pipeline/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| PipelineError::download(format!("http client: {e}")))?;
@@ -480,7 +516,9 @@ fn download_one(
         req = req.bearer_auth(token);
     }
 
-    let mut response = req.send().map_err(|e| format!("request failed: {e}"))?;
+    let mut response = req
+        .send()
+        .map_err(|e| format_download_error("request failed", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -511,9 +549,9 @@ fn download_one(
     });
 
     loop {
-        let n = response
-            .read(&mut buf)
-            .map_err(|e| format!("read body: {e}"))?;
+        let n = response.read(&mut buf).map_err(|e| {
+            format_download_error(&format!("read body after {downloaded} bytes"), e)
+        })?;
         if n == 0 {
             break;
         }
@@ -605,5 +643,21 @@ mod tests {
         let u = resolve_url(e, None);
         assert!(u.contains("parakeet-tdt-0.6b-v2-onnx"));
         assert!(u.ends_with("/encoder-model.int8.onnx"));
+    }
+
+    #[test]
+    fn base_url_must_be_http_or_https() {
+        assert!(validate_model_base_url("https://cdn.example/models").is_ok());
+        assert!(validate_model_base_url("http://localhost:8080/m").is_ok());
+        assert!(validate_model_base_url("ftp://bad").is_err());
+        assert!(validate_model_base_url("file:///tmp").is_err());
+        assert!(validate_model_base_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn timeout_errors_are_labeled_for_install_report() {
+        let msg = format_download_error("request failed", "error sending request for url: timed out");
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(msg.contains("stalled"), "{msg}");
     }
 }

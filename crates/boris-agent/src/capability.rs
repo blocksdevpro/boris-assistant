@@ -7,8 +7,8 @@ use crate::tool::{Tool, ToolKind, ToolRisk};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityPreset {
-    /// Safe / moderate local facts only (time, notes, profile, skills list).
-    /// No shell, network, or arbitrary filesystem writes outside memory.
+    /// Safe / moderate local facts only (time, notes, profile, skills, todos).
+    /// No shell, network, or arbitrary filesystem writes outside memory/sandbox plan files.
     VoiceSafe,
     /// Sandboxed files + OS helpers; still no shell / network until confirmed host opts in.
     LocalPower,

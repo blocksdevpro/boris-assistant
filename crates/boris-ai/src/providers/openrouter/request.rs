@@ -48,11 +48,13 @@ fn base_body(model: &str, messages: &Value, tools: &Value) -> Value {
             "messages": messages,
         })
     } else {
+        // parallel_tool_calls nudges OpenAI-compatible providers to emit multi-tool messages.
         json!({
             "model": model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "parallel_tool_calls": true,
         })
     }
 }
@@ -89,6 +91,7 @@ mod tests {
         let body = client.request_body(&json!([]), &tools, false);
         assert!(body.get("stream").is_none());
         assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
         assert!(body["tools"].as_array().unwrap().len() == 1);
     }
 }

@@ -16,6 +16,7 @@ pub struct AgentOptions {
     pub sandbox: Option<SandboxConfig>,
     pub audit_path: Option<PathBuf>,
     pub session_id: Option<String>,
-    /// When true, Moderate tools auto-allow (see [`SandboxConfig::trusted_auto_moderate`]).
+    /// When true, Moderate tools + sandbox file writes auto-allow
+    /// (see [`SandboxConfig::trusted_auto_moderate`]).
     pub trusted_auto_moderate: bool,
 }

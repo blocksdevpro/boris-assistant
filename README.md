@@ -11,6 +11,7 @@ transcribe → tool-using agent → speak. The product host is a **Tauri v2** ap
 | **Voice engine** | [`crates/boris-pipeline`](crates/boris-pipeline) |
 | **Agent / tools** | [`crates/boris-agent`](crates/boris-agent) |
 | **License** | [Apache-2.0](LICENSE) |
+| **Contributing** | [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
 | **Repository** | https://github.com/blocksdevpro/boris-assistant |
 
 > **Note:** The root package `boris-assistant` is a **retired CLI stub**.  
@@ -200,7 +201,8 @@ Crate-level docs live in each `crates/*/README.md`.
 - Agent tools run under **capability presets** and **path sandboxes** (`~/.boris/workspace` and configured roots).
 - **Shell** and higher-risk actions use **HITL** confirmation; deny lists are best-effort, not a full sandbox.
 - **Web fetch** blocks common private/link-local/metadata hosts; residual DNS-rebinding risk remains (documented in agent web tools).
-- Keep API keys in `.env` (gitignored) or `~/.boris/auth.json` — never commit secrets.
+- Keep API keys in `.env` (gitignored) or `~/.boris/auth.json` — never commit secrets. `auth.json` is **plaintext** secret storage.
+- Full policy and private reporting: [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -224,7 +226,7 @@ Copyright 2026 BlocksDevPro.
 
 Third-party models and native libraries (ONNX Runtime, Parakeet, Supertone, wake weights, etc.)
 carry their **own** licenses; this Apache-2.0 grant covers the Boris source in this repository,
-not every binary weight you download at runtime.
+not every binary weight you download at runtime. See [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
 
 ---
 

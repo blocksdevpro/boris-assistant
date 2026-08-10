@@ -79,8 +79,10 @@ pub(super) fn check_path_allowed(
     raw: &str,
     access: PathAccess,
 ) -> Result<(), String> {
-    // Lexical normalize first, then prefer real path when available.
-    let resolved = resolve_path_for_policy(Path::new(raw))?;
+    // Relative model args are sandbox-relative (same contract as tools:
+    // `resolve_under_roots` joins under sandbox first). Absolute paths are
+    // checked as-is after normalize + best-effort canonicalize.
+    let resolved = resolve_policy_candidate(config, raw)?;
     let roots: Vec<PathBuf> = match access {
         PathAccess::Read => {
             let mut r = Vec::new();
@@ -112,6 +114,20 @@ pub(super) fn check_path_allowed(
         "path `{}` is outside allowed roots",
         resolved.display()
     ))
+}
+
+/// Build the absolute path policy should check for `raw`.
+///
+/// Relative paths join [`SandboxConfig::sandbox_root`] before normalize so
+/// containment compares absolute roots against absolute candidates.
+fn resolve_policy_candidate(config: &SandboxConfig, raw: &str) -> Result<PathBuf, String> {
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        config.sandbox_root.join(raw_path)
+    };
+    resolve_path_for_policy(&candidate)
 }
 
 /// Normalize a path without requiring it to exist (no symlink resolve).
@@ -241,7 +257,7 @@ pub fn resolve_in_roots(
         PathAccess::Read
     };
     check_path_allowed(config, raw, access)?;
-    resolve_path_for_policy(Path::new(raw))
+    resolve_policy_candidate(config, raw)
 }
 
 #[cfg(test)]
@@ -249,6 +265,54 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    fn test_sandbox_cfg(sandbox: PathBuf) -> SandboxConfig {
+        SandboxConfig {
+            sandbox_root: sandbox,
+            boris_data_roots: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+            network: super::super::NetworkPolicy::Off,
+            shell: super::super::ShellPolicy::Denied,
+            auto_allow_up_to: crate::tool::ToolRisk::Moderate,
+            force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
+            max_confirms_per_turn: 12,
+            trusted_auto_moderate: false,
+        }
+    }
+
+    #[test]
+    fn relative_write_allowed_under_sandbox() {
+        let sandbox = PathBuf::from(r"C:\Users\me\.boris\state\workspace");
+        let cfg = test_sandbox_cfg(sandbox);
+        let result = check_path_allowed(&cfg, "note.txt", PathAccess::Write);
+        assert!(
+            result.is_ok(),
+            "relative write under sandbox should be allowed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn relative_escape_denied() {
+        let sandbox = PathBuf::from(r"C:\Users\me\.boris\state\workspace");
+        let cfg = test_sandbox_cfg(sandbox);
+        // Escaping the sandbox via `..` must deny even after sandbox-join.
+        let result = check_path_allowed(&cfg, "../outside", PathAccess::Write);
+        assert!(
+            result.is_err(),
+            "relative path escaping sandbox should deny: {result:?}"
+        );
+        let result2 = check_path_allowed(&cfg, r"..\..\Windows\evil.txt", PathAccess::Write);
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn relative_nested_write_allowed() {
+        let sandbox = PathBuf::from(r"C:\Users\me\.boris\state\workspace");
+        let cfg = test_sandbox_cfg(sandbox);
+        let result = check_path_allowed(&cfg, "notes/daily/todo.md", PathAccess::Write);
+        assert!(result.is_ok(), "{result:?}");
+    }
 
     #[test]
     fn parent_escape_rejected() {
@@ -339,7 +403,7 @@ mod tests {
             shell: super::super::ShellPolicy::Denied,
             auto_allow_up_to: crate::tool::ToolRisk::Moderate,
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         };
         // If link is a dir symlink to outside, path under link is outside root after canon.

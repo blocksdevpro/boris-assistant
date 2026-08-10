@@ -220,6 +220,7 @@ fn go_off_session(rt: &mut EngineRuntime, sess: &mut SessionRefs<'_>) {
         sess.transcript_len,
         rt.stt.as_mut(),
         rt.tts.as_mut(),
+        &mut rt.agent,
     );
 }
 
@@ -257,7 +258,12 @@ fn on_hear_break(
             LoopReact::Continue
         }
         HearBreak::Disconnected => {
-            end_session(&rt.store, sess.active_session, sess.transcript_len);
+            end_session(
+                &rt.store,
+                sess.active_session,
+                sess.transcript_len,
+                &mut rt.agent,
+            );
             release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
             rt.picture.set_phase(Phase::Off);
             LoopReact::Exit
@@ -279,9 +285,23 @@ fn go_off_if_not_running(
 }
 
 /// Compact tool-activity label for the overlay chip.
+///
+/// Wire format is stable (`tool ·`, `done ·`, `fail ·`, `thinking ·`, `confirm ·`)
+/// so the UI humanizer can parse it.
 fn activity_label(ev: &AgentEvent) -> Option<String> {
     match ev {
-        AgentEvent::ToolExecutionStart { tool_name, .. } => Some(format!("tool · {tool_name}")),
+        AgentEvent::ToolExecutionStart {
+            tool_name,
+            args_summary,
+            ..
+        } => {
+            let detail = tool_start_detail(tool_name, args_summary);
+            if detail.is_empty() {
+                Some(format!("tool · {tool_name}"))
+            } else {
+                Some(format!("tool · {tool_name} · {detail}"))
+            }
+        }
         AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
             format!("done · {tool_name}")
         } else {
@@ -296,17 +316,44 @@ fn activity_label(ev: &AgentEvent) -> Option<String> {
             if msg.is_empty() {
                 Some(format!("tool · {tool_name}"))
             } else {
-                Some(format!("tool · {tool_name} · {msg}"))
+                let short = truncate_activity(msg, 56);
+                Some(format!("tool · {tool_name} · {short}"))
             }
         }
+        // Round 0 is the first LLM call (already shown as "thinking…").
+        // Later rounds = model planning after tools — surface the step.
         AgentEvent::TurnStart { round } if *round > 0 => {
-            Some(format!("thinking · round {}", round + 1))
+            Some(format!("thinking · step {}", round + 1))
         }
         AgentEvent::NeedsConfirmation { pending } => {
             Some(format!("confirm · {}", pending.name))
         }
         _ => None,
     }
+}
+
+/// Prefer a short args hint over the raw `tool (k=v)` audit summary.
+fn tool_start_detail(tool_name: &str, args_summary: &str) -> String {
+    let s = args_summary.trim();
+    if s.is_empty() || s == tool_name {
+        return String::new();
+    }
+    // args_summary is often `bash (command=ls -la)` — strip the name wrapper.
+    let inner = s
+        .strip_prefix(tool_name)
+        .map(str::trim)
+        .and_then(|rest| rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')))
+        .unwrap_or(s);
+    truncate_activity(inner.trim(), 48)
+}
+
+fn truncate_activity(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 fn run(
@@ -343,6 +390,7 @@ fn run(
                     rt.picture.said = None;
                     rt.picture.turn = None;
                     rt.picture.detail = None;
+                    rt.picture.activity = None;
 
                     // STT/TTS stay unloaded until a turn needs them (preloaded one
                     // step ahead during capture / agent — never kept for Armed idle).
@@ -361,7 +409,12 @@ fn run(
                 }
                 Ok(EngineCommand::Stop) => continue,
                 Ok(EngineCommand::Shutdown) | Err(_) => {
-                    end_session(&rt.store, sess.active_session, sess.transcript_len);
+                    end_session(
+                        &rt.store,
+                        sess.active_session,
+                        sess.transcript_len,
+                        &mut rt.agent,
+                    );
                     release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "shutdown");
                     rt.picture.engine = EngineState::Off;
                     rt.picture.set_phase(Phase::Off);
@@ -380,6 +433,7 @@ fn run(
         let capture_kind = if await_reply {
             rt.picture.detail = None;
             rt.picture.turn = None;
+            rt.picture.clear_activity();
             rt.picture.set_phase(Phase::AwaitingReply);
             tracing::info!(
                 depth = follow_up_depth,
@@ -407,8 +461,10 @@ fn run(
             follow_up_depth = 0;
             // Soft landing into Ready: keep last turn text so captions / Conversation
             // don't hard-cut when Speaking ends — clear only after the next wake.
+            // Drop leftover tool activity so the island can idle cleanly.
             rt.picture.detail = None;
             rt.picture.turn = None;
+            rt.picture.clear_activity();
             rt.picture.set_phase(Phase::Armed);
 
             match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
@@ -563,6 +619,8 @@ fn run(
         }));
         let activity_tx = rt.picture.status_tx.clone();
         let base_w = activity_base.clone();
+        // Keep the listener for the whole turn — including HITL resume —
+        // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
             let Some(label) = activity_label(ev) else {
                 return;
@@ -576,13 +634,13 @@ fn run(
         });
 
         let outcome = rt.agent_rt.block_on(rt.agent.prompt_with_report(&text));
-        unsub(); // drop live tool listener
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         rt.tts = tts_owned;
 
         let (outcome, report) = match outcome {
             Ok(pair) => pair,
             Err(e) => {
+                unsub();
                 tracing::error!(error = %e, %turn, "agent failed");
                 rt.agent.abort();
                 rt.picture.detail = None;
@@ -620,11 +678,11 @@ fn run(
                 continue;
             }
         };
-        rt.picture.activity = if report.tools_used.is_empty() {
-            None
-        } else {
-            Some(format!("{} tools", report.tools_used.len()))
-        };
+        // Live tool labels already mirrored; keep a soft chip until speech/confirm.
+        if !report.tools_used.is_empty() {
+            rt.picture.activity = Some(format!("{} tools", report.tools_used.len()));
+            rt.picture.publish();
+        }
         rt.picture
             .update_context_from_chars(report.approx_chars_in);
 
@@ -647,13 +705,18 @@ fn run(
             turn,
         };
         let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
-            OutcomeResolve::Stopped => continue,
+            OutcomeResolve::Stopped => {
+                unsub();
+                continue;
+            }
             OutcomeResolve::ReArm => {
+                unsub();
                 follow_up_depth = 0;
                 continue;
             }
             OutcomeResolve::Done(o) => o,
         };
+        unsub(); // full turn finished (or speech path next)
 
         let agent_ms = agent_t.elapsed().as_millis() as u64;
         tracing::info!(%turn, agent_ms, "agent done");
@@ -705,6 +768,8 @@ fn run(
         }
 
         // Show reply text while still "Thinking" — TTS synth is NOT speaking yet.
+        // Drop sticky tool chips ("N tools" / last tool label) so Speaking is clean.
+        rt.picture.clear_activity();
         rt.picture.said = Some(reply.clone());
         rt.picture.publish();
         tracing::info!(%turn, %reply, expect_reply, "said (synth next)");
@@ -894,6 +959,16 @@ mod tests {
         };
         assert_eq!(activity_label(&start).as_deref(), Some("tool · bash"));
 
+        let start_args = AgentEvent::ToolExecutionStart {
+            call_id: "2".into(),
+            tool_name: "bash".into(),
+            args_summary: "bash (command=ls -la)".into(),
+        };
+        assert_eq!(
+            activity_label(&start_args).as_deref(),
+            Some("tool · bash · command=ls -la")
+        );
+
         let end_ok = AgentEvent::ToolExecutionEnd {
             call_id: "1".into(),
             tool_name: "bash".into(),
@@ -916,7 +991,7 @@ mod tests {
         let round2 = AgentEvent::TurnStart { round: 1 };
         assert_eq!(
             activity_label(&round2).as_deref(),
-            Some("thinking · round 2")
+            Some("thinking · step 2")
         );
     }
 

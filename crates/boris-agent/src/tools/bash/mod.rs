@@ -47,3 +47,9 @@ pub(crate) const MAX_LINES: usize = 2000;
 
 /// Max bytes retained in command output before line cap.
 pub(crate) const MAX_BYTES: usize = 30 * 1024;
+
+/// Hard cap on captured stdout/stderr before [`output::truncate_output`].
+///
+/// 4× the final display budget: enough headroom for soft-wrap + line joins
+/// without retaining unbounded flood output in process memory.
+pub(crate) const CAPTURE_MAX_BYTES: usize = MAX_BYTES * 4;

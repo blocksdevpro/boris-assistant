@@ -92,6 +92,7 @@ impl Tool for LoadSkillTool {
     fn description(&self) -> &str {
         "Load the full instructions for a named skill playbook. Call this when the user's \
          request matches a skill description, then follow the steps with other tools. \
+         For research, plan multi-query web_search + fetch waves (parent verifies). \
          Required arg: name (skill id, e.g. research, get-things-done)."
     }
 

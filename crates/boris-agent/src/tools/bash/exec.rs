@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use super::output::{parse_timeout_secs, truncate_output};
 use super::policy::validate_command;
+use super::CAPTURE_MAX_BYTES;
 use crate::runtime::ProgressEvent;
 use crate::tool::{
     optional_string, require_object, require_string, soft_wrap_text, truncate_tool_result,
@@ -19,6 +20,9 @@ use crate::tool::{
 };
 use crate::tool_context::ToolCallContext;
 use crate::tools::fs_common::resolve_under_roots;
+
+/// Capacity of the progress channel (drop-on-full via `try_send`).
+const PROGRESS_CHANNEL_CAP: usize = 32;
 
 /// Run a bash/shell command with timeout and output caps.
 #[derive(Debug, Clone)]
@@ -119,31 +123,62 @@ fn scrub_child_env(cmd: &mut Command) {
     }
 }
 
-/// Read a pipe in chunks, emitting progress; returns the full buffer.
+/// Read a pipe in chunks, emitting progress; returns a **capped** buffer.
+///
+/// After [`CAPTURE_MAX_BYTES`] the buffer stops growing, but the pipe is still
+/// drained so the child does not block on a full OS pipe. Progress after the
+/// cap is drop-on-full / sparse so flood output cannot OOM the host.
 async fn read_pipe_chunked(
     mut pipe: impl tokio::io::AsyncRead + Unpin,
-    tx: mpsc::UnboundedSender<ProgressEvent>,
+    tx: mpsc::Sender<ProgressEvent>,
     is_stderr: bool,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut total: u64 = 0;
+    let mut truncated = false;
+    let mut sent_cap_notice = false;
     loop {
         match pipe.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
                 total += n as u64;
-                let delta = String::from_utf8_lossy(&chunk[..n]).into_owned();
-                let _ = tx.send(ProgressEvent::Chunk {
-                    delta: if is_stderr {
-                        format!("[stderr] {delta}")
-                    } else {
-                        delta
-                    },
-                    total_bytes: total,
-                    truncated: false,
-                });
+                if buf.len() < CAPTURE_MAX_BYTES {
+                    let room = CAPTURE_MAX_BYTES - buf.len();
+                    let take = n.min(room);
+                    buf.extend_from_slice(&chunk[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+
+                if !truncated {
+                    let delta = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                    let _ = tx.try_send(ProgressEvent::Chunk {
+                        delta: if is_stderr {
+                            format!("[stderr] {delta}")
+                        } else {
+                            delta
+                        },
+                        total_bytes: total,
+                        truncated: false,
+                    });
+                } else if !sent_cap_notice {
+                    // One lightweight notice; further drain chunks skip progress
+                    // allocations so malicious floods cannot OOM via the channel.
+                    sent_cap_notice = true;
+                    let _ = tx.try_send(ProgressEvent::Chunk {
+                        delta: if is_stderr {
+                            "[stderr] [capture capped]".into()
+                        } else {
+                            "[capture capped]".into()
+                        },
+                        total_bytes: total,
+                        truncated: true,
+                    });
+                }
             }
             Err(_) => break,
         }
@@ -255,7 +290,8 @@ impl Tool for BashTool {
             .ok_or_else(|| ToolError::failed("stderr not piped"))?;
 
         // Chunked reads so we can emit progress; cancel still kills the process.
-        let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        // Bounded channel + try_send (drop-on-full) avoids progress-side OOM.
+        let (prog_tx, mut prog_rx) = mpsc::channel::<ProgressEvent>(PROGRESS_CHANNEL_CAP);
         let stdout_task = tokio::spawn(read_pipe_chunked(stdout, prog_tx.clone(), false));
         let stderr_task = tokio::spawn(read_pipe_chunked(stderr, prog_tx, true));
 
@@ -352,9 +388,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("boris-bash-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let tool = BashTool::new(vec![dir.clone()], dir.clone());
-        #[cfg(windows)]
-        let cmd = "echo bash-smoke-ok";
-        #[cfg(not(windows))]
         let cmd = "echo bash-smoke-ok";
         let out = tool
             .execute(
@@ -415,6 +448,72 @@ mod tests {
             .await
             .expect_err("denied");
         assert!(err.message.contains("safety policy"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// High-volume pipe must not grow the capture buffer past CAPTURE_MAX_BYTES.
+    #[tokio::test]
+    async fn read_pipe_chunked_caps_buffer() {
+        // ~3× the hard cap so we prove drain-without-grow.
+        let flood_len = CAPTURE_MAX_BYTES * 3;
+        let flood = vec![b'x'; flood_len];
+        let (tx, mut rx) = mpsc::channel::<ProgressEvent>(PROGRESS_CHANNEL_CAP);
+
+        let captured = read_pipe_chunked(flood.as_slice(), tx, false).await;
+        assert_eq!(
+            captured.len(),
+            CAPTURE_MAX_BYTES,
+            "buffer must stop at capture cap"
+        );
+        assert!(captured.iter().all(|&b| b == b'x'));
+
+        // Progress must report truncated at least once; channel is bounded so
+        // we only assert we got a capped notice rather than every byte.
+        let mut saw_truncated = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let ProgressEvent::Chunk { truncated, .. } = ev {
+                if truncated {
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "expected a truncated progress event");
+    }
+
+    /// End-to-end: flooding stdout still returns a finite truncated tool result.
+    #[tokio::test]
+    async fn high_volume_output_is_truncated_not_unbounded() {
+        let dir = std::env::temp_dir().join(format!(
+            "boris-bash-flood-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+
+        // ~1MB of 'a' — well above CAPTURE_MAX_BYTES (120KB) and MAX_BYTES (30KB).
+        #[cfg(windows)]
+        let cmd = "python -c \"print('a' * 1000000)\"";
+        #[cfg(not(windows))]
+        let cmd = "python3 -c \"print('a' * 1000000)\" || python -c \"print('a' * 1000000)\" || yes a | head -c 1000000";
+
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "command": cmd, "timeout": 30 }),
+            )
+            .await;
+
+        // Skip if python/yes unavailable in CI — unit test above covers the cap.
+        let Ok(out) = out else {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return;
+        };
+        // truncate_tool_result + truncate_output keep the result modest.
+        assert!(
+            out.len() < CAPTURE_MAX_BYTES * 2,
+            "result too large: {} bytes",
+            out.len()
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

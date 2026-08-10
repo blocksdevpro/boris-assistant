@@ -48,7 +48,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file under the write sandbox (default ~/.boris/sandbox), \
+        "Write content to a file under the write sandbox (default ~/.boris/state/workspace), \
          creating parent directories as needed. Overwrites by default. Requires confirmation."
     }
 

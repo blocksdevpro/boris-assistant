@@ -35,7 +35,7 @@ pub mod todo;
 pub mod tool_search;
 pub mod web;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent::Agent;
 use crate::capability::{filter_tools_for_preset, CapabilityPreset};
@@ -95,7 +95,24 @@ pub fn builtin_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// OS surface: system info, open, clipboard, todos.
+/// Plan / multi-step tracking — always registered (including VoiceSafe).
+///
+/// Kept separate from [`os_tools`] so capability presets that disable power
+/// tools still get todos. The system prompt, skills, and finish-gate all
+/// reference `todo_write`; missing registration used to hard-fail turns.
+pub fn plan_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+    plan_tools_at(&paths.sandbox_root.join("todos.json"))
+}
+
+/// Plan tools bound to an explicit todos file (session-local path).
+pub fn plan_tools_at(todos_file: &Path) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(todo::TodoReadTool::with_path(todos_file)),
+        Box::new(todo::TodoWriteTool::with_path(todos_file)),
+    ]
+}
+
+/// OS surface: system info, open, clipboard (power-tool wave).
 pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(system::GetSystemInfoTool::new(
@@ -105,8 +122,6 @@ pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
         Box::new(open_tool::OpenPathTool::new(paths.read_roots_flat())),
         Box::new(clipboard::ClipboardGetTool),
         Box::new(clipboard::ClipboardSetTool),
-        Box::new(todo::TodoReadTool::new(&paths.sandbox_root)),
-        Box::new(todo::TodoWriteTool::new(&paths.sandbox_root)),
     ]
 }
 
@@ -185,10 +200,11 @@ pub fn register_builtin_tools_with_options(
 /// Full registration with a capability preset (toolset filtering).
 ///
 /// 1. Core time/notes  
-/// 2. Optional personal-context tools  
-/// 3. Optional power tools (OS / FS / web / bash)  
-/// 4. Filter by [`CapabilityPreset`]  
-/// 5. [`Agent::register_tools`]
+/// 2. Plan tools (todo_read / todo_write) — **always**, even VoiceSafe  
+/// 3. Optional personal-context tools  
+/// 4. Optional power tools (OS / FS / web / bash)  
+/// 5. Filter by [`CapabilityPreset`]  
+/// 6. [`Agent::register_tools`]
 pub fn register_builtin_tools_with_preset(
     agent: &mut Agent,
     paths: BuiltinToolPaths,
@@ -197,6 +213,10 @@ pub fn register_builtin_tools_with_preset(
     preset: CapabilityPreset,
 ) {
     let mut tools = builtin_tools(&paths);
+    // Always register plan tools. VoiceSafe sets power_tools=false and used to
+    // skip os_tools (which previously owned todos), while the prompt still
+    // taught the model to call todo_write → "unknown tool" hard-fail loop.
+    tools.extend(plan_tools(&paths));
     tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {
@@ -260,6 +280,7 @@ mod tests {
         let paths = test_paths();
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
         tools.extend(builtin_tools(&paths));
+        tools.extend(plan_tools(&paths));
         tools.extend(os_tools(&paths));
         tools.extend(fs_tools(&paths));
         tools.extend(web_tools());
@@ -275,6 +296,26 @@ mod tests {
             missing.is_empty(),
             "tools missing explicit ToolMeta::read_only: {missing:?}"
         );
+    }
+
+    #[test]
+    fn voice_safe_still_registers_todos() {
+        let paths = test_paths();
+        let mut tools = builtin_tools(&paths);
+        tools.extend(plan_tools(&paths));
+        // power_tools=false for VoiceSafe (no os/fs/web/bash).
+        let tools = filter_tools_for_preset(tools, CapabilityPreset::VoiceSafe);
+        let names: Vec<_> = tools.iter().map(|t| t.name().to_string()).collect();
+        assert!(
+            names.iter().any(|n| n == "todo_read"),
+            "todo_read missing under VoiceSafe: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "todo_write"),
+            "todo_write missing under VoiceSafe: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "bash"), "bash must stay off");
+        assert!(!names.iter().any(|n| n == "web_search"), "web must stay off");
     }
 
     #[test]

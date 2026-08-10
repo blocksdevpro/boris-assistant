@@ -45,7 +45,9 @@ impl Tool for WebSearchTool {
 
     fn description(&self) -> &str {
         "Search the live web for a query. Returns numbered titles, URLs, and short snippets. \
-         Prefer this over guessing URLs. Summarize for speech; do not read every result aloud."
+         For hard lookups (people, LinkedIn, profiles), call this multiple times in one message \
+         with different query angles — do not rely on a single obvious phrase. Prefer this over \
+         guessing URLs. Summarize for speech; do not read every result aloud."
     }
 
     fn parameters(&self) -> Value {
@@ -55,7 +57,7 @@ impl Tool for WebSearchTool {
                 "query": { "type": "string" },
                 "limit": {
                     "type": "number",
-                    "description": "Max results (default 5, max 8)"
+                    "description": "Max results (default 8, max 8)"
                 }
             },
             "required": ["query"]
@@ -138,11 +140,11 @@ impl Tool for WebSearchTool {
     }
 }
 
-/// Parse `limit` from tool args: default 5, clamped to `[1, MAX_SEARCH]`.
+/// Parse `limit` from tool args: default [`MAX_SEARCH`], clamped to `[1, MAX_SEARCH]`.
 pub(crate) fn parse_search_limit(v: Option<&Value>) -> usize {
     v.and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .unwrap_or(5)
+        .unwrap_or(MAX_SEARCH)
         .clamp(1, MAX_SEARCH)
 }
 
@@ -305,11 +307,11 @@ mod tests {
 
     #[test]
     fn parse_search_limit_defaults_and_clamps() {
-        assert_eq!(parse_search_limit(None), 5);
+        assert_eq!(parse_search_limit(None), MAX_SEARCH);
         assert_eq!(parse_search_limit(Some(&json!(3))), 3);
         assert_eq!(parse_search_limit(Some(&json!(0))), 1);
         assert_eq!(parse_search_limit(Some(&json!(99))), MAX_SEARCH);
-        assert_eq!(parse_search_limit(Some(&json!("nope"))), 5);
+        assert_eq!(parse_search_limit(Some(&json!("nope"))), MAX_SEARCH);
     }
 
     #[test]

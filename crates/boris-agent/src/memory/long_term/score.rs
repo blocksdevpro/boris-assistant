@@ -12,27 +12,40 @@ pub(super) fn score_file(
     query_lc: &str,
     hits: &mut Vec<MemoryHit>,
 ) -> Result<(), String> {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let boost_session = rel.contains("sessions/") || rel.ends_with("/memory.md");
+    let boost_curated = rel.ends_with("MEMORY.md");
+    score_file_as(path, rel, query_lc, hits, boost_session, boost_curated)
+}
+
+/// Score with an explicit display path (used for session logs outside the memory root).
+pub(super) fn score_file_as(
+    path: &Path,
+    display_path: String,
+    query_lc: &str,
+    hits: &mut Vec<MemoryHit>,
+    boost_session: bool,
+    boost_curated: bool,
+) -> Result<(), String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let score = score_document(&raw, query_lc);
     if score == 0 {
         return Ok(());
     }
     let mut score = score;
-    // Recency boost for session logs (filename starts with date).
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    if rel.contains("sessions/") {
+    if boost_session {
         score = score.saturating_add(15);
     }
-    if rel.ends_with("MEMORY.md") {
+    if boost_curated {
         score = score.saturating_add(25); // curated knowledge wins ties
     }
     let snippet = best_snippet(&raw, query_lc, 220);
     hits.push(MemoryHit {
-        path: rel,
+        path: display_path.replace('\\', "/"),
         score,
         snippet,
     });
@@ -153,7 +166,7 @@ mod tests {
     #[test]
     fn safe_rel_path_rejects_dotdot() {
         assert!(is_safe_rel_path("MEMORY.md"));
-        assert!(is_safe_rel_path("desktop/sessions/x.md"));
+        assert!(is_safe_rel_path("desktop/MEMORY.md"));
         assert!(!is_safe_rel_path("../secrets.txt"));
         assert!(!is_safe_rel_path("/abs"));
     }

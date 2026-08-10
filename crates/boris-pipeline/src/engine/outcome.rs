@@ -70,16 +70,29 @@ pub(super) fn resolve_agent_outcome(
             "agent needs confirmation"
         );
         // Never put confirm text in `detail` (overlay treats detail as error).
+        // Drop prior-turn `heard` so the UI does not show the last STT line as
+        // “You” while waiting for yes/no (fresh answer is written after STT).
         ctx.picture.detail = None;
+        ctx.picture.heard = None;
         ctx.picture.activity = Some(format!("confirm · {}", pending.name));
         ctx.picture.said = Some(prompt.clone());
         ctx.picture.publish();
 
-        // Speak the confirm prompt.
+        // Speak the confirm prompt. Preload STT while TTS runs so the user is
+        // not stuck waiting on model load after the prompt finishes.
         if let Err(e) = ctx.tts.load() {
             tracing::error!(error = %e, "tts load failed for confirm");
             ctx.agent.abort();
             ctx.picture.detail = Some(format!("tts: {e}"));
+            ctx.picture.set_phase(Phase::Armed);
+            return OutcomeResolve::ReArm;
+        }
+        // Fire STT load early (best-effort); confirm capture needs it ready.
+        if let Err(e) = ctx.stt.load() {
+            tracing::error!(error = %e, "stt load failed for confirm");
+            ctx.agent.abort();
+            ctx.picture.detail = Some(format!("stt: {e}"));
+            ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             return OutcomeResolve::ReArm;
         }
@@ -95,6 +108,9 @@ pub(super) fn resolve_agent_outcome(
             }
         };
         while ctx.output_events.try_recv().is_ok() {}
+        // UI: show confirm context while Boris is speaking so the user knows
+        // a yes/no is coming (not a freeform reply).
+        ctx.picture.set_phase(Phase::AwaitingConfirm);
         if let Err(e) = ctx.audio.play(pcm) {
             tracing::error!(error = %e, "confirm prompt play failed");
         }
@@ -115,12 +131,15 @@ pub(super) fn resolve_agent_outcome(
                     ctx.transcript_len,
                     ctx.stt.as_mut(),
                     ctx.tts.as_mut(),
+                    ctx.agent,
                 );
                 return OutcomeResolve::Stopped;
             }
             PlaybackWait::Aborted => {}
             PlaybackWait::Finished => {
                 ctx.picture.set_phase(Phase::Talking);
+                // Keep activity as confirm so overlay still reads as yes/no.
+                ctx.picture.activity = Some(format!("confirm · {}", pending.name));
                 wait_playback_or_stop(
                     ctx.output_events,
                     ctx.cmd_rx,
@@ -140,12 +159,15 @@ pub(super) fn resolve_agent_outcome(
                 ctx.transcript_len,
                 ctx.stt.as_mut(),
                 ctx.tts.as_mut(),
+                ctx.agent,
             );
             return OutcomeResolve::Stopped;
         }
 
-        // Listen for yes/no with longer post-TTS settle + confirm-specific VAD.
+        // Brief post-TTS settle, then open the mic — phase already AwaitingConfirm.
         ctx.picture.set_phase(Phase::AwaitingConfirm);
+        ctx.picture.activity = Some("confirm · say yes or no".into());
+        ctx.picture.publish();
         if let Err(e) = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running) {
             ctx.agent.abort();
             ctx.picture.clear_activity();
@@ -159,11 +181,12 @@ pub(super) fn resolve_agent_outcome(
                         ctx.transcript_len,
                         ctx.stt.as_mut(),
                         ctx.tts.as_mut(),
+                        ctx.agent,
                     );
                     OutcomeResolve::Stopped
                 }
                 HearBreak::Disconnected => {
-                    end_session(ctx.store, ctx.active_session, ctx.transcript_len);
+                    end_session(ctx.store, ctx.active_session, ctx.transcript_len, ctx.agent);
                     release_voice_models(ctx.stt.as_mut(), ctx.tts.as_mut(), "disconnected");
                     ctx.picture.set_phase(Phase::Off);
                     OutcomeResolve::Stopped
@@ -175,16 +198,9 @@ pub(super) fn resolve_agent_outcome(
             };
         }
 
-        if let Err(e) = ctx.stt.load() {
-            tracing::error!(error = %e, "stt load failed for confirm");
-            ctx.agent.abort();
-            ctx.picture.detail = Some(format!("stt: {e}"));
-            ctx.picture.clear_activity();
-            ctx.picture.set_phase(Phase::Armed);
-            return OutcomeResolve::ReArm;
-        }
-
         ctx.picture.set_phase(Phase::Hearing);
+        ctx.picture.activity = Some("confirm · listening".into());
+        ctx.picture.publish();
         let clip = match hear::capture_utterance(
             ctx.mic,
             ctx.vad,
@@ -203,6 +219,7 @@ pub(super) fn resolve_agent_outcome(
                     ctx.transcript_len,
                     ctx.stt.as_mut(),
                     ctx.tts.as_mut(),
+                    ctx.agent,
                 );
                 return OutcomeResolve::Stopped;
             }
@@ -243,11 +260,14 @@ pub(super) fn resolve_agent_outcome(
                         ctx.transcript_len,
                         ctx.stt.as_mut(),
                         ctx.tts.as_mut(),
+                        ctx.agent,
                     );
                     return OutcomeResolve::Stopped;
                 }
                 let _ = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running);
                 ctx.picture.set_phase(Phase::Hearing);
+                ctx.picture.activity = Some("confirm · listening".into());
+                ctx.picture.publish();
                 match hear::capture_utterance(
                     ctx.mic,
                     ctx.vad,
@@ -330,6 +350,7 @@ pub(super) fn resolve_agent_outcome(
                         ctx.transcript_len,
                         ctx.stt.as_mut(),
                         ctx.tts.as_mut(),
+                        ctx.agent,
                     );
                     return OutcomeResolve::Stopped;
                 }
@@ -337,6 +358,8 @@ pub(super) fn resolve_agent_outcome(
                 let _ = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running);
                 let _ = ctx.stt.load();
                 ctx.picture.set_phase(Phase::Hearing);
+                ctx.picture.activity = Some("confirm · listening".into());
+                ctx.picture.publish();
                 let second = hear::capture_utterance(
                     ctx.mic,
                     ctx.vad,

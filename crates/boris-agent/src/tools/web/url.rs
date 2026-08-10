@@ -2,10 +2,10 @@
 //!
 //! # Host policy
 //!
-//! `web_fetch` (and redirect hops) must not target loopback, link-local,
-//! private RFC1918, CGNAT, metadata (e.g. `169.254.169.254`), or IPv6
-//! unique-local / link-local addresses. Literal IPs and obvious local
-//! hostnames are blocked before the request. Redirect targets are
+//! `web_fetch` (and redirect hops) and `open_url` must not target loopback,
+//! link-local, private RFC1918, CGNAT, metadata (e.g. `169.254.169.254`), or
+//! IPv6 unique-local / link-local addresses. Literal IPs and obvious local
+//! hostnames are blocked before the request/open. Redirect targets are
 //! re-validated the same way.
 //!
 //! **Residual risk**: when the host is a public DNS name, the OS resolver

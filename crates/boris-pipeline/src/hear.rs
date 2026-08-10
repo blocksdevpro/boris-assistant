@@ -20,15 +20,21 @@ use crate::engine::EngineCommand;
 /// How long the user has to *start* speaking when Boris is awaiting a freeform reply.
 const AWAIT_REPLY_START_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// Yes/no confirm: slightly shorter start window (answers are short).
-const AWAIT_CONFIRM_START_TIMEOUT: Duration = Duration::from_secs(10);
+/// Yes/no confirm: short start window — answers are "yes"/"no", not essays.
+const AWAIT_CONFIRM_START_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Discard residual playback / room echo before opening VAD after TTS.
 /// Too short → Boris's own voice (or room echo) gets transcribed as the user.
 const POST_TTS_SETTLE: Duration = Duration::from_millis(550);
 
-/// Longer settle after a confirm prompt so TTS tail / room echo does not trip VAD.
-const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(1000);
+/// Settle after a confirm prompt. Must drain speaker tail / room echo so VAD
+/// does not hear Boris as the user — but keep it tight: every ms here is dead
+/// air before the user knows they can answer.
+const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(380);
+
+/// Trailing silence for yes/no confirms (short utterances endpoint fast).
+/// Freeform replies keep the longer shared [`vad_silence_samples`] window.
+const CONFIRM_SILENCE_AFTER: Duration = Duration::from_millis(420);
 
 /// Why a hear step returned early.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +224,7 @@ pub fn capture_utterance(
     kind: CaptureKind,
 ) -> Result<AudioBuffer, HearBreak> {
     let max_secs: u32 = match kind {
-        CaptureKind::AwaitConfirm => 12, // short yes/no — do not hold the mic forever
+        CaptureKind::AwaitConfirm => 8, // short yes/no — do not hold the mic forever
         _ => 30,
     };
     tracing::info!(?kind, max_secs, "capture_utterance begin");
@@ -233,10 +239,11 @@ pub fn capture_utterance(
     let mut frame_buf: Vec<f32> = Vec::new();
     let score_every = duration_to_samples(VAD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
     let mut samples_since_score: usize = 0;
-    // Confirm: require a bit more trailing silence so "yeah…" isn't cut mid-word.
+    // Confirm: *shorter* trailing silence than freeform — "yes"/"no" end cleanly
+    // and 1.3s+ of post-speech wait made HITL feel frozen after the answer.
     let silence_after = match kind {
         CaptureKind::AwaitConfirm => {
-            vad_silence_samples().saturating_mul(3).saturating_div(2).max(vad_silence_samples())
+            duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).max(score_every)
         }
         _ => vad_silence_samples(),
     };
@@ -254,10 +261,9 @@ pub fn capture_utterance(
         let frame = next_frame(mic, cmd_rx, running)?;
         record.push(&frame);
         if record.exceeded_max() {
-            let clip = {
-                record.set_recording(false);
-                record.take_audio()
-            };
+            // take_audio first — never stop/trim before draining the full clip.
+            let clip = record.take_audio();
+            record.set_recording(false);
             tracing::warn!(
                 samples = clip.len(),
                 has_spoken,
@@ -291,10 +297,10 @@ pub fn capture_utterance(
                         silence_before
                     };
                     if samples_since_speech >= limit {
-                        let clip = {
-                            record.set_recording(false);
-                            record.take_audio()
-                        };
+                        // Drain the full utterance before leaving recording mode.
+                        // (Stopping first used to trim to pre-roll and drop speech.)
+                        let clip = record.take_audio();
+                        record.set_recording(false);
                         tracing::info!(
                             samples = clip.len(),
                             ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,

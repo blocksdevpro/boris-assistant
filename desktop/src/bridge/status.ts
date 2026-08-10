@@ -257,9 +257,9 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
       hasKey: Boolean(wire.openrouter_api_key?.trim()),
       model: wire.openrouter_model || null,
       fastModel: wire.openrouter_fast_model || null,
-      modelProvider: wire.openrouter_model_provider || null,
-      fastProvider: wire.openrouter_fast_provider || null,
-      pinProvider: wire.openrouter_pin_provider ?? false,
+      capability: wire.capability_preset || null,
+      memory: wire.long_term_memory,
+      voice: wire.tts_voice_id || null,
     });
   } catch (e) {
     const msg = invokeErrorMessage(e);

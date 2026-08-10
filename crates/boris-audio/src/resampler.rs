@@ -73,6 +73,20 @@ impl Resampler {
         Ok(())
     }
 
+    /// Borrow after [`Self::ensure_resampler`]; never panics on the Result path.
+    fn resampler_ref(&self) -> Result<&Fft<AudioSample>> {
+        self.resampler
+            .as_ref()
+            .ok_or_else(|| Error::audio("resampler not initialized"))
+    }
+
+    /// Mutable borrow after [`Self::ensure_resampler`]; never panics on the Result path.
+    fn resampler_mut(&mut self) -> Result<&mut Fft<AudioSample>> {
+        self.resampler
+            .as_mut()
+            .ok_or_else(|| Error::audio("resampler not initialized"))
+    }
+
     fn validate_input(&self, input: &[AudioSample]) -> Result<usize> {
         let channels = self.channels as usize;
         if channels == 0 {
@@ -133,18 +147,14 @@ impl Resampler {
 
         let mut output = Vec::new();
         loop {
-            let need = self
-                .resampler
-                .as_ref()
-                .expect("resampler present")
-                .input_frames_next();
+            let need = self.resampler_ref()?.input_frames_next();
             let need_samples = need * channels;
             if self.pending.len() < need_samples {
                 break;
             }
 
             let chunk: Vec<AudioSample> = self.pending.drain(..need_samples).collect();
-            let resampler = self.resampler.as_mut().expect("resampler present");
+            let resampler = self.resampler_mut()?;
             let block = Self::process_block(resampler, channels, &chunk, need)?;
             output.extend_from_slice(&block);
         }
@@ -169,7 +179,7 @@ impl Resampler {
 
         // Drop any stream leftovers and clear FFT delay between independent jobs.
         self.pending.clear();
-        self.resampler.as_mut().expect("resampler present").reset();
+        self.resampler_mut()?.reset();
 
         let input_frames = input.len() / channels;
         let mut output: Vec<AudioSample> = Vec::with_capacity(
@@ -180,11 +190,7 @@ impl Resampler {
 
         let mut frame_pos = 0usize;
         while frame_pos < input_frames {
-            let need = self
-                .resampler
-                .as_ref()
-                .expect("resampler present")
-                .input_frames_next();
+            let need = self.resampler_ref()?.input_frames_next();
             let available = (input_frames - frame_pos).min(need);
 
             let mut in_buf = vec![0.0f32; need * channels];
@@ -192,7 +198,7 @@ impl Resampler {
             let src = frame_pos * channels;
             in_buf[..copy_samples].copy_from_slice(&input[src..src + copy_samples]);
 
-            let resampler = self.resampler.as_mut().expect("resampler present");
+            let resampler = self.resampler_mut()?;
             let block = Self::process_block(resampler, channels, &in_buf, need)?;
             output.extend_from_slice(&block);
             frame_pos += available;
@@ -203,20 +209,12 @@ impl Resampler {
         }
 
         // Flush FFT delay with silent input.
-        let delay = self
-            .resampler
-            .as_ref()
-            .expect("resampler present")
-            .output_delay();
+        let delay = self.resampler_ref()?.output_delay();
         let mut flushed = 0usize;
         while flushed < delay {
-            let need = self
-                .resampler
-                .as_ref()
-                .expect("resampler present")
-                .input_frames_next();
+            let need = self.resampler_ref()?.input_frames_next();
             let in_buf = vec![0.0f32; need * channels];
-            let resampler = self.resampler.as_mut().expect("resampler present");
+            let resampler = self.resampler_mut()?;
             let block = Self::process_block(resampler, channels, &in_buf, need)?;
             let produced = block.len() / channels;
             output.extend_from_slice(&block);

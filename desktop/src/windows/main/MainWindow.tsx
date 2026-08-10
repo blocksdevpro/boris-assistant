@@ -2,26 +2,31 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
-  type CSSProperties,
-  type ReactNode,
 } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   Download,
-  HardDrive,
-  KeyRound,
-  Mic,
   Power,
   PowerOff,
   RefreshCw,
-  Volume2,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import {
+  SettingsField,
+  SettingsGroup,
+  SettingsRow,
+  Toggle,
+} from "@/components/settings";
 import {
   downloadModels,
+  EMPTY_SETTINGS,
+  formatContextMeter,
   getModelsStatus,
   getSettings,
   listInputDevices,
@@ -35,6 +40,7 @@ import {
   switchInput,
   switchOutput,
   useStatus,
+  type AppSettings,
   type DeviceDto,
   type DownloadProgress,
   type ModelsStatus,
@@ -42,25 +48,64 @@ import {
 } from "@/bridge";
 import { getLogPath, logger } from "@/lib/logger";
 import { toneFor } from "@/lib/phaseVisual";
+import {
+  conversationLines,
+  humanizeActivity,
+} from "@/lib/statusPresentation";
 import { cn } from "@/lib/utils";
 
-const selectClassName = cn(
-  "flex h-9 w-full appearance-none rounded-lg border border-white/[0.08]",
-  "bg-white/[0.03] px-3 py-1.5 text-[13px] text-white/90 outline-none",
-  "transition-colors hover:bg-white/[0.05]",
-  "focus-visible:border-white/20 focus-visible:ring-2 focus-visible:ring-white/10",
+type View = "home" | "settings";
+
+const CAPABILITY_OPTIONS: { id: string; label: string; footer: string }[] = [
+  {
+    id: "full",
+    label: "Full",
+    footer: "Shell, web, and files. Approvals still apply.",
+  },
+  {
+    id: "local_power",
+    label: "Local only",
+    footer: "Files and system helpers. No shell or network.",
+  },
+  {
+    id: "voice_safe",
+    label: "Voice-safe",
+    footer: "Light tools only — time, notes, profile, skills.",
+  },
+];
+
+/** Compact trailing control (Tools, Voice, short picks). */
+const selectCompactClass = cn(
+  "h-9 max-w-[11rem] appearance-none rounded-lg border-0",
+  "bg-white/[0.08] px-3 text-[14px] text-white/90 outline-none",
+  "focus-visible:ring-2 focus-visible:ring-white/15",
   "disabled:cursor-not-allowed disabled:opacity-40",
 );
 
+/** Device / long labels — take available trailing width, ellipsize. */
+const selectDeviceClass = cn(
+  "h-9 w-full min-w-0 max-w-full appearance-none rounded-lg border-0",
+  "bg-white/[0.08] px-3 text-[13px] text-white/90 outline-none",
+  "focus-visible:ring-2 focus-visible:ring-white/15",
+  "disabled:cursor-not-allowed disabled:opacity-40",
+);
+
+const fieldInputClass = cn(
+  "h-10 border-0 bg-white/[0.08] text-[14px] text-white",
+  "placeholder:text-white/30 focus-visible:border-transparent",
+  "focus-visible:ring-2 focus-visible:ring-white/15",
+);
+
+function shortDeviceName(name: string): string {
+  // "Microphone (Razer BlackShark V2)" → keep full if short; else drop prefix.
+  const m = name.match(/^\s*(?:Microphone|Speakers?|Headset)\s*\((.+)\)\s*$/i);
+  if (m?.[1]) return m[1].trim();
+  return name;
+}
+
 /**
- * WINDOW — configure + control the voice engine.
- *
- * Design goals
- * 1. Presence first — same phase language as the floating island
- * 2. One obvious action — Start / Stop as the hero
- * 3. Conversation is first-class, not an afterthought
- * 4. Setup (API, devices) is secondary and calm
- * 5. Never touch PCM / models — host only
+ * Main window — Home (run) + Settings (prefs).
+ * Quiet, Apple-like surface. Motion stays on the overlay island.
  */
 export function MainWindow() {
   const status = useStatus();
@@ -69,33 +114,29 @@ export function MainWindow() {
     [status.phase, status.engine],
   );
 
-  const [apiKey, setApiKey] = useState("");
-  /** Strong / primary OpenRouter model id. */
-  const [model, setModel] = useState("");
-  /** Fast model for simple turns (empty = same as strong). */
-  const [fastModel, setFastModel] = useState("");
-  /** OpenRouter model-provider for strong (e.g. coreweave). */
-  const [modelProvider, setModelProvider] = useState("");
-  /** OpenRouter model-provider for fast. */
-  const [fastProvider, setFastProvider] = useState("");
-  /** Hard-pin preferred providers (no OpenRouter fallbacks). */
-  const [pinProvider, setPinProvider] = useState(false);
+  const [view, setView] = useState<View>("home");
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [inputs, setInputs] = useState<DeviceDto[]>([]);
   const [outputs, setOutputs] = useState<DeviceDto[]>([]);
-  const [selectedInput, setSelectedInput] = useState("");
-  const [selectedOutput, setSelectedOutput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelsStatus | null>(null);
   const [installing, setInstalling] = useState(false);
-  const [installProgress, setInstallProgress] = useState<DownloadProgress | null>(
-    null,
-  );
+  const [installProgress, setInstallProgress] =
+    useState<DownloadProgress | null>(null);
   const [logPath, setLogPath] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const autoStarted = useRef(false);
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
-  const modelsReady = Boolean(models?.parakeet_ready && models?.supertone_ready);
+  const modelsReady = Boolean(
+    models?.parakeet_ready && models?.supertone_ready,
+  );
+  const contextMeter = formatContextMeter(
+    status.context_used,
+    status.context_limit,
+  );
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -105,14 +146,6 @@ export function MainWindow() {
       ]);
       setInputs(ins);
       setOutputs(outs);
-      setSelectedInput((prev) => {
-        if (prev && ins.some((d) => d.id === prev)) return prev;
-        return ins.find((d) => d.is_default)?.id ?? ins[0]?.id ?? "";
-      });
-      setSelectedOutput((prev) => {
-        if (prev && outs.some((d) => d.id === prev)) return prev;
-        return outs.find((d) => d.is_default)?.id ?? outs[0]?.id ?? "";
-      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("refreshDevices failed", msg);
@@ -122,13 +155,46 @@ export function MainWindow() {
 
   const refreshModels = useCallback(async () => {
     try {
-      const m = await getModelsStatus();
-      setModels(m);
+      setModels(await getModelsStatus());
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("refreshModels failed", msg);
       setError(msg);
     }
+  }, []);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  const flushSave = useCallback(async (next: AppSettings) => {
+    try {
+      await saveSettings(next);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("saveSettings failed", msg);
+      setError(msg);
+    }
+  }, []);
+
+  const patchSettings = useCallback(
+    (patch: Partial<AppSettings>) => {
+      const base = settingsRef.current ?? { ...EMPTY_SETTINGS };
+      const next = { ...base, ...patch };
+      setSettings(next);
+      settingsRef.current = next;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        void flushSave(next);
+      }, 320);
+    },
+    [flushSave],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -139,21 +205,15 @@ export function MainWindow() {
     });
   }, [refreshDevices, refreshModels]);
 
-  // Restore last OpenRouter key + models/providers from ~/.boris/config.toml + auth.json
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const s = await getSettings();
         if (cancelled) return;
-        if (s.openrouter_api_key) setApiKey(s.openrouter_api_key);
-        if (s.openrouter_model) setModel(s.openrouter_model);
-        if (s.openrouter_fast_model) setFastModel(s.openrouter_fast_model);
-        if (s.openrouter_model_provider) setModelProvider(s.openrouter_model_provider);
-        if (s.openrouter_fast_provider) setFastProvider(s.openrouter_fast_provider);
-        if (s.openrouter_pin_provider) setPinProvider(true);
+        setSettings(s);
       } catch {
-        // Missing or unreadable settings → leave fields empty
+        if (!cancelled) setSettings({ ...EMPTY_SETTINGS });
       }
     })();
     return () => {
@@ -161,50 +221,56 @@ export function MainWindow() {
     };
   }, []);
 
-  const persistCredentials = useCallback(async () => {
-    try {
-      await saveSettings({
-        openrouter_api_key: apiKey,
-        openrouter_model: model,
-        openrouter_fast_model: fastModel,
-        openrouter_model_provider: modelProvider,
-        openrouter_fast_provider: fastProvider,
-        openrouter_pin_provider: pinProvider,
-      });
-    } catch {
-      // Non-fatal: start should still proceed if disk write fails
+  // Restore preferred devices once lists + settings are ready.
+  useEffect(() => {
+    if (!settings) return;
+    if (inputs.length === 0 && outputs.length === 0) return;
+
+    const pick = (list: DeviceDto[], preferred: string) => {
+      if (preferred && list.some((d) => d.id === preferred)) return preferred;
+      return list.find((d) => d.is_default)?.id ?? list[0]?.id ?? "";
+    };
+
+    const inputId = pick(inputs, settings.input_device);
+    const outputId = pick(outputs, settings.output_device);
+
+    if (inputId && inputId !== settings.input_device) {
+      // Keep UI selection without thrashing disk on first match-to-default.
     }
-  }, [apiKey, model, fastModel, modelProvider, fastProvider, pinProvider]);
+    // Apply host preference if we have a stored id.
+    if (settings.input_device && inputId === settings.input_device) {
+      void switchInput(inputId).catch(() => {});
+    }
+    if (settings.output_device && outputId === settings.output_device) {
+      void switchOutput(outputId).catch(() => {});
+    }
+  }, [settings, inputs, outputs]);
 
   const onStart = async () => {
+    const s = settingsRef.current ?? settings;
+    if (!s) return;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
     setBusy(true);
     setError(null);
     logger.info("UI onStart", {
-      hasKey: Boolean(apiKey.trim()),
-      model: model || null,
-      fastModel: fastModel || null,
-      modelProvider: modelProvider || null,
-      fastProvider: fastProvider || null,
-      pinProvider,
-      selectedInput,
-      selectedOutput,
+      hasKey: Boolean(s.openrouter_api_key.trim()),
+      model: s.openrouter_model || null,
       modelsReady,
-      logPath: logPath || null,
     });
     try {
-      // Save before start so relaunch restores credentials even if engine fails later
-      await persistCredentials();
-      // Host also re-applies preferred devices after Start; send them first so
-      // they are stored even if engine spawn is slow.
-      if (selectedInput) await switchInput(selectedInput);
-      if (selectedOutput) await switchOutput(selectedOutput);
+      await saveSettings(s);
+      if (s.input_device) await switchInput(s.input_device);
+      if (s.output_device) await switchOutput(s.output_device);
       await startEngine({
-        apiKey,
-        model: model || undefined,
-        fastModel: fastModel || undefined,
-        modelProvider: modelProvider || undefined,
-        fastProvider: fastProvider || undefined,
-        pinProvider,
+        apiKey: s.openrouter_api_key,
+        model: s.openrouter_model || undefined,
+        fastModel: s.openrouter_fast_model || undefined,
+        modelProvider: s.openrouter_model_provider || undefined,
+        fastProvider: s.openrouter_fast_provider || undefined,
+        pinProvider: s.openrouter_pin_provider,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -214,6 +280,16 @@ export function MainWindow() {
       setBusy(false);
     }
   };
+
+  // Start engine on launch when enabled (once).
+  useEffect(() => {
+    if (autoStarted.current || !settings?.start_engine_on_launch) return;
+    if (!modelsReady || engineOn || busy) return;
+    if (!settings.openrouter_api_key.trim()) return;
+    autoStarted.current = true;
+    void onStart();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot
+  }, [settings, modelsReady, engineOn, busy]);
 
   const onStop = async () => {
     setBusy(true);
@@ -228,12 +304,11 @@ export function MainWindow() {
   };
 
   const onInputChange = async (id: string) => {
-    setSelectedInput(id);
     setBusy(true);
     setError(null);
     try {
-      // Always notify host — stores preference when Off, switches when On.
       await switchInput(id);
+      await patchSettings({ input_device: id });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -242,11 +317,11 @@ export function MainWindow() {
   };
 
   const onOutputChange = async (id: string) => {
-    setSelectedOutput(id);
     setBusy(true);
     setError(null);
     try {
       await switchOutput(id);
+      await patchSettings({ output_device: id });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -263,10 +338,10 @@ export function MainWindow() {
       const report = await downloadModels();
       await refreshModels();
       if (!report.ok) {
-        const detail =
+        setError(
           report.errors[0] ??
-          `Install incomplete (failed ${report.files_failed} file(s))`;
-        setError(detail);
+            `Install incomplete (failed ${report.files_failed} file(s))`,
+        );
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -277,365 +352,259 @@ export function MainWindow() {
     }
   };
 
+  const selectedInput =
+    settings?.input_device &&
+    inputs.some((d) => d.id === settings.input_device)
+      ? settings.input_device
+      : (inputs.find((d) => d.is_default)?.id ?? inputs[0]?.id ?? "");
+
+  const selectedOutput =
+    settings?.output_device &&
+    outputs.some((d) => d.id === settings.output_device)
+      ? settings.output_device
+      : (outputs.find((d) => d.is_default)?.id ?? outputs[0]?.id ?? "");
+
+  const capability =
+    CAPABILITY_OPTIONS.find((p) => p.id === settings?.capability_preset) ??
+    CAPABILITY_OPTIONS[0]!;
+
   return (
     <div className="main-console flex h-screen flex-col overflow-hidden text-white">
       <TitleBar
+        title={view === "settings" ? "Settings" : "Boris"}
+        leading={
+          view === "settings" ? (
+            <button
+              type="button"
+              onClick={() => setView("home")}
+              className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-1 text-[13px] font-medium text-white/70 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              <ChevronLeft className="size-4" strokeWidth={2} />
+              Home
+            </button>
+          ) : undefined
+        }
         trailing={
-          <span className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium leading-none tracking-tight text-white/55 ring-1 ring-white/[0.06]">
-            <span
-              className="size-1.5 shrink-0 rounded-full"
-              style={{ background: tone.accent, boxShadow: `0 0 8px ${tone.glow}` }}
-            />
-            <span className="truncate">{tone.label}</span>
-          </span>
+          view === "home" ? (
+            <button
+              type="button"
+              aria-label="Settings"
+              onClick={() => setView("settings")}
+              className="inline-flex size-8 items-center justify-center rounded-lg text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              <SettingsIcon className="size-4" strokeWidth={1.75} />
+            </button>
+          ) : undefined
         }
       />
 
-      {/*
-        Scroll container is block-level (not flex-col). Flex children of a
-        constrained flex parent default to shrink, which let Conversation
-        collapse and Connection paint over the bubbles.
-      */}
-      <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        <div className="flex flex-col gap-5">
-          {/* ── Hero presence ─────────────────────────────────────────── */}
-          <section
-            className="main-hero relative rounded-2xl px-5 py-5 sm:px-6 sm:py-6"
-            style={
-              {
-                "--hero-accent": tone.accent,
-                "--hero-glow": tone.glow,
-              } as CSSProperties
-            }
-          >
-          {/* Glow clipped separately so the phase title never loses ascenders */}
-          <div aria-hidden className="main-hero-glow absolute inset-0">
-            <div
-              className="absolute -right-16 -top-20 size-56 rounded-full opacity-50 blur-3xl"
-              style={{ background: tone.glow }}
-            />
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        {view === "home" ? (
+          <HomeView
+            status={status}
+            tone={tone}
+            contextMeter={contextMeter}
+            engineOn={engineOn}
+            engineFault={engineFault}
+            modelsReady={modelsReady}
+            busy={busy}
+            error={error}
+            models={models}
+            installing={installing}
+            installProgress={installProgress}
+            onStart={() => void onStart()}
+            onStop={() => void onStop()}
+            onInstall={() => void onInstallModels()}
+            onOpenSettings={() => setView("settings")}
+          />
+        ) : settings ? (
+          <SettingsView
+            settings={settings}
+            engineOn={engineOn}
+            busy={busy}
+            inputs={inputs}
+            outputs={outputs}
+            selectedInput={selectedInput}
+            selectedOutput={selectedOutput}
+            modelsReady={modelsReady}
+            installing={installing}
+            installProgress={installProgress}
+            advancedOpen={advancedOpen}
+            logPath={logPath}
+            capability={capability}
+            onPatch={(p) => patchSettings(p)}
+            onInputChange={(id) => void onInputChange(id)}
+            onOutputChange={(id) => void onOutputChange(id)}
+            onRefreshDevices={() => void refreshDevices()}
+            onRefreshModels={() => void refreshModels()}
+            onInstall={() => void onInstallModels()}
+            onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-[13px] text-white/40">
+            Loading…
           </div>
-
-          <div className="relative flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-center gap-4">
-              <HeroOrb accent={tone.accent} motion={tone.motion} />
-              <div className="min-w-0 flex-1 py-0.5">
-                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <h1 className="main-hero-title">{tone.label}</h1>
-                  {status.turn ? (
-                    <span className="main-type-meta main-type-tabular text-white/30">
-                      turn #{status.turn}
-                    </span>
-                  ) : null}
-                </div>
-                <p className="main-hero-hint mt-1">{tone.hint}</p>
-                {status.detail ? (
-                  <p className="mt-2 text-[12.5px] font-medium leading-snug text-red-300/90">
-                    {status.detail}
-                  </p>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="lg"
-                disabled={busy || engineOn || !modelsReady}
-                onClick={() => void onStart()}
-                className={cn(
-                  "h-10 gap-2 rounded-xl px-5 text-[13px] font-semibold tracking-tight",
-                  "bg-white text-[#0c0d10] hover:bg-white/90",
-                  "disabled:bg-white/20 disabled:text-white/40",
-                )}
-                title={
-                  modelsReady
-                    ? undefined
-                    : "Install speech models before starting the engine"
-                }
-              >
-                <Power className="size-4" strokeWidth={2.25} />
-                Start
-              </Button>
-              <Button
-                type="button"
-                size="lg"
-                variant="outline"
-                disabled={busy || status.engine === "Off"}
-                onClick={() => void onStop()}
-                className={cn(
-                  "h-10 gap-2 rounded-xl border-white/10 bg-white/[0.04] px-5 text-[13px] font-medium text-white/80",
-                  "hover:bg-white/[0.08] hover:text-white",
-                  "disabled:opacity-30",
-                )}
-              >
-                <PowerOff className="size-4" strokeWidth={2} />
-                Stop
-              </Button>
-            </div>
-          </div>
-
-          {error ? (
-            <p className="relative mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-[12px] text-red-300 ring-1 ring-red-500/20">
-              {error}
-            </p>
-          ) : null}
-          {engineFault ? (
-            <p className="relative mt-3 text-[12px] text-amber-200/80">
-              Engine reported a fault — try Stop, then Start again.
-            </p>
-          ) : null}
-          {logPath ? (
-            <p
-              className="relative mt-2 truncate text-[10.5px] text-white/30"
-              title={logPath}
-            >
-              Debug log: {logPath}
-            </p>
-          ) : null}
-        </section>
-
-        {/* ── Models ──────────────────────────────────────────────────── */}
-        <ModelsPanel
-          models={models}
-          installing={installing}
-          progress={installProgress}
-          onRefresh={() => void refreshModels()}
-          onInstall={() => void onInstallModels()}
-        />
-
-        {/* ── Conversation ────────────────────────────────────────────── */}
-        <ConversationPanel status={status} />
-
-        {/* ── Setup grid ──────────────────────────────────────────────── */}
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Panel
-            icon={<KeyRound className="size-3.5" strokeWidth={2} />}
-            title="Connection"
-            description="OpenRouter key, models, and model-providers (inference hosts like CoreWeave — not the API brand)."
-          >
-            <div className="flex flex-col gap-3.5">
-              <Field label="API key" htmlFor="api-key">
-                <Input
-                  id="api-key"
-                  type="password"
-                  placeholder="OPENROUTER_API_KEY or paste here"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  disabled={engineOn}
-                  autoComplete="off"
-                  className="h-9 border-white/[0.08] bg-white/[0.03] text-[13px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
-                />
-              </Field>
-
-              <div className="rounded-xl bg-white/[0.02] px-3 py-3 ring-1 ring-white/[0.05]">
-                <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-white/40">
-                  Strong model
-                </p>
-                <div className="flex flex-col gap-3">
-                  <ModelPicker
-                    id="model-id"
-                    value={model}
-                    disabled={engineOn}
-                    onChange={setModel}
-                    placeholder="google/gemini-2.5-flash-lite"
-                  />
-                  <ProviderPicker
-                    id="model-provider"
-                    value={modelProvider}
-                    disabled={engineOn}
-                    onChange={setModelProvider}
-                    hint="OpenRouter host for this model (e.g. coreweave). Empty = auto."
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/[0.02] px-3 py-3 ring-1 ring-white/[0.05]">
-                <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-white/40">
-                  Fast model
-                  <span className="ml-1.5 font-normal normal-case tracking-normal text-white/25">
-                    simple turns · leave empty to match strong
-                  </span>
-                </p>
-                <div className="flex flex-col gap-3">
-                  <ModelPicker
-                    id="fast-model-id"
-                    value={fastModel}
-                    disabled={engineOn}
-                    onChange={setFastModel}
-                    placeholder="same as strong"
-                  />
-                  <ProviderPicker
-                    id="fast-provider"
-                    value={fastProvider}
-                    disabled={engineOn}
-                    onChange={setFastProvider}
-                    hint="Host for the fast model. Empty = strong’s provider, then auto."
-                  />
-                </div>
-              </div>
-
-              <label className="flex cursor-pointer items-start gap-2.5 text-[12.5px] text-white/60">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 size-3.5 rounded border-white/20 bg-white/5"
-                  checked={pinProvider}
-                  disabled={engineOn || (!modelProvider.trim() && !fastProvider.trim())}
-                  onChange={(e) => setPinProvider(e.target.checked)}
-                />
-                <span>
-                  <span className="font-medium text-white/75">Pin provider</span>
-                  <span className="mt-0.5 block text-[11.5px] text-white/35">
-                    Don’t fall back to other OpenRouter hosts if the preferred list fails.
-                  </span>
-                </span>
-              </label>
-
-              <p className="text-[11px] leading-relaxed text-white/30">
-                Tip: you can also write{" "}
-                <code className="rounded bg-white/[0.06] px-1 py-0.5 text-white/45">
-                  model@coreweave
-                </code>{" "}
-                in the model field. Provider dropdown wins when both are set.
-              </p>
-            </div>
-          </Panel>
-
-          <Panel
-            icon={<Mic className="size-3.5" strokeWidth={2} />}
-            title="Devices"
-            description="Microphone and speakers. Live labels come from the engine."
-            action={
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void refreshDevices()}
-                className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/80 disabled:opacity-40"
-              >
-                <RefreshCw className="size-3" />
-                Refresh
-              </button>
-            }
-          >
-            <div className="flex flex-col gap-3.5">
-              <Field label="Microphone" htmlFor="mic">
-                <div className="relative">
-                  <select
-                    id="mic"
-                    className={selectClassName}
-                    value={selectedInput}
-                    disabled={busy || inputs.length === 0}
-                    onChange={(e) => void onInputChange(e.target.value)}
-                  >
-                    {inputs.length === 0 ? (
-                      <option value="">No devices found</option>
-                    ) : (
-                      inputs.map((d) => (
-                        <option key={d.id} value={d.id} className="bg-[#1a1b20] text-white">
-                          {d.name}
-                          {d.is_default ? " (default)" : ""}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                  <DeviceHint
-                    ok={status.mic.ok && engineOn}
-                    label={status.mic.label}
-                    icon={<Mic className="size-3" />}
-                  />
-                </div>
-              </Field>
-              <Field label="Speaker" htmlFor="speaker">
-                <div className="relative">
-                  <select
-                    id="speaker"
-                    className={selectClassName}
-                    value={selectedOutput}
-                    disabled={busy || outputs.length === 0}
-                    onChange={(e) => void onOutputChange(e.target.value)}
-                  >
-                    {outputs.length === 0 ? (
-                      <option value="">No devices found</option>
-                    ) : (
-                      outputs.map((d) => (
-                        <option key={d.id} value={d.id} className="bg-[#1a1b20] text-white">
-                          {d.name}
-                          {d.is_default ? " (default)" : ""}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                  <DeviceHint
-                    ok={status.speaker.ok && engineOn}
-                    label={status.speaker.label}
-                    icon={<Volume2 className="size-3" />}
-                  />
-                </div>
-              </Field>
-            </div>
-          </Panel>
-        </div>
-        </div>
+        )}
       </main>
     </div>
   );
 }
 
-function HeroOrb({
-  accent,
-  motion,
+/* ── Home ─────────────────────────────────────────────────────────────────── */
+
+function HomeView({
+  status,
+  tone,
+  contextMeter,
+  engineOn,
+  engineFault,
+  modelsReady,
+  busy,
+  error,
+  models,
+  installing,
+  installProgress,
+  onStart,
+  onStop,
+  onInstall,
+  onOpenSettings,
 }: {
-  accent: string;
-  motion: ReturnType<typeof toneFor>["motion"];
+  status: StatusPicture;
+  tone: ReturnType<typeof toneFor>;
+  contextMeter: string | null;
+  engineOn: boolean;
+  engineFault: boolean;
+  modelsReady: boolean;
+  busy: boolean;
+  error: string | null;
+  models: ModelsStatus | null;
+  installing: boolean;
+  installProgress: DownloadProgress | null;
+  onStart: () => void;
+  onStop: () => void;
+  onInstall: () => void;
+  onOpenSettings: () => void;
 }) {
+  const act = humanizeActivity(status.activity);
+  const showActivity =
+    act &&
+    (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
+
   return (
-    <div className="relative flex size-14 shrink-0 items-center justify-center" aria-hidden>
-      {motion !== "none" ? (
-        <span
-          className={cn(
-            "absolute inset-0 rounded-full border border-current opacity-40",
-            motion === "breathe" && "main-orb-breathe",
-            motion === "listen" && "main-orb-listen",
-            motion === "think" && "main-orb-think",
-            motion === "speak" && "main-orb-speak",
-          )}
-          style={{ borderColor: accent, color: accent }}
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-5 py-6">
+      {/* Status strip — no glow card, no orb */}
+      <section className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+            <span
+              className="mt-1.5 size-2 shrink-0 rounded-full"
+              style={{ background: tone.accent }}
+              aria-hidden
+            />
+            <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-white">
+              {tone.label}
+            </h1>
+            {status.turn ? (
+              <span className="text-[12px] tabular-nums text-white/30">
+                #{status.turn}
+              </span>
+            ) : null}
+            {contextMeter && engineOn ? (
+              <span className="text-[12px] tabular-nums text-white/25">
+                {contextMeter}
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 pl-[18px] text-[13px] leading-snug text-white/45">
+            {tone.hint}
+          </p>
+          {showActivity ? (
+            <p className="mt-1.5 pl-[18px] text-[12px] text-white/50">{act}</p>
+          ) : null}
+          {status.detail ? (
+            <p className="mt-2 pl-[18px] text-[13px] text-red-300/90">
+              {status.detail}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="flex shrink-0 gap-2">
+          <Button
+            type="button"
+            size="lg"
+            disabled={busy || engineOn || !modelsReady}
+            onClick={onStart}
+            className={cn(
+              "h-10 gap-2 rounded-full px-5 text-[13px] font-semibold",
+              "bg-white text-[#0b0b0c] hover:bg-white/90",
+              "disabled:bg-white/15 disabled:text-white/35",
+            )}
+            title={
+              modelsReady
+                ? undefined
+                : "Download speech models before starting"
+            }
+          >
+            <Power className="size-3.5" strokeWidth={2.25} />
+            Start
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            variant="outline"
+            disabled={busy || status.engine === "Off"}
+            onClick={onStop}
+            className={cn(
+              "h-10 gap-2 rounded-full border-white/10 bg-transparent px-4 text-[13px] font-medium text-white/70",
+              "hover:bg-white/[0.06] hover:text-white",
+              "disabled:opacity-30",
+            )}
+          >
+            <PowerOff className="size-3.5" strokeWidth={2} />
+            Stop
+          </Button>
+        </div>
+      </section>
+
+      {error ? (
+        <p className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300 ring-1 ring-red-500/15">
+          {error}
+        </p>
+      ) : null}
+      {engineFault ? (
+        <p className="text-[13px] text-amber-200/80">
+          Something went wrong — try Stop, then Start again.
+        </p>
+      ) : null}
+
+      {!modelsReady ? (
+        <ModelsBanner
+          models={models}
+          installing={installing}
+          progress={installProgress}
+          onInstall={onInstall}
+          onOpenSettings={onOpenSettings}
         />
       ) : null}
-      <span
-        className="relative size-4 rounded-full"
-        style={{
-          background: accent,
-          boxShadow: `0 0 22px ${accent}`,
-        }}
-      />
+
+      <ConversationView status={status} />
     </div>
   );
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function ModelsPanel({
+function ModelsBanner({
   models,
   installing,
   progress,
-  onRefresh,
   onInstall,
+  onOpenSettings,
 }: {
   models: ModelsStatus | null;
   installing: boolean;
   progress: DownloadProgress | null;
-  onRefresh: () => void;
   onInstall: () => void;
+  onOpenSettings: () => void;
 }) {
-  const ready = Boolean(models?.parakeet_ready && models?.supertone_ready);
-  const missingCount = models?.missing?.length ?? 0;
-
   const pct =
     installing && progress?.total_bytes && progress.total_bytes > 0
       ? Math.min(
@@ -644,203 +613,114 @@ function ModelsPanel({
         )
       : null;
 
-  const componentLabel =
-    progress?.component === "parakeet"
-      ? "Parakeet STT"
-      : progress?.component === "supertone"
-        ? "Supertone TTS"
-        : progress?.component ?? null;
-
-  const statusLabel = progress
-    ? progress.status === "downloading"
-      ? "Downloading"
-      : progress.status === "starting"
-        ? "Starting"
-        : progress.status === "skipped"
-          ? "Skipped"
-          : progress.status === "done"
-            ? "Done"
-            : progress.status === "failed"
-              ? "Failed"
-              : progress.status
-    : null;
-
   return (
-    <Panel
-      icon={<HardDrive className="size-3.5" strokeWidth={2} />}
-      title="Speech models"
-      description="Parakeet (STT) and Supertone (TTS) install under ~/.boris/models — about 900 MB the first time."
-      action={
+    <div className="settings-group rounded-[12px] px-4 py-3.5">
+      <p className="text-[15px] font-medium tracking-[-0.01em] text-white/90">
+        Download speech models to start
+      </p>
+      <p className="mt-1 text-[12px] leading-snug text-white/40">
+        About 900 MB, stored on this computer.
+        {models?.missing?.length
+          ? ` ${models.missing.length} files missing.`
+          : ""}
+      </p>
+      {installing ? (
+        <div className="mt-3">
+          <div className="main-progress-track">
+            <div
+              className="main-progress-fill"
+              style={{ width: `${pct ?? 4}%` }}
+            />
+          </div>
+          <p className="mt-1.5 truncate text-[12px] text-white/40">
+            {progress?.file_name ?? "Preparing…"}
+            {pct != null ? ` · ${pct}%` : ""}
+          </p>
+        </div>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="sm"
+          disabled={installing}
+          onClick={onInstall}
+          className="h-8 gap-1.5 rounded-full bg-white/10 px-3.5 text-[13px] text-white hover:bg-white/15"
+        >
+          <Download className="size-3.5" strokeWidth={2} />
+          {installing ? "Downloading…" : "Download"}
+        </Button>
         <button
           type="button"
-          disabled={installing}
-          onClick={onRefresh}
-          className="main-type-meta inline-flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-white/[0.06] hover:text-white/80 disabled:opacity-40"
+          onClick={onOpenSettings}
+          className="h-8 rounded-full px-3 text-[13px] text-white/45 hover:text-white/70"
         >
-          <RefreshCw className="size-3" strokeWidth={2} />
-          Refresh
+          Details
         </button>
-      }
-    >
-      <div className="flex flex-col gap-3.5">
-        <div className="flex flex-wrap gap-2">
-          <ModelChip
-            label="Parakeet STT"
-            ok={models?.parakeet_ready ?? false}
-          />
-          <ModelChip
-            label="Supertone TTS"
-            ok={models?.supertone_ready ?? false}
-          />
-        </div>
+      </div>
+    </div>
+  );
+}
 
-        {models && !ready ? (
-          <p className="text-[12.5px] font-medium leading-snug text-amber-200/90">
-            {missingCount > 0
-              ? `${missingCount} files missing — install before starting the engine.`
-              : "Models incomplete — install before starting the engine."}
-          </p>
-        ) : null}
+function ConversationView({ status }: { status: StatusPicture }) {
+  const lines = conversationLines(status);
 
-        {ready ? (
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <p className="main-type-meta">Models ready</p>
-            <p className="main-type-path truncate" title={models?.models_dir ?? undefined}>
-              {models?.models_dir ?? "~/.boris/models"}
-            </p>
-          </div>
-        ) : null}
-
-        {installing ? (
-          <div className="flex flex-col gap-2 rounded-xl bg-white/[0.03] px-3.5 py-3 ring-1 ring-white/[0.06]">
-            <div className="flex min-w-0 items-baseline justify-between gap-3">
-              <p className="min-w-0 truncate text-[13px] font-medium tracking-tight text-white/90">
-                {progress?.file_name ?? "Preparing download…"}
+  return (
+    <section className="flex min-h-[160px] flex-col gap-4">
+      {lines.map((line, i) => {
+        switch (line.kind) {
+          case "placeholder":
+            return (
+              <p key={`p-${i}`} className="text-[15px] leading-relaxed text-white/30">
+                {line.text}
               </p>
-              {pct != null ? (
-                <span className="main-type-tabular shrink-0 text-[12px] font-semibold text-white/70">
-                  {pct}%
-                </span>
-              ) : null}
-            </div>
-
-            <div className="main-progress-track">
+            );
+          case "error":
+            return (
+              <p
+                key={`e-${i}`}
+                className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300/90"
+              >
+                {line.text}
+              </p>
+            );
+          case "status":
+            return (
+              <p key={`s-${i}`} className="text-[13px] text-white/40">
+                {line.text}
+              </p>
+            );
+          case "confirm":
+            return (
               <div
-                className="main-progress-fill"
-                style={{ width: `${pct ?? (progress ? 4 : 0)}%` }}
-              />
-            </div>
-
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-              {componentLabel ? (
-                <span className="main-type-meta text-white/55">{componentLabel}</span>
-              ) : null}
-              {statusLabel ? (
-                <>
-                  <span className="text-white/20" aria-hidden>
-                    ·
-                  </span>
-                  <span className="main-type-meta capitalize text-white/50">
-                    {statusLabel}
-                  </span>
-                </>
-              ) : null}
-              {progress ? (
-                <>
-                  <span className="text-white/20" aria-hidden>
-                    ·
-                  </span>
-                  <span className="main-type-meta main-type-tabular text-white/50">
-                    {progress.total_bytes != null
-                      ? `${formatBytes(progress.bytes_downloaded)} / ${formatBytes(progress.total_bytes)}`
-                      : formatBytes(progress.bytes_downloaded)}
-                  </span>
-                </>
-              ) : (
-                <span className="main-type-meta">Connecting…</span>
-              )}
-            </div>
-          </div>
-        ) : null}
-
-        {!ready || installing ? (
-          <Button
-            type="button"
-            size="sm"
-            disabled={installing}
-            onClick={onInstall}
-            className={cn(
-              "h-9 w-fit gap-2 rounded-lg px-4 text-[13px] font-medium tracking-tight",
-              "bg-white/10 text-white hover:bg-white/15",
-              "disabled:opacity-40",
-            )}
-          >
-            <Download className="size-3.5" strokeWidth={2} />
-            {installing ? "Installing…" : "Install models"}
-          </Button>
-        ) : null}
-      </div>
-    </Panel>
-  );
-}
-
-function ModelChip({ label, ok }: { label: string; ok: boolean }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ring-1",
-        "text-[12px] font-medium tracking-tight",
-        ok
-          ? "bg-emerald-500/10 text-emerald-300/90 ring-emerald-500/20"
-          : "bg-white/[0.04] text-white/50 ring-white/[0.08]",
-      )}
-    >
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          ok ? "bg-emerald-400" : "bg-white/25",
-        )}
-      />
-      {label}
-      <span
-        className={cn(
-          "text-[11px] font-normal",
-          ok ? "text-emerald-300/55" : "text-white/30",
-        )}
-      >
-        {ok ? "ready" : "missing"}
-      </span>
-    </span>
-  );
-}
-
-function ConversationPanel({ status }: { status: StatusPicture }) {
-  const heard = status.heard?.trim() || "";
-  const said = status.said?.trim() || "";
-  const hasLines = Boolean(heard || said);
-
-  return (
-    <section className="main-panel flex min-h-[120px] flex-col overflow-hidden rounded-2xl">
-      <header className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3.5">
-        <div>
-          <h2 className="main-type-title">Conversation</h2>
-          <p className="main-type-desc mt-0.5">
-            Last turn — mirrors the floating island
-          </p>
-        </div>
-      </header>
-      <div className="flex flex-col gap-3 px-4 py-4">
-        {!hasLines ? (
-          <p className="main-type-body text-white/32">
-            When Boris is listening, your words and his reply show up here.
-          </p>
-        ) : (
-          <>
-            {heard ? <Bubble who="You" text={heard} /> : null}
-            {said ? <Bubble who="Boris" text={said} accent /> : null}
-          </>
-        )}
-      </div>
+                key={`c-${i}`}
+                className="rounded-[12px] bg-amber-500/[0.08] px-4 py-3 ring-1 ring-amber-400/15"
+              >
+                <p className="text-[13px] font-medium text-amber-100/70">
+                  Needs your OK
+                  {line.activity ? (
+                    <span className="ml-1.5 font-normal text-amber-100/45">
+                      · {line.activity}
+                    </span>
+                  ) : null}
+                </p>
+                <p className="mt-1.5 text-[15px] leading-relaxed text-white/88">
+                  {line.prompt}
+                </p>
+                <p className="mt-2 text-[12px] text-amber-100/40">
+                  Say yes, no, sure, or cancel — no wake word
+                </p>
+              </div>
+            );
+          case "you":
+            return (
+              <Bubble key={`y-${i}`} who="You" text={line.text} muted={line.muted} />
+            );
+          case "boris":
+            return <Bubble key={`b-${i}`} who="Boris" text={line.text} accent />;
+          default:
+            return null;
+        }
+      })}
     </section>
   );
 }
@@ -849,27 +729,20 @@ function Bubble({
   who,
   text,
   accent,
+  muted,
 }: {
   who: string;
   text: string;
   accent?: boolean;
+  muted?: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-1">
-      <span
-        className={cn(
-          "text-[10px] font-semibold uppercase tracking-[0.08em]",
-          accent ? "text-white/50" : "text-white/30",
-        )}
-      >
-        {who}
-      </span>
+    <div className={cn("flex flex-col gap-1", muted && "opacity-50")}>
+      <span className="text-[12px] text-white/35">{who}</span>
       <p
         className={cn(
-          "break-words rounded-xl px-3.5 py-2.5 text-[13px] font-normal leading-[1.5] tracking-[-0.005em]",
-          accent
-            ? "bg-white/[0.07] text-white/90 ring-1 ring-white/[0.06]"
-            : "bg-white/[0.03] text-white/70 ring-1 ring-white/[0.04]",
+          "max-w-[95%] break-words text-[15px] leading-relaxed tracking-[-0.01em]",
+          accent ? "text-white/90" : "text-white/70",
         )}
       >
         {text}
@@ -878,211 +751,553 @@ function Bubble({
   );
 }
 
-function Panel({
-  icon,
-  title,
-  description,
-  action,
-  children,
+/* ── Settings ─────────────────────────────────────────────────────────────── */
+
+function SettingsView({
+  settings,
+  engineOn,
+  busy,
+  inputs,
+  outputs,
+  selectedInput,
+  selectedOutput,
+  modelsReady,
+  installing,
+  installProgress,
+  advancedOpen,
+  logPath,
+  capability,
+  onPatch,
+  onInputChange,
+  onOutputChange,
+  onRefreshDevices,
+  onRefreshModels,
+  onInstall,
+  onToggleAdvanced,
 }: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action?: ReactNode;
-  children: ReactNode;
+  settings: AppSettings;
+  engineOn: boolean;
+  busy: boolean;
+  inputs: DeviceDto[];
+  outputs: DeviceDto[];
+  selectedInput: string;
+  selectedOutput: string;
+  modelsReady: boolean;
+  installing: boolean;
+  installProgress: DownloadProgress | null;
+  advancedOpen: boolean;
+  logPath: string;
+  capability: (typeof CAPABILITY_OPTIONS)[number];
+  onPatch: (p: Partial<AppSettings>) => void;
+  onInputChange: (id: string) => void;
+  onOutputChange: (id: string) => void;
+  onRefreshDevices: () => void;
+  onRefreshModels: () => void;
+  onInstall: () => void;
+  onToggleAdvanced: () => void;
 }) {
+  const locked = engineOn;
+
   return (
-    <section className="main-panel flex flex-col rounded-2xl">
-      <header className="flex items-start justify-between gap-3 border-b border-white/[0.05] px-4 py-3.5">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-md bg-white/[0.05] text-white/55 ring-1 ring-white/[0.06]">
-              {icon}
-            </span>
-            <h2 className="main-type-title">{title}</h2>
+    <div className="mx-auto flex w-full max-w-xl flex-col gap-7 px-5 py-6 pb-12">
+      <h1 className="text-[28px] font-bold tracking-[-0.03em] text-white">
+        Settings
+      </h1>
+
+      {/* General */}
+      <SettingsGroup
+        title="General"
+        footer={
+          locked
+            ? "Some options apply on next Start."
+            : capability.footer
+        }
+      >
+        <SettingsRow label="Start engine on launch">
+          <Toggle
+            checked={settings.start_engine_on_launch}
+            onChange={(v) => onPatch({ start_engine_on_launch: v })}
+            aria-label="Start engine on launch"
+          />
+        </SettingsRow>
+        <SettingsRow label="Show overlay on wake">
+          <Toggle
+            checked={settings.show_overlay_on_wake}
+            onChange={(v) => onPatch({ show_overlay_on_wake: v })}
+            aria-label="Show overlay on wake"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Long-term memory"
+          subtitle="Remember notes across sessions"
+        >
+          <Toggle
+            checked={settings.long_term_memory}
+            disabled={locked}
+            onChange={(v) => onPatch({ long_term_memory: v })}
+            aria-label="Long-term memory"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Trusted mode"
+          subtitle="Auto-allow notes and sandbox file writes. Shell and open URL still need yes. Confirm budget defaults to 12 per turn."
+        >
+          <Toggle
+            checked={settings.trusted_auto_moderate}
+            disabled={locked}
+            onChange={(v) => onPatch({ trusted_auto_moderate: v })}
+            aria-label="Trusted mode"
+          />
+        </SettingsRow>
+        <SettingsRow label="Tools" last>
+          <select
+            className={selectCompactClass}
+            value={
+              CAPABILITY_OPTIONS.some((p) => p.id === settings.capability_preset)
+                ? settings.capability_preset
+                : "full"
+            }
+            disabled={locked}
+            onChange={(e) => onPatch({ capability_preset: e.target.value })}
+          >
+            {CAPABILITY_OPTIONS.map((p) => (
+              <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </SettingsRow>
+      </SettingsGroup>
+
+      {/* Speech */}
+      <SettingsGroup
+        title="Speech"
+        footer="Voice applies on next Start. Models install under ~/.boris/models."
+      >
+        <SettingsRow label="Voice">
+          <select
+            className={selectCompactClass}
+            value={settings.tts_voice_id || "M4"}
+            disabled={locked}
+            onChange={(e) => onPatch({ tts_voice_id: e.target.value })}
+          >
+            <option value="M4" className="bg-[#1c1c1e] text-white">
+              M4
+            </option>
+          </select>
+        </SettingsRow>
+        <SettingsRow
+          label="Speech models"
+          subtitle={
+            modelsReady
+              ? "Ready"
+              : installing
+                ? "Downloading…"
+                : "Not installed"
+          }
+          last={modelsReady && !installing}
+        >
+          {modelsReady ? (
+            <button
+              type="button"
+              onClick={onRefreshModels}
+              className="text-[13px] text-white/40 hover:text-white/70"
+            >
+              Refresh
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={installing}
+              onClick={onInstall}
+              className="text-[13px] font-medium text-white/80 hover:text-white disabled:opacity-40"
+            >
+              {installing ? "…" : "Download"}
+            </button>
+          )}
+        </SettingsRow>
+        {installing && installProgress ? (
+          <div className="border-t border-white/[0.06] px-4 py-3">
+            <div className="main-progress-track">
+              <div
+                className="main-progress-fill"
+                style={{
+                  width: `${
+                    installProgress.total_bytes
+                      ? Math.min(
+                          100,
+                          Math.round(
+                            (installProgress.bytes_downloaded /
+                              installProgress.total_bytes) *
+                              100,
+                          ),
+                        )
+                      : 4
+                  }%`,
+                }}
+              />
+            </div>
+            <p className="mt-1.5 truncate text-[12px] text-white/40">
+              {installProgress.file_name}
+            </p>
           </div>
-          <p className="main-type-desc mt-1 max-w-prose">{description}</p>
+        ) : null}
+      </SettingsGroup>
+
+      {/* Models & API */}
+      <SettingsGroup
+        title="Models & API"
+        footer={locked ? "Stop the engine to change models." : undefined}
+      >
+        <SettingsField label="API key">
+          <Input
+            type="password"
+            placeholder="OpenRouter API key"
+            value={settings.openrouter_api_key}
+            disabled={locked}
+            autoComplete="off"
+            onChange={(e) => onPatch({ openrouter_api_key: e.target.value })}
+            className={fieldInputClass}
+          />
+        </SettingsField>
+        <ModelField
+          label="Model"
+          value={settings.openrouter_model}
+          disabled={locked}
+          onChange={(v) => onPatch({ openrouter_model: v })}
+        />
+        <ModelField
+          label="Fast model"
+          subtitle="Empty matches Model"
+          value={settings.openrouter_fast_model}
+          disabled={locked}
+          onChange={(v) => onPatch({ openrouter_fast_model: v })}
+          allowEmpty
+          last={!advancedOpen}
+        />
+        <button
+          type="button"
+          onClick={onToggleAdvanced}
+          className={cn(
+            "flex w-full min-h-[44px] items-center justify-between px-4 py-2.5 text-left",
+            "border-t border-white/[0.06] text-[15px] text-white/80",
+            "hover:bg-white/[0.03]",
+          )}
+        >
+          <span>Advanced</span>
+          <ChevronRight
+            className={cn(
+              "size-4 text-white/30 transition-transform",
+              advancedOpen && "rotate-90",
+            )}
+          />
+        </button>
+        {advancedOpen ? (
+          <>
+            <ProviderField
+              label="Inference host"
+              value={settings.openrouter_model_provider}
+              disabled={locked}
+              onChange={(v) => onPatch({ openrouter_model_provider: v })}
+            />
+            <ProviderField
+              label="Fast host"
+              value={settings.openrouter_fast_provider}
+              disabled={locked}
+              onChange={(v) => onPatch({ openrouter_fast_provider: v })}
+            />
+            <SettingsRow
+              label="Don’t fall back to other hosts"
+              last
+            >
+              <Toggle
+                checked={settings.openrouter_pin_provider}
+                disabled={
+                  locked ||
+                  (!settings.openrouter_model_provider.trim() &&
+                    !settings.openrouter_fast_provider.trim())
+                }
+                onChange={(v) => onPatch({ openrouter_pin_provider: v })}
+                aria-label="Pin preferred host"
+              />
+            </SettingsRow>
+          </>
+        ) : null}
+      </SettingsGroup>
+
+      {/* Sound */}
+      <SettingsGroup title="Sound">
+        <SettingsRow
+          label="Microphone"
+          stacked
+        >
+          <div className="flex items-center gap-2">
+            <select
+              className={selectDeviceClass}
+              value={selectedInput}
+              disabled={busy || inputs.length === 0}
+              title={
+                inputs.find((d) => d.id === selectedInput)?.name ?? undefined
+              }
+              onChange={(e) => onInputChange(e.target.value)}
+            >
+              {inputs.length === 0 ? (
+                <option value="">No devices</option>
+              ) : (
+                inputs.map((d) => (
+                  <option
+                    key={d.id}
+                    value={d.id}
+                    className="bg-[#1c1c1e] text-white"
+                  >
+                    {shortDeviceName(d.name)}
+                    {d.is_default ? " · default" : ""}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        </SettingsRow>
+        <SettingsRow label="Speakers" stacked last>
+          <div className="flex items-center gap-2">
+            <select
+              className={selectDeviceClass}
+              value={selectedOutput}
+              disabled={busy || outputs.length === 0}
+              title={
+                outputs.find((d) => d.id === selectedOutput)?.name ?? undefined
+              }
+              onChange={(e) => onOutputChange(e.target.value)}
+            >
+              {outputs.length === 0 ? (
+                <option value="">No devices</option>
+              ) : (
+                outputs.map((d) => (
+                  <option
+                    key={d.id}
+                    value={d.id}
+                    className="bg-[#1c1c1e] text-white"
+                  >
+                    {shortDeviceName(d.name)}
+                    {d.is_default ? " · default" : ""}
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRefreshDevices}
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-white/[0.06] text-white/50 hover:bg-white/[0.1] hover:text-white/80 disabled:opacity-40"
+              aria-label="Refresh devices"
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+          </div>
+        </SettingsRow>
+      </SettingsGroup>
+
+      {/* Diagnostics */}
+      <SettingsGroup title="Diagnostics" footer="Log filter applies after restart.">
+        <SettingsField label="Log filter">
+          <Input
+            placeholder="info  or  boris=debug"
+            value={settings.logging_filter}
+            onChange={(e) => onPatch({ logging_filter: e.target.value })}
+            className={cn(fieldInputClass, "font-mono text-[13px]")}
+          />
+        </SettingsField>
+        {logPath ? (
+          <div className="px-4 py-3">
+            <p className="text-[13px] text-white/45">Log file</p>
+            <p
+              className="mt-1 break-all font-mono text-[11px] leading-snug text-white/40"
+              title={logPath}
+            >
+              {logPath.replace(/\\/g, "/")}
+            </p>
+          </div>
+        ) : null}
+      </SettingsGroup>
+    </div>
+  );
+}
+
+/** Model picker: preset trailing, custom id full-width under the row. */
+function ModelField({
+  label,
+  subtitle,
+  value,
+  onChange,
+  disabled,
+  allowEmpty,
+  last,
+}: {
+  label: string;
+  subtitle?: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  allowEmpty?: boolean;
+  last?: boolean;
+}) {
+  const match = MODEL_PRESETS.some((p) => p.id === value);
+  const isCustomValue = Boolean(value) && !match;
+  // When allowEmpty, empty means "Same as model" — track intentional Custom…
+  // so the text field can open before the user types an id.
+  const [forceCustom, setForceCustom] = useState(false);
+
+  useEffect(() => {
+    if (match) setForceCustom(false);
+    else if (isCustomValue) setForceCustom(true);
+  }, [match, isCustomValue]);
+
+  const inCustomMode =
+    forceCustom || isCustomValue || (!allowEmpty && !match);
+  const selectValue = inCustomMode
+    ? "__custom__"
+    : !value && allowEmpty
+      ? ""
+      : match
+        ? value
+        : "__custom__";
+  const showCustom = selectValue === "__custom__";
+
+  return (
+    <>
+      <SettingsRow label={label} subtitle={subtitle} last={last && !showCustom}>
+        <select
+          className={selectCompactClass}
+          disabled={disabled}
+          value={selectValue}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "__custom__") {
+              setForceCustom(true);
+              // Clear preset text so the custom field starts empty for typing.
+              if (match) onChange("");
+              return;
+            }
+            setForceCustom(false);
+            onChange(v);
+          }}
+        >
+          {allowEmpty ? (
+            <option value="" className="bg-[#1c1c1e] text-white">
+              Same as model
+            </option>
+          ) : null}
+          {MODEL_PRESETS.map((p) => (
+            <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">
+              {p.label}
+            </option>
+          ))}
+          <option value="__custom__" className="bg-[#1c1c1e] text-white">
+            Custom…
+          </option>
+        </select>
+      </SettingsRow>
+      {showCustom ? (
+        <div
+          className={cn(
+            "border-b border-white/[0.06] px-4 pb-3",
+            last && "border-b-0",
+          )}
+        >
+          <Input
+            value={value}
+            disabled={disabled}
+            placeholder="provider/model-id"
+            onChange={(e) => {
+              setForceCustom(true);
+              onChange(e.target.value);
+            }}
+            className={cn(fieldInputClass, "h-9 w-full font-mono text-[13px]")}
+          />
         </div>
-        {action}
-      </header>
-      <div className="px-4 py-4">{children}</div>
-    </section>
+      ) : null}
+    </>
   );
 }
 
-function Field({
+function ProviderField({
   label,
-  htmlFor,
-  children,
-}: {
-  label: string;
-  htmlFor: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label
-        htmlFor={htmlFor}
-        className="text-[11px] font-medium tracking-wide text-white/45"
-      >
-        {label}
-      </Label>
-      {children}
-    </div>
-  );
-}
-
-/** Preset select + free-text model id (easier switching than a bare text box). */
-function ModelPicker({
-  id,
   value,
   onChange,
   disabled,
-  placeholder,
+  last,
 }: {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-  placeholder: string;
-}) {
-  const presetMatch = MODEL_PRESETS.some((p) => p.id === value);
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor={`${id}-preset`} className="text-[11px] font-medium tracking-wide text-white/45">
-        Model
-      </Label>
-      <select
-        id={`${id}-preset`}
-        className={selectClassName}
-        disabled={disabled}
-        value={presetMatch ? value : "__custom__"}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === "__custom__") {
-            if (presetMatch) onChange("");
-            return;
-          }
-          onChange(v);
-        }}
-      >
-        {MODEL_PRESETS.map((p) => (
-          <option key={p.id} value={p.id} className="bg-[#1a1b20] text-white">
-            {p.label}
-          </option>
-        ))}
-        <option value="__custom__" className="bg-[#1a1b20] text-white">
-          Custom model id…
-        </option>
-      </select>
-      <Input
-        id={id}
-        list={`${id}-suggestions`}
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="h-9 border-white/[0.08] bg-white/[0.03] font-mono text-[12px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
-      />
-      <datalist id={`${id}-suggestions`}>
-        {MODEL_PRESETS.map((p) => (
-          <option key={p.id} value={p.id} />
-        ))}
-      </datalist>
-    </div>
-  );
-}
-
-/** OpenRouter model-provider (inference host) picker. */
-function ProviderPicker({
-  id,
-  value,
-  onChange,
-  disabled,
-  hint,
-}: {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-  hint: string;
-}) {
-  const firstSlug = value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)[0] ?? "";
-  const presetMatch = PROVIDER_PRESETS.some((p) => p.id === firstSlug && p.id !== "");
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor={id} className="text-[11px] font-medium tracking-wide text-white/45">
-        Model provider
-      </Label>
-      <select
-        id={`${id}-preset`}
-        className={selectClassName}
-        disabled={disabled}
-        value={presetMatch ? firstSlug : value.trim() ? "__custom__" : ""}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === "__custom__") {
-            if (presetMatch) onChange("");
-            return;
-          }
-          onChange(v);
-        }}
-      >
-        {PROVIDER_PRESETS.map((p) => (
-          <option key={p.id || "auto"} value={p.id} className="bg-[#1a1b20] text-white">
-            {p.label}
-            {p.id ? ` (${p.id})` : ""}
-          </option>
-        ))}
-        <option value="__custom__" className="bg-[#1a1b20] text-white">
-          Custom / ordered list…
-        </option>
-      </select>
-      <Input
-        id={id}
-        list={`${id}-suggestions`}
-        placeholder="coreweave  or  coreweave,baseten"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="h-9 border-white/[0.08] bg-white/[0.03] font-mono text-[12px] text-white placeholder:text-white/25 focus-visible:border-white/20 focus-visible:ring-white/10"
-      />
-      <datalist id={`${id}-suggestions`}>
-        {PROVIDER_PRESETS.filter((p) => p.id).map((p) => (
-          <option key={p.id} value={p.id} />
-        ))}
-      </datalist>
-      <p className="text-[11px] leading-snug text-white/30">{hint}</p>
-    </div>
-  );
-}
-
-function DeviceHint({
-  ok,
-  label,
-  icon,
-}: {
-  ok: boolean;
   label: string;
-  icon: ReactNode;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  last?: boolean;
 }) {
+  const first =
+    value
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)[0] ?? "";
+  const match = PROVIDER_PRESETS.some((p) => p.id === first && p.id !== "");
+  const isCustomValue = Boolean(value.trim()) && !match;
+  // Empty is "Auto" in the preset list — same Custom… sticky mode as ModelField.
+  const [forceCustom, setForceCustom] = useState(false);
+
+  useEffect(() => {
+    if (match) setForceCustom(false);
+    else if (isCustomValue) setForceCustom(true);
+  }, [match, isCustomValue]);
+
+  const inCustomMode = forceCustom || isCustomValue;
+  const selectValue = inCustomMode ? "__custom__" : match ? first : "";
+  const showCustom = selectValue === "__custom__";
+
   return (
-    <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/30">
-      <span
-        className={cn(
-          "inline-flex size-4 items-center justify-center rounded-full",
-          ok ? "text-emerald-400/90" : "text-white/25",
-        )}
-      >
-        {icon}
-      </span>
-      <span className="truncate">Live · {label}</span>
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          ok ? "bg-emerald-400" : "bg-white/15",
-        )}
-      />
-    </p>
+    <>
+      <SettingsRow label={label} last={last && !showCustom}>
+        <select
+          className={selectCompactClass}
+          disabled={disabled}
+          value={selectValue}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "__custom__") {
+              setForceCustom(true);
+              if (match) onChange("");
+              return;
+            }
+            setForceCustom(false);
+            onChange(v);
+          }}
+        >
+          {PROVIDER_PRESETS.map((p) => (
+            <option
+              key={p.id || "auto"}
+              value={p.id}
+              className="bg-[#1c1c1e] text-white"
+            >
+              {p.label}
+            </option>
+          ))}
+          <option value="__custom__" className="bg-[#1c1c1e] text-white">
+            Custom…
+          </option>
+        </select>
+      </SettingsRow>
+      {showCustom ? (
+        <div className="border-b border-white/[0.06] px-4 pb-3">
+          <Input
+            value={value}
+            disabled={disabled}
+            placeholder="coreweave,baseten"
+            onChange={(e) => {
+              setForceCustom(true);
+              onChange(e.target.value);
+            }}
+            className={cn(fieldInputClass, "h-9 w-full font-mono text-[13px]")}
+          />
+        </div>
+      ) : null}
+    </>
   );
 }

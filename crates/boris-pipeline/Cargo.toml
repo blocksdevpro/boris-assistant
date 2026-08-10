@@ -7,6 +7,8 @@ repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Desktop voice engine: sequential turns, status, no worker mesh"
 readme      = "README.md"
 publish     = false
+keywords    = ["voice", "assistant", "pipeline"]
+categories  = ["multimedia::audio"]
 
 [features]
 default = ["stt-parakeet", "tts-supertone"]

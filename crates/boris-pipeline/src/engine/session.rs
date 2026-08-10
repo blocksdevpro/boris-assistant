@@ -24,6 +24,9 @@ pub(super) fn agent_message_pairs(agent: &Agent) -> Vec<(String, serde_json::Val
 }
 
 /// Start or resume a voice session and seed the agent context.
+///
+/// Order: `resume_or_create` → `ensure_session_artifacts` → load/reset context
+/// → `bind_session` → `active_session = Some`.
 pub(super) fn begin_session(
     store: &SessionStore,
     active_session: &mut Option<SessionId>,
@@ -43,6 +46,15 @@ pub(super) fn begin_session(
 
     match store.resume_or_create() {
         Ok(meta) => {
+            // Ensure session-local todos / dir exist before bind (no workspace migration).
+            if let Err(e) = store.ensure_session_artifacts(&meta.id) {
+                tracing::warn!(
+                    error = %e,
+                    session_id = %meta.id,
+                    "ensure_session_artifacts failed"
+                );
+            }
+
             let resumed = previous.as_ref() == Some(&meta.id);
             if resumed {
                 tracing::info!(session_id = %meta.id, "session resumed");
@@ -79,6 +91,9 @@ pub(super) fn begin_session(
                 // Grok writes the system row at session start.
                 seed_transcript(store, &meta.id, transcript_len, agent);
             }
+
+            // Bind session-local paths (todos, audit, subagent root, sid, activations).
+            agent.bind_session(&store.session_dir(&meta.id), meta.id.as_str());
             *active_session = Some(meta.id);
         }
         Err(e) => {
@@ -87,6 +102,7 @@ pub(super) fn begin_session(
                 "session resume_or_create failed; continuing without persistence"
             );
             agent.reset(system_prompt);
+            agent.unbind_session();
         }
     }
 }
@@ -113,7 +129,10 @@ pub(super) fn end_session(
     store: &SessionStore,
     active_session: &mut Option<SessionId>,
     transcript_len: &mut usize,
+    agent: &mut Agent,
 ) {
+    agent.abort();
+    agent.unbind_session();
     match store.end_current() {
         Ok(Some(meta)) => {
             tracing::info!(session_id = %meta.id, "session ended");
@@ -139,8 +158,9 @@ pub(super) fn go_off(
     transcript_len: &mut usize,
     stt: &mut dyn SpeechToText,
     tts: &mut dyn TextToSpeech,
+    agent: &mut Agent,
 ) {
-    end_session(store, active_session, transcript_len);
+    end_session(store, active_session, transcript_len, agent);
     audio.stop();
     release_voice_models(stt, tts, "engine stop");
     picture.engine = EngineState::Off;

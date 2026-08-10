@@ -15,18 +15,20 @@
 //!         summary.json       # Grok-like session summary
 //!         chat_history.jsonl # full transcript (user/assistant/tool_result/system)
 //!         events.jsonl       # lightweight turn events
+//!         tool_calls.jsonl   # primary tool audit (session-scoped)
+//!         todos.json         # session plan list
+//!         memory.md          # session turn log (LTM append)
+//!         subagents/         # child subagent artifacts
 //!   memory/
-//!     MEMORY.md              # global curated knowledge (Grok template style)
+//!     MEMORY.md              # single global curated knowledge
 //!     profile.json
 //!     notes.jsonl
 //!     desktop/               # workspace bucket when no project cwd
-//!       MEMORY.md
-//!       sessions/
-//!         YYYY-MM-DD-{sid8}.md
+//!       MEMORY.md            # workspace-scoped curated notes (not per-chat logs)
 //!   skills/                  # user skills (<name>/SKILL.md)
 //!   logs/
 //!     boris-desktop.*.log
-//!     audit/
+//!     audit/                 # legacy global audit (unused by engine)
 //!       tool_calls.jsonl
 //!   models/
 //!     parakeet/ | supertone/ | livekit/
@@ -144,12 +146,19 @@ pub fn ensure_sessions_dir() -> std::io::Result<()> {
     fs::create_dir_all(sessions_dir())
 }
 
-/// Tool audit directory (`~/.boris/logs/audit`).
+/// Legacy global tool audit directory (`~/.boris/logs/audit`).
+///
+/// **Unused by the engine.** Primary tool audit is session-scoped:
+/// `{sessions}/desktop/{uuid}/tool_calls.jsonl`, bound via
+/// [`boris_agent::Agent::set_audit_path`] at session start.
 pub fn audit_dir() -> PathBuf {
     logs_dir().join("audit")
 }
 
-/// Append-only tool call audit (`~/.boris/logs/audit/tool_calls.jsonl`).
+/// Legacy global append-only tool audit path (`~/.boris/logs/audit/tool_calls.jsonl`).
+///
+/// **Unused by the engine** (no dual-write). Kept for migration helpers and
+/// tests. Session bind writes `{session}/tool_calls.jsonl` instead.
 pub fn audit_path() -> PathBuf {
     audit_dir().join("tool_calls.jsonl")
 }
@@ -178,7 +187,10 @@ pub fn memory_workspace_dir() -> PathBuf {
     memory_dir().join(DESKTOP_WORKSPACE)
 }
 
-/// Markdown session logs under the desktop workspace.
+/// Legacy path: old LTM turn logs lived here (`memory/desktop/sessions/`).
+///
+/// New code writes session logs to `{sessions_dir()}/{id}/memory.md` instead.
+/// Kept for migration of home layout only — engine no longer appends here.
 pub fn memory_sessions_dir() -> PathBuf {
     memory_workspace_dir().join("sessions")
 }
@@ -207,7 +219,9 @@ pub fn ensure_agent_dirs() -> std::io::Result<()> {
     fs::create_dir_all(audit_dir())?;
     fs::create_dir_all(skills_dir())?;
     fs::create_dir_all(memory_dir())?;
-    fs::create_dir_all(memory_sessions_dir())?;
+    fs::create_dir_all(memory_workspace_dir())?;
+    // Session turn logs live under sessions/{id}/memory.md — do not create
+    // the legacy memory/desktop/sessions tree.
     fs::create_dir_all(memory_workspace_dir())?;
     Ok(())
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use boris_agent::CapabilityPreset;
 
-use crate::env_util::{env_flag_false, env_opt, env_truthy, nonempty};
+use crate::env_util::{env_opt, env_truthy, nonempty};
 use crate::paths;
 use crate::prompt::BORIS_SYSTEM_PROMPT;
 use crate::settings::{self, AppSettings};
@@ -100,6 +100,11 @@ pub struct PipelineConfig {
     pub capability_preset: CapabilityPreset,
     /// Enable markdown long-term memory tools + session logs.
     pub long_term_memory: bool,
+    /// Auto-allow moderate tools + trusted sandbox file writes.
+    /// Shell and open URL still need yes (Dangerous/Critical HITL).
+    pub trusted_auto_moderate: bool,
+    /// Max HITL confirmations per user turn before remaining calls are denied.
+    pub max_confirms_per_turn: u32,
 }
 
 impl PipelineConfig {
@@ -135,7 +140,10 @@ impl PipelineConfig {
 
         let saved = settings::load_settings().unwrap_or_default();
         let capability_preset = resolve_capability_preset(&saved);
-        let long_term_memory = resolve_long_term_memory_flag();
+        let long_term_memory = resolve_long_term_memory_flag(&saved);
+        let trusted_auto_moderate = resolve_trusted_auto_moderate(&saved);
+        let max_confirms_per_turn = resolve_max_confirms_per_turn(&saved);
+        let tts_voice_id = resolve_tts_voice_id(&saved);
 
         let (strong, strong_prov, fast, fast_prov, pin) = resolve_llm_prefs(&saved, &prefs);
 
@@ -154,9 +162,11 @@ impl PipelineConfig {
             stt_model_dir: paths::parakeet_dir(),
             tts_model_dir: paths::supertone_onnx_dir(),
             tts_voice_dir: paths::supertone_voices_dir(),
-            tts_voice_id: "M4".into(),
+            tts_voice_id,
             capability_preset,
             long_term_memory,
+            trusted_auto_moderate,
+            max_confirms_per_turn,
         }
     }
 }
@@ -232,9 +242,42 @@ fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     CapabilityPreset::Full
 }
 
-/// `BORIS_MEMORY=0` disables; default on.
-fn resolve_long_term_memory_flag() -> bool {
-    !env_flag_false("BORIS_MEMORY")
+/// `BORIS_MEMORY` env overrides `config.toml` `[agent].long_term_memory`.
+fn resolve_long_term_memory_flag(saved: &AppSettings) -> bool {
+    env_truthy("BORIS_MEMORY").unwrap_or(saved.long_term_memory)
+}
+
+/// `BORIS_TRUSTED` env overrides `config.toml` `[agent].trusted_auto_moderate`.
+fn resolve_trusted_auto_moderate(saved: &AppSettings) -> bool {
+    env_truthy("BORIS_TRUSTED").unwrap_or(saved.trusted_auto_moderate)
+}
+
+/// Optional `BORIS_MAX_CONFIRMS` env overrides `config.toml` `[agent].max_confirms_per_turn`.
+/// Clamped to at least 1; invalid/missing env falls back to saved (default 12).
+fn resolve_max_confirms_per_turn(saved: &AppSettings) -> u32 {
+    if let Some(raw) = env_opt("BORIS_MAX_CONFIRMS") {
+        if let Ok(n) = raw.trim().parse::<u32>() {
+            return n.max(1);
+        }
+        tracing::warn!(
+            value = %raw,
+            "invalid BORIS_MAX_CONFIRMS; using config/default"
+        );
+    }
+    saved.max_confirms_per_turn.max(1)
+}
+
+/// Voice from config, default `M4`. Optional `BORIS_TTS_VOICE` override.
+fn resolve_tts_voice_id(saved: &AppSettings) -> String {
+    if let Some(v) = env_opt("BORIS_TTS_VOICE") {
+        return v;
+    }
+    let t = saved.tts_voice_id.trim();
+    if t.is_empty() {
+        "M4".into()
+    } else {
+        t.to_string()
+    }
 }
 
 #[cfg(test)]

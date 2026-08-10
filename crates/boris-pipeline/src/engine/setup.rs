@@ -359,10 +359,13 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     // / data roots never diverge (Grok layout: state/workspace + memory/sessions).
     let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
     preset.apply_to_sandbox(&mut sandbox);
-    // Trusted auto-allow for Moderate tools (notes, workspace writes, clipboard…).
-    // Dangerous (bash, open url) still confirm. Disable with BORIS_TRUSTED=0.
-    let trusted = !env_flag_false("BORIS_TRUSTED");
+    // Trusted auto-allow for Moderate tools + sandbox file writes (notes, workspace…).
+    // Shell / open URL still confirm. Env `BORIS_TRUSTED` overrides config.
+    let trusted = config.trusted_auto_moderate;
     sandbox = sandbox.with_trusted_auto_moderate(trusted);
+    // Multi-tool HITL budget (default 12). Env `BORIS_MAX_CONFIRMS` overrides config.
+    let max_confirms = config.max_confirms_per_turn.max(1);
+    sandbox = sandbox.with_max_confirms_per_turn(max_confirms);
     let tool_paths = boris_agent::tools::BuiltinToolPaths {
         notes_path: paths::notes_path(),
         profile_path: paths::profile_path(),
@@ -372,7 +375,8 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         allow_write: sandbox.allow_write.clone(),
         boris_home: paths::boris_home(),
     };
-    agent.configure_runtime(sandbox, Some(paths::audit_path()));
+    // Null audit at init — session bind sets per-session tool_calls.jsonl.
+    agent.configure_runtime(sandbox, None);
 
     // Core + (optional) power tools filtered by capability preset + personal context.
     let power = preset.wants_power_tools();
@@ -398,10 +402,14 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     agent.enable_skills(loaded);
 
     if config.long_term_memory {
-        match agent.enable_long_term_memory(paths::memory_dir()) {
+        match agent.enable_long_term_memory_with_sessions(
+            paths::memory_dir(),
+            Some(paths::sessions_dir()),
+        ) {
             Ok(_) => tracing::info!(
                 memory_md = %paths::memory_md_path().display(),
-                "long-term markdown memory enabled"
+                sessions = %paths::sessions_dir().display(),
+                "long-term markdown memory enabled (global MEMORY + per-session memory.md)"
             ),
             Err(e) => tracing::warn!(error = %e, "long-term memory enable failed"),
         }
@@ -439,12 +447,13 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         notes = %paths::notes_path().display(),
         profile = %paths::profile_path().display(),
         workspace = %paths::workspace_dir().display(),
-        audit = %paths::audit_path().display(),
+        audit = "session-bound (null until bind_session)",
         skills = skill_count,
         skills_dir = %paths::skills_dir().display(),
         capability = preset.as_str(),
         long_term_memory = config.long_term_memory,
         trusted_auto_moderate = trusted,
+        max_confirms_per_turn = max_confirms,
         progressive_listing = features.progressive_listing,
         wave_scheduling = features.wave_scheduling,
         max_parallel_tools = features.max_parallel_tools,

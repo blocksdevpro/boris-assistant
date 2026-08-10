@@ -1,4 +1,10 @@
 //! Lean subagent: run a short read-mostly tool loop and return a summary.
+//!
+//! Child tools are filtered with [`ToolMeta::is_read_only`](crate::tool::ToolMeta::is_read_only)
+//! and `risk <= Moderate`. Production tools must set explicit `read_only(true)`
+//! on their meta (kind-only heuristics only treat Read/Search as RO). After the
+//! profile-tool meta fix, `get_user_context` / `recall_notes` / file reads are
+//! eligible; writers (`save_user_fact`, `remember_note`, bash, …) are not.
 
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +78,8 @@ impl Tool for SpawnSubagentTool {
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Other)
             .timeout(std::time::Duration::from_secs(90))
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -96,7 +104,8 @@ impl Tool for SpawnSubagentTool {
                         return false;
                     }
                     let m = t.meta();
-                    m.kind.is_read_only() && m.risk <= ToolRisk::Moderate
+                    // Prefer explicit meta.read_only (concurrency annotations).
+                    m.is_read_only() && m.risk <= ToolRisk::Moderate
                 })
                 .cloned()
                 .collect()
@@ -122,6 +131,9 @@ impl Tool for SpawnSubagentTool {
             max_tool_rounds: max_rounds.min(DEFAULT_MAX_TOOL_ROUNDS),
             session_id: None,
             turn_id: None,
+            features: crate::runtime::ToolRuntimeFeatures::default(),
+            // Child registries are small; always list all child tools.
+            force_list_all: true,
         };
 
         let state = LoopState {
@@ -129,6 +141,7 @@ impl Tool for SpawnSubagentTool {
             tools: &child_tools,
             runtime: &runtime,
             client: self.client.as_ref(),
+            activated: None,
         };
 
         let result = agent_loop(state, &goal, &config, vec![], 0, 0, None, None, None, 0)

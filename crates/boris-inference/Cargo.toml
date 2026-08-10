@@ -1,7 +1,12 @@
 [package]
-name    = "boris-inference"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-inference"
+version     = "0.1.0"
+edition     = "2021"
+description = "Object-safe SpeechToText / TextToSpeech ports for Boris adapters"
+publish     = false
+readme      = "README.md"
+license = "Apache-2.0"
 
+repository = "https://github.com/blocksdevpro/boris-assistant"
 [dependencies]
 boris-core = { workspace = true }

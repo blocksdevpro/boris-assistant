@@ -1,16 +1,27 @@
 /**
  * Typed bridge for engine status + control.
- * Rust owns the source of truth; this is the window/overlay surface.
+ *
+ * # Host vs pipeline
+ *
+ * - **Host** (`boris-desktop`): owns these invoke/event names, mirrors status,
+ *   starts/stops the engine process, lists devices, loads settings.
+ * - **Pipeline** (`boris_pipeline`): owns voice policy, model install, real
+ *   `StatusPicture` production, and `~/.boris` persistence internals.
+ *
+ * The UI never imports pipeline crates — only this module + [`./types`].
  */
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { logger } from "@/lib/logger";
 import { invokeErrorMessage } from "./errors";
+import { COMMANDS, EVENTS } from "./ipc";
 import {
   EMPTY_SETTINGS,
+  normalizeSettings,
   normalizeStatus,
   OFF_STATUS,
+  settingsToWire,
   type AppSettings,
   type DeviceDto,
   type DownloadProgress,
@@ -23,7 +34,7 @@ import {
 /** Pull once (overlay mount, window focus, etc.). */
 export async function getStatus(): Promise<StatusPicture> {
   try {
-    const raw = await invoke<StatusPicture>("get_status");
+    const raw = await invoke<StatusPicture>(COMMANDS.getStatus);
     return normalizeStatus(raw);
   } catch (e) {
     logger.warn("get_status failed", invokeErrorMessage(e));
@@ -34,7 +45,7 @@ export async function getStatus(): Promise<StatusPicture> {
 /** Check whether required STT/TTS models exist under `~/.boris`. */
 export async function preflightCheck(): Promise<PreflightReport> {
   try {
-    return await invoke<PreflightReport>("preflight_check");
+    return await invoke<PreflightReport>(COMMANDS.preflightCheck);
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("preflight_check failed", msg);
@@ -51,7 +62,7 @@ export async function onStatus(
 ): Promise<() => void> {
   let unlisten: UnlistenFn | undefined;
   try {
-    unlisten = await listen<StatusPicture>("status", (e) => {
+    unlisten = await listen<StatusPicture>(EVENTS.status, (e) => {
       handler(normalizeStatus(e.payload));
     });
   } catch (e) {
@@ -105,7 +116,8 @@ export async function startEngine(
     pinProvider,
   });
   try {
-    await invoke("start_engine", {
+    // CamelCase keys → Tauri renames to snake_case for Rust args.
+    await invoke(COMMANDS.startEngine, {
       apiKey,
       model: modelId,
       fastModel,
@@ -124,7 +136,7 @@ export async function startEngine(
 export async function stopEngine(): Promise<void> {
   logger.info("stopEngine");
   try {
-    await invoke("stop_engine");
+    await invoke(COMMANDS.stopEngine);
     logger.info("stopEngine ok");
   } catch (e) {
     const msg = invokeErrorMessage(e);
@@ -135,7 +147,7 @@ export async function stopEngine(): Promise<void> {
 
 export async function listInputDevices(): Promise<DeviceDto[]> {
   try {
-    return await invoke<DeviceDto[]>("list_input_devices");
+    return await invoke<DeviceDto[]>(COMMANDS.listInputDevices);
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("list_input_devices failed", msg);
@@ -145,7 +157,7 @@ export async function listInputDevices(): Promise<DeviceDto[]> {
 
 export async function listOutputDevices(): Promise<DeviceDto[]> {
   try {
-    return await invoke<DeviceDto[]>("list_output_devices");
+    return await invoke<DeviceDto[]>(COMMANDS.listOutputDevices);
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("list_output_devices failed", msg);
@@ -156,7 +168,7 @@ export async function listOutputDevices(): Promise<DeviceDto[]> {
 export async function switchInput(deviceId: string): Promise<void> {
   logger.info("switchInput", { deviceId });
   try {
-    await invoke("switch_input", { deviceId });
+    await invoke(COMMANDS.switchInput, { deviceId });
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("switchInput failed", msg);
@@ -167,7 +179,7 @@ export async function switchInput(deviceId: string): Promise<void> {
 export async function switchOutput(deviceId: string): Promise<void> {
   logger.info("switchOutput", { deviceId });
   try {
-    await invoke("switch_output", { deviceId });
+    await invoke(COMMANDS.switchOutput, { deviceId });
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("switchOutput failed", msg);
@@ -178,7 +190,7 @@ export async function switchOutput(deviceId: string): Promise<void> {
 /** Whether Parakeet + Supertone are present under `~/.boris/models`. */
 export async function getModelsStatus(): Promise<ModelsStatus> {
   try {
-    return await invoke<ModelsStatus>("models_status");
+    return await invoke<ModelsStatus>(COMMANDS.modelsStatus);
   } catch (e) {
     const msg = invokeErrorMessage(e);
     logger.error("models_status failed", msg);
@@ -193,7 +205,7 @@ export async function getModelsStatus(): Promise<ModelsStatus> {
 export async function downloadModels(): Promise<ModelsInstallReport> {
   logger.info("downloadModels start");
   try {
-    const report = await invoke<ModelsInstallReport>("download_models");
+    const report = await invoke<ModelsInstallReport>(COMMANDS.downloadModels);
     logger.info("downloadModels done", {
       ok: report.ok,
       files_downloaded: report.files_downloaded,
@@ -213,7 +225,7 @@ export async function onModelsProgress(
 ): Promise<() => void> {
   let unlisten: UnlistenFn | undefined;
   try {
-    unlisten = await listen<DownloadProgress>("models-progress", (e) => {
+    unlisten = await listen<DownloadProgress>(EVENTS.modelsProgress, (e) => {
       handler(e.payload);
     });
   } catch (e) {
@@ -225,32 +237,29 @@ export async function onModelsProgress(
   };
 }
 
-/** Load OpenRouter key + model from `~/.boris/settings.json`. */
+/** Load OpenRouter key + models/providers from `~/.boris/config.toml` + `auth.json`. */
 export async function getSettings(): Promise<AppSettings> {
   try {
-    const raw = await invoke<Partial<AppSettings>>("get_settings");
-    return {
-      openrouter_api_key: raw?.openrouter_api_key ?? "",
-      openrouter_model: raw?.openrouter_model ?? "",
-    };
+    const raw = await invoke<Partial<AppSettings>>(COMMANDS.getSettings);
+    return normalizeSettings(raw);
   } catch (e) {
     logger.warn("get_settings failed", invokeErrorMessage(e));
     return { ...EMPTY_SETTINGS };
   }
 }
 
-/** Persist OpenRouter key + model (never log the key). */
+/** Persist OpenRouter key + models/providers (never log the key). */
 export async function saveSettings(settings: AppSettings): Promise<void> {
+  const wire = settingsToWire(settings);
   try {
-    await invoke("save_app_settings", {
-      settings: {
-        openrouter_api_key: settings.openrouter_api_key ?? "",
-        openrouter_model: settings.openrouter_model ?? "",
-      },
-    });
+    await invoke(COMMANDS.saveAppSettings, { settings: wire });
     logger.info("saveSettings ok", {
-      hasKey: Boolean(settings.openrouter_api_key?.trim()),
-      model: settings.openrouter_model || null,
+      hasKey: Boolean(wire.openrouter_api_key?.trim()),
+      model: wire.openrouter_model || null,
+      fastModel: wire.openrouter_fast_model || null,
+      modelProvider: wire.openrouter_model_provider || null,
+      fastProvider: wire.openrouter_fast_provider || null,
+      pinProvider: wire.openrouter_pin_provider ?? false,
     });
   } catch (e) {
     const msg = invokeErrorMessage(e);

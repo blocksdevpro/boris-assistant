@@ -1,9 +1,13 @@
 [package]
-name = "boris-desktop"
-version = "0.1.0"
+name        = "boris-desktop"
+version     = "0.1.0"
 description = "Boris Desktop — voice assistant shell"
-authors = ["you"]
-edition = "2021"
+authors     = ["BlocksDevPro"]
+edition     = "2021"
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+readme      = "../../README.md"
+publish     = false
 
 [lib]
 name = "boris_desktop_lib"

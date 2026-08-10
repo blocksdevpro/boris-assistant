@@ -1,15 +1,73 @@
+//! Host spawn configuration for [`crate::Engine`].
+//!
+//! Built from desktop args, `~/.boris` settings, and env overrides
+//! (`OPENROUTER_*`, `BORIS_*`). Model dirs default under `~/.boris/models`.
 use std::path::PathBuf;
 
 use boris_agent::CapabilityPreset;
 
+use crate::env_util::{env_flag_false, env_opt, env_truthy, nonempty};
 use crate::paths;
 use crate::prompt::BORIS_SYSTEM_PROMPT;
 use crate::settings::{self, AppSettings};
 
+/// Explicit LLM / OpenRouter preferences passed into [`PipelineConfig::with_llm`].
+///
+/// Priority for each field (when building the final config):
+/// explicit value → env → `config.toml` → engine default.
+#[derive(Debug, Clone, Default)]
+pub struct LlmPrefs {
+    pub openrouter_api_key: String,
+    /// Strong / primary model id (multi-step agent work).
+    pub openrouter_model: Option<String>,
+    /// Fast / cheap model id for simple turns.
+    pub openrouter_fast_model: Option<String>,
+    /// OpenRouter **model-provider** preference for strong (e.g. `coreweave`).
+    pub openrouter_model_provider: Option<String>,
+    /// OpenRouter model-provider preference for fast.
+    pub openrouter_fast_provider: Option<String>,
+    /// When `Some`, overrides pin; when `None`, falls back to env / saved.
+    pub openrouter_pin_provider: Option<bool>,
+}
+
+impl LlmPrefs {
+    pub fn new(openrouter_api_key: impl Into<String>) -> Self {
+        Self {
+            openrouter_api_key: openrouter_api_key.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.openrouter_model = Some(model.into());
+        self
+    }
+
+    pub fn fast_model(mut self, model: impl Into<String>) -> Self {
+        self.openrouter_fast_model = Some(model.into());
+        self
+    }
+
+    pub fn model_provider(mut self, provider: impl Into<String>) -> Self {
+        self.openrouter_model_provider = Some(provider.into());
+        self
+    }
+
+    pub fn fast_provider(mut self, provider: impl Into<String>) -> Self {
+        self.openrouter_fast_provider = Some(provider.into());
+        self
+    }
+
+    pub fn pin_provider(mut self, pin: bool) -> Self {
+        self.openrouter_pin_provider = Some(pin);
+        self
+    }
+}
+
 /// Host-supplied configuration for [`crate::Engine::spawn`].
 ///
 /// Model dirs default to `~/.boris/models/...` (see [`crate::paths`]).
-/// Does **not** read `config.toml`.
+/// User prefs/secrets load from `config.toml` + `auth.json` via [`crate::settings`].
 pub struct PipelineConfig {
     pub openrouter_api_key: String,
     /// Strong / primary model id (multi-step agent work).
@@ -24,6 +82,7 @@ pub struct PipelineConfig {
     pub openrouter_pin_provider: bool,
     pub system_prompt: String,
     /// Rate of PCM passed to playback (must match TTS native rate).
+    /// When `0` or unused, the engine prefers [`boris_inference::TextToSpeech::sample_rate`].
     pub play_source_rate: u32,
     /// Wake-word ONNX model bytes (host may embed or load from disk).
     pub wakeword_model: Vec<u8>,
@@ -46,7 +105,7 @@ pub struct PipelineConfig {
 impl PipelineConfig {
     /// Build with model paths under `~/.boris/models` and optional seed from workspace assets.
     ///
-    /// Merges explicit args with `~/.boris/settings.json` and env vars:
+    /// Merges explicit args with `~/.boris/config.toml` + `auth.json` and env vars:
     /// - `OPENROUTER_MODEL` / `BORIS_STRONG_MODEL` — strong model
     /// - `BORIS_FAST_MODEL` — fast model
     /// - `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` — strong provider order
@@ -58,30 +117,13 @@ impl PipelineConfig {
         play_source_rate: u32,
         wakeword_model: Vec<u8>,
     ) -> Self {
-        Self::with_llm(
-            openrouter_api_key,
-            openrouter_model,
-            None,
-            None,
-            None,
-            None,
-            play_source_rate,
-            wakeword_model,
-        )
+        let mut prefs = LlmPrefs::new(openrouter_api_key);
+        prefs.openrouter_model = openrouter_model;
+        Self::with_llm(prefs, play_source_rate, wakeword_model)
     }
 
     /// Full LLM configuration (models + OpenRouter model-providers).
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_llm(
-        openrouter_api_key: String,
-        openrouter_model: Option<String>,
-        openrouter_fast_model: Option<String>,
-        openrouter_model_provider: Option<String>,
-        openrouter_fast_provider: Option<String>,
-        openrouter_pin_provider: Option<bool>,
-        play_source_rate: u32,
-        wakeword_model: Vec<u8>,
-    ) -> Self {
+    pub fn with_llm(prefs: LlmPrefs, play_source_rate: u32, wakeword_model: Vec<u8>) -> Self {
         // Best-effort dev seed from workspace `assets/models` only.
         // Product path for clean installs is `download::install_models`.
         if let Err(e) = paths::bootstrap_models_if_needed() {
@@ -95,11 +137,10 @@ impl PipelineConfig {
         let capability_preset = resolve_capability_preset(&saved);
         let long_term_memory = resolve_long_term_memory_flag();
 
-        let (strong, strong_prov, fast, fast_prov, pin) =
-            resolve_llm_prefs(&saved, openrouter_model, openrouter_fast_model, openrouter_model_provider, openrouter_fast_provider, openrouter_pin_provider);
+        let (strong, strong_prov, fast, fast_prov, pin) = resolve_llm_prefs(&saved, &prefs);
 
         Self {
-            openrouter_api_key,
+            openrouter_api_key: prefs.openrouter_api_key,
             openrouter_model: strong,
             openrouter_fast_model: fast,
             openrouter_model_provider: strong_prov,
@@ -120,14 +161,10 @@ impl PipelineConfig {
     }
 }
 
-/// Priority: explicit arg → env → settings.json → None (engine default).
+/// Priority: explicit arg → env → config.toml → None (engine default).
 fn resolve_llm_prefs(
     saved: &AppSettings,
-    model: Option<String>,
-    fast_model: Option<String>,
-    model_provider: Option<String>,
-    fast_provider: Option<String>,
-    pin: Option<bool>,
+    prefs: &LlmPrefs,
 ) -> (
     Option<String>,
     Option<String>,
@@ -136,60 +173,41 @@ fn resolve_llm_prefs(
     bool,
 ) {
     let strong = first_nonempty([
-        model,
+        prefs.openrouter_model.clone(),
         env_opt("OPENROUTER_MODEL"),
         env_opt("BORIS_STRONG_MODEL"),
         nonempty(saved.openrouter_model.clone()),
     ]);
     let fast = first_nonempty([
-        fast_model,
+        prefs.openrouter_fast_model.clone(),
         env_opt("BORIS_FAST_MODEL"),
         nonempty(saved.openrouter_fast_model.clone()),
         None,
     ]);
     let strong_prov = first_nonempty([
-        model_provider,
+        prefs.openrouter_model_provider.clone(),
         env_opt("BORIS_MODEL_PROVIDER"),
         env_opt("BORIS_STRONG_PROVIDER"),
         nonempty(saved.openrouter_model_provider.clone()),
     ]);
     let fast_prov = first_nonempty([
-        fast_provider,
+        prefs.openrouter_fast_provider.clone(),
         env_opt("BORIS_FAST_PROVIDER"),
         nonempty(saved.openrouter_fast_provider.clone()),
         // Fall back to strong provider if only one is configured.
         strong_prov.clone(),
     ]);
-    let pin = pin.unwrap_or_else(|| {
+    let pin = prefs.openrouter_pin_provider.unwrap_or_else(|| {
         env_truthy("BORIS_PIN_PROVIDER").unwrap_or(saved.openrouter_pin_provider)
     });
     (strong, strong_prov, fast, fast_prov, pin)
-}
-
-fn env_opt(key: &str) -> Option<String> {
-    std::env::var(key).ok().and_then(nonempty)
-}
-
-fn nonempty(s: String) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_string())
-    }
 }
 
 fn first_nonempty(candidates: [Option<String>; 4]) -> Option<String> {
     candidates.into_iter().flatten().next()
 }
 
-fn env_truthy(key: &str) -> Option<bool> {
-    let v = std::env::var(key).ok()?;
-    let v = v.trim().to_ascii_lowercase();
-    Some(matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-}
-
-/// `BORIS_CAPABILITY` env, else settings.json, else Full.
+/// `BORIS_CAPABILITY` env, else config.toml `[capability]`, else Full.
 fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     if let Ok(raw) = std::env::var("BORIS_CAPABILITY") {
         if let Some(p) = CapabilityPreset::parse(&raw) {
@@ -203,12 +221,12 @@ fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     }
     if !saved.capability_preset.trim().is_empty() {
         if let Some(p) = CapabilityPreset::parse(&saved.capability_preset) {
-            tracing::info!(preset = p.as_str(), "capability from settings.json");
+            tracing::info!(preset = p.as_str(), "capability from config.toml");
             return p;
         }
         tracing::warn!(
             value = %saved.capability_preset,
-            "unknown capability_preset in settings; using full"
+            "unknown capability_preset in config; using full"
         );
     }
     CapabilityPreset::Full
@@ -216,11 +234,79 @@ fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
 
 /// `BORIS_MEMORY=0` disables; default on.
 fn resolve_long_term_memory_flag() -> bool {
-    match std::env::var("BORIS_MEMORY") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !(v == "0" || v == "false" || v == "off" || v == "no")
-        }
-        Err(_) => true,
+    !env_flag_false("BORIS_MEMORY")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_nonempty_picks_first() {
+        assert_eq!(
+            first_nonempty([None, Some("a".into()), Some("b".into()), None]).as_deref(),
+            Some("a")
+        );
+        assert_eq!(first_nonempty([None, None, None, None]), None);
+    }
+
+    #[test]
+    fn resolve_llm_prefs_prefers_explicit_over_saved() {
+        let saved = AppSettings {
+            openrouter_model: "saved-strong".into(),
+            openrouter_fast_model: "saved-fast".into(),
+            openrouter_model_provider: "saved-prov".into(),
+            openrouter_fast_provider: "saved-fast-prov".into(),
+            openrouter_pin_provider: false,
+            ..Default::default()
+        };
+        let prefs = LlmPrefs {
+            openrouter_api_key: String::new(),
+            openrouter_model: Some("arg-strong".into()),
+            openrouter_fast_model: Some("arg-fast".into()),
+            openrouter_model_provider: Some("arg-prov".into()),
+            openrouter_fast_provider: Some("arg-fast-prov".into()),
+            openrouter_pin_provider: Some(true),
+        };
+        let (strong, strong_p, fast, fast_p, pin) = resolve_llm_prefs(&saved, &prefs);
+        assert_eq!(strong.as_deref(), Some("arg-strong"));
+        assert_eq!(fast.as_deref(), Some("arg-fast"));
+        assert_eq!(strong_p.as_deref(), Some("arg-prov"));
+        assert_eq!(fast_p.as_deref(), Some("arg-fast-prov"));
+        assert!(pin);
+    }
+
+    #[test]
+    fn resolve_llm_prefs_uses_saved_when_args_empty() {
+        let saved = AppSettings {
+            openrouter_model: "saved-strong".into(),
+            openrouter_fast_model: "saved-fast".into(),
+            openrouter_model_provider: "only-strong-prov".into(),
+            openrouter_fast_provider: String::new(),
+            openrouter_pin_provider: true,
+            ..Default::default()
+        };
+        let prefs = LlmPrefs::default();
+        let (strong, strong_p, fast, fast_p, pin) = resolve_llm_prefs(&saved, &prefs);
+        assert_eq!(strong.as_deref(), Some("saved-strong"));
+        assert_eq!(fast.as_deref(), Some("saved-fast"));
+        assert_eq!(strong_p.as_deref(), Some("only-strong-prov"));
+        // fast provider falls back to strong when unset
+        assert_eq!(fast_p.as_deref(), Some("only-strong-prov"));
+        assert!(pin);
+    }
+
+    #[test]
+    fn llm_prefs_builder_chain() {
+        let p = LlmPrefs::new("sk")
+            .model("m")
+            .fast_model("f")
+            .model_provider("p")
+            .pin_provider(true);
+        assert_eq!(p.openrouter_api_key, "sk");
+        assert_eq!(p.openrouter_model.as_deref(), Some("m"));
+        assert_eq!(p.openrouter_fast_model.as_deref(), Some("f"));
+        assert_eq!(p.openrouter_model_provider.as_deref(), Some("p"));
+        assert_eq!(p.openrouter_pin_provider, Some(true));
     }
 }

@@ -77,9 +77,12 @@ impl Tool for SaveUserFactTool {
     }
 
     fn meta(&self) -> ToolMeta {
+        // Durable write — align with remember_note / update_user_profile.
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Memory)
             .permissions(&[Permission::FsWrite])
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -149,6 +152,8 @@ impl Tool for UpdateUserProfileTool {
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Memory)
             .permissions(&[Permission::FsWrite])
+            .read_only(false)
+            .max_concurrency(1)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -217,9 +222,12 @@ impl Tool for GetUserContextTool {
     }
 
     fn meta(&self) -> ToolMeta {
+        // Read-only recall — align with recall_notes / memory_get.
         ToolMeta::with_risk(ToolRisk::Safe)
             .kind(ToolKind::Memory)
             .permissions(&[Permission::FsRead])
+            .read_only(true)
+            .max_concurrency(8)
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
@@ -231,5 +239,39 @@ impl Tool for GetUserContextTool {
             return Ok("No personal context stored yet.".into());
         }
         Ok(truncate_tool_result(guard.render_block(2000)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::profile::UserProfile;
+    use std::sync::{Arc, Mutex};
+
+    fn dummy_profile() -> SharedProfile {
+        Arc::new(Mutex::new(UserProfile::default()))
+    }
+
+    #[test]
+    fn memory_profile_tool_meta_aligned() {
+        let profile = dummy_profile();
+        let path = std::env::temp_dir().join("boris-profile-meta-test.json");
+        let save = SaveUserFactTool::with_path(profile.clone(), &path);
+        let update = UpdateUserProfileTool::with_path(profile.clone(), &path);
+        let get = GetUserContextTool::new(profile);
+
+        let save_m = save.meta();
+        assert_eq!(save_m.read_only, Some(false));
+        assert_eq!(save_m.max_concurrency, Some(1));
+        assert!(save_m.permissions.contains(&Permission::FsWrite));
+
+        let update_m = update.meta();
+        assert_eq!(update_m.read_only, Some(false));
+        assert_eq!(update_m.max_concurrency, Some(1));
+
+        let get_m = get.meta();
+        assert_eq!(get_m.read_only, Some(true));
+        assert!(get_m.permissions.contains(&Permission::FsRead));
+        assert!(get_m.is_read_only());
     }
 }

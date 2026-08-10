@@ -29,6 +29,10 @@ pub struct AgentLoopConfig {
     pub max_tool_rounds: u32,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
+    /// Listing / concurrency / progress flags for this run.
+    pub features: crate::runtime::ToolRuntimeFeatures,
+    /// When true (subagent children), always dump full child tool list.
+    pub force_list_all: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -37,6 +41,8 @@ impl Default for AgentLoopConfig {
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
             session_id: None,
             turn_id: None,
+            features: crate::runtime::ToolRuntimeFeatures::default(),
+            force_list_all: false,
         }
     }
 }
@@ -79,6 +85,13 @@ pub enum AgentEvent {
         ok: bool,
         duration_ms: u64,
     },
+    /// Mid-execution progress (slim UI label; rate-limited).
+    ToolProgress {
+        call_id: String,
+        tool_name: String,
+        message: String,
+        byte_total: Option<u64>,
+    },
     NeedsConfirmation {
         pending: PendingToolCall,
     },
@@ -86,6 +99,9 @@ pub enum AgentEvent {
         message: String,
     },
 }
+
+/// Shared emit handle used by the loop and progress sinks.
+pub type EmitFn = std::sync::Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
 /// Listener type for [`crate::Agent::subscribe`].
 pub type EventListener = Box<dyn Fn(&AgentEvent) + Send + Sync>;

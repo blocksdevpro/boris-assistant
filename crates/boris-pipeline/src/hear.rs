@@ -8,8 +8,7 @@ use std::time::Duration;
 
 use boris_audio::buffer::{RecordingBuffer, SlidingBuffer};
 use boris_audio::AUDIO_TARGET_RATE;
-use boris_core::types::ArcAudioBuffer;
-use boris_core::AudioBuffer;
+use boris_core::{ArcAudioBuffer, AudioBuffer};
 use boris_sense::{
     duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, Vad, WakeWord,
     VAD_PROCESSING_INTERVAL, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,

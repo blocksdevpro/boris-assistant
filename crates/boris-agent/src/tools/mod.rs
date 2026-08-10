@@ -1,7 +1,20 @@
-//! Built-in agent tools (tau-inspired suite + Boris voice tools).
+//! Built-in agent tools and host registration helpers.
 //!
-//! Individual tools live in submodules; this module assembles the default set
-//! and exposes registration helpers for the host (`boris-pipeline` / desktop).
+//! # Layout
+//!
+//! | Module | Tools |
+//! |--------|--------|
+//! | [`time`] | get_time, get_date |
+//! | [`notes`] | remember / recall notes |
+//! | [`profile`] | user profile / facts |
+//! | [`system`] / [`open_tool`] / [`clipboard`] / [`todo`] | OS surface |
+//! | [`files`] / [`glob`] / [`grep`] | filesystem |
+//! | [`web`] | web_search, web_fetch |
+//! | [`bash`] | shell |
+//! | [`skills_tools`] / [`memory_tools`] / [`subagent`] / [`tool_search`] | advanced |
+//!
+//! Hosts (pipeline / desktop) should call [`register_builtin_tools`] once after
+//! constructing [`crate::Agent`] with a [`BuiltinToolPaths`] pointing at `~/.boris`.
 
 pub mod bash;
 pub mod clipboard;
@@ -12,12 +25,14 @@ pub mod grep;
 pub mod memory_tools;
 pub mod notes;
 pub mod open_tool;
+pub mod path_pattern;
 pub mod profile;
 pub mod skills_tools;
 pub mod subagent;
 pub mod system;
 pub mod time;
 pub mod todo;
+pub mod tool_search;
 pub mod web;
 
 use std::path::PathBuf;
@@ -27,8 +42,12 @@ use crate::capability::{filter_tools_for_preset, CapabilityPreset};
 use crate::tool::Tool;
 use crate::tools::files::FsRoots;
 
-/// Paths and roots for file-backed / OS tools.
+/// Paths and sandbox roots for file-backed / OS tools.
+///
+/// Built by the host from `boris-pipeline` home layout (`~/.boris`).
+#[derive(Debug, Clone)]
 pub struct BuiltinToolPaths {
+    /// Notes file path.
     pub notes_path: PathBuf,
     /// Durable personal profile JSON (`~/.boris/memory/profile.json`).
     pub profile_path: PathBuf,
@@ -64,7 +83,9 @@ impl BuiltinToolPaths {
     }
 }
 
-/// Core v1 tools: time, notes (no profile).
+// ── Tool set factories ───────────────────────────────────────────────────────
+
+/// Core v1 tools: time + notes (no profile).
 pub fn builtin_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(time::GetTimeTool),
@@ -89,7 +110,7 @@ pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Filesystem tools (tau-style names + list_dir / glob / grep).
+/// Filesystem tools (list / read / write / edit / glob / grep).
 pub fn fs_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     let roots = paths.fs_roots();
     vec![
@@ -103,6 +124,8 @@ pub fn fs_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 }
 
 /// Web search + fetch (requires host network policy Open).
+///
+/// Registration failures are logged and skipped (missing API keys, etc.).
 pub fn web_tools() -> Vec<Box<dyn Tool>> {
     let mut out: Vec<Box<dyn Tool>> = Vec::new();
     match web::WebSearchTool::new() {
@@ -116,7 +139,7 @@ pub fn web_tools() -> Vec<Box<dyn Tool>> {
     out
 }
 
-/// Bash tool (requires host shell policy OpenConfirm + HITL).
+/// Bash tool (requires host shell policy + HITL for dangerous runs).
 pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     let cwd_roots = paths.read_roots_flat();
     vec![Box::new(bash::BashTool::new(
@@ -126,16 +149,19 @@ pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 }
 
 /// Alias for [`bash_tools`].
+#[deprecated(note = "use bash_tools")]
 pub fn shell_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     bash_tools(paths)
 }
+
+// ── Registration on Agent ────────────────────────────────────────────────────
 
 /// Register time + notes tools. Prefer [`register_builtin_tools`].
 pub fn register_time_and_notes(agent: &mut Agent, paths: &BuiltinToolPaths) {
     agent.register_tools(builtin_tools(paths));
 }
 
-/// Full host setup: personal context + all MVP tool waves.
+/// Full host setup: personal context + all MVP tool waves (Full preset).
 pub fn register_builtin_tools(agent: &mut Agent, paths: BuiltinToolPaths) {
     register_builtin_tools_with_preset(agent, paths, true, true, CapabilityPreset::Full);
 }
@@ -156,7 +182,13 @@ pub fn register_builtin_tools_with_options(
     );
 }
 
-/// Full registration with a capability preset (Grok toolset filtering).
+/// Full registration with a capability preset (toolset filtering).
+///
+/// 1. Core time/notes  
+/// 2. Optional personal-context tools  
+/// 3. Optional power tools (OS / FS / web / bash)  
+/// 4. Filter by [`CapabilityPreset`]  
+/// 5. [`Agent::register_tools`]
 pub fn register_builtin_tools_with_preset(
     agent: &mut Agent,
     paths: BuiltinToolPaths,
@@ -165,26 +197,7 @@ pub fn register_builtin_tools_with_preset(
     preset: CapabilityPreset,
 ) {
     let mut tools = builtin_tools(&paths);
-
-    match agent.enable_personal_context(&paths.profile_path, llm_extract) {
-        Ok(profile) => {
-            tools.push(Box::new(profile::SaveUserFactTool::with_path(
-                profile.clone(),
-                paths.profile_path.clone(),
-            )));
-            tools.push(Box::new(profile::UpdateUserProfileTool::with_path(
-                profile.clone(),
-                paths.profile_path.clone(),
-            )));
-            tools.push(Box::new(profile::GetUserContextTool::new(profile)));
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "personal context enable failed; profile tools not registered"
-            );
-        }
-    }
+    tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {
         tools.extend(os_tools(&paths));
@@ -195,4 +208,83 @@ pub fn register_builtin_tools_with_preset(
 
     let tools = filter_tools_for_preset(tools, preset);
     agent.register_tools(tools);
+}
+
+fn try_profile_tools(
+    agent: &mut Agent,
+    paths: &BuiltinToolPaths,
+    llm_extract: bool,
+) -> Vec<Box<dyn Tool>> {
+    match agent.enable_personal_context(&paths.profile_path, llm_extract) {
+        Ok(profile) => vec![
+            Box::new(profile::SaveUserFactTool::with_path(
+                profile.clone(),
+                paths.profile_path.clone(),
+            )),
+            Box::new(profile::UpdateUserProfileTool::with_path(
+                profile.clone(),
+                paths.profile_path.clone(),
+            )),
+            Box::new(profile::GetUserContextTool::new(profile)),
+        ],
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "personal context enable failed; profile tools not registered"
+            );
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths() -> BuiltinToolPaths {
+        let root = std::env::temp_dir().join(format!("boris-tool-meta-{}", std::process::id()));
+        BuiltinToolPaths {
+            notes_path: root.join("notes.jsonl"),
+            profile_path: root.join("profile.json"),
+            sandbox_root: root.join("sandbox"),
+            data_roots: vec![root.join("memory")],
+            allow_read: vec![],
+            allow_write: vec![],
+            boris_home: root,
+        }
+    }
+
+    /// Lint-style: every registered builtin should set explicit `read_only`.
+    #[test]
+    fn builtins_set_explicit_read_only() {
+        let paths = test_paths();
+        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        tools.extend(builtin_tools(&paths));
+        tools.extend(os_tools(&paths));
+        tools.extend(fs_tools(&paths));
+        tools.extend(web_tools());
+        tools.extend(bash_tools(&paths));
+
+        let mut missing = Vec::new();
+        for t in &tools {
+            if t.meta().read_only.is_none() {
+                missing.push(t.name().to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tools missing explicit ToolMeta::read_only: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn shell_allowlist_style_integration_via_bash_meta() {
+        let paths = test_paths();
+        let tools = bash_tools(&paths);
+        assert_eq!(tools.len(), 1);
+        let m = tools[0].meta();
+        assert!(m.permissions.contains(&crate::tool::Permission::Shell));
+        assert_eq!(m.read_only, Some(false));
+        assert!(m.requires_confirmation);
+    }
 }

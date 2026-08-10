@@ -1,6 +1,13 @@
 /**
- * UI contract shared by WINDOW and OVERLAY.
- * Mirrors Rust `boris_pipeline::StatusPicture`.
+ * UI DTOs shared by main window and overlay.
+ *
+ * # Host vs pipeline
+ *
+ * These shapes mirror **pipeline** serde types (`boris_pipeline::{StatusPicture,
+ * DeviceDto, PreflightReport, ModelsStatus, DownloadProgress, AppSettings, …}`).
+ * The host only forwards them over Tauri IPC — it does not invent alternate fields.
+ *
+ * Keep this file aligned with Rust DTO sources in one atomic PR when fields change.
  */
 
 export type EngineState = "Off" | "Starting" | "On" | "Fault";
@@ -21,6 +28,7 @@ export type DeviceHealth = {
   ok: boolean;
 };
 
+/** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
   engine: EngineState;
   phase: Phase;
@@ -100,7 +108,10 @@ export type ModelsInstallReport = {
   errors: string[];
 };
 
-/** Persisted under `~/.boris/settings.json` (Rust `AppSettings`). */
+/**
+ * Prefs + secrets from `~/.boris/config.toml` + `auth.json`.
+ * Mirrors Rust `boris_pipeline::AppSettings` (snake_case wire format).
+ */
 export type AppSettings = {
   openrouter_api_key: string;
   /** Strong / primary OpenRouter model id. */
@@ -179,7 +190,9 @@ export const OFF_STATUS: StatusPicture = {
 };
 
 /** Normalize partial / missing Option fields from serde. */
-export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined): StatusPicture {
+export function normalizeStatus(
+  raw: Partial<StatusPicture> | null | undefined,
+): StatusPicture {
   if (!raw) return { ...OFF_STATUS };
   return {
     engine: raw.engine ?? "Off",
@@ -194,6 +207,26 @@ export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined):
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
   };
+}
+
+/** Merge a partial settings payload into a full [`AppSettings`] with defaults. */
+export function normalizeSettings(
+  raw: Partial<AppSettings> | null | undefined,
+): AppSettings {
+  return {
+    openrouter_api_key: raw?.openrouter_api_key ?? "",
+    openrouter_model: raw?.openrouter_model ?? "",
+    openrouter_fast_model: raw?.openrouter_fast_model ?? "",
+    openrouter_model_provider: raw?.openrouter_model_provider ?? "",
+    openrouter_fast_provider: raw?.openrouter_fast_provider ?? "",
+    openrouter_pin_provider: raw?.openrouter_pin_provider ?? false,
+    capability_preset: raw?.capability_preset ?? "",
+  };
+}
+
+/** Wire shape for `save_app_settings` (always send full struct to Rust). */
+export function settingsToWire(settings: AppSettings): AppSettings {
+  return normalizeSettings(settings);
 }
 
 /** Format token counts for the overlay meter: `233K / 500K`. */

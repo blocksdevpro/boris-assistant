@@ -1,11 +1,17 @@
 [package]
-name    = "boris-tts-kokoro"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-tts-kokoro"
+version     = "0.1.0"
+edition     = "2021"
+description = "Kokoro (any-tts) TextToSpeech adapter for Boris — experimental"
+publish     = false
+readme      = "README.md"
+license = "Apache-2.0"
 
+repository = "https://github.com/blocksdevpro/boris-assistant"
 [dependencies]
 boris-core      = { workspace = true }
 boris-inference = { workspace = true }
 tracing         = { workspace = true }
 
-any-tts = "0.1.2"
+# Kokoro only; no HuggingFace auto-download — hosts must supply local weights.
+any-tts = { version = "0.1.2", default-features = false, features = ["kokoro"] }

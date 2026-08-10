@@ -46,6 +46,12 @@ impl Tool for ListSkillsTool {
 
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
+            .read_only(true)
+            .max_concurrency(4)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
@@ -111,6 +117,12 @@ impl Tool for LoadSkillTool {
         ToolMeta::with_risk(ToolRisk::Safe)
             .kind(ToolKind::Skill)
             .max_result_chars(MAX_SKILL_RESULT_CHARS)
+            .read_only(true)
+            .max_concurrency(4)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {

@@ -1,3 +1,10 @@
+/**
+ * React hook: live engine status for main window + overlay.
+ *
+ * Subscribes to host `status` events; initial snapshot via `get_status`.
+ * The host mirrors pipeline `StatusPicture` — this hook is pure UI glue.
+ */
+
 import { useEffect, useState } from "react";
 import { getStatus, onStatus } from "./status";
 import { OFF_STATUS, type StatusPicture } from "./types";

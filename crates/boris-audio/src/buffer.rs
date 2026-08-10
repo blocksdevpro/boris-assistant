@@ -153,9 +153,10 @@ impl RecordingBuffer {
     ///
     /// - Entering (`true`) clears the exceeded flag and keeps the current buffer
     ///   (pre-roll is the start of the utterance).
-    /// - Leaving (`false`) trims the buffer back to the pre-roll
-    ///   [`Self::preroll_capacity`] (newest samples), so idle mode does not retain
-    ///   a full utterance after endpoint.
+    /// - Leaving (`false`) only flips the flag. It does **not** trim samples —
+    ///   callers must [`Self::take_audio`] the full utterance first. Subsequent
+    ///   idle [`Self::push`] calls already enforce the pre-roll window via
+    ///   sliding retention, so a full clip is never silently truncated on stop.
     pub fn set_recording(&mut self, is_recording: bool) {
         if is_recording {
             self.is_recording = true;
@@ -163,11 +164,6 @@ impl RecordingBuffer {
             return;
         }
         self.is_recording = false;
-        // Trim to pre-roll window when returning to idle.
-        if self.buffer.len() > self.capacity {
-            let excess = self.buffer.len() - self.capacity;
-            self.buffer.drain(..excess);
-        }
     }
 
     /// True after a recording push hit the utterance length cap.
@@ -269,7 +265,9 @@ mod tests {
     }
 
     #[test]
-    fn set_recording_false_trims_to_preroll_capacity() {
+    fn set_recording_false_keeps_full_utterance_for_take() {
+        // Regression: stopping used to trim to pre-roll *before* take_audio,
+        // so STT only ever saw the last ~preroll seconds of speech.
         let mut r = RecordingBuffer::new(3, 20);
         r.push(&[1.0, 2.0, 3.0]);
         r.set_recording(true);
@@ -278,8 +276,31 @@ mod tests {
 
         r.set_recording(false);
         assert!(!r.is_recording());
-        assert_eq!(r.len(), 3);
-        // Newest pre-roll samples retained.
-        assert_eq!(r.take_audio(), vec![5.0, 6.0, 7.0]);
+        // Full clip still present until drained.
+        assert_eq!(r.len(), 7);
+        assert_eq!(r.take_audio(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn capture_endpoint_order_preserves_long_utterance() {
+        // Mirrors hear::capture_utterance: take_audio then set_recording(false).
+        let mut r = RecordingBuffer::new(3, 20);
+        r.set_recording(true);
+        r.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let clip = r.take_audio();
+        r.set_recording(false);
+        assert_eq!(clip, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn idle_push_after_stop_enforces_preroll() {
+        let mut r = RecordingBuffer::new(3, 20);
+        r.set_recording(true);
+        r.push(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        r.set_recording(false);
+        // Next idle push slides to pre-roll capacity.
+        r.push(&[6.0]);
+        assert_eq!(r.take_audio(), vec![4.0, 5.0, 6.0]);
     }
 }

@@ -254,10 +254,9 @@ pub fn capture_utterance(
         let frame = next_frame(mic, cmd_rx, running)?;
         record.push(&frame);
         if record.exceeded_max() {
-            let clip = {
-                record.set_recording(false);
-                record.take_audio()
-            };
+            // take_audio first — never stop/trim before draining the full clip.
+            let clip = record.take_audio();
+            record.set_recording(false);
             tracing::warn!(
                 samples = clip.len(),
                 has_spoken,
@@ -291,10 +290,10 @@ pub fn capture_utterance(
                         silence_before
                     };
                     if samples_since_speech >= limit {
-                        let clip = {
-                            record.set_recording(false);
-                            record.take_audio()
-                        };
+                        // Drain the full utterance before leaving recording mode.
+                        // (Stopping first used to trim to pre-roll and drop speech.)
+                        let clip = record.take_audio();
+                        record.set_recording(false);
                         tracing::info!(
                             samples = clip.len(),
                             ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,

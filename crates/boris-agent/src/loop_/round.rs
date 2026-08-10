@@ -96,9 +96,14 @@ pub(super) fn should_reenter_finish_gate(
     todos_file: &std::path::Path,
     user_text: &str,
 ) -> bool {
-    if at_cap || finish_gate_left == 0 || reply.is_empty() || tools_used.is_empty() {
+    if at_cap || finish_gate_left == 0 || reply.is_empty() {
         return false;
     }
-    crate::finish_gate::pending_todo_count(todos_file) > 0
-        || crate::finish_gate::should_research_gate(user_text, reply, tools_used)
+    // Research gate may fire with zero tools (freestyle LinkedIn/find-person).
+    if crate::finish_gate::should_research_gate(user_text, reply, tools_used) {
+        return true;
+    }
+    // Open todos only re-enter when this turn already used tools (avoid stale
+    // todos forcing silence on casual replies).
+    !tools_used.is_empty() && crate::finish_gate::pending_todo_count(todos_file) > 0
 }

@@ -52,7 +52,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use boris_agent::session::types::SessionId;
-use boris_agent::{AgentEvent, AgentOutcome};
+use boris_agent::{AgentEvent, AgentOutcome, Role};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::TurnId;
 
@@ -287,8 +287,10 @@ fn go_off_if_not_running(
 /// Compact tool-activity label for the overlay chip.
 ///
 /// Wire format is stable (`tool ·`, `done ·`, `fail ·`, `thinking ·`, `confirm ·`)
-/// so the UI humanizer can parse it.
-fn activity_label(ev: &AgentEvent) -> Option<String> {
+/// so the UI humanizer can parse it. Prefer *what* is happening over step numbers.
+///
+/// `recent_tools` (most recent last) enriches post-tool thinking labels.
+fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option<String> {
     match ev {
         AgentEvent::ToolExecutionStart {
             tool_name,
@@ -320,10 +322,40 @@ fn activity_label(ev: &AgentEvent) -> Option<String> {
                 Some(format!("tool · {tool_name} · {short}"))
             }
         }
+        // Assistant decided on tools — show count before ToolExecutionStart fires.
+        AgentEvent::MessageEnd { role, preview }
+            if matches!(role, Role::Assistant) && preview.contains("tool call") =>
+        {
+            let n = preview
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>();
+            if n.is_empty() {
+                Some("thinking · calling tools".into())
+            } else if n == "1" {
+                Some("thinking · 1 tool next".into())
+            } else {
+                Some(format!("thinking · {n} tools next"))
+            }
+        }
         // Round 0 is the first LLM call (already shown as "thinking…").
-        // Later rounds = model planning after tools — surface the step.
+        // Later rounds = model deciding after tools — name the last tools when known.
         AgentEvent::TurnStart { round } if *round > 0 => {
-            Some(format!("thinking · step {}", round + 1))
+            if recent_tools.is_empty() {
+                Some("thinking · next action".into())
+            } else {
+                let names = recent_tools
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!("thinking · after {names}"))
+            }
         }
         AgentEvent::NeedsConfirmation { pending } => {
             Some(format!("confirm · {}", pending.name))
@@ -344,7 +376,38 @@ fn tool_start_detail(tool_name: &str, args_summary: &str) -> String {
         .map(str::trim)
         .and_then(|rest| rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')))
         .unwrap_or(s);
-    truncate_activity(inner.trim(), 48)
+    let inner = inner.trim();
+    // Prefer the most useful arg for the chip (query / url / goal / command).
+    for key in ["query", "url", "goal", "command", "path", "name"] {
+        if let Some(v) = extract_arg_value(inner, key) {
+            return truncate_activity(&v, 48);
+        }
+    }
+    truncate_activity(inner, 48)
+}
+
+/// Pull `key=value` or `key="value"` from a compact args summary.
+fn extract_arg_value(summary: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let idx = summary.find(&needle)?;
+    let rest = &summary[idx + needle.len()..];
+    if rest.starts_with('"') {
+        let body = &rest[1..];
+        let end = body.find('"')?;
+        let v = body[..end].trim();
+        if v.is_empty() {
+            return None;
+        }
+        return Some(v.to_string());
+    }
+    // Unquoted: until comma or end.
+    let end = rest.find(',').unwrap_or(rest.len());
+    let v = rest[..end].trim().trim_matches('"');
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
 }
 
 fn truncate_activity(s: &str, max: usize) -> String {
@@ -619,10 +682,29 @@ fn run(
         }));
         let activity_tx = rt.picture.status_tx.clone();
         let base_w = activity_base.clone();
+        // Recent tool names (for "thinking · after web_search" style labels).
+        let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recent_w = recent_tools.clone();
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
-            let Some(label) = activity_label(ev) else {
+            // Track tools for post-tool thinking labels.
+            if let AgentEvent::ToolExecutionStart { tool_name, .. } = ev {
+                if let Ok(mut g) = recent_w.lock() {
+                    if !g.iter().any(|t| t == tool_name) {
+                        g.push(tool_name.clone());
+                    }
+                    while g.len() > 4 {
+                        g.remove(0);
+                    }
+                }
+            }
+            let tools_snapshot = recent_w
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let Some(label) = activity_label(ev, &tools_snapshot) else {
                 return;
             };
             let Ok(base) = base_w.lock() else {
@@ -952,12 +1034,13 @@ mod tests {
 
     #[test]
     fn activity_label_tools() {
+        let empty: &[String] = &[];
         let start = AgentEvent::ToolExecutionStart {
             call_id: "1".into(),
             tool_name: "bash".into(),
             args_summary: String::new(),
         };
-        assert_eq!(activity_label(&start).as_deref(), Some("tool · bash"));
+        assert_eq!(activity_label(&start, empty).as_deref(), Some("tool · bash"));
 
         let start_args = AgentEvent::ToolExecutionStart {
             call_id: "2".into(),
@@ -965,8 +1048,18 @@ mod tests {
             args_summary: "bash (command=ls -la)".into(),
         };
         assert_eq!(
-            activity_label(&start_args).as_deref(),
-            Some("tool · bash · command=ls -la")
+            activity_label(&start_args, empty).as_deref(),
+            Some("tool · bash · ls -la")
+        );
+
+        let search = AgentEvent::ToolExecutionStart {
+            call_id: "3".into(),
+            tool_name: "web_search".into(),
+            args_summary: "web_search (query=Uttam LinkedIn Dhanbad)".into(),
+        };
+        assert_eq!(
+            activity_label(&search, empty).as_deref(),
+            Some("tool · web_search · Uttam LinkedIn Dhanbad")
         );
 
         let end_ok = AgentEvent::ToolExecutionEnd {
@@ -975,7 +1068,7 @@ mod tests {
             ok: true,
             duration_ms: 1,
         };
-        assert_eq!(activity_label(&end_ok).as_deref(), Some("done · bash"));
+        assert_eq!(activity_label(&end_ok, empty).as_deref(), Some("done · bash"));
 
         let end_fail = AgentEvent::ToolExecutionEnd {
             call_id: "1".into(),
@@ -983,15 +1076,32 @@ mod tests {
             ok: false,
             duration_ms: 1,
         };
-        assert_eq!(activity_label(&end_fail).as_deref(), Some("fail · bash"));
+        assert_eq!(
+            activity_label(&end_fail, empty).as_deref(),
+            Some("fail · bash")
+        );
 
         let noise = AgentEvent::TurnStart { round: 0 };
-        assert!(activity_label(&noise).is_none());
+        assert!(activity_label(&noise, empty).is_none());
 
         let round2 = AgentEvent::TurnStart { round: 1 };
         assert_eq!(
-            activity_label(&round2).as_deref(),
-            Some("thinking · step 2")
+            activity_label(&round2, empty).as_deref(),
+            Some("thinking · next action")
+        );
+        let after = vec!["web_search".into(), "web_fetch".into()];
+        assert_eq!(
+            activity_label(&round2, &after).as_deref(),
+            Some("thinking · after web_search, web_fetch")
+        );
+
+        let tools_next = AgentEvent::MessageEnd {
+            role: Role::Assistant,
+            preview: "3 tool call(s)".into(),
+        };
+        assert_eq!(
+            activity_label(&tools_next, empty).as_deref(),
+            Some("thinking · 3 tools next")
         );
     }
 

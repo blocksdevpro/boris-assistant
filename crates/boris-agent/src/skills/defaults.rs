@@ -81,8 +81,8 @@ mod tests {
     fn version_parse_and_upgrade_legacy_skill() {
         assert_eq!(skill_frontmatter_version("nope"), 0);
         assert_eq!(
-            skill_frontmatter_version("---\nname: research\nversion: 3\n---\nbody"),
-            3
+            skill_frontmatter_version("---\nname: research\nversion: 4\n---\nbody"),
+            4
         );
 
         let dir = std::env::temp_dir().join(format!(
@@ -110,13 +110,18 @@ mod tests {
             "expected research skill upgrade, got {written:?}"
         );
         let body = fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
-        assert!(body.contains("version: 3"));
-        assert!(body.contains("Minimum effort") || body.contains("multi-tool") || body.contains("wave 1"));
+        assert!(body.contains("version: 4"));
+        assert!(
+            body.contains("Minimum effort")
+                || body.contains("multi-tool")
+                || body.contains("wave 1")
+                || body.contains("open_url")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn upgrades_research_v2_to_v3() {
+    fn upgrades_research_v2_to_current() {
         let dir = std::env::temp_dir().join(format!(
             "boris-skills-v2up-{}-{}",
             std::process::id(),
@@ -136,10 +141,10 @@ mod tests {
         let written = ensure_default_skills(&dir).unwrap();
         assert!(
             written.iter().any(|p| p.to_string_lossy().contains("research")),
-            "expected research v2->v3 upgrade, got {written:?}"
+            "expected research v2->v4 upgrade, got {written:?}"
         );
         let body = fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
-        assert!(body.contains("version: 3"));
+        assert!(body.contains("version: 4"));
         assert!(body.contains("wave 1") || body.contains("spawn_subagent"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -186,7 +191,7 @@ You are running a multi-step work playbook. Stay Boris in speech, but be thoroug
         "research",
         r#"---
 name: research
-version: 3
+version: 4
 description: >
   Thorough live web research with multi-query fan-out, fetch, and verification.
   Use when the user asks to look up, search, find out, find a person/profile
@@ -231,10 +236,12 @@ This is hard mode. One lazy query is not enough.
    - Run another multi-search batch. **Minimum effort before giving up:** 2 full
      search waves + at least 1 fetch wave when any URL looks plausible.
 6. Only after that effort:
-   - High confidence -> speak the best match (name what you found + one identifying detail).
+   - High confidence -> speak the best match in 1–2 sentences. You may include **exactly one**
+     profile URL, or call `open_url` with that URL so the host can open it.
    - Medium -> offer top 1-2 candidates and ask **one** short verify question.
-   - No hit -> say you tried several angles, list what you used, ask for **one** extra
-     clue (employer spelling, school, handle). Never invent a profile URL.
+   - No hit -> say you tried several angles, ask for **one** extra clue (employer spelling,
+     school, handle). Never invent a profile URL.
+   Tools must be real API tool_calls only — never tool XML or invoke tags in speech.
 
 ### B) Fact / news / general lookup
 1. Wave 1: batch 2-3 `web_search` queries (different phrasings) in one step.

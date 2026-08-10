@@ -256,7 +256,8 @@ export function MainWindow() {
     setBusy(true);
     setError(null);
     logger.info("UI onStart", {
-      hasKey: Boolean(s.openrouter_api_key.trim()),
+      hasOpenRouterKey: Boolean(s.openrouter_api_key.trim()),
+      hasExaKey: Boolean(s.exa_api_key.trim()),
       model: s.openrouter_model || null,
       modelsReady,
     });
@@ -944,22 +945,53 @@ function SettingsView({
         ) : null}
       </SettingsGroup>
 
-      {/* Models & API */}
+      {/* API keys — secrets in ~/.boris/auth.json */}
       <SettingsGroup
-        title="Models & API"
-        footer={locked ? "Stop the engine to change models." : undefined}
+        title="API keys"
+        footer={
+          locked
+            ? "Stop the engine to change API keys."
+            : "Stored only in ~/.boris/auth.json on this PC. Never shared."
+        }
       >
-        <SettingsField label="API key">
+        <SettingsField
+          label="OpenRouter"
+          subtitle="Required for chat. openrouter.ai/keys"
+        >
           <Input
             type="password"
-            placeholder="OpenRouter API key"
+            placeholder="sk-or-v1-…"
             value={settings.openrouter_api_key}
             disabled={locked}
             autoComplete="off"
+            spellCheck={false}
             onChange={(e) => onPatch({ openrouter_api_key: e.target.value })}
             className={fieldInputClass}
           />
         </SettingsField>
+        <SettingsField
+          label="Exa (web search)"
+          subtitle="Recommended for reliable web_search. Free tier at dashboard.exa.ai"
+          last
+        >
+          <Input
+            type="password"
+            placeholder="Exa API key"
+            value={settings.exa_api_key}
+            disabled={locked}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => onPatch({ exa_api_key: e.target.value })}
+            className={fieldInputClass}
+          />
+        </SettingsField>
+      </SettingsGroup>
+
+      {/* Models */}
+      <SettingsGroup
+        title="Models"
+        footer={locked ? "Stop the engine to change models." : undefined}
+      >
         <ModelField
           label="Model"
           value={settings.openrouter_model}

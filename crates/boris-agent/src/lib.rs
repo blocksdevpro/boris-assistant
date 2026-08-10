@@ -56,6 +56,7 @@ pub mod routing;
 pub mod runtime;
 pub mod session;
 pub mod skills;
+pub mod speech_sanitize;
 pub mod stats;
 pub mod tool;
 pub mod tool_context;
@@ -65,7 +66,7 @@ pub mod types;
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
 pub use boris_ai::{
     parse_provider_list, split_model_and_provider, LlmClient, LlmError, LlmErrorKind,
-    OpenRouterClient, TokenUsage,
+    OpenRouterClient, ReasoningConfig, ReasoningEffort, TokenUsage, DEFAULT_MAX_TOKENS,
 };
 
 pub use agent::{Agent, AgentOptions};
@@ -90,6 +91,9 @@ pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, Se
 pub use skills::{
     ensure_default_skills, format_skills_catalog, load_skill_body, load_skills, user_skills_dir,
     LoadedSkills, Skill, SkillSource,
+};
+pub use speech_sanitize::{
+    contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
 pub use stats::AgentStats;
 pub use tool::{

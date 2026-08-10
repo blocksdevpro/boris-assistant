@@ -173,8 +173,11 @@ impl RoutingClient {
 #[async_trait]
 impl LlmClient for RoutingClient {
     async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
-        // Auto-route from the latest user text in the payload (no agent downcast).
-        if let Some(text) = last_user_text(&messages) {
+        // Tool rounds always use the strong tier (better function-calling).
+        if tools_requested(&tools) {
+            self.set_route(RouteMode::Strong);
+        } else if let Some(text) = last_user_text(&messages) {
+            // Auto-route from the latest user text in the payload (no agent downcast).
             self.set_route(classify_route(&text));
         }
         let mode = self.route();

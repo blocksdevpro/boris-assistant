@@ -6,11 +6,16 @@ use reqwest::Client;
 
 use crate::model_pref::parse_provider_list;
 
+use super::reasoning::{ReasoningConfig, DEFAULT_MAX_TOKENS};
+
 /// Default TCP connect timeout for OpenRouter requests.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default overall request timeout (connect + TTFB + body).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// Reasoning models (DeepSeek / Gemini thinking / o-series) often need more
+/// than 60s for a single tool-planning step; 180s avoids mid-think timeouts.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Default OpenRouter API base URL (`…/api/v1`). Chat completions is
 /// `{base}/chat/completions`.
@@ -22,7 +27,8 @@ pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// Product defaults (voice pipeline, desktop settings) may override via
 /// `OpenRouterClient::new(..., Some(model))` / [`OpenRouterClient::with_model`].
 /// Changing this constant only affects callers that pass `None`.
-pub const DEFAULT_MODEL: &str = "google/gemini-2.5-flash-lite";
+/// Default when the host does not pass a model (tool-capable preferred).
+pub const DEFAULT_MODEL: &str = "google/gemini-3.6-flash";
 
 /// OpenRouter Chat Completions client.
 ///
@@ -49,6 +55,10 @@ pub struct OpenRouterClient {
     pub(super) session_id: Option<String>,
     /// API base URL without trailing slash (default OpenRouter).
     pub(super) base_url: String,
+    /// Thinking / reasoning budget (OpenRouter unified `reasoning` object).
+    pub(super) reasoning: ReasoningConfig,
+    /// Completion token cap (must exceed reasoning allocation on some models).
+    pub(super) max_tokens: u32,
     pub(super) http: Client,
 }
 
@@ -119,9 +129,34 @@ impl OpenRouterClient {
         self
     }
 
+    /// Set OpenRouter reasoning effort (thinking tokens).
+    ///
+    /// Defaults to [`ReasoningConfig::default`] (`high`, exclude body).
+    pub fn with_reasoning(mut self, reasoning: ReasoningConfig) -> Self {
+        self.reasoning = reasoning;
+        self
+    }
+
+    /// Cap on completion tokens (reasoning + visible answer share this pool on
+    /// some providers). Default [`DEFAULT_MAX_TOKENS`].
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens.max(1_024);
+        self
+    }
+
     /// Model id configured for this client.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Current reasoning config.
+    pub fn reasoning(&self) -> &ReasoningConfig {
+        &self.reasoning
+    }
+
+    /// Current max_tokens.
+    pub fn max_tokens(&self) -> u32 {
+        self.max_tokens
     }
 
     /// Configured OpenRouter model-provider order (may be empty).
@@ -166,6 +201,8 @@ impl OpenRouterClient {
             allow_fallbacks: true,
             session_id: None,
             base_url: DEFAULT_BASE_URL.to_string(),
+            reasoning: ReasoningConfig::default(),
+            max_tokens: DEFAULT_MAX_TOKENS,
             http: build_http_client(connect_timeout, timeout),
         }
     }

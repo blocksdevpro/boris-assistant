@@ -105,6 +105,8 @@ fn scrub_child_env(cmd: &mut Command) {
         "BORIS_OPENROUTER_API_KEY",
         "BORIS_API_KEY",
         "XAI_API_KEY",
+        "EXA_API_KEY",
+        "BORIS_EXA_API_KEY",
         "GROQ_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",

@@ -3,7 +3,7 @@
 //! | File | Role |
 //! |------|------|
 //! | `config.toml` | Prefs only (models, capability, audio, ui, logging) |
-//! | `auth.json`   | Secrets only (`openrouter_api_key`) |
+//! | `auth.json`   | Secrets only (`openrouter_api_key`, `exa_api_key`) |
 //!
 //! Desktop IPC still uses [`AppSettings`] (JSON-shaped). On disk we split like
 //! `~/.grok/config.toml` + `~/.grok/auth.json`.
@@ -54,6 +54,9 @@ fn default_max_confirms_per_turn() -> u32 {
 pub struct AppSettings {
     #[serde(default)]
     pub openrouter_api_key: String,
+    /// Exa web search API key (also via `EXA_API_KEY` / `BORIS_EXA_API_KEY` env).
+    #[serde(default)]
+    pub exa_api_key: String,
     #[serde(default)]
     pub openrouter_model: String,
     #[serde(default)]
@@ -101,6 +104,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             openrouter_api_key: String::new(),
+            exa_api_key: String::new(),
             openrouter_model: String::new(),
             openrouter_fast_model: String::new(),
             openrouter_model_provider: String::new(),
@@ -126,6 +130,14 @@ impl std::fmt::Debug for AppSettings {
             .field(
                 "openrouter_api_key",
                 &if self.openrouter_api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field(
+                "exa_api_key",
+                &if self.exa_api_key.is_empty() {
                     "<empty>"
                 } else {
                     "<redacted>"
@@ -292,6 +304,9 @@ fn device_for_toml(id: &str) -> String {
 struct AuthFile {
     #[serde(default)]
     openrouter_api_key: String,
+    /// Exa Search API key for `web_search`.
+    #[serde(default)]
+    exa_api_key: String,
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -331,6 +346,7 @@ pub fn load_settings() -> Result<AppSettings> {
             let auth: AuthFile = serde_json::from_str(&raw)
                 .map_err(|e| PipelineError::settings(format!("parse auth.json: {e}")))?;
             out.openrouter_api_key = auth.openrouter_api_key;
+            out.exa_api_key = auth.exa_api_key;
         }
     }
 
@@ -430,6 +446,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
 
     let auth = AuthFile {
         openrouter_api_key: settings.openrouter_api_key.clone(),
+        exa_api_key: settings.exa_api_key.clone(),
     };
     let json = serde_json::to_string_pretty(&auth)
         .map_err(|e| PipelineError::settings(format!("serialize auth.json: {e}")))?;
@@ -546,6 +563,7 @@ fn load_settings_raw_no_migrate() -> Result<AppSettings> {
         let raw = fs::read_to_string(auth_path()).map_err(PipelineError::from)?;
         if let Ok(auth) = serde_json::from_str::<AuthFile>(&raw) {
             out.openrouter_api_key = auth.openrouter_api_key;
+            out.exa_api_key = auth.exa_api_key;
         }
     }
     Ok(out)
@@ -756,6 +774,7 @@ mod tests {
 
         let s = AppSettings {
             openrouter_api_key: "sk-test".into(),
+            exa_api_key: "exa-test".into(),
             openrouter_model: "google/gemini-2.5-flash-lite".into(),
             openrouter_fast_model: "fast-model".into(),
             openrouter_model_provider: "coreweave".into(),
@@ -790,9 +809,12 @@ mod tests {
         let raw_auth = fs::read_to_string(auth_path()).unwrap();
         assert!(raw_auth.contains("sk-test"));
         assert!(raw_auth.contains("openrouter_api_key"));
+        assert!(raw_auth.contains("exa-test"));
+        assert!(raw_auth.contains("exa_api_key"));
 
         let loaded = load_settings().expect("load");
         assert_eq!(loaded.openrouter_api_key, "sk-test");
+        assert_eq!(loaded.exa_api_key, "exa-test");
         assert_eq!(loaded.openrouter_model, "google/gemini-2.5-flash-lite");
         assert_eq!(loaded.openrouter_fast_model, "fast-model");
         assert_eq!(loaded.openrouter_model_provider, "coreweave");

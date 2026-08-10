@@ -14,6 +14,14 @@ impl OpenRouterClient {
             .as_object_mut()
             .expect("chat completion body is always a JSON object");
 
+        // Headroom for reasoning + final answer / tool_calls.
+        obj.insert("max_tokens".into(), json!(self.max_tokens));
+
+        // Unified OpenRouter reasoning (DeepSeek / Gemini thinking / Claude / o-series).
+        if let Some(reasoning) = self.reasoning.to_request_value() {
+            obj.insert("reasoning".into(), reasoning);
+        }
+
         if stream {
             obj.insert("stream".into(), json!(true));
             // Final SSE event includes usage (incl. cached_tokens) when supported.
@@ -82,6 +90,10 @@ mod tests {
         assert_eq!(body["provider"]["allow_fallbacks"], false);
         assert_eq!(body["session_id"], "sess-1");
         assert!(body.get("tools").is_none());
+        // Default: high reasoning + completion headroom.
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["enabled"], true);
+        assert!(body["max_tokens"].as_u64().unwrap() >= 8_000);
     }
 
     #[test]
@@ -93,5 +105,16 @@ mod tests {
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
         assert!(body["tools"].as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn request_body_respects_reasoning_override() {
+        use crate::providers::openrouter::ReasoningConfig;
+        let client = OpenRouterClient::new("k".into(), Some("m".into()))
+            .with_reasoning(ReasoningConfig::medium())
+            .with_max_tokens(8_192);
+        let body = client.request_body(&json!([]), &Value::Null, false);
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["max_tokens"], 8_192);
     }
 }

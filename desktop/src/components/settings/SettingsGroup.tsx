@@ -96,10 +96,12 @@ export function SettingsRow({
 /** Full-width field under a label (API key, log filter). */
 export function SettingsField({
   label,
+  subtitle,
   last,
   children,
 }: {
   label: string;
+  subtitle?: string;
   last?: boolean;
   children: ReactNode;
 }) {
@@ -110,7 +112,12 @@ export function SettingsField({
         !last && "border-b border-white/[0.06]",
       )}
     >
-      <p className="text-[13px] font-normal text-white/45">{label}</p>
+      <div className="min-w-0">
+        <p className="text-[13px] font-normal text-white/45">{label}</p>
+        {subtitle ? (
+          <p className="mt-0.5 text-[12px] leading-snug text-white/35">{subtitle}</p>
+        ) : null}
+      </div>
       {children}
     </div>
   );

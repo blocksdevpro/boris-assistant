@@ -36,16 +36,61 @@ impl Agent {
         })
     }
 
+    /// For LinkedIn / person-find asks, inject the research skill body once so
+    /// freestyle "need more hints" does not skip the multi-query playbook.
+    fn maybe_inject_research_skill(&mut self, user_text: &str) {
+        if !crate::finish_gate::looks_like_person_find(user_text) {
+            return;
+        }
+        let Some(shared) = self.skills.as_ref() else {
+            return;
+        };
+        let body = {
+            let Ok(guard) = shared.lock() else {
+                return;
+            };
+            let Some(skill) = guard.get("research") else {
+                return;
+            };
+            match crate::skills::load_skill_body(skill) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "research skill inject skipped");
+                    return;
+                }
+            }
+        };
+        // Avoid re-injecting while a recent research playbook is still in context.
+        let already = self.context.messages.iter().rev().take(10).any(|m| {
+            m.content
+                .as_str()
+                .is_some_and(|s| s.contains("Person/profile research request"))
+        });
+        if already {
+            return;
+        }
+        info!("injecting research skill body for person/profile find");
+        self.context.push(
+            Role::User,
+            crate::finish_gate::person_find_skill_nudge(&body),
+        );
+    }
+
     /// Summarize older turns into a compact block (Grok-lite compaction).
     async fn maybe_llm_compact(&mut self) -> Result<(), String> {
-        let digest = self.context.older_turns_digest(2);
+        // Keep more recent turns intact so ongoing research/tool work is not
+        // summarized away mid-session.
+        const KEEP_RECENT: usize = 4;
+        let digest = self.context.older_turns_digest(KEEP_RECENT);
         if digest.trim().is_empty() {
             return Ok(());
         }
         let messages = serde_json::json!([
             {
                 "role": "system",
-                "content": "Summarize the conversation for an assistant. Keep names, decisions, open tasks, and file paths. Max 12 short bullet lines. No fluff."
+                "content": "Summarize the conversation for an assistant continuing the work. \
+Keep: names, URLs, file paths, decisions, open tasks, tool findings (facts, numbers, links). \
+Max 20 short bullet lines. Prefer concrete facts over narrative. No fluff."
             },
             {
                 "role": "user",
@@ -66,7 +111,7 @@ impl Agent {
         if summary.is_empty() {
             return Ok(());
         }
-        self.context.apply_summary_compact(&summary, 2);
+        self.context.apply_summary_compact(&summary, KEEP_RECENT);
         info!(chars = summary.len(), "context llm-compact applied");
         Ok(())
     }
@@ -133,6 +178,10 @@ impl Agent {
 
         let snapshot = self.context.messages.clone();
         self.context.push(Role::User, user_text);
+
+        // Person/profile finds: auto-inject research skill body so the model
+        // does not freestyle without the multi-query playbook.
+        self.maybe_inject_research_skill(user_text);
 
         let ct = CancellationToken::new();
         self.cancel = Some(ct.clone());

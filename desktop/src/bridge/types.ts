@@ -114,6 +114,8 @@ export type ModelsInstallReport = {
  */
 export type AppSettings = {
   openrouter_api_key: string;
+  /** Exa Search API key for live `web_search` (optional; falls back to DDG scrape). */
+  exa_api_key: string;
   /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
   /** Fast / cheap model for simple turns. */
@@ -157,6 +159,7 @@ export type AppSettings = {
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
+  exa_api_key: "",
   openrouter_model: "",
   openrouter_fast_model: "",
   openrouter_model_provider: "",
@@ -174,18 +177,21 @@ export const EMPTY_SETTINGS: AppSettings = {
   logging_filter: "",
 };
 
-/** Common OpenRouter chat models for the preset dropdown. */
+/** Common OpenRouter chat models for the preset dropdown (kept current for agents). */
 export const MODEL_PRESETS: { id: string; label: string }[] = [
-  { id: "google/gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
-  { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-  { id: "openai/gpt-4o-mini", label: "GPT-4o mini" },
-  { id: "openai/gpt-4o", label: "GPT-4o" },
-  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
-  { id: "anthropic/claude-3.5-haiku", label: "Claude 3.5 Haiku" },
-  { id: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
-  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B" },
-  { id: "x-ai/grok-3-mini", label: "Grok 3 Mini" },
+  { id: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (recommended)" },
+  { id: "google/gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (cheap/fast)" },
+  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731" },
+  { id: "deepseek/deepseek-v4-flash-latest", label: "DeepSeek V4 Flash Latest" },
+  { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5" },
+  { id: "anthropic/claude-opus-5", label: "Claude Opus 5" },
+  { id: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { id: "x-ai/grok-4.5", label: "Grok 4.5" },
+  { id: "qwen/qwen3.8-max", label: "Qwen3.8 Max" },
+  { id: "qwen/qwen3.7-flash", label: "Qwen3.7 Flash" },
+  { id: "minimax/minimax-m3", label: "MiniMax M3" },
+  { id: "moonshotai/kimi-k2.7-code", label: "Kimi K2.7 Code" },
 ];
 
 /**
@@ -249,6 +255,7 @@ export function normalizeSettings(
 ): AppSettings {
   return {
     openrouter_api_key: raw?.openrouter_api_key ?? "",
+    exa_api_key: raw?.exa_api_key ?? "",
     openrouter_model: raw?.openrouter_model ?? "",
     openrouter_fast_model: raw?.openrouter_fast_model ?? "",
     openrouter_model_provider: raw?.openrouter_model_provider ?? "",

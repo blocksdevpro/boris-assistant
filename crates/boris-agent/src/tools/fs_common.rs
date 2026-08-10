@@ -2,17 +2,21 @@
 //!
 //! All FS tools resolve model-supplied paths through [`resolve_under_roots`] so
 //! relative paths join an allowed root and absolute paths must sit under one.
+//!
+//! After lexical resolve we re-check the **canonical** path when the filesystem
+//! allows it, so a symlink under an allowed root cannot escape.
+//! **TOCTOU residual**: the path may change between this check and later I/O.
 
 use std::path::{Path, PathBuf};
 
-use crate::runtime::policy::{normalize_path, path_is_within};
+use crate::runtime::policy::{normalize_path, path_is_within, resolve_path_for_policy};
 use crate::tool::ToolError;
 
 /// Resolve `raw` to a normalized absolute path that sits under one of `roots`.
 ///
 /// # Rules
 /// - Empty / NUL-containing paths are rejected as invalid args.
-/// - Absolute paths must already fall under some root.
+/// - Absolute paths must already fall under some root (lexical + best-effort real path).
 /// - Relative paths are joined to each root in order; first in-bounds win.
 pub fn resolve_under_roots(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolError> {
     let raw = raw.trim();
@@ -27,30 +31,42 @@ pub fn resolve_under_roots(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, Tool
     let normalized = normalize_path(&candidate).map_err(ToolError::invalid_args)?;
 
     if normalized.is_absolute() {
-        for root in roots {
-            let root_n = normalize_path(root).unwrap_or_else(|_| root.clone());
-            if path_is_within(&normalized, &root_n) {
-                return Ok(normalized);
-            }
-        }
-        return Err(ToolError::failed(format!(
-            "path `{}` is outside allowed roots",
-            normalized.display()
-        )));
+        return accept_if_within_roots(normalized, roots);
     }
 
     // Relative: try under each root.
     for root in roots {
         let joined = root.join(&normalized);
         let joined_n = normalize_path(&joined).map_err(ToolError::invalid_args)?;
-        let root_n = normalize_path(root).unwrap_or_else(|_| root.clone());
-        if path_is_within(&joined_n, &root_n) {
-            return Ok(joined_n);
+        if let Ok(accepted) = accept_if_within_roots(joined_n, roots) {
+            return Ok(accepted);
         }
     }
 
     Err(ToolError::failed(format!(
         "path `{raw}` is outside allowed roots"
+    )))
+}
+
+fn accept_if_within_roots(normalized: PathBuf, roots: &[PathBuf]) -> Result<PathBuf, ToolError> {
+    // Prefer real path (symlink target) for the containment check.
+    let real = resolve_path_for_policy(&normalized).unwrap_or_else(|_| normalized.clone());
+
+    for root in roots {
+        let root_n = resolve_path_for_policy(root)
+            .or_else(|_| normalize_path(root))
+            .unwrap_or_else(|_| root.clone());
+        if path_is_within(&real, &root_n) || path_is_within(&normalized, &root_n) {
+            // Return real path when it stayed in-bounds so tools open the true target.
+            if path_is_within(&real, &root_n) {
+                return Ok(real);
+            }
+            return Ok(normalized);
+        }
+    }
+    Err(ToolError::failed(format!(
+        "path `{}` is outside allowed roots",
+        real.display()
     )))
 }
 
@@ -140,5 +156,13 @@ mod tests {
         let roots = write_roots(&sandbox, &data, &allow_write);
         assert_eq!(roots.len(), 3);
         assert!(!roots.iter().any(|p| p == Path::new("/r")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn case_insensitive_accept_on_windows() {
+        let roots = vec![PathBuf::from("C:\\Users\\me\\.boris\\sandbox")];
+        let p = resolve_under_roots("c:\\users\\me\\.boris\\sandbox\\Note.TXT", &roots);
+        assert!(p.is_ok());
     }
 }

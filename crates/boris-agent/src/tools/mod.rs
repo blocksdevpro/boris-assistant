@@ -149,6 +149,7 @@ pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 }
 
 /// Alias for [`bash_tools`].
+#[deprecated(note = "use bash_tools")]
 pub fn shell_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     bash_tools(paths)
 }
@@ -233,5 +234,57 @@ fn try_profile_tools(
             );
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths() -> BuiltinToolPaths {
+        let root = std::env::temp_dir().join(format!("boris-tool-meta-{}", std::process::id()));
+        BuiltinToolPaths {
+            notes_path: root.join("notes.jsonl"),
+            profile_path: root.join("profile.json"),
+            sandbox_root: root.join("sandbox"),
+            data_roots: vec![root.join("memory")],
+            allow_read: vec![],
+            allow_write: vec![],
+            boris_home: root,
+        }
+    }
+
+    /// Lint-style: every registered builtin should set explicit `read_only`.
+    #[test]
+    fn builtins_set_explicit_read_only() {
+        let paths = test_paths();
+        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        tools.extend(builtin_tools(&paths));
+        tools.extend(os_tools(&paths));
+        tools.extend(fs_tools(&paths));
+        tools.extend(web_tools());
+        tools.extend(bash_tools(&paths));
+
+        let mut missing = Vec::new();
+        for t in &tools {
+            if t.meta().read_only.is_none() {
+                missing.push(t.name().to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tools missing explicit ToolMeta::read_only: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn shell_allowlist_style_integration_via_bash_meta() {
+        let paths = test_paths();
+        let tools = bash_tools(&paths);
+        assert_eq!(tools.len(), 1);
+        let m = tools[0].meta();
+        assert!(m.permissions.contains(&crate::tool::Permission::Shell));
+        assert_eq!(m.read_only, Some(false));
+        assert!(m.requires_confirmation);
     }
 }

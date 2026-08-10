@@ -1,8 +1,12 @@
 [package]
-name    = "boris-pipeline"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-pipeline"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Desktop voice engine: sequential turns, status, no worker mesh"
+readme      = "README.md"
+publish     = false
 
 [features]
 default = ["stt-parakeet", "tts-supertone"]
@@ -14,10 +18,11 @@ boris-core      = { workspace = true }
 boris-audio     = { workspace = true }
 boris-sense     = { workspace = true }
 boris-inference = { workspace = true }
-boris-agent     = { path = "../boris-agent" }
+boris-agent     = { workspace = true }
 
 crossbeam-channel = { workspace = true }
 tracing           = { workspace = true }
+thiserror         = { workspace = true }
 serde             = { version = "1", features = ["derive"] }
 serde_json        = { workspace = true }
 toml              = "0.8"

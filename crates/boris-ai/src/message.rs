@@ -44,6 +44,10 @@ pub fn extract_text_content(v: &Value) -> String {
     }
 }
 
+/// Append one multimodal content part.
+///
+/// Handles plain strings and objects with a `text` field (including
+/// `{ "type": "text", "text": "..." }`).
 fn append_content_part(out: &mut String, part: &Value) {
     if let Some(s) = part.as_str() {
         out.push_str(s);
@@ -51,13 +55,6 @@ fn append_content_part(out: &mut String, part: &Value) {
     }
     if let Some(s) = part.get("text").and_then(|t| t.as_str()) {
         out.push_str(s);
-        return;
-    }
-    // Gemini-style: { "type": "text", "text": "..." }
-    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-        if let Some(s) = part.get("text").and_then(|t| t.as_str()) {
-            out.push_str(s);
-        }
     }
 }
 

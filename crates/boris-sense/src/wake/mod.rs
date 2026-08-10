@@ -4,13 +4,15 @@
 //! [`WakeWord::predict`] on an interval. Crossing [`WAKEWORD_THRESHOLD`] starts
 //! a listen turn — policy stays in `boris-pipeline`, not here.
 
+#[cfg(feature = "wake")]
 mod livekit;
 
 use std::time::Duration;
 
 use boris_core::{AudioSample, Result};
 
-pub use livekit::LivekitWakeWord;
+#[cfg(feature = "wake")]
+pub use livekit::{LiveKitWakeWord, LivekitWakeWord};
 
 /// Score above which the engine treats the window as a wake hit.
 pub const WAKEWORD_THRESHOLD: f32 = 0.5;

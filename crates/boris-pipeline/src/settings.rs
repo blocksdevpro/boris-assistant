@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{PipelineError, Result};
 use crate::paths::{self, auth_path, boris_home, config_path, legacy_settings_path};
 
 /// Path to the prefs file (`~/.boris/config.toml`).
@@ -146,7 +147,7 @@ struct AuthFile {
 
 /// Load settings from disk. Missing files → defaults.
 /// Migrates legacy `settings.json` on first successful load.
-pub fn load_settings() -> Result<AppSettings, String> {
+pub fn load_settings() -> Result<AppSettings> {
     paths::migrate_home_if_needed();
     migrate_legacy_settings_if_needed()?;
 
@@ -154,7 +155,8 @@ pub fn load_settings() -> Result<AppSettings, String> {
 
     let cfg_path = config_path();
     if cfg_path.is_file() {
-        let raw = fs::read_to_string(&cfg_path).map_err(|e| format!("read config.toml: {e}"))?;
+        let raw = fs::read_to_string(&cfg_path)
+            .map_err(|e| PipelineError::settings(format!("read config.toml: {e}")))?;
         if !raw.trim().is_empty() {
             // Reject the *old* dead config.toml that pointed at workspace models.
             if looks_like_legacy_config_toml(&raw) {
@@ -163,8 +165,8 @@ pub fn load_settings() -> Result<AppSettings, String> {
                     "legacy config.toml (model paths) ignored; use settings migration"
                 );
             } else {
-                let cfg: ConfigFile =
-                    toml::from_str(&raw).map_err(|e| format!("parse config.toml: {e}"))?;
+                let cfg: ConfigFile = toml::from_str(&raw)
+                    .map_err(|e| PipelineError::settings(format!("parse config.toml: {e}")))?;
                 out.openrouter_model = cfg.models.strong;
                 out.openrouter_fast_model = cfg.models.fast;
                 out.openrouter_model_provider = cfg.models.provider;
@@ -177,10 +179,11 @@ pub fn load_settings() -> Result<AppSettings, String> {
 
     let auth_p = auth_path();
     if auth_p.is_file() {
-        let raw = fs::read_to_string(&auth_p).map_err(|e| format!("read auth.json: {e}"))?;
+        let raw = fs::read_to_string(&auth_p)
+            .map_err(|e| PipelineError::settings(format!("read auth.json: {e}")))?;
         if !raw.trim().is_empty() {
-            let auth: AuthFile =
-                serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
+            let auth: AuthFile = serde_json::from_str(&raw)
+                .map_err(|e| PipelineError::settings(format!("parse auth.json: {e}")))?;
             out.openrouter_api_key = auth.openrouter_api_key;
         }
     }
@@ -189,53 +192,65 @@ pub fn load_settings() -> Result<AppSettings, String> {
 }
 
 /// Persist prefs to `config.toml` and secrets to `auth.json`.
-pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
+///
+/// **Merge policy:** only `[models]` and `[capability]` are written from
+/// [`AppSettings`]. Existing `[audio]`, `[ui]`, `[logging]`, and any unknown
+/// tables/keys in `config.toml` are preserved so hand-edits are not wiped.
+/// Fresh files get only the sections we own (no hard-coded audio/ui/logging).
+pub fn save_settings(settings: &AppSettings) -> Result<()> {
     paths::migrate_home_if_needed();
     let home = boris_home();
-    fs::create_dir_all(&home).map_err(|e| format!("create ~/.boris: {e}"))?;
+    fs::create_dir_all(&home)
+        .map_err(|e| PipelineError::settings(format!("create ~/.boris: {e}")))?;
 
     // If an old path-style config.toml exists, archive it once.
     archive_legacy_config_toml_if_needed()?;
 
-    let cfg = ConfigFile {
-        models: ModelsSection {
-            strong: settings.openrouter_model.clone(),
-            fast: settings.openrouter_fast_model.clone(),
-            provider: settings.openrouter_model_provider.clone(),
-            fast_provider: settings.openrouter_fast_provider.clone(),
-            pin_provider: settings.openrouter_pin_provider,
-        },
-        capability: CapabilitySection {
-            preset: settings.capability_preset.clone(),
-        },
-        audio: AudioSection {
-            input_device: "default".into(),
-            output_device: "default".into(),
-        },
-        ui: UiSection {
-            show_overlay_on_wake: true,
-            start_engine_on_launch: false,
-        },
-        logging: LoggingSection {
-            filter: "warn,boris_desktop=info".into(),
-        },
+    let mut root = load_config_value_for_merge()?;
+
+    let models = ModelsSection {
+        strong: settings.openrouter_model.clone(),
+        fast: settings.openrouter_fast_model.clone(),
+        provider: settings.openrouter_model_provider.clone(),
+        fast_provider: settings.openrouter_fast_provider.clone(),
+        pin_provider: settings.openrouter_pin_provider,
+    };
+    let capability = CapabilitySection {
+        preset: settings.capability_preset.clone(),
     };
 
-    let toml_body = toml::to_string_pretty(&cfg).map_err(|e| format!("serialize config.toml: {e}"))?;
+    let models_val = toml::Value::try_from(&models)
+        .map_err(|e| PipelineError::settings(format!("serialize models: {e}")))?;
+    let capability_val = toml::Value::try_from(&capability)
+        .map_err(|e| PipelineError::settings(format!("serialize capability: {e}")))?;
+
+    let table = root.as_table_mut().ok_or_else(|| {
+        PipelineError::settings("config.toml root is not a table")
+    })?;
+    table.insert("models".into(), models_val);
+    table.insert("capability".into(), capability_val);
+    // Intentionally do not insert/overwrite audio, ui, logging, or unknown keys.
+
+    let toml_body = toml::to_string_pretty(&root)
+        .map_err(|e| PipelineError::settings(format!("serialize config.toml: {e}")))?;
     // Header comment like a hand-edited Grok config.
     let mut body = String::from(
         "# Boris user config (prefs only — secrets live in auth.json)\n\
-         # Docs: models, capability, audio, ui, logging\n\n",
+         # Managed sections: [models], [capability]\n\
+         # Hand-edit free: [audio], [ui], [logging], and any extra tables\n\n",
     );
     body.push_str(&toml_body);
 
-    write_atomic(&config_path(), body.as_bytes()).map_err(|e| format!("write config.toml: {e}"))?;
+    write_atomic(&config_path(), body.as_bytes())
+        .map_err(|e| PipelineError::settings(format!("write config.toml: {e}")))?;
 
     let auth = AuthFile {
         openrouter_api_key: settings.openrouter_api_key.clone(),
     };
-    let json = serde_json::to_string_pretty(&auth).map_err(|e| format!("serialize auth.json: {e}"))?;
-    write_atomic(&auth_path(), json.as_bytes()).map_err(|e| format!("write auth.json: {e}"))?;
+    let json = serde_json::to_string_pretty(&auth)
+        .map_err(|e| PipelineError::settings(format!("serialize auth.json: {e}")))?;
+    write_atomic(&auth_path(), json.as_bytes())
+        .map_err(|e| PipelineError::settings(format!("write auth.json: {e}")))?;
 
     tracing::debug!(
         config = %config_path().display(),
@@ -245,19 +260,41 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     Ok(())
 }
 
+/// Load existing config as a TOML value for merge, or an empty table.
+fn load_config_value_for_merge() -> Result<toml::Value> {
+    let path = config_path();
+    if !path.is_file() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| PipelineError::settings(format!("read config.toml: {e}")))?;
+    if raw.trim().is_empty() || looks_like_legacy_config_toml(&raw) {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    match raw.parse::<toml::Value>() {
+        Ok(v) if v.is_table() => Ok(v),
+        Ok(_) => Ok(toml::Value::Table(toml::map::Map::new())),
+        Err(e) => {
+            tracing::warn!(error = %e, "config.toml parse failed on save merge; rewriting managed sections only");
+            Ok(toml::Value::Table(toml::map::Map::new()))
+        }
+    }
+}
+
 /// One-shot: `settings.json` → config.toml + auth.json, then `.bak`.
-fn migrate_legacy_settings_if_needed() -> Result<(), String> {
+fn migrate_legacy_settings_if_needed() -> Result<()> {
     let legacy = legacy_settings_path();
     if !legacy.is_file() {
         return Ok(());
     }
     // Already have new files with content? Still merge key if auth empty.
-    let raw = fs::read_to_string(&legacy).map_err(|e| format!("read legacy settings: {e}"))?;
+    let raw = fs::read_to_string(&legacy)
+        .map_err(|e| PipelineError::settings(format!("read legacy settings: {e}")))?;
     if raw.trim().is_empty() {
         return Ok(());
     }
-    let old: AppSettings =
-        serde_json::from_str(&raw).map_err(|e| format!("parse legacy settings.json: {e}"))?;
+    let old: AppSettings = serde_json::from_str(&raw)
+        .map_err(|e| PipelineError::settings(format!("parse legacy settings.json: {e}")))?;
 
     // If new config already exists and is non-legacy, only fill missing auth key.
     let cfg_exists = config_path().is_file()
@@ -310,10 +347,10 @@ fn migrate_legacy_settings_if_needed() -> Result<(), String> {
     Ok(())
 }
 
-fn load_settings_raw_no_migrate() -> Result<AppSettings, String> {
+fn load_settings_raw_no_migrate() -> Result<AppSettings> {
     let mut out = AppSettings::default();
     if config_path().is_file() {
-        let raw = fs::read_to_string(config_path()).map_err(|e| e.to_string())?;
+        let raw = fs::read_to_string(config_path()).map_err(PipelineError::from)?;
         if !looks_like_legacy_config_toml(&raw) {
             if let Ok(cfg) = toml::from_str::<ConfigFile>(&raw) {
                 out.openrouter_model = cfg.models.strong;
@@ -326,7 +363,7 @@ fn load_settings_raw_no_migrate() -> Result<AppSettings, String> {
         }
     }
     if auth_path().is_file() {
-        let raw = fs::read_to_string(auth_path()).map_err(|e| e.to_string())?;
+        let raw = fs::read_to_string(auth_path()).map_err(PipelineError::from)?;
         if let Ok(auth) = serde_json::from_str::<AuthFile>(&raw) {
             out.openrouter_api_key = auth.openrouter_api_key;
         }
@@ -349,12 +386,13 @@ fn looks_like_legacy_config_toml(raw: &str) -> bool {
         || (raw.contains("[api]") && raw.contains("chat_model"))
 }
 
-fn archive_legacy_config_toml_if_needed() -> Result<(), String> {
+fn archive_legacy_config_toml_if_needed() -> Result<()> {
     let path = config_path();
     if !path.is_file() {
         return Ok(());
     }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| PipelineError::settings(format!("read config: {e}")))?;
     if !looks_like_legacy_config_toml(&raw) {
         return Ok(());
     }
@@ -457,6 +495,59 @@ mod tests {
         assert_eq!(loaded.openrouter_model_provider, "coreweave");
         assert!(loaded.openrouter_pin_provider);
         assert_eq!(loaded.capability_preset, "voice_safe");
+
+        // Hand-edited sections must survive a subsequent save.
+        let mut raw_cfg = fs::read_to_string(config_path()).unwrap();
+        raw_cfg.push_str(
+            "\n[audio]\ninput_device = \"USB Mic\"\noutput_device = \"Speakers\"\n\n[custom]\nfoo = 1\n",
+        );
+        fs::write(config_path(), &raw_cfg).unwrap();
+        save_settings(&loaded).expect("re-save");
+        let after = fs::read_to_string(config_path()).unwrap();
+        assert!(after.contains("USB Mic"), "audio section wiped: {after}");
+        assert!(after.contains("[custom]"), "unknown section wiped: {after}");
+        assert!(after.contains("foo"), "unknown key wiped: {after}");
+        // Fresh defaults must not re-inject hard-coded audio/ui/logging when absent.
+        assert!(!after.contains("show_overlay_on_wake") || after.contains("[ui]"));
+
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_does_not_inject_default_audio_ui_logging() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-noinject-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+
+        let s = AppSettings {
+            openrouter_model: "m".into(),
+            ..Default::default()
+        };
+        save_settings(&s).expect("save");
+        let raw = fs::read_to_string(config_path()).unwrap();
+        assert!(raw.contains("[models]"));
+        // Header comments may mention section names; require real tables are absent.
+        assert!(
+            !raw.lines().any(|l| l.trim() == "[audio]"),
+            "should not invent [audio] table: {raw}"
+        );
+        assert!(
+            !raw.lines().any(|l| l.trim() == "[ui]"),
+            "should not invent [ui] table: {raw}"
+        );
+        assert!(
+            !raw.lines().any(|l| l.trim() == "[logging]"),
+            "should not invent [logging] table: {raw}"
+        );
 
         std::env::remove_var(paths::BORIS_HOME_ENV);
         let _ = fs::remove_dir_all(&dir);

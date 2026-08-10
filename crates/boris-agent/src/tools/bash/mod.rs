@@ -1,7 +1,12 @@
 //! Bash / shell execution — tau-style `bash` tool, adapted for Boris.
 //!
 //! Runs via `bash -lc` when available (Git Bash / WSL / Unix), otherwise falls
-//! back to platform shell. Always requires HITL confirmation.
+//! back to platform shell. **HITL confirmation is authoritative**; the deny list
+//! in [`policy`] is best-effort only. Host [`ShellPolicy`](crate::runtime::ShellPolicy)
+//! (Denied / Allowlist / OpenConfirm) gates registration-time capability.
+//!
+//! On Windows without bash, PowerShell is started with `-ExecutionPolicy Bypass`
+//! for usability — that is not a sandbox.
 //!
 //! # Tool
 //!

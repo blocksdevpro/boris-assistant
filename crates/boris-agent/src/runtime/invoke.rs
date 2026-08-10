@@ -59,6 +59,9 @@ impl ToolRuntime {
     }
 
     /// Policy-only decision (no execute). Used to plan parallel batches.
+    ///
+    /// Hard gates (path / shell / network) always apply. `skip_confirmation`
+    /// only collapses [`PolicyDecision::NeedsConfirmation`] → Allow.
     pub fn decide_only(
         &self,
         tool: &dyn Tool,
@@ -66,11 +69,11 @@ impl ToolRuntime {
         opts: InvokeOptions,
     ) -> PolicyDecision {
         let meta = tool.meta();
-        if opts.skip_confirmation {
-            return PolicyDecision::Allow;
-        }
         let args = normalize_args(args);
-        decide(&self.policy, &meta, &args, opts.confirms_used)
+        apply_skip_confirmation(
+            decide(&self.policy, &meta, &args, opts.confirms_used),
+            opts.skip_confirmation,
+        )
     }
 
     /// Run policy + optional execute for one tool (async).
@@ -83,11 +86,11 @@ impl ToolRuntime {
         let meta = tool.meta();
         let args = normalize_args(&inv.args);
 
-        let decision = if opts.skip_confirmation {
-            PolicyDecision::Allow
-        } else {
-            decide(&self.policy, &meta, &args, opts.confirms_used)
-        };
+        // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
+        let decision = apply_skip_confirmation(
+            decide(&self.policy, &meta, &args, opts.confirms_used),
+            opts.skip_confirmation,
+        );
 
         match decision {
             PolicyDecision::Deny { reason } => {
@@ -227,6 +230,14 @@ fn normalize_args(args: &Value) -> Value {
     }
 }
 
+/// After HITL grant, only skip the confirmation branch — never path/shell/network denials.
+fn apply_skip_confirmation(decision: PolicyDecision, skip: bool) -> PolicyDecision {
+    match decision {
+        PolicyDecision::NeedsConfirmation { .. } if skip => PolicyDecision::Allow,
+        other => other,
+    }
+}
+
 fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
     let summary = if pending.args_summary.chars().count() > 80 {
         let head: String = pending.args_summary.chars().take(77).collect();
@@ -351,6 +362,69 @@ mod tests {
                 assert!(*tool.ran.lock().unwrap());
             }
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grant_still_enforces_path_policy() {
+        use crate::tool::{Permission, ToolKind};
+        use std::path::PathBuf;
+
+        struct PathTool;
+        #[async_trait]
+        impl Tool for PathTool {
+            fn name(&self) -> &str {
+                "path_read"
+            }
+            fn description(&self) -> &str {
+                "r"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::with_risk(ToolRisk::Dangerous)
+                    .kind(ToolKind::Read)
+                    .permissions(&[Permission::FsRead])
+                    .confirm(true)
+                    .read_only(true)
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("should-not-run".into())
+            }
+        }
+
+        let policy = SandboxConfig {
+            sandbox_root: PathBuf::from("C:\\Users\\me\\.boris\\sandbox"),
+            boris_data_roots: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+            network: crate::runtime::NetworkPolicy::Off,
+            shell: crate::runtime::ShellPolicy::Denied,
+            auto_allow_up_to: ToolRisk::Moderate,
+            force_confirm_at_or_above: ToolRisk::Dangerous,
+            max_confirms_per_turn: 3,
+            trusted_auto_moderate: false,
+        };
+        let rt = ToolRuntime::new(policy, Box::new(MemoryAuditSink::new()));
+        let inv = ToolInvocation::new(
+            "1",
+            "path_read",
+            json!({ "path": "C:\\Windows\\System32\\config" }),
+        );
+        let opts = InvokeOptions {
+            skip_confirmation: true,
+            confirms_used: 1,
+        };
+        match rt.invoke(&PathTool, inv, opts).await {
+            InvokeResult::Denied { reason } => {
+                assert!(reason.contains("outside") || reason.contains("path"));
+            }
+            other => panic!("expected Denied after grant, got {other:?}"),
         }
     }
 

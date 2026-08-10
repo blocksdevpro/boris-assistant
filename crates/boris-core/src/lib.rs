@@ -17,15 +17,23 @@
 //! - LLM provider clients (see `boris-ai`)
 //! - Engine phase / UI status (see `boris-pipeline`)
 //! - Session FSM / worker event buses (removed; the product engine is sequential)
+//!
+//! # Error taxonomy
+//!
+//! Map failures by domain: paths/settings → [`Error::Config`], device/I-O/resample
+//! → [`Error::Audio`], model/runtime/misc → [`Error::Other`]. See the docs on
+//! [`Error`] for the full convention. `From<String>` / `From<&str>` only create
+//! `Other`; classified failures should use [`Error::config`], [`Error::audio`],
+//! or [`Error::other`].
 
 #![deny(missing_docs)]
 
-pub mod error;
-pub mod types;
+mod error;
+mod types;
 
 // ── Crate-root re-exports (preferred import path for hosts & siblings) ───────
 
 pub use error::{Error, Result};
 pub use types::{
-    ArcAudioBuffer, AudioBuffer, AudioSample, ServiceKind, TurnId, AUDIO_TARGET_RATE,
+    ArcAudioBuffer, AudioBuffer, AudioSample, TurnId, AUDIO_TARGET_RATE,
 };

@@ -3,6 +3,14 @@
 //! Supertonic (and similar small models) drop middle clauses when given long
 //! multi-sentence monologues in one forward pass. We force sentence-level
 //! (and long-clause) units ourselves.
+//!
+//! # Abbreviations
+//!
+//! Sentence splitting treats `.` / `!` / `?` followed by whitespace (or end)
+//! as a boundary. Common abbreviations (`Mr.`, `U.S.`, `e.g.`) may still
+//! split when a space follows the period. Prefer writing them without a
+//! trailing space before the next word, or expand them in the LLM prompt
+//! profile if this becomes noisy in production.
 
 /// Soft per-unit char budget. Prefer complete sentences under this length.
 pub const PREFERRED_UNIT_CHARS: usize = 180;
@@ -178,5 +186,22 @@ mod tests {
     fn empty_and_whitespace() {
         assert!(speakable_units("").is_empty());
         assert!(speakable_units("   ").is_empty());
+    }
+
+    /// Documents current abbreviation behavior (period + space = boundary).
+    #[test]
+    fn abbreviations_with_space_may_split() {
+        let units = speakable_units("Talk to Mr. Smith later.");
+        // "Mr." is followed by space → treated as sentence end today.
+        assert!(
+            units.len() >= 2,
+            "expected abbreviation split on '. ', got {units:?}"
+        );
+    }
+
+    #[test]
+    fn decimal_or_initials_without_space_stay_together() {
+        let units = speakable_units("Version 1.2.3 is ready.");
+        assert_eq!(units.len(), 1, "got {units:?}");
     }
 }

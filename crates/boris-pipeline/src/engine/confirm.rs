@@ -2,6 +2,9 @@
 //!
 //! Pure string helpers — no audio or agent I/O. Used by [`super::outcome`] after
 //! STT returns a freeform confirm answer.
+//!
+//! Matching is **whole-word / whole-phrase** only (no substring scan of the
+//! full utterance), so short tokens like `"no"` do not fire inside `"know"`.
 
 /// Normalize STT: lowercase, strip most punctuation, collapse spaces.
 pub(super) fn normalize_confirm_text(text: &str) -> String {
@@ -18,18 +21,34 @@ pub(super) fn normalize_confirm_text(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// True when `phrase` appears as consecutive whole words in `words`.
+fn words_contain_phrase(words: &[&str], phrase: &str) -> bool {
+    let p: Vec<&str> = phrase.split_whitespace().collect();
+    if p.is_empty() || p.len() > words.len() {
+        return false;
+    }
+    words.windows(p.len()).any(|w| w == p.as_slice())
+}
+
+/// True when `words` starts with the phrase (as whole words).
+fn head_is_phrase(words: &[&str], phrase: &str) -> bool {
+    let p: Vec<&str> = phrase.split_whitespace().collect();
+    if p.is_empty() || p.len() > words.len() {
+        return false;
+    }
+    words[..p.len()] == p[..]
+}
+
 /// Interpret freeform STT as yes/no. `None` = ambiguous.
 ///
 /// Accepts natural variants ("yeah go ahead", "nope cancel that", "yes.") not only
-/// bare yes/no.
+/// bare yes/no. Short tokens only match as whole words.
 pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
     let t = normalize_confirm_text(text);
     if t.is_empty() {
         return None;
     }
     let words: Vec<&str> = t.split_whitespace().collect();
-    let head: String = words.iter().take(5).cloned().collect::<Vec<_>>().join(" ");
-
     // Multi-word phrases first (order matters for "do not" / "go ahead").
     const YES_PHRASES: &[&str] = &[
         "go ahead",
@@ -46,6 +65,8 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
         "yep sure",
         "ok go",
         "okay go",
+        "uh huh",
+        "mm hmm",
     ];
     const NO_PHRASES: &[&str] = &[
         "do not",
@@ -62,16 +83,18 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
     ];
 
     for p in NO_PHRASES {
-        if head == *p || head.starts_with(&format!("{p} ")) || t.contains(p) {
+        if head_is_phrase(&words, p) || words_contain_phrase(&words, p) {
             return Some(false);
         }
     }
     for p in YES_PHRASES {
-        if head == *p || head.starts_with(&format!("{p} ")) || t.contains(p) {
+        if head_is_phrase(&words, p) || words_contain_phrase(&words, p) {
             return Some(true);
         }
     }
 
+    // Single-token vocabulary (whole-word only).
+    // Ultra-short tokens ("y", "n") only count as the *entire* utterance.
     const YES: &[&str] = &[
         "yes",
         "yeah",
@@ -82,7 +105,6 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
         "okay",
         "please",
         "affirmative",
-        "y",
         "yea",
         "confirmed",
         "confirm",
@@ -94,30 +116,28 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
         "absolutely",
         "definitely",
         "correct",
-        "right",
         "true",
-        "uh huh",
         "mhmm",
-        "mm hmm",
     ];
     const NO: &[&str] = &[
-        "no", "nope", "nah", "cancel", "stop", "never", "n", "negative", "decline", "abort",
+        "no", "nope", "nah", "cancel", "stop", "never", "negative", "decline", "abort",
         "refuse", "reject", "denied", "pass", "skip",
     ];
+    const YES_ULTRA: &[&str] = &["y"];
+    const NO_ULTRA: &[&str] = &["n"];
 
-    // First-word / head match.
-    for n in NO {
-        if head == *n || head.starts_with(&format!("{n} ")) {
-            return Some(false);
-        }
-    }
-    for y in YES {
-        if head == *y || head.starts_with(&format!("{y} ")) {
+    if words.len() == 1 {
+        let w = words[0];
+        if YES_ULTRA.contains(&w) || YES.contains(&w) {
             return Some(true);
         }
+        if NO_ULTRA.contains(&w) || NO.contains(&w) {
+            return Some(false);
+        }
+        return None;
     }
 
-    // Any clear token in the utterance (handles "uh yes bro", "mm no thanks").
+    // Multi-word: scan all clear tokens first so "yes no wait" stays ambiguous.
     let mut saw_yes = false;
     let mut saw_no = false;
     for w in &words {
@@ -134,12 +154,24 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
             saw_no = true;
         }
     }
-    // Prefer deny if both appear ("yes no wait" → ambiguous → None, re-ask).
     match (saw_yes, saw_no) {
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        _ => None,
+        (true, true) => return None,
+        (true, false) => return Some(true),
+        (false, true) => return Some(false),
+        (false, false) => {}
     }
+
+    // First-word match for remaining vocabulary (e.g. "approve the change").
+    // Ultra-short tokens never apply as multi-word heads.
+    if let Some(first) = words.first() {
+        if NO.contains(first) {
+            return Some(false);
+        }
+        if YES.contains(first) {
+            return Some(true);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -159,6 +191,33 @@ mod tests {
         assert_eq!(interpret_yes_no("don't"), Some(false));
         assert_eq!(interpret_yes_no("uh maybe later"), None);
         assert_eq!(interpret_yes_no(""), None);
+        assert_eq!(interpret_yes_no("y"), Some(true));
+        assert_eq!(interpret_yes_no("n"), Some(false));
+    }
+
+    #[test]
+    fn no_false_positives_from_substrings() {
+        // "no" must not match inside other words.
+        assert_eq!(interpret_yes_no("know"), None);
+        assert_eq!(interpret_yes_no("nothing"), None);
+        assert_eq!(interpret_yes_no("another"), None);
+        assert_eq!(interpret_yes_no("yesterday"), None);
+        // "ok" must not match inside longer tokens (already whole-word).
+        assert_eq!(interpret_yes_no("okra"), None);
+        // Ambiguous mixed signal.
+        assert_eq!(interpret_yes_no("yes no wait"), None);
+        // "y" / "n" only as sole token.
+        assert_eq!(interpret_yes_no("yep"), Some(true));
+        assert_eq!(interpret_yes_no("y please"), None); // ultra-short not as head of multi-word
+        assert_eq!(interpret_yes_no("n thanks"), None);
+    }
+
+    #[test]
+    fn phrase_whole_words_only() {
+        assert_eq!(interpret_yes_no("please go ahead"), Some(true));
+        assert_eq!(interpret_yes_no("cancel that now"), Some(false));
+        // Partial phrase fragments should not match.
+        assert_eq!(interpret_yes_no("ahead"), None);
     }
 
     #[test]

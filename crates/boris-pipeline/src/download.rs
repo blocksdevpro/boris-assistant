@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{PipelineError, Result as PipelineResult};
 use crate::paths::{
     boris_home, ensure_model_dirs, models_dir, parakeet_dir, parakeet_looks_ready,
     supertone_looks_ready, supertone_onnx_dir, supertone_onnx_is_multilingual,
@@ -331,8 +332,9 @@ pub fn models_status() -> ModelsStatus {
 /// for each state change (and periodically while downloading large files).
 pub fn install_models(
     mut on_progress: impl FnMut(DownloadProgress),
-) -> Result<ModelsInstallReport, String> {
-    ensure_model_dirs().map_err(|e| format!("create ~/.boris/models: {e}"))?;
+) -> PipelineResult<ModelsInstallReport> {
+    ensure_model_dirs()
+        .map_err(|e| PipelineError::download(format!("create ~/.boris/models: {e}")))?;
 
     let base_override = std::env::var(BORIS_MODEL_BASE_URL_ENV)
         .ok()
@@ -347,7 +349,7 @@ pub fn install_models(
         .timeout(None)
         .user_agent(concat!("boris-pipeline/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| PipelineError::download(format!("http client: {e}")))?;
 
     let root = models_dir();
     let onnx_dir = supertone_onnx_dir();

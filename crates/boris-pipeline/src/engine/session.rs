@@ -69,13 +69,13 @@ pub(super) fn begin_session(
                             session_id = %meta.id,
                             "failed to load session transcript; resetting conversation"
                         );
-                        agent.reset_conversation(system_prompt);
+                        agent.reset(system_prompt);
                         seed_transcript(store, &meta.id, transcript_len, agent);
                     }
                 }
             } else {
                 tracing::info!(session_id = %meta.id, "session created");
-                agent.reset_conversation(system_prompt);
+                agent.reset(system_prompt);
                 // Grok writes the system row at session start.
                 seed_transcript(store, &meta.id, transcript_len, agent);
             }
@@ -86,7 +86,7 @@ pub(super) fn begin_session(
                 error = %e,
                 "session resume_or_create failed; continuing without persistence"
             );
-            agent.reset_conversation(system_prompt);
+            agent.reset(system_prompt);
         }
     }
 }

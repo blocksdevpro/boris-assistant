@@ -4,12 +4,11 @@ use serde_json::{json, Value};
 
 use super::client::OpenRouterClient;
 
-/// OpenRouter chat completions endpoint.
-pub const CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-
 impl OpenRouterClient {
     /// Build the JSON body for a chat completion request.
-    pub(super) fn request_body(&self, messages: Value, tools: Value, stream: bool) -> Value {
+    ///
+    /// Clones `messages` / `tools` into the body once per call.
+    pub(super) fn request_body(&self, messages: &Value, tools: &Value, stream: bool) -> Value {
         let mut body = base_body(&self.model, messages, tools);
         let obj = body
             .as_object_mut()
@@ -42,8 +41,8 @@ impl OpenRouterClient {
     }
 }
 
-fn base_body(model: &str, messages: Value, tools: Value) -> Value {
-    if tools_absent_or_empty(&tools) {
+fn base_body(model: &str, messages: &Value, tools: &Value) -> Value {
+    if tools_absent_or_empty(tools) {
         json!({
             "model": model,
             "messages": messages,
@@ -73,7 +72,7 @@ mod tests {
             .with_provider_pref("coreweave, baseten")
             .with_allow_fallbacks(false)
             .with_session_id("sess-1");
-        let body = client.request_body(json!([]), Value::Null, true);
+        let body = client.request_body(&json!([]), &Value::Null, true);
         assert_eq!(body["model"], "m");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -87,7 +86,7 @@ mod tests {
     fn request_body_includes_tools_when_present() {
         let client = OpenRouterClient::new("k".into(), Some("m".into()));
         let tools = json!([{ "type": "function", "function": { "name": "x" } }]);
-        let body = client.request_body(json!([]), tools, false);
+        let body = client.request_body(&json!([]), &tools, false);
         assert!(body.get("stream").is_none());
         assert_eq!(body["tool_choice"], "auto");
         assert!(body["tools"].as_array().unwrap().len() == 1);

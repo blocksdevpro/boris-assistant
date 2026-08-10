@@ -1,7 +1,12 @@
 [package]
-name    = "boris-audio"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-audio"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+description = "Real-time duplex audio I/O for Boris (cpal capture/playback + rubato resample)"
+readme      = "README.md"
+publish     = false
 
 [dependencies]
 boris-core        = { workspace = true }

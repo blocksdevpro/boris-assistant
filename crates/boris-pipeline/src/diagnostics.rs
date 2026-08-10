@@ -38,7 +38,7 @@ pub fn log_environment(context: &str) {
         tracing::warn!("could not read current_exe");
     }
 
-    // Env vars that affect models / home / logging (never log API keys).
+    // Env vars that affect models / home / logging (never log API key values).
     for key in [
         "BORIS_HOME",
         "BORIS_LOG",
@@ -59,11 +59,8 @@ pub fn log_environment(context: &str) {
     ] {
         match std::env::var(key) {
             Ok(v) if key == "PATH" => {
-                // PATH can be huge — just length + whether onnxruntime might resolve.
+                // PATH can be huge — just length.
                 tracing::info!(%key, len = v.len(), "env set");
-            }
-            Ok(v) if key == "OPENROUTER_API_KEY" => {
-                tracing::info!(%key, present = !v.trim().is_empty(), "env set");
             }
             Ok(v) => tracing::info!(%key, value = %v, "env set"),
             Err(_) => tracing::debug!(%key, "env unset"),
@@ -72,7 +69,7 @@ pub fn log_environment(context: &str) {
     let key_present = std::env::var("OPENROUTER_API_KEY")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    tracing::info!(openrouter_api_key_in_env = key_present, "credentials env");
+    tracing::info!(openrouter_api_key_in_env = key_present, "credentials env (value redacted)");
 
     let home = paths::boris_home();
     tracing::info!(boris_home = %home.display(), "paths");

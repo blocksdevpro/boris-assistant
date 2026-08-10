@@ -6,13 +6,13 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
 };
 
-use boris_core::{AudioBuffer, AudioSample};
+use boris_core::{AudioBuffer, AudioSample, Error, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 
 use crate::resampler::OutputResampler;
@@ -22,6 +22,7 @@ use crate::resampler::OutputResampler;
 const DRAIN_EMPTY_CALLBACKS: u32 = 12;
 
 /// Commands from [`crate::AudioService`] to the output worker.
+#[derive(Debug)]
 pub enum OutputCommand {
     /// Queue mono PCM at the service source rate for playback.
     Play(AudioBuffer),
@@ -30,8 +31,13 @@ pub enum OutputCommand {
 }
 
 /// Lifecycle signals for the voice engine / UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputEvent {
-    /// Samples are in the device queue — audible audio is about to start.
+    /// Play job was resampled and **queued** for the device callback.
+    ///
+    /// This is emitted from the command worker after samples enter the software
+    /// queue — not when the first sample is actually written to the hardware.
+    /// Audible start typically follows within one or a few device buffer periods.
     Started,
     /// Software + short device-buffer drain after a real Play job finished.
     Drained,
@@ -76,9 +82,9 @@ impl OutputStreamState {
 }
 
 /// Live output stream + command worker for one playback device.
-pub struct OutputPipeline {
+pub(crate) struct OutputPipeline {
     /// Held so the device callback lives for the pipeline lifetime.
-    _stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
     shutdown: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
     /// Currently open device id.
@@ -90,19 +96,23 @@ impl OutputPipeline {
     /// Open `device` and process commands from `cmd_rx`.
     ///
     /// `source_rate` is the rate of PCM on [`OutputCommand::Play`] (TTS native rate).
-    pub fn from_device(
+    pub(crate) fn from_device(
         device: &cpal::Device,
         cmd_rx: crossbeam_channel::Receiver<OutputCommand>,
         event_tx: crossbeam_channel::Sender<OutputEvent>,
         source_rate: u32,
-    ) -> Self {
+    ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let device_id = device.id().expect("output device id");
+        let device_id = device
+            .id()
+            .map_err(|e| Error::audio(format!("output device id: {e}")))?;
         let state = Arc::new(Mutex::new(OutputStreamState::new()));
 
-        let config = device
-            .default_output_config()
-            .expect("default_output_config — speaker may be denied");
+        let config = device.default_output_config().map_err(|e| {
+            Error::audio(format!(
+                "default_output_config failed — speaker may be denied: {e}"
+            ))
+        })?;
         let stream_config = config.config();
         let sample_format = config.sample_format();
         tracing::info!(
@@ -114,26 +124,53 @@ impl OutputPipeline {
             "OutputPipeline::from_device"
         );
 
+        let event_drops = Arc::new(AtomicU64::new(0));
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => {
-                build_output_stream::<f32>(device, stream_config.clone(), state.clone(), event_tx.clone())
-            }
-            cpal::SampleFormat::I32 => {
-                build_output_stream::<i32>(device, stream_config.clone(), state.clone(), event_tx.clone())
-            }
-            cpal::SampleFormat::U32 => {
-                build_output_stream::<u32>(device, stream_config.clone(), state.clone(), event_tx.clone())
-            }
+            cpal::SampleFormat::F32 => build_output_stream::<f32>(
+                device,
+                stream_config,
+                state.clone(),
+                event_tx.clone(),
+                event_drops.clone(),
+            )?,
+            cpal::SampleFormat::I16 => build_output_stream::<i16>(
+                device,
+                stream_config,
+                state.clone(),
+                event_tx.clone(),
+                event_drops.clone(),
+            )?,
+            cpal::SampleFormat::U16 => build_output_stream::<u16>(
+                device,
+                stream_config,
+                state.clone(),
+                event_tx.clone(),
+                event_drops.clone(),
+            )?,
+            cpal::SampleFormat::I32 => build_output_stream::<i32>(
+                device,
+                stream_config,
+                state.clone(),
+                event_tx.clone(),
+                event_drops.clone(),
+            )?,
+            cpal::SampleFormat::U32 => build_output_stream::<u32>(
+                device,
+                stream_config,
+                state.clone(),
+                event_tx.clone(),
+                event_drops.clone(),
+            )?,
             other => {
-                tracing::error!(?other, "unsupported output sample format");
-                panic!("unsupported sample format: {other:?}");
+                return Err(Error::audio(format!(
+                    "unsupported output sample format: {other:?}"
+                )));
             }
         };
 
-        if let Err(e) = stream.play() {
-            tracing::error!(error = %e, "output stream.play() failed");
-            panic!("output stream.play() failed: {e}");
-        }
+        stream
+            .play()
+            .map_err(|e| Error::audio(format!("output stream.play() failed: {e}")))?;
         tracing::info!("output stream playing");
 
         let shutdown_worker = shutdown.clone();
@@ -151,15 +188,26 @@ impl OutputPipeline {
                 shutdown_worker,
                 state_worker,
                 &mut resampler,
+                event_drops,
             );
         });
 
-        Self {
+        Ok(Self {
             device_id,
             shutdown,
-            _stream: stream,
+            stream: Some(stream),
             worker: Some(worker),
             _state: state,
+        })
+    }
+}
+
+fn lock_output_state(state: &Mutex<OutputStreamState>) -> std::sync::MutexGuard<'_, OutputStreamState> {
+    match state.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::error!("OutputPipeline: state mutex poisoned — recovering");
+            poisoned.into_inner()
         }
     }
 }
@@ -170,11 +218,25 @@ fn run_output_worker(
     shutdown: Arc<AtomicBool>,
     state: Arc<Mutex<OutputStreamState>>,
     resampler: &mut OutputResampler,
+    event_drops: Arc<AtomicU64>,
 ) {
+    let mut last_event_drops = 0u64;
+
     while let Ok(command) = cmd_rx.recv() {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
+
+        let drops = event_drops.load(Ordering::Relaxed);
+        if drops > last_event_drops {
+            tracing::warn!(
+                new_drops = drops - last_event_drops,
+                total_drops = drops,
+                "OutputPipeline: output event queue full — events dropped in RT callback"
+            );
+            last_event_drops = drops;
+        }
+
         match command {
             OutputCommand::Play(audio) => {
                 // Resample outside the state lock so the stream callback is not
@@ -194,19 +256,33 @@ fn run_output_worker(
                     "OutputPipeline: queued play buffer"
                 );
 
-                let mut guard = state.lock().unwrap();
+                let mut guard = lock_output_state(&state);
                 if guard.queue_play(resampled) {
                     // Host can flip UI to "Speaking" only after this — not during TTS synth.
-                    let _ = event_tx.send(OutputEvent::Started);
+                    // Non-RT path: blocking send is fine for lifecycle events.
+                    if event_tx.send(OutputEvent::Started).is_err() {
+                        tracing::error!("OutputPipeline: event channel disconnected (Started)");
+                    }
                 } else {
                     tracing::warn!("OutputPipeline: Play produced empty buffer");
                 }
             }
             OutputCommand::Flush => {
-                state.lock().unwrap().clear_job();
-                let _ = event_tx.send(OutputEvent::Cleared);
+                lock_output_state(&state).clear_job();
+                if event_tx.send(OutputEvent::Cleared).is_err() {
+                    tracing::error!("OutputPipeline: event channel disconnected (Cleared)");
+                }
             }
         }
+    }
+}
+
+fn fill_silence<T>(output: &mut [T])
+where
+    T: cpal::Sample + cpal::FromSample<f32>,
+{
+    for sample in output.iter_mut() {
+        *sample = T::from_sample(0.0);
     }
 }
 
@@ -215,7 +291,8 @@ fn build_output_stream<T>(
     config: cpal::StreamConfig,
     state: Arc<Mutex<OutputStreamState>>,
     event_tx: crossbeam_channel::Sender<OutputEvent>,
-) -> cpal::Stream
+    event_drops: Arc<AtomicU64>,
+) -> Result<cpal::Stream>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + 'static,
 {
@@ -223,7 +300,19 @@ where
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                let mut state = state.lock().unwrap();
+                // Prefer try_lock on the RT path: never block; fill silence if busy.
+                let mut state = match state.try_lock() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        fill_silence(output);
+                        return;
+                    }
+                    Err(std::sync::TryLockError::Poisoned(p)) => {
+                        // Recover rather than panicking on the audio thread.
+                        p.into_inner()
+                    }
+                };
+
                 let mut got_real_sample = false;
 
                 for sample in output.iter_mut() {
@@ -262,18 +351,23 @@ where
                     state.active = false;
                     state.started = false;
                     state.empty_callbacks = 0;
-                    let _ = event_tx.send(OutputEvent::Drained);
+                    // Never block in the cpal callback.
+                    if event_tx.try_send(OutputEvent::Drained).is_err() {
+                        event_drops.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             },
             |err| tracing::error!("OutputStream error: {err}"),
             None,
         )
-        .expect("build_output_stream")
+        .map_err(|e| Error::audio(format!("build_output_stream failed: {e}")))
 }
 
 impl Drop for OutputPipeline {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        // Drop stream before join (callback ends; worker still wakes via cmd channel close).
+        drop(self.stream.take());
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }

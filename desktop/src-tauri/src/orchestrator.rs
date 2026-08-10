@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use boris_pipeline::{
-    devices, paths, DeviceDto, Engine, EngineCommand, EngineHandle, PipelineConfig,
+    devices, paths, DeviceDto, Engine, EngineCommand, EngineHandle, LlmPrefs, PipelineConfig,
     PreflightReport, StatusPicture,
 };
 use boris_tts_supertone::SUPERTONE_SAMPLE_RATE;
@@ -157,18 +157,17 @@ impl AppState {
             "spawning pipeline engine"
         );
 
-        let config = PipelineConfig::with_llm(
-            api_key,
-            model,
-            fast_model,
-            model_provider,
-            fast_provider,
-            pin_provider,
-            SUPERTONE_SAMPLE_RATE,
-            WAKEWORD_MODEL_BYTES.to_vec(),
-        );
+        let mut prefs = LlmPrefs::new(api_key);
+        prefs.openrouter_model = model;
+        prefs.openrouter_fast_model = fast_model;
+        prefs.openrouter_model_provider = model_provider;
+        prefs.openrouter_fast_provider = fast_provider;
+        prefs.openrouter_pin_provider = pin_provider;
+        let config =
+            PipelineConfig::with_llm(prefs, SUPERTONE_SAMPLE_RATE, WAKEWORD_MODEL_BYTES.to_vec());
 
-        let (engine, handle, status_rx) = Engine::spawn(config);
+        let (engine, handle, status_rx) =
+            Engine::spawn(config).map_err(|e| e.to_string())?;
         *self._engine.lock().unwrap() = Some(engine);
         *handle_g = Some(handle.clone());
         info!("engine thread spawned");

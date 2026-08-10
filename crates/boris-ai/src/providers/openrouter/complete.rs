@@ -5,13 +5,12 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::client::LlmClient;
-use crate::error::LlmError;
+use crate::error::{truncate_error_body, LlmError};
 use crate::message::{message_has_usable_payload, normalize_assistant_message};
 use crate::usage::{log_usage, TokenUsage};
 
 use super::client::OpenRouterClient;
-use super::request::CHAT_COMPLETIONS_URL;
-use super::sse::{push_sse_bytes, StreamAssembler};
+use super::sse::{flush_sse_buffer, push_sse_bytes, StreamAssembler};
 
 #[async_trait]
 impl LlmClient for OpenRouterClient {
@@ -21,10 +20,9 @@ impl LlmClient for OpenRouterClient {
         // Some OpenRouter/Gemini streams return HTTP 200 with zero content deltas
         // (thinking-only / empty assembly). Treat that as failure and fall back
         // so the agent does not go Silent with nothing to say.
-        match self
-            .complete_streaming(messages.clone(), tools.clone())
-            .await
-        {
+        //
+        // Clone messages/tools only when falling back — streaming takes references.
+        match self.complete_streaming(&messages, &tools).await {
             Ok(msg) if message_has_usable_payload(&msg) => Ok(msg),
             Ok(msg) => {
                 tracing::warn!(
@@ -32,11 +30,11 @@ impl LlmClient for OpenRouterClient {
                     has_tools = crate::message::has_tool_calls(&msg),
                     "stream complete returned empty payload; falling back to non-stream"
                 );
-                self.complete_blocking(messages, tools).await
+                self.complete_blocking(&messages, &tools).await
             }
             Err(e) => {
                 tracing::debug!(error = %e, "stream complete failed; falling back to non-stream");
-                self.complete_blocking(messages, tools).await
+                self.complete_blocking(&messages, &tools).await
             }
         }
     }
@@ -50,31 +48,33 @@ impl OpenRouterClient {
     /// Non-streaming JSON response path.
     pub(super) async fn complete_blocking(
         &self,
-        messages: Value,
-        tools: Value,
+        messages: &Value,
+        tools: &Value,
     ) -> Result<Value, LlmError> {
         let body = self.request_body(messages, tools, false);
 
-        let response = self
+        let req = self
             .http
-            .post(CHAT_COMPLETIONS_URL)
-            .header("Authorization", self.authorization_header())
-            .json(&body)
-            .send()
-            .await
-            .map_err(LlmError::from)?;
+            .post(self.chat_completions_url())
+            .json(&body);
+        let req = self.apply_common_headers(req);
+
+        let response = req.send().await.map_err(LlmError::from)?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::http(format!(
-                "OpenRouter HTTP error {status}: {body}"
-            )));
+            return Err(LlmError::from_http_status(status, &body));
         }
 
         let json: Value = response.json().await.map_err(|e| {
-            LlmError::parse(format!("failed to parse OpenRouter response JSON: {e}"))
+            LlmError::parse(format!("failed to parse chat completion response JSON: {e}"))
         })?;
+
+        // Some gateways return HTTP 200 with a top-level error object.
+        if let Some(err) = json.get("error") {
+            return Err(LlmError::from_provider_error_value(err));
+        }
 
         if let Some(usage) = json.get("usage") {
             log_usage(&self.model, &TokenUsage::from_usage_value(usage), "blocking");
@@ -87,7 +87,8 @@ impl OpenRouterClient {
             .cloned()
             .ok_or_else(|| {
                 LlmError::parse(format!(
-                    "OpenRouter response missing choices[0].message: {json}"
+                    "chat completion response missing choices[0].message: {}",
+                    truncate_error_body(&json.to_string())
                 ))
             })?;
 
@@ -97,31 +98,24 @@ impl OpenRouterClient {
     /// SSE chat completions — assemble full assistant message from deltas.
     pub(super) async fn complete_streaming(
         &self,
-        messages: Value,
-        tools: Value,
+        messages: &Value,
+        tools: &Value,
     ) -> Result<Value, LlmError> {
         let body = self.request_body(messages, tools, true);
 
-        let mut req = self
+        let req = self
             .http
-            .post(CHAT_COMPLETIONS_URL)
-            .header("Authorization", self.authorization_header())
+            .post(self.chat_completions_url())
             .header("Accept", "text/event-stream")
             .json(&body);
-
-        if let Some(sid) = self.session_id.as_deref() {
-            // Header form is also supported; body session_id takes precedence if both set.
-            req = req.header("x-session-id", sid);
-        }
+        let req = self.apply_common_headers(req);
 
         let response = req.send().await.map_err(LlmError::from)?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::http(format!(
-                "OpenRouter stream HTTP error {status}: {body}"
-            )));
+            return Err(LlmError::from_http_status(status, &body));
         }
 
         let mut assembler = StreamAssembler::new();
@@ -131,16 +125,31 @@ impl OpenRouterClient {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| LlmError::http(format!("stream read: {e}")))?;
             push_sse_bytes(&mut line_buf, &chunk, |data| {
-                if let Ok(v) = serde_json::from_str::<Value>(data) {
-                    assembler.ingest_event(&v);
-                }
+                ingest_sse_data(&mut assembler, data);
             });
         }
+        // Final event may omit trailing newline.
+        flush_sse_buffer(&mut line_buf, |data| {
+            ingest_sse_data(&mut assembler, data);
+        });
 
         if let Some(usage) = assembler.last_usage() {
             log_usage(&self.model, usage, "stream");
         }
 
         Ok(assembler.finish())
+    }
+}
+
+fn ingest_sse_data(assembler: &mut StreamAssembler, data: &str) {
+    match serde_json::from_str::<Value>(data) {
+        Ok(v) => assembler.ingest_event(&v),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                payload = %truncate_error_body(data),
+                "skipping invalid SSE JSON payload"
+            );
+        }
     }
 }

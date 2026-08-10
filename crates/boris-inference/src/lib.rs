@@ -12,9 +12,17 @@
 //!
 //! # Object safety
 //!
-//! Both traits are object-safe (`&mut self` methods, no generics) so the engine
-//! can erase concrete backends behind `dyn`. Implementations only need
-//! [`Send`] — models are typically used from one engine thread.
+//! Both traits are object-safe (`&mut self` / `&self` methods, no generics) so
+//! the engine can erase concrete backends behind `dyn`. Implementations only
+//! need [`Send`] — models are typically used from one engine thread.
+//!
+//! # Load policy
+//!
+//! Prefer **explicit** `load` / `unload` from the host (preload while the user
+//! speaks or the agent thinks). Adapters may also **lazy-load** on the first
+//! `transcribe` / `synthesize`. Either way, missing config (paths, voices)
+//! should map to [`boris_core::Error::Config`]; inference failures to
+//! [`boris_core::Error::Other`].
 
 #![deny(missing_docs)]
 

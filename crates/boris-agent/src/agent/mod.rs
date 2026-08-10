@@ -20,6 +20,7 @@ mod turn;
 pub use options::AgentOptions;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use boris_ai::LlmClient;
@@ -63,7 +64,9 @@ pub struct Agent {
     session_id: Option<String>,
     turn_id: Option<String>,
     max_tool_rounds: u32,
-    listeners: Arc<Mutex<Vec<EventListener>>>,
+    /// Event bus: `(listener_id, callback)` — unsubscribe removes by id.
+    listeners: Arc<Mutex<Vec<(u64, EventListener)>>>,
+    next_listener_id: AtomicU64,
     cancel: Option<CancellationToken>,
     /// Shared skill registry (catalog + load_skill tool).
     skills: Option<SharedSkills>,
@@ -123,6 +126,7 @@ impl Agent {
             turn_id: None,
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
             listeners: Arc::new(Mutex::new(Vec::new())),
+            next_listener_id: AtomicU64::new(1),
             cancel: None,
             skills: None,
             long_term: None,
@@ -163,8 +167,7 @@ impl Agent {
             Arc::clone(&self.shared_tools),
             Arc::clone(&self.activated),
         );
-        self.tools.push(Arc::new(tool));
-        self.sync_shared_tools();
+        self.insert_tool(Arc::new(tool));
         info!("tool_search registered");
     }
 
@@ -184,8 +187,7 @@ impl Agent {
             Arc::clone(&self.shared_tools),
             self.sandbox_snapshot.clone(),
         );
-        self.tools.push(Arc::new(tool));
-        self.sync_shared_tools();
+        self.insert_tool(Arc::new(tool));
         info!("spawn_subagent tool enabled");
     }
 
@@ -311,44 +313,61 @@ impl Agent {
     }
 
     /// Alias for [`Self::abort`] (legacy name used by pipeline).
+    #[deprecated(note = "use Agent::abort")]
     pub fn cancel_pending(&mut self) {
         self.abort();
     }
 
     /// Subscribe to agent lifecycle events. Returns an unsubscribe handle.
+    ///
+    /// Listeners are stored by monotonic id; calling the returned closure
+    /// removes that listener (no index-based leak / noop placeholders).
     pub fn subscribe(
         &mut self,
         f: impl Fn(&AgentEvent) + Send + Sync + 'static,
     ) -> impl FnOnce() {
-        let mut guard = self.listeners.lock().unwrap();
-        guard.push(Box::new(f));
-        let idx = guard.len() - 1;
+        let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut guard = self.listeners.lock().unwrap();
+            guard.push((id, Box::new(f)));
+        }
         let listeners = Arc::clone(&self.listeners);
         move || {
             if let Ok(mut g) = listeners.lock() {
-                if idx < g.len() {
-                    g[idx] = Box::new(|_| {});
-                }
+                g.retain(|(lid, _)| *lid != id);
             }
         }
     }
 
     fn emit(&self, event: &AgentEvent) {
         if let Ok(guard) = self.listeners.lock() {
-            for listener in guard.iter() {
+            for (_, listener) in guard.iter() {
                 listener(event);
             }
         }
     }
 
+    /// Register a tool. If a tool with the same name already exists, it is
+    /// **replaced** and a warning is logged (dedupe by name).
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(Arc::from(tool));
-        self.sync_shared_tools();
+        self.insert_tool(Arc::from(tool));
     }
 
+    /// Register many tools (each name-deduped via [`Self::register_tool`]).
     pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         for tool in tools {
-            self.tools.push(Arc::from(tool));
+            self.insert_tool(Arc::from(tool));
+        }
+    }
+
+    /// Single mutation path for `tools` + live `shared_tools` mirror.
+    fn insert_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        if let Some(pos) = self.tools.iter().position(|t| t.name() == name) {
+            warn!(%name, "replacing existing tool registration (name dedupe)");
+            self.tools[pos] = tool;
+        } else {
+            self.tools.push(tool);
         }
         self.sync_shared_tools();
     }
@@ -376,6 +395,7 @@ impl Agent {
     }
 
     /// Alias for [`Self::reset`].
+    #[deprecated(note = "use Agent::reset")]
     pub fn reset_conversation(&mut self, system_prompt: &str) {
         self.reset(system_prompt);
     }

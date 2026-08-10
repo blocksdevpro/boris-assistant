@@ -1,4 +1,4 @@
-﻿//! Bash tool type, process spawn, and execute path.
+//! Bash tool type, process spawn, and execute path.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -47,12 +47,15 @@ impl BashTool {
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        scrub_child_env(&mut cmd);
         cmd
     }
 
     #[cfg(windows)]
     fn build_fallback(command: &str, cwd: &std::path::Path) -> Command {
-        // PowerShell is ubiquitous on Windows when Git Bash is not installed.
+        // PowerShell when Git Bash is missing. `-ExecutionPolicy Bypass` is
+        // intentional for desktop usability — not a security boundary. HITL
+        // confirmation + ShellPolicy remain authoritative (see bash/policy.rs).
         let mut cmd = Command::new("powershell.exe");
         cmd.args([
             "-NoProfile",
@@ -67,6 +70,7 @@ impl BashTool {
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .kill_on_drop(true);
+        scrub_child_env(&mut cmd);
         cmd
     }
 
@@ -80,7 +84,38 @@ impl BashTool {
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        scrub_child_env(&mut cmd);
         cmd
+    }
+}
+
+/// Drop common API / cloud secret env vars from the child process.
+///
+/// Does not clear PATH / system vars (would break normal tools). Best-effort
+/// only — the model can still read secrets from disk if roots allow.
+fn scrub_child_env(cmd: &mut Command) {
+    const DROP: &[&str] = &[
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+        "BORIS_OPENROUTER_API_KEY",
+        "BORIS_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_OPENAI_API_KEY",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "NPM_TOKEN",
+        "CARGO_REGISTRY_TOKEN",
+    ];
+    for key in DROP {
+        cmd.env_remove(key);
     }
 }
 

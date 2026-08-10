@@ -5,9 +5,11 @@ use boris_agent::{Agent, SandboxConfig};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::ArcAudioBuffer;
+use boris_inference::TextToSpeech;
 use boris_sense::{init_onnx_runtime, LivekitWakeWord, WebRtcVad};
 
 use crate::config::PipelineConfig;
+use crate::error::{PipelineError, Result};
 use crate::paths;
 use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS};
 
@@ -17,7 +19,7 @@ use super::llm::{
 };
 use super::models::{create_stt, create_tts, SttBox, TtsBox};
 use super::picture::Picture;
-use super::util::{env_flag_false, env_flag_true, panic_payload_str, uuid_lite};
+use super::util::{env_flag_false, env_flag_true, session_token};
 use super::MIC_QUEUE;
 
 /// Fully initialized engine-thread state before the turn loop.
@@ -43,15 +45,24 @@ pub(super) struct EngineRuntime {
 pub(super) fn init_runtime(
     config: PipelineConfig,
     status_tx: std::sync::mpsc::Sender<StatusPicture>,
-) -> Result<EngineRuntime, String> {
+) -> Result<EngineRuntime> {
     tracing::info!("engine thread entered run()");
+    publish_starting(&status_tx, &config);
+
     crate::diagnostics::log_environment("engine_run");
     crate::diagnostics::log_writable_check("boris_home", paths::boris_home());
     crate::diagnostics::log_writable_check("sessions", paths::sessions_dir());
     crate::diagnostics::log_writable_check("logs", paths::logs_dir());
 
     tracing::info!("init_onnx_runtime…");
-    init_onnx_runtime();
+    init_onnx_runtime().map_err(|e| {
+        fault(
+            &status_tx,
+            &config,
+            format!("onnx runtime init failed: {e}"),
+        );
+        PipelineError::init(format!("onnx runtime: {e}"))
+    })?;
     tracing::info!("init_onnx_runtime done");
 
     tracing::info!(
@@ -66,7 +77,17 @@ pub(super) fn init_runtime(
         "pipeline config (key redacted)"
     );
 
-    let mut audio = open_audio(&config, &status_tx)?;
+    let stt = create_stt(config.stt_model_dir.clone());
+    let tts = create_tts(
+        config.tts_model_dir.clone(),
+        config.tts_voice_dir.clone(),
+        &config.tts_voice_id,
+    );
+
+    // Prefer TTS native rate (trait) over host hard-code when the adapter reports one.
+    let play_rate = resolve_play_source_rate(config.play_source_rate, tts.as_ref());
+
+    let mut audio = open_audio(play_rate, &config, &status_tx)?;
     let mic = audio.subscribe_input(Some(MIC_QUEUE));
     let output_events = audio.subscribe_output();
     tracing::info!(mic_queue = MIC_QUEUE, "subscribed to mic + output events");
@@ -75,13 +96,6 @@ pub(super) fn init_runtime(
     let vad = WebRtcVad::new();
     tracing::info!("WebRtcVad ready");
 
-    let stt = create_stt(config.stt_model_dir.clone());
-    let tts = create_tts(
-        config.tts_model_dir.clone(),
-        config.tts_voice_dir.clone(),
-        &config.tts_voice_id,
-    );
-
     // Long-lived Tokio runtime for the async agent plane (LLM + tools).
     // Voice capture / STT / TTS stay on this sync engine thread.
     let agent_rt = tokio::runtime::Builder::new_multi_thread()
@@ -89,7 +103,14 @@ pub(super) fn init_runtime(
         .enable_all()
         .thread_name("boris-agent")
         .build()
-        .expect("failed to build Tokio runtime for agent");
+        .map_err(|e| {
+            fault(
+                &status_tx,
+                &config,
+                format!("failed to build Tokio runtime for agent: {e}"),
+            );
+            PipelineError::init(format!("tokio runtime: {e}"))
+        })?;
 
     let agent = build_agent(&config);
 
@@ -121,7 +142,8 @@ pub(super) fn init_runtime(
     };
     picture.publish();
     tracing::info!("engine idle (Off) — waiting for Start command");
-Ok(EngineRuntime {
+
+    Ok(EngineRuntime {
         audio,
         mic,
         output_events,
@@ -139,12 +161,55 @@ Ok(EngineRuntime {
     })
 }
 
+fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: &PipelineConfig) {
+    let _ = status_tx.send(StatusPicture {
+        engine: EngineState::Starting,
+        phase: Phase::Quiet,
+        detail: Some("initializing…".into()),
+        heard: None,
+        said: None,
+        mic: DeviceHealth {
+            label: config.mic_label.clone(),
+            ok: true,
+        },
+        speaker: DeviceHealth {
+            label: config.speaker_label.clone(),
+            ok: true,
+        },
+        turn: None,
+        activity: None,
+        context_used: None,
+        context_limit: None,
+    });
+}
+
+fn resolve_play_source_rate(config_rate: u32, tts: &dyn TextToSpeech) -> u32 {
+    let native = tts.sample_rate();
+    if native > 0 {
+        if config_rate > 0 && config_rate != native {
+            tracing::info!(
+                config_rate,
+                native,
+                backend = tts.backend_id(),
+                "using TTS native sample_rate for playback"
+            );
+        }
+        return native;
+    }
+    if config_rate > 0 {
+        config_rate
+    } else {
+        44_100
+    }
+}
+
 fn open_audio(
+    play_source_rate: u32,
     config: &PipelineConfig,
     status_tx: &std::sync::mpsc::Sender<StatusPicture>,
-) -> Result<AudioService, String> {
-    tracing::info!("opening AudioService (default mic + speaker)…");
-    match AudioService::with_source_rate(config.play_source_rate) {
+) -> Result<AudioService> {
+    tracing::info!(play_source_rate, "opening AudioService (default mic + speaker)…");
+    match AudioService::with_source_rate(play_source_rate) {
         Ok(audio) => {
             tracing::info!("AudioService ready");
             Ok(audio)
@@ -152,26 +217,9 @@ fn open_audio(
         Err(e) => {
             tracing::error!(error = %e, "AudioService::with_source_rate FAILED");
             crate::diagnostics::log_environment("audio_init_failed");
-            let _ = status_tx.send(StatusPicture {
-                engine: EngineState::Fault,
-                phase: Phase::Off,
-                detail: Some(e.clone()),
-                heard: None,
-                said: None,
-                mic: DeviceHealth {
-                    label: config.mic_label.clone(),
-                    ok: false,
-                },
-                speaker: DeviceHealth {
-                    label: config.speaker_label.clone(),
-                    ok: false,
-                },
-                turn: None,
-                activity: None,
-                context_used: None,
-                context_limit: None,
-            });
-            Err(format!("audio init failed: {e}"))
+            let detail = e.to_string();
+            fault(status_tx, config, detail.clone());
+            Err(PipelineError::init(format!("audio init failed: {detail}")))
         }
     }
 }
@@ -179,54 +227,55 @@ fn open_audio(
 fn load_wakeword(
     config: &PipelineConfig,
     status_tx: &std::sync::mpsc::Sender<StatusPicture>,
-) -> Result<LivekitWakeWord, String> {
+) -> Result<LivekitWakeWord> {
     tracing::info!(
         wake_bytes = config.wakeword_model.len(),
         sample_rate = boris_audio::AUDIO_TARGET_RATE,
         "loading LivekitWakeWord (ORT sessions)…"
     );
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        LivekitWakeWord::new(
-            "boris",
-            &config.wakeword_model,
-            boris_audio::AUDIO_TARGET_RATE,
-        )
-    })) {
+    match LivekitWakeWord::try_new(
+        "boris",
+        &config.wakeword_model,
+        boris_audio::AUDIO_TARGET_RATE,
+    ) {
         Ok(w) => {
             tracing::info!("LivekitWakeWord loaded");
             Ok(w)
         }
-        Err(payload) => {
-            let msg = panic_payload_str(&payload);
+        Err(e) => {
             tracing::error!(
-                error = %msg,
+                error = %e,
                 wake_bytes = config.wakeword_model.len(),
-                "LivekitWakeWord::new PANICKED — often missing onnxruntime.dll / DirectML.dll beside the exe"
+                "LivekitWakeWord::try_new FAILED — often missing onnxruntime.dll / DirectML.dll beside the exe"
             );
-            crate::diagnostics::log_environment("wakeword_panic");
-            let detail = format!("wakeword init panic: {msg}");
-            let _ = status_tx.send(StatusPicture {
-                engine: EngineState::Fault,
-                phase: Phase::Off,
-                detail: Some(detail.clone()),
-                heard: None,
-                said: None,
-                mic: DeviceHealth {
-                    label: config.mic_label.clone(),
-                    ok: false,
-                },
-                speaker: DeviceHealth {
-                    label: config.speaker_label.clone(),
-                    ok: false,
-                },
-                turn: None,
-                activity: None,
-                context_used: None,
-                context_limit: None,
-            });
-            Err(detail)
+            crate::diagnostics::log_environment("wakeword_init_failed");
+            let detail = format!("wakeword init: {e}");
+            fault(status_tx, config, detail.clone());
+            Err(PipelineError::init(detail))
         }
     }
+}
+
+fn fault(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: &PipelineConfig, detail: impl Into<String>) {
+    let _ = status_tx.send(StatusPicture {
+        engine: EngineState::Fault,
+        phase: Phase::Off,
+        detail: Some(detail.into()),
+        heard: None,
+        said: None,
+        mic: DeviceHealth {
+            label: config.mic_label.clone(),
+            ok: false,
+        },
+        speaker: DeviceHealth {
+            label: config.speaker_label.clone(),
+            ok: false,
+        },
+        turn: None,
+        activity: None,
+        context_used: None,
+        context_limit: None,
+    });
 }
 
 fn build_agent(config: &PipelineConfig) -> Agent {
@@ -259,7 +308,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     }
     // One session id for the engine process → OpenRouter sticky-routes to the
     // same host, improving cache hit rates on multi-turn agent work.
-    let session_id = format!("boris-{}", uuid_lite());
+    let session_id = format!("boris-{}", session_token());
     let strong = build_openrouter_client(
         &config.openrouter_api_key,
         &strong_model,
@@ -310,12 +359,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     preset.apply_to_sandbox(&mut sandbox);
     // Trusted auto-allow for Moderate tools (notes, workspace writes, clipboard…).
     // Dangerous (bash, open url) still confirm. Disable with BORIS_TRUSTED=0.
-    let trusted = std::env::var("BORIS_TRUSTED")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v == "0" || v == "false" || v == "off" || v == "no")
-        })
-        .unwrap_or(true);
+    let trusted = !env_flag_false("BORIS_TRUSTED");
     sandbox = sandbox.with_trusted_auto_moderate(trusted);
     agent.configure_runtime(sandbox, Some(paths::audit_path()));
 

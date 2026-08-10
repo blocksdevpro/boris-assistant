@@ -24,6 +24,18 @@
 //! Wake scoring, VAD capture, STT, agent, and TTS are **called inline** on the
 //! engine thread (or briefly block it). Status is pushed for the UI. Hosts send
 //! [`EngineCommand`] via [`EngineHandle`].
+//!
+//! # Shutdown contract
+//!
+//! 1. Prefer [`Engine::shutdown_and_join`] when the host is exiting (sends
+//!    [`EngineCommand::Shutdown`], then joins the engine thread).
+//! 2. Dropping [`Engine`] also sends `Shutdown` (best-effort; does **not** join,
+//!    so the process should not exit until the thread finishes if you need a
+//!    clean model unload — use `shutdown_and_join` for that).
+//! 3. [`EngineHandle::shutdown`] alone is enough if another owner holds `Engine`
+//!    and will join later.
+//! 4. All of the above are safe if the command channel is already closed
+//!    (disconnected engine thread): send errors are ignored.
 
 mod confirm;
 mod device_switch;
@@ -40,11 +52,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use boris_agent::session::types::SessionId;
-use boris_agent::AgentOutcome;
+use boris_agent::{AgentEvent, AgentOutcome};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::TurnId;
 
 use crate::config::PipelineConfig;
+use crate::error::{PipelineError, Result};
 use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::{EngineState, Phase, StatusPicture};
 
@@ -53,10 +66,10 @@ use models::{
     join_stt_load, join_tts_load, reclaim_stt_slot, release_voice_models, spawn_stt_load,
     spawn_tts_load, unload_stt, unload_tts, SttBox,
 };
-use outcome::{resolve_agent_outcome, OutcomeResolve};
+use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve};
 use playback::{poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait};
 use session::{agent_message_pairs, begin_session, end_session, go_off};
-use setup::init_runtime;
+use setup::{init_runtime, EngineRuntime};
 use util::transcript_usable;
 
 /// Mic fan-out queue. Must stay large enough that a brief engine stall during
@@ -82,33 +95,41 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn send(&self, cmd: EngineCommand) -> Result<(), mpsc::SendError<EngineCommand>> {
+    pub fn send(&self, cmd: EngineCommand) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.cmd_tx.send(cmd)
     }
 
-    pub fn start(&self) -> Result<(), mpsc::SendError<EngineCommand>> {
+    pub fn start(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::Start)
     }
 
-    pub fn stop(&self) -> Result<(), mpsc::SendError<EngineCommand>> {
+    pub fn stop(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::Stop)
     }
 
-    pub fn shutdown(&self) -> Result<(), mpsc::SendError<EngineCommand>> {
+    pub fn shutdown(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::Shutdown)
     }
 }
 
-/// Join handle for the engine thread (drop does not join).
+/// Join handle + shutdown sender for the engine thread.
+///
+/// See module-level **Shutdown contract**.
 pub struct Engine {
-    _join: JoinHandle<()>,
+    join: Option<JoinHandle<()>>,
+    /// Clone of the command sender used only for Drop / `shutdown_and_join`.
+    shutdown_tx: Option<Sender<EngineCommand>>,
 }
 
 impl Engine {
     /// Spawn the engine thread. Status snapshots are sent on the returned receiver.
-    pub fn spawn(config: PipelineConfig) -> (Self, EngineHandle, Receiver<StatusPicture>) {
+    ///
+    /// Returns [`PipelineError::Init`] if the OS refuses the thread spawn.
+    /// (Audio / wake init failures surface as a Fault status then thread exit.)
+    pub fn spawn(config: PipelineConfig) -> Result<(Self, EngineHandle, Receiver<StatusPicture>)> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
+        let shutdown_tx = cmd_tx.clone();
 
         let join = thread::Builder::new()
             .name("boris-engine".into())
@@ -117,9 +138,174 @@ impl Engine {
                     tracing::error!(error = %e, "engine thread exited with error");
                 }
             })
-            .expect("spawn boris-engine");
+            .map_err(|e| PipelineError::init(format!("spawn boris-engine: {e}")))?;
 
-        (Self { _join: join }, EngineHandle { cmd_tx }, status_rx)
+        Ok((
+            Self {
+                join: Some(join),
+                shutdown_tx: Some(shutdown_tx),
+            },
+            EngineHandle { cmd_tx },
+            status_rx,
+        ))
+    }
+
+    /// Send [`EngineCommand::Shutdown`] (if the channel is still open) and join
+    /// the engine thread. Safe to call if the thread already exited.
+    pub fn shutdown_and_join(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(EngineCommand::Shutdown);
+        }
+        if let Some(join) = self.join.take() {
+            if let Err(e) = join.join() {
+                tracing::warn!(?e, "engine thread panicked during join");
+            }
+        }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Best-effort stop request; do not join here (avoid blocking Drop).
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(EngineCommand::Shutdown);
+        }
+        // Detach join handle — use `shutdown_and_join` for a synchronous stop.
+        if let Some(join) = self.join.take() {
+            drop(join);
+        }
+    }
+}
+
+// ── HearBreak / go_off helpers (dedupe turn-loop arms) ───────────────────────
+
+/// How the outer turn loop should react after a hear break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopReact {
+    /// `continue` the outer loop (device switch applied or soft stop).
+    Continue,
+    /// Exit the engine thread cleanly.
+    Exit,
+}
+
+/// Session fields that live in `run` but are needed by break helpers.
+struct SessionRefs<'a> {
+    active_session: &'a mut Option<SessionId>,
+    transcript_len: &'a mut usize,
+}
+
+fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
+    match cmd {
+        EngineCommand::SwitchInput { device_id } => {
+            apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
+        }
+        EngineCommand::SwitchOutput { device_id } => {
+            apply_output_switch(
+                &mut rt.audio,
+                &mut rt.output_events,
+                &mut rt.picture,
+                &device_id,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn go_off_session(rt: &mut EngineRuntime, sess: &mut SessionRefs<'_>) {
+    go_off(
+        &mut rt.picture,
+        &rt.audio,
+        &rt.store,
+        sess.active_session,
+        sess.transcript_len,
+        rt.stt.as_mut(),
+        rt.tts.as_mut(),
+    );
+}
+
+/// Shared HearBreak handling for wake / settle / capture.
+///
+/// `on_soft_stop` runs when we get `Stopped` while still marked running
+/// (clear follow-up depth, etc.).
+fn on_hear_break(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    br: HearBreak,
+    running: bool,
+    on_soft_stop: impl FnOnce(),
+) -> LoopReact {
+    match br {
+        HearBreak::SwitchInput { device_id } => {
+            apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
+            LoopReact::Continue
+        }
+        HearBreak::SwitchOutput { device_id } => {
+            apply_output_switch(
+                &mut rt.audio,
+                &mut rt.output_events,
+                &mut rt.picture,
+                &device_id,
+            );
+            LoopReact::Continue
+        }
+        HearBreak::Stopped if !running => {
+            go_off_session(rt, sess);
+            LoopReact::Continue
+        }
+        HearBreak::Stopped => {
+            on_soft_stop();
+            LoopReact::Continue
+        }
+        HearBreak::Disconnected => {
+            end_session(&rt.store, sess.active_session, sess.transcript_len);
+            release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
+            rt.picture.set_phase(Phase::Off);
+            LoopReact::Exit
+        }
+    }
+}
+
+fn go_off_if_not_running(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    running: bool,
+) -> bool {
+    if !running {
+        go_off_session(rt, sess);
+        true
+    } else {
+        false
+    }
+}
+
+/// Compact tool-activity label for the overlay chip.
+fn activity_label(ev: &AgentEvent) -> Option<String> {
+    match ev {
+        AgentEvent::ToolExecutionStart { tool_name, .. } => Some(format!("tool · {tool_name}")),
+        AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
+            format!("done · {tool_name}")
+        } else {
+            format!("fail · {tool_name}")
+        }),
+        AgentEvent::ToolProgress {
+            tool_name,
+            message,
+            ..
+        } => {
+            let msg = message.trim();
+            if msg.is_empty() {
+                Some(format!("tool · {tool_name}"))
+            } else {
+                Some(format!("tool · {tool_name} · {msg}"))
+            }
+        }
+        AgentEvent::TurnStart { round } if *round > 0 => {
+            Some(format!("thinking · round {}", round + 1))
+        }
+        AgentEvent::NeedsConfirmation { pending } => {
+            Some(format!("confirm · {}", pending.name))
+        }
+        _ => None,
     }
 }
 
@@ -127,7 +313,7 @@ fn run(
     config: PipelineConfig,
     cmd_rx: Receiver<EngineCommand>,
     status_tx: Sender<StatusPicture>,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut rt = init_runtime(config, status_tx)?;
 
     let mut running = false;
@@ -140,6 +326,11 @@ fn run(
     let mut transcript_len: usize = 0;
 
     loop {
+        let mut sess = SessionRefs {
+            active_session: &mut active_session,
+            transcript_len: &mut transcript_len,
+        };
+
         // ── Off: wait for Start ─────────────────────────────────────────────
         if !running {
             await_reply = false;
@@ -157,8 +348,8 @@ fn run(
                     // step ahead during capture / agent — never kept for Armed idle).
                     begin_session(
                         &rt.store,
-                        &mut active_session,
-                        &mut transcript_len,
+                        sess.active_session,
+                        sess.transcript_len,
                         &mut rt.agent,
                         &rt.system_prompt,
                     );
@@ -170,22 +361,14 @@ fn run(
                 }
                 Ok(EngineCommand::Stop) => continue,
                 Ok(EngineCommand::Shutdown) | Err(_) => {
-                    end_session(&rt.store, &mut active_session, &mut transcript_len);
+                    end_session(&rt.store, sess.active_session, sess.transcript_len);
                     release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "shutdown");
                     rt.picture.engine = EngineState::Off;
                     rt.picture.set_phase(Phase::Off);
                     return Ok(());
                 }
-                Ok(EngineCommand::SwitchInput { device_id }) => {
-                    apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
-                }
-                Ok(EngineCommand::SwitchOutput { device_id }) => {
-                    apply_output_switch(
-                        &mut rt.audio,
-                        &mut rt.output_events,
-                        &mut rt.picture,
-                        &device_id,
-                    );
+                Ok(cmd @ (EngineCommand::SwitchInput { .. } | EngineCommand::SwitchOutput { .. })) => {
+                    apply_device_cmd(&mut rt, cmd);
                 }
             }
             continue;
@@ -203,55 +386,15 @@ fn run(
                 "awaiting freeform user reply (no wake)"
             );
             if let Err(e) = hear::settle_after_playback(&rt.mic, &cmd_rx, &mut running) {
-                match e {
-                    HearBreak::SwitchInput { device_id } => {
-                        apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
-                        continue;
-                    }
-                    HearBreak::SwitchOutput { device_id } => {
-                        apply_output_switch(
-                            &mut rt.audio,
-                            &mut rt.output_events,
-                            &mut rt.picture,
-                            &device_id,
-                        );
-                        continue;
-                    }
-                    HearBreak::Stopped if !running => {
-                        go_off(
-                            &mut rt.picture,
-                            &rt.audio,
-                            &rt.store,
-                            &mut active_session,
-                            &mut transcript_len,
-                            rt.stt.as_mut(),
-                            rt.tts.as_mut(),
-                        );
-                        continue;
-                    }
-                    HearBreak::Stopped => {
-                        await_reply = false;
-                        follow_up_depth = 0;
-                        continue;
-                    }
-                    HearBreak::Disconnected => {
-                        end_session(&rt.store, &mut active_session, &mut transcript_len);
-                        release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
-                        rt.picture.set_phase(Phase::Off);
-                        return Ok(());
-                    }
+                match on_hear_break(&mut rt, &mut sess, e, running, || {
+                    await_reply = false;
+                    follow_up_depth = 0;
+                }) {
+                    LoopReact::Continue => continue,
+                    LoopReact::Exit => return Ok(()),
                 }
             }
-            if !running {
-                go_off(
-                    &mut rt.picture,
-                    &rt.audio,
-                    &rt.store,
-                    &mut active_session,
-                    &mut transcript_len,
-                    rt.stt.as_mut(),
-                    rt.tts.as_mut(),
-                );
+            if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
             }
             // Consumed for this entry; may re-arm after this turn if Boris asks again.
@@ -270,50 +413,13 @@ fn run(
 
             match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
                 Ok(()) => {}
-                Err(HearBreak::SwitchInput { device_id }) => {
-                    apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
-                    continue;
-                }
-                Err(HearBreak::SwitchOutput { device_id }) => {
-                    apply_output_switch(
-                        &mut rt.audio,
-                        &mut rt.output_events,
-                        &mut rt.picture,
-                        &device_id,
-                    );
-                    continue;
-                }
-                Err(HearBreak::Stopped) if !running => {
-                    go_off(
-                        &mut rt.picture,
-                        &rt.audio,
-                        &rt.store,
-                        &mut active_session,
-                        &mut transcript_len,
-                        rt.stt.as_mut(),
-                        rt.tts.as_mut(),
-                    );
-                    continue;
-                }
-                Err(HearBreak::Stopped) => continue,
-                Err(HearBreak::Disconnected) => {
-                    end_session(&rt.store, &mut active_session, &mut transcript_len);
-                    release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
-                    rt.picture.set_phase(Phase::Off);
-                    return Ok(());
-                }
+                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                    LoopReact::Continue => continue,
+                    LoopReact::Exit => return Ok(()),
+                },
             }
 
-            if !running {
-                go_off(
-                    &mut rt.picture,
-                    &rt.audio,
-                    &rt.store,
-                    &mut active_session,
-                    &mut transcript_len,
-                    rt.stt.as_mut(),
-                    rt.tts.as_mut(),
-                );
+            if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
             }
             // New user turn — drop previous line now that we're listening again.
@@ -323,7 +429,7 @@ fn run(
         };
 
         // ── One turn, top to bottom ─────────────────────────────────────────
-        let turn = TurnId(next_turn);
+        let turn = TurnId::new(next_turn);
         next_turn = next_turn.saturating_add(1);
         rt.picture.turn = Some(turn);
         // Hearing only while the mic is actually recording (not during STT).
@@ -339,52 +445,15 @@ fn run(
 
         let clip = match capture {
             Ok(c) => c,
-            Err(HearBreak::SwitchInput { device_id }) => {
-                apply_input_switch(&mut rt.audio, &mut rt.picture, &device_id);
-                continue;
-            }
-            Err(HearBreak::SwitchOutput { device_id }) => {
-                apply_output_switch(
-                    &mut rt.audio,
-                    &mut rt.output_events,
-                    &mut rt.picture,
-                    &device_id,
-                );
-                continue;
-            }
-            Err(HearBreak::Stopped) if !running => {
-                go_off(
-                    &mut rt.picture,
-                    &rt.audio,
-                    &rt.store,
-                    &mut active_session,
-                    &mut transcript_len,
-                    rt.stt.as_mut(),
-                    rt.tts.as_mut(),
-                );
-                continue;
-            }
-            Err(HearBreak::Stopped) => {
+            Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
                 follow_up_depth = 0;
-                continue;
-            }
-            Err(HearBreak::Disconnected) => {
-                end_session(&rt.store, &mut active_session, &mut transcript_len);
-                release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
-                return Ok(());
-            }
+            }) {
+                LoopReact::Continue => continue,
+                LoopReact::Exit => return Ok(()),
+            },
         };
 
-        if !running {
-            go_off(
-                &mut rt.picture,
-                &rt.audio,
-                &rt.store,
-                &mut active_session,
-                &mut transcript_len,
-                rt.stt.as_mut(),
-                rt.tts.as_mut(),
-            );
+        if go_off_if_not_running(&mut rt, &mut sess, running) {
             continue;
         }
 
@@ -455,15 +524,7 @@ fn run(
         )
         .still_running()
         {
-            go_off(
-                &mut rt.picture,
-                &rt.audio,
-                &rt.store,
-                &mut active_session,
-                &mut transcript_len,
-                rt.stt.as_mut(),
-                rt.tts.as_mut(),
-            );
+            go_off_session(&mut rt, &mut sess);
             continue;
         }
 
@@ -481,92 +542,41 @@ fn run(
         let agent_t = std::time::Instant::now();
         let tts_job = spawn_tts_load(rt.tts);
         rt.agent.set_turn_id(Some(turn.to_string()));
-        if let Some(ref sid) = active_session {
+        if let Some(ref sid) = *sess.active_session {
             rt.agent.set_session_id(Some(sid.to_string()));
         }
 
-        // Live tool activity → overlay (subscribe emits on this thread inside block_on).
-        let activity_bridge =
-            std::sync::Arc::new(std::sync::Mutex::new(rt.picture.status_tx.clone()));
-        let activity_snap = std::sync::Arc::new(std::sync::Mutex::new((
-            rt.picture.engine,
-            rt.picture.phase,
-            rt.picture.detail.clone(),
-            rt.picture.heard.clone(),
-            rt.picture.said.clone(),
-            rt.picture.mic.clone(),
-            rt.picture.speaker.clone(),
-            rt.picture.turn,
-            rt.picture.context_used,
-            rt.picture.context_limit,
-        )));
-        let snap_w = activity_snap.clone();
-        let tx_w = activity_bridge.clone();
-        let _unsub = rt.agent.subscribe(move |ev| {
-            use boris_agent::AgentEvent;
-            let label = match ev {
-                AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                    Some(format!("tool · {tool_name}"))
-                }
-                AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
-                    format!("done · {tool_name}")
-                } else {
-                    format!("fail · {tool_name}")
-                }),
-                AgentEvent::ToolProgress {
-                    tool_name,
-                    message,
-                    ..
-                } => {
-                    let msg = message.trim();
-                    if msg.is_empty() {
-                        Some(format!("tool · {tool_name}"))
-                    } else {
-                        Some(format!("tool · {tool_name} · {msg}"))
-                    }
-                }
-                AgentEvent::TurnStart { round } if *round > 0 => {
-                    Some(format!("thinking · round {}", round + 1))
-                }
-                AgentEvent::NeedsConfirmation { pending } => {
-                    Some(format!("confirm · {}", pending.name))
-                }
-                _ => None,
+        // Live tool activity → overlay. Snapshot freezes non-activity fields so
+        // mid-turn events do not clobber heard/said with a stale full rebuild.
+        let activity_base = std::sync::Arc::new(std::sync::Mutex::new(StatusPicture {
+            engine: rt.picture.engine,
+            phase: rt.picture.phase,
+            detail: rt.picture.detail.clone(),
+            heard: rt.picture.heard.clone(),
+            said: rt.picture.said.clone(),
+            mic: rt.picture.mic.clone(),
+            speaker: rt.picture.speaker.clone(),
+            turn: rt.picture.turn.map(|t| t.to_string()),
+            activity: None,
+            context_used: rt.picture.context_used,
+            context_limit: rt.picture.context_limit,
+        }));
+        let activity_tx = rt.picture.status_tx.clone();
+        let base_w = activity_base.clone();
+        let unsub = rt.agent.subscribe(move |ev| {
+            let Some(label) = activity_label(ev) else {
+                return;
             };
-            let Some(label) = label else { return };
-            let Ok(g) = snap_w.lock() else { return };
-            let (
-                engine,
-                phase,
-                detail,
-                heard,
-                said,
-                mic,
-                speaker,
-                turn_id,
-                context_used,
-                context_limit,
-            ) = g.clone();
-            drop(g);
-            if let Ok(tx) = tx_w.lock() {
-                let _ = tx.send(StatusPicture {
-                    engine,
-                    phase,
-                    detail,
-                    heard,
-                    said,
-                    mic,
-                    speaker,
-                    turn: turn_id.map(|t| t.to_string()),
-                    activity: Some(label),
-                    context_used,
-                    context_limit,
-                });
-            }
+            let Ok(base) = base_w.lock() else {
+                return;
+            };
+            let mut snap = base.clone();
+            snap.activity = Some(label);
+            let _ = activity_tx.send(snap);
         });
 
         let outcome = rt.agent_rt.block_on(rt.agent.prompt_with_report(&text));
-        _unsub(); // drop live tool listener
+        unsub(); // drop live tool listener
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         rt.tts = tts_owned;
 
@@ -574,7 +584,7 @@ fn run(
             Ok(pair) => pair,
             Err(e) => {
                 tracing::error!(error = %e, %turn, "agent failed");
-                rt.agent.cancel_pending();
+                rt.agent.abort();
                 rt.picture.detail = None;
                 rt.picture.clear_activity();
                 // Recoverable spoken line instead of silent Ready.
@@ -585,7 +595,9 @@ fn run(
                 if rt.tts.load().is_ok() {
                     if let Ok(pcm) = rt.tts.synthesize(recovery) {
                         while rt.output_events.try_recv().is_ok() {}
-                        rt.audio.play(pcm);
+                        if let Err(e) = rt.audio.play(pcm) {
+                            tracing::error!(error = %e, "recovery play failed");
+                        }
                         let _ = wait_playback_started(
                             &mut rt.output_events,
                             &cmd_rx,
@@ -617,24 +629,24 @@ fn run(
             .update_context_from_chars(report.approx_chars_in);
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
-        let outcome = match resolve_agent_outcome(
-            outcome,
-            &mut rt.agent,
-            &rt.agent_rt,
-            &mut rt.tts,
-            &mut rt.stt,
-            &rt.mic,
-            &mut rt.vad,
-            &mut rt.audio,
-            &mut rt.output_events,
-            &cmd_rx,
-            &mut running,
-            &mut rt.picture,
-            &rt.store,
-            &mut active_session,
-            &mut transcript_len,
+        let mut confirm = ConfirmCtx {
+            agent: &mut rt.agent,
+            agent_rt: &rt.agent_rt,
+            tts: &mut rt.tts,
+            stt: &mut rt.stt,
+            mic: &rt.mic,
+            vad: &mut rt.vad,
+            audio: &mut rt.audio,
+            output_events: &mut rt.output_events,
+            cmd_rx: &cmd_rx,
+            running: &mut running,
+            picture: &mut rt.picture,
+            store: &rt.store,
+            active_session: sess.active_session,
+            transcript_len: sess.transcript_len,
             turn,
-        ) {
+        };
+        let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
             OutcomeResolve::Stopped => continue,
             OutcomeResolve::ReArm => {
                 follow_up_depth = 0;
@@ -676,11 +688,11 @@ fn run(
             }
         };
 
-        if let Some(ref sid) = active_session {
+        if let Some(ref sid) = *sess.active_session {
             // Full Grok-like transcript: system / user / assistant+tool_calls / tool_result.
             let pairs = agent_message_pairs(&rt.agent);
-            match rt.store.sync_messages(sid, &pairs, transcript_len) {
-                Ok(n) => transcript_len = n,
+            match rt.store.sync_messages(sid, &pairs, *sess.transcript_len) {
+                Ok(n) => *sess.transcript_len = n,
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -706,15 +718,7 @@ fn run(
         )
         .still_running()
         {
-            go_off(
-                &mut rt.picture,
-                &rt.audio,
-                &rt.store,
-                &mut active_session,
-                &mut transcript_len,
-                rt.stt.as_mut(),
-                rt.tts.as_mut(),
-            );
+            go_off_session(&mut rt, &mut sess);
             continue;
         }
 
@@ -756,15 +760,7 @@ fn run(
         )
         .still_running()
         {
-            go_off(
-                &mut rt.picture,
-                &rt.audio,
-                &rt.store,
-                &mut active_session,
-                &mut transcript_len,
-                rt.stt.as_mut(),
-                rt.tts.as_mut(),
-            );
+            go_off_session(&mut rt, &mut sess);
             continue;
         }
 
@@ -774,7 +770,11 @@ fn run(
         // always sees a single reclaim path after playback.
         let mut stt_slot: Option<SttBox> = Some(rt.stt);
         let mut stt_follow_job = if will_await {
-            Some(spawn_stt_load(stt_slot.take().expect("stt")))
+            Some(spawn_stt_load(
+                stt_slot
+                    .take()
+                    .expect("stt slot present when starting follow-up preload"),
+            ))
         } else {
             None
         };
@@ -784,7 +784,14 @@ fn run(
         // we must not hang waiting for Drained on a dead channel (stuck Talking).
         let play_t = std::time::Instant::now();
         while rt.output_events.try_recv().is_ok() {}
-        rt.audio.play(pcm);
+        if let Err(e) = rt.audio.play(pcm) {
+            tracing::error!(error = %e, %turn, "play failed");
+            rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
+            follow_up_depth = 0;
+            rt.picture.detail = Some(format!("play: {e}"));
+            rt.picture.set_phase(Phase::Armed);
+            continue;
+        }
         match wait_playback_started(
             &mut rt.output_events,
             &cmd_rx,
@@ -794,15 +801,7 @@ fn run(
         ) {
             PlaybackWait::Stopped => {
                 rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
-                go_off(
-                    &mut rt.picture,
-                    &rt.audio,
-                    &rt.store,
-                    &mut active_session,
-                    &mut transcript_len,
-                    rt.stt.as_mut(),
-                    rt.tts.as_mut(),
-                );
+                go_off_session(&mut rt, &mut sess);
                 continue;
             }
             PlaybackWait::Aborted => {
@@ -831,16 +830,7 @@ fn run(
 
         rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
 
-        if !running {
-            go_off(
-                &mut rt.picture,
-                &rt.audio,
-                &rt.store,
-                &mut active_session,
-                &mut transcript_len,
-                rt.stt.as_mut(),
-                rt.tts.as_mut(),
-            );
+        if go_off_if_not_running(&mut rt, &mut sess, running) {
             continue;
         }
 
@@ -893,5 +883,48 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<EngineCommand>();
         assert_send::<EngineHandle>();
+    }
+
+    #[test]
+    fn activity_label_tools() {
+        let start = AgentEvent::ToolExecutionStart {
+            call_id: "1".into(),
+            tool_name: "bash".into(),
+            args_summary: String::new(),
+        };
+        assert_eq!(activity_label(&start).as_deref(), Some("tool · bash"));
+
+        let end_ok = AgentEvent::ToolExecutionEnd {
+            call_id: "1".into(),
+            tool_name: "bash".into(),
+            ok: true,
+            duration_ms: 1,
+        };
+        assert_eq!(activity_label(&end_ok).as_deref(), Some("done · bash"));
+
+        let end_fail = AgentEvent::ToolExecutionEnd {
+            call_id: "1".into(),
+            tool_name: "bash".into(),
+            ok: false,
+            duration_ms: 1,
+        };
+        assert_eq!(activity_label(&end_fail).as_deref(), Some("fail · bash"));
+
+        let noise = AgentEvent::TurnStart { round: 0 };
+        assert!(activity_label(&noise).is_none());
+
+        let round2 = AgentEvent::TurnStart { round: 1 };
+        assert_eq!(
+            activity_label(&round2).as_deref(),
+            Some("thinking · round 2")
+        );
+    }
+
+    #[test]
+    fn loop_react_enum_is_copy() {
+        let a = LoopReact::Continue;
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(LoopReact::Exit, LoopReact::Exit);
     }
 }

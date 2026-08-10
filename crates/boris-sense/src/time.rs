@@ -5,10 +5,6 @@
 
 use std::time::Duration;
 
-use boris_core::AUDIO_TARGET_RATE;
-
-use crate::vad::{VAD_INITIAL_TIMEOUT, VAD_SILENCE_WINDOW};
-
 /// Convert a wall duration into a sample count at `sample_rate`.
 pub fn duration_to_samples(d: Duration, sample_rate: u32) -> usize {
     if sample_rate == 0 {
@@ -19,13 +15,15 @@ pub fn duration_to_samples(d: Duration, sample_rate: u32) -> usize {
 }
 
 /// Samples of non-speech after speech before endpointing (`VAD_SILENCE_WINDOW`).
+#[cfg(feature = "vad")]
 pub fn vad_silence_samples() -> usize {
-    duration_to_samples(VAD_SILENCE_WINDOW, AUDIO_TARGET_RATE)
+    duration_to_samples(crate::vad::VAD_SILENCE_WINDOW, boris_core::AUDIO_TARGET_RATE)
 }
 
 /// Samples of non-speech before any speech before giving up (`VAD_INITIAL_TIMEOUT`).
+#[cfg(feature = "vad")]
 pub fn vad_initial_timeout_samples() -> usize {
-    duration_to_samples(VAD_INITIAL_TIMEOUT, AUDIO_TARGET_RATE)
+    duration_to_samples(crate::vad::VAD_INITIAL_TIMEOUT, boris_core::AUDIO_TARGET_RATE)
 }
 
 #[cfg(test)]
@@ -40,6 +38,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zero_rate_is_zero() {
+        assert_eq!(duration_to_samples(Duration::from_secs(1), 0), 0);
+    }
+
+    #[test]
+    fn subsecond_rounding() {
+        // 40 ms @ 16 kHz = 640 samples
+        assert_eq!(
+            duration_to_samples(Duration::from_millis(40), 16_000),
+            640
+        );
+    }
+
+    #[cfg(feature = "vad")]
     #[test]
     fn vad_helpers_positive() {
         assert!(vad_silence_samples() > 0);

@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! Host (pipeline/desktop)
-//!   â””â”€ Agent facade          agent/        memory, HITL, session, prompt profile
-//!        â””â”€ agent_loop       loop_         pure ReAct: complete â†’ tools â†’ events
-//!             â””â”€ ToolRuntime runtime/      policy, timeout, audit, confirmation
-//!                  â””â”€ dyn Tool             tools/* + tool.rs
+//!   └─ Agent facade          agent/        memory, HITL, session, prompt profile
+//!        └─ agent_loop       loop_/        pure ReAct: complete → tools → events
+//!             └─ ToolRuntime runtime/      policy, timeout, audit, confirmation
+//!                  └─ dyn Tool             tools/* + tool.rs
 //! ```
 //!
 //! | Layer | Module(s) | Responsibility |
@@ -23,6 +23,21 @@
 //!
 //! Provider HTTP lives in `boris-ai` and is re-exported here for hosts.
 //! Tool bodies stay observation-only; speech is always [`AgentOutcome`].
+//!
+//! # Public API surface
+//!
+//! **Prefer the crate-root re-exports** below for host integration
+//! (`Agent`, `SandboxConfig`, `register_builtin_tools`, …). Nested modules
+//! (`session::`, `tools::`, `runtime::`, …) are also `pub` because the pipeline
+//! and tests need them; treat leaf internals as unstable unless re-exported
+//! here. Module names `loop_` and `tool::trait_` use trailing underscores as an
+//! intentional Rust keyword escape (not planned renames).
+//!
+//! # Security (summary)
+//!
+//! Hosts inject [`SandboxConfig`] (path roots, [`NetworkPolicy`], [`ShellPolicy`]).
+//! HITL confirmation only skips the confirm UI — path/shell/network hard gates
+//! still run after a user grant. See the crate README “Security model” section.
 
 pub mod agent;
 pub mod capability;
@@ -30,6 +45,7 @@ pub mod client;
 pub mod context;
 pub mod error;
 pub mod finish_gate;
+/// Pure ReAct loop (`loop` is a keyword → `loop_`).
 pub mod loop_;
 pub mod memory;
 pub mod observe;
@@ -61,7 +77,7 @@ pub use memory::{
     FactCategory, LongTermMemory, MemoryHit, ProfileStore, UserFact, UserProfile,
     PERSONAL_CONTEXT_MAX_CHARS,
 };
-pub use observe::TurnReport;
+pub use observe::{TurnOutcomeKind, TurnReport};
 pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
 pub use routing::{classify_route, RouteMode, RoutingClient};
@@ -83,14 +99,19 @@ pub use tool::{
 pub use tool_context::ToolCallContext;
 pub use tools::{
     bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,
-    register_builtin_tools_with_options, register_builtin_tools_with_preset, shell_tools,
-    web_tools, BuiltinToolPaths,
+    register_builtin_tools_with_options, register_builtin_tools_with_preset, web_tools,
+    BuiltinToolPaths,
 };
+
+/// Deprecated alias for [`bash_tools`].
+#[allow(deprecated)]
+#[deprecated(note = "use bash_tools")]
+pub use tools::shell_tools;
 pub use types::{
     AgentEvent, AgentLoopConfig, LoopResult, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS,
 };
 
-// â”€â”€ Temporary aliases (migration window) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Temporary aliases (migration window) ─────────────────────────────────────
 
 /// Deprecated name for [`Agent`]. Prefer `Agent`.
 #[deprecated(note = "renamed to Agent")]

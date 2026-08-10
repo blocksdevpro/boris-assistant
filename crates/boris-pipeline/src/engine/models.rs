@@ -158,6 +158,10 @@ impl SpeechToText for PanicLostStt {
 
 struct PanicLostTts;
 impl TextToSpeech for PanicLostTts {
+    fn backend_id(&self) -> &str {
+        "panic-lost"
+    }
+
     fn synthesize(&mut self, _: &str) -> boris_core::Result<boris_core::AudioBuffer> {
         Err(boris_core::Error::other(
             "TTS model lost after load-thread panic",
@@ -182,6 +186,10 @@ struct NullTts;
 
 #[cfg(not(feature = "tts-supertone"))]
 impl TextToSpeech for NullTts {
+    fn backend_id(&self) -> &str {
+        "null"
+    }
+
     fn synthesize(&mut self, _: &str) -> boris_core::Result<boris_core::AudioBuffer> {
         Err(boris_core::Error::other("tts-supertone feature disabled"))
     }

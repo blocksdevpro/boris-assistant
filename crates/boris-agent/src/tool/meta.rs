@@ -47,12 +47,14 @@ impl ToolKind {
         }
     }
 
-    /// True when the tool does not mutate external state by design.
+    /// Default read-only heuristic for **unannotated** tools only.
+    ///
+    /// Only [`Read`](Self::Read) and [`Search`](Self::Search) are treated as
+    /// read-only by kind. Production tools should set
+    /// [`ToolMeta::read_only`](ToolMeta::read_only) explicitly — Memory, Skill,
+    /// System, and Other may write or have side effects.
     pub fn is_read_only(self) -> bool {
-        matches!(
-            self,
-            Self::Read | Self::Search | Self::Memory | Self::Skill | Self::System | Self::Other
-        )
+        matches!(self, Self::Read | Self::Search)
     }
 }
 
@@ -235,6 +237,25 @@ mod tests {
         assert!(m.is_read_only());
         let m = m.read_only(false);
         assert!(!m.is_read_only());
+        // Memory/System/Other are NOT read-only by default kind heuristic.
+        let mem = ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory);
+        assert!(!mem.is_read_only());
+        let sys = ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::System);
+        assert!(!sys.is_read_only());
+    }
+
+    #[test]
+    fn only_read_and_search_kinds_default_ro() {
+        assert!(ToolKind::Read.is_read_only());
+        assert!(ToolKind::Search.is_read_only());
+        assert!(!ToolKind::Write.is_read_only());
+        assert!(!ToolKind::Execute.is_read_only());
+        assert!(!ToolKind::Web.is_read_only());
+        assert!(!ToolKind::Memory.is_read_only());
+        assert!(!ToolKind::Skill.is_read_only());
+        assert!(!ToolKind::System.is_read_only());
+        assert!(!ToolKind::Plan.is_read_only());
+        assert!(!ToolKind::Other.is_read_only());
     }
 
     #[test]

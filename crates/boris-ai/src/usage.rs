@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-/// Token usage from an OpenRouter (or compatible) `usage` object.
+/// Token usage from an OpenAI-compatible (or OpenRouter) `usage` object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     /// Input tokens billed for the prompt.
@@ -18,7 +18,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// Parse an OpenRouter-style `usage` JSON object.
+    /// Parse an OpenAI-compatible `usage` JSON object.
     pub fn from_usage_value(usage: &Value) -> Self {
         let prompt_tokens = u64_field(usage, "prompt_tokens");
         let completion_tokens = u64_field(usage, "completion_tokens");
@@ -62,6 +62,8 @@ fn u64_field(obj: &Value, key: &str) -> u64 {
 }
 
 /// Log usage at info (cache hit) or debug (miss / cold).
+///
+/// Provider-agnostic wording — hosts may use any OpenAI-compatible backend.
 pub fn log_usage(model: &str, usage: &TokenUsage, path: &str) {
     if !usage.is_worth_logging() {
         return;
@@ -74,7 +76,7 @@ pub fn log_usage(model: &str, usage: &TokenUsage, path: &str) {
             completion_tokens = usage.completion_tokens,
             cached_tokens = usage.cached_tokens,
             cache_write_tokens = usage.cache_write_tokens,
-            "OpenRouter usage (cache hit)"
+            "LLM usage (cache hit)"
         );
     } else {
         tracing::debug!(
@@ -83,7 +85,7 @@ pub fn log_usage(model: &str, usage: &TokenUsage, path: &str) {
             prompt_tokens = usage.prompt_tokens,
             completion_tokens = usage.completion_tokens,
             cache_write_tokens = usage.cache_write_tokens,
-            "OpenRouter usage"
+            "LLM usage"
         );
     }
 }

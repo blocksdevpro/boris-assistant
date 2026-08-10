@@ -26,6 +26,8 @@ pub struct DeviceInfo {
 }
 
 /// List devices for `direction` (name + default flag).
+///
+/// On host enumeration failure, logs an error and returns an empty list.
 pub fn list_devices(direction: Direction) -> Vec<DeviceInfo> {
     let host = cpal::default_host();
     let default_id = match direction {
@@ -39,9 +41,19 @@ pub fn list_devices(direction: Direction) -> Vec<DeviceInfo> {
         Direction::Output => host.output_devices(),
     };
 
+    let devices = match devices {
+        Ok(iter) => iter,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                ?direction,
+                "failed to list audio devices — returning empty list"
+            );
+            return Vec::new();
+        }
+    };
+
     devices
-        .into_iter()
-        .flatten()
         .filter_map(|device| {
             let id = device.id().ok()?;
             let description = device.description().ok()?;

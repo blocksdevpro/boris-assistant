@@ -6,7 +6,7 @@
 //! | [`meta`] | [`ToolMeta`], risk, permissions, kind |
 //! | [`args`] | `require_object` / `require_string` / … |
 //! | [`output`] | truncation + soft-wrap |
-//! | [`trait_`] | [`Tool`] trait |
+//! | [`trait_`] | [`Tool`] trait (`trait` is a keyword → `trait_`) |
 
 mod args;
 mod error;

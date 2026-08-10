@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use boris_core::{ArcAudioBuffer, AudioBuffer};
+use boris_core::{ArcAudioBuffer, AudioBuffer, Error, Result};
 use cpal::{traits::HostTrait, DeviceId};
 
 use crate::devices::{self, device_name};
@@ -85,33 +85,37 @@ impl AudioService {
     ///
     /// Use the TTS native rate (Supertone = 44_100, Kokoro = 24_000). Wrong rate = slow/fast audio.
     ///
-    /// Returns `Err` when no default input/output device is available.
-    pub fn with_source_rate(source_rate: u32) -> Result<Self, String> {
+    /// Returns `Err` when no default input/output device is available, or when
+    /// opening a device stream fails (format unsupported, permission denied, etc.).
+    pub fn with_source_rate(source_rate: u32) -> Result<Self> {
         let host = cpal::default_host();
         tracing::info!(source_rate, "AudioService::with_source_rate");
 
         let input_device = host.default_input_device().ok_or_else(|| {
             tracing::error!("no default input device from cpal host");
-            "No default microphone found. Connect a mic or grant audio input permission."
-                .to_string()
+            Error::audio(
+                "No default microphone found. Connect a mic or grant audio input permission.",
+            )
         })?;
         let input_name = device_name(&input_device);
         tracing::info!(%input_name, "opening default input device");
 
         let input_subscribers: InputSubscribers = Arc::new(Mutex::new(Vec::new()));
-        let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone());
+        let input_pipeline =
+            InputPipeline::from_device(&input_device, input_subscribers.clone())?;
         tracing::info!(%input_name, "input pipeline open");
 
         let output_device = host.default_output_device().ok_or_else(|| {
             tracing::error!("no default output device from cpal host");
-            "No default speaker found. Connect a speaker/headphones or grant audio output permission."
-                .to_string()
+            Error::audio(
+                "No default speaker found. Connect a speaker/headphones or grant audio output permission.",
+            )
         })?;
         let output_name = device_name(&output_device);
         tracing::info!(%output_name, source_rate, "opening default output device");
 
         let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&output_device, source_rate);
+            open_output_pipeline(&output_device, source_rate)?;
         tracing::info!(%output_name, "output pipeline open");
 
         Ok(Self {
@@ -125,7 +129,7 @@ impl AudioService {
     }
 
     /// Defaults to 44.1 kHz play source (Supertone). Prefer [`Self::with_source_rate`] when known.
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self> {
         Self::with_source_rate(DEFAULT_SOURCE_RATE_HZ)
     }
 
@@ -145,23 +149,34 @@ impl AudioService {
     ) -> crossbeam_channel::Receiver<ArcAudioBuffer> {
         let queue = queue.unwrap_or(DEFAULT_INPUT_SUBSCRIBER_QUEUE);
         let (tx, rx) = crossbeam_channel::bounded::<ArcAudioBuffer>(queue);
-        self.input_subscribers.lock().unwrap().push(tx);
+        match self.input_subscribers.lock() {
+            Ok(mut g) => g.push(tx),
+            Err(poisoned) => {
+                tracing::error!("AudioService: input subscriber mutex poisoned — recovering");
+                poisoned.into_inner().push(tx);
+            }
+        }
         rx
     }
 
     /// Switch capture to `id`. Does **not** fall back to default on failure.
-    pub fn switch_input(&mut self, id: &DeviceId) -> Result<(), String> {
+    ///
+    /// On stream open failure the previous input pipeline is left running.
+    pub fn switch_input(&mut self, id: &DeviceId) -> Result<()> {
         if &self.input_pipeline.device_id == id {
             tracing::debug!(?id, "input already selected");
             return Ok(());
         }
         let device = Self::find_input_device(id).ok_or_else(|| {
-            format!("input device not found (id={id:?}) — unplugged or no longer available")
+            Error::audio(format!(
+                "input device not found (id={id:?}) — unplugged or no longer available"
+            ))
         })?;
         let name = device_name(&device);
         tracing::info!(%name, "opening input device");
-        // Drop old pipeline (stops stream) then open the new one; subscribers stay.
-        self.input_pipeline = InputPipeline::from_device(&device, self.input_subscribers.clone());
+        // Open new pipeline before replacing so a failure keeps the old stream.
+        let new_pipeline = InputPipeline::from_device(&device, self.input_subscribers.clone())?;
+        self.input_pipeline = new_pipeline;
         Ok(())
     }
 
@@ -171,45 +186,74 @@ impl AudioService {
     ///
     /// Returns `Ok(true)` when the pipeline was rebuilt (in-flight Play is dropped).
     /// Returns `Ok(false)` when `id` was already selected.
-    pub fn switch_output(&mut self, id: &DeviceId) -> Result<bool, String> {
+    ///
+    /// On open failure the previous output pipeline is left running.
+    pub fn switch_output(&mut self, id: &DeviceId) -> Result<bool> {
         if &self.output_pipeline.device_id == id {
             tracing::debug!(?id, "output already selected");
             return Ok(false);
         }
         let device = Self::find_output_device(id).ok_or_else(|| {
-            format!("output device not found (id={id:?}) — unplugged or no longer available")
+            Error::audio(format!(
+                "output device not found (id={id:?}) — unplugged or no longer available"
+            ))
         })?;
         let name = device_name(&device);
         tracing::info!(%name, "opening output device");
 
         let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&device, self.source_rate);
+            open_output_pipeline(&device, self.source_rate)?;
         self.output_command_channel = output_command_channel;
         self.output_event_channel = output_event_channel;
         self.output_pipeline = output_pipeline;
         Ok(true)
     }
 
-    /// Queue mono PCM at [`Self::source_rate`] for playback (blocking send).
-    pub fn play(&self, audio: AudioBuffer) {
-        if let Err(e) = self
+    /// Queue mono PCM at [`Self::source_rate`] for playback.
+    ///
+    /// Uses non-blocking `try_send`. Returns `Err` when the command queue is full
+    /// (backpressure — caller may retry) or the output worker is gone.
+    pub fn play(&self, audio: AudioBuffer) -> Result<()> {
+        match self
             .output_command_channel
             .0
-            .send(OutputCommand::Play(audio))
+            .try_send(OutputCommand::Play(audio))
         {
-            tracing::error!(error = %e, "AudioService::play — output worker gone");
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::TrySendError::Full(_)) => Err(Error::audio(
+                "output command queue full — play dropped (backpressure)",
+            )),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                tracing::error!("AudioService::play — output worker gone");
+                Err(Error::audio("output worker gone"))
+            }
         }
     }
 
     /// Stop / clear current playback as soon as possible.
+    ///
+    /// Prefer `try_send`; fall back to a blocking `send` if the queue is full so
+    /// a Flush is not lost behind pending Play buffers.
     pub fn stop(&self) {
-        if self
+        match self
             .output_command_channel
             .0
             .try_send(OutputCommand::Flush)
-            .is_err()
         {
-            let _ = self.output_command_channel.0.send(OutputCommand::Flush);
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                if self
+                    .output_command_channel
+                    .0
+                    .send(OutputCommand::Flush)
+                    .is_err()
+                {
+                    tracing::error!("AudioService::stop — output worker gone");
+                }
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                tracing::error!("AudioService::stop — output worker gone");
+            }
         }
     }
 
@@ -222,7 +266,7 @@ impl AudioService {
 fn open_output_pipeline(
     device: &cpal::Device,
     source_rate: u32,
-) -> (EventChannel, CommandChannel, OutputPipeline) {
+) -> Result<(EventChannel, CommandChannel, OutputPipeline)> {
     let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(OUTPUT_EVENT_CAPACITY);
     let output_command_channel =
         crossbeam_channel::bounded::<OutputCommand>(OUTPUT_COMMAND_CAPACITY);
@@ -230,11 +274,11 @@ fn open_output_pipeline(
     let output_event_tx = output_event_channel.0.clone();
     let output_command_rx = output_command_channel.1.clone();
     let output_pipeline =
-        OutputPipeline::from_device(device, output_command_rx, output_event_tx, source_rate);
+        OutputPipeline::from_device(device, output_command_rx, output_event_tx, source_rate)?;
 
-    (
+    Ok((
         output_event_channel,
         output_command_channel,
         output_pipeline,
-    )
+    ))
 }

@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use crate::context::Role;
 use crate::error::AgentError;
 use crate::loop_::{self, LoopState};
-use crate::observe::TurnReport;
+use crate::observe::{TurnOutcomeKind, TurnReport};
 use crate::outcome::AgentOutcome;
 use crate::types::{AgentEvent, AgentLoopConfig, LoopResult};
 
@@ -29,7 +29,7 @@ impl Agent {
         let listeners = std::sync::Arc::clone(&self.listeners);
         std::sync::Arc::new(move |event: AgentEvent| {
             if let Ok(guard) = listeners.lock() {
-                for listener in guard.iter() {
+                for (_, listener) in guard.iter() {
                     listener(&event);
                 }
             }
@@ -79,11 +79,13 @@ impl Agent {
     }
 
     /// Back-compat alias for [`Self::prompt`].
+    #[deprecated(note = "use Agent::prompt")]
     pub async fn run_turn(&mut self, user_text: &str) -> Result<AgentOutcome, AgentError> {
         self.prompt(user_text).await
     }
 
     /// Back-compat alias for [`Self::prompt`].
+    #[deprecated(note = "use Agent::prompt")]
     pub async fn chat(&mut self, message: &str) -> Result<AgentOutcome, AgentError> {
         self.prompt(message).await
     }
@@ -274,9 +276,9 @@ impl Agent {
             tool_rounds: loop_out.tool_rounds,
             tools_used: loop_out.tools_used.clone(),
             outcome: match &loop_out.outcome {
-                AgentOutcome::NeedsConfirmation { .. } => "needs_confirm".into(),
-                AgentOutcome::Silent => "silent".into(),
-                AgentOutcome::Speak { .. } => "speak".into(),
+                AgentOutcome::NeedsConfirmation { .. } => TurnOutcomeKind::NeedsConfirm,
+                AgentOutcome::Silent => TurnOutcomeKind::Silent,
+                AgentOutcome::Speak { .. } => TurnOutcomeKind::Speak,
             },
             approx_chars_in,
         };

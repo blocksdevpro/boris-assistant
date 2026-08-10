@@ -187,8 +187,9 @@ pub async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, Stri
         msg
     })?
     .map_err(|e| {
-        tracing::error!(error = %e, "download_models install failed");
-        e
+        let msg = e.to_string();
+        tracing::error!(error = %msg, "download_models install failed");
+        msg
     })?;
 
     tracing::info!(
@@ -217,7 +218,7 @@ pub fn get_settings() -> Result<AppSettings, String> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "get_settings failed");
-            Err(e)
+            Err(e.to_string())
         }
     }
 }
@@ -236,6 +237,6 @@ pub fn save_app_settings(settings: AppSettings) -> Result<(), String> {
     );
     save_settings(&settings).map_err(|e| {
         tracing::error!(error = %e, "save_app_settings failed");
-        e
+        e.to_string()
     })
 }

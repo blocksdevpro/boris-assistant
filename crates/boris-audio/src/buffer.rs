@@ -149,11 +149,24 @@ impl RecordingBuffer {
         self.is_recording
     }
 
-    /// Enter / leave active recording. Entering clears the exceeded flag.
+    /// Enter / leave active recording.
+    ///
+    /// - Entering (`true`) clears the exceeded flag and keeps the current buffer
+    ///   (pre-roll is the start of the utterance).
+    /// - Leaving (`false`) trims the buffer back to the pre-roll
+    ///   [`Self::preroll_capacity`] (newest samples), so idle mode does not retain
+    ///   a full utterance after endpoint.
     pub fn set_recording(&mut self, is_recording: bool) {
-        self.is_recording = is_recording;
         if is_recording {
+            self.is_recording = true;
             self.exceeded_max = false;
+            return;
+        }
+        self.is_recording = false;
+        // Trim to pre-roll window when returning to idle.
+        if self.buffer.len() > self.capacity {
+            let excess = self.buffer.len() - self.capacity;
+            self.buffer.drain(..excess);
         }
     }
 
@@ -253,5 +266,20 @@ mod tests {
         assert!(r.exceeded_max());
         assert_eq!(r.len(), 5);
         assert_eq!(r.take_audio(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn set_recording_false_trims_to_preroll_capacity() {
+        let mut r = RecordingBuffer::new(3, 20);
+        r.push(&[1.0, 2.0, 3.0]);
+        r.set_recording(true);
+        r.push(&[4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(r.len(), 7);
+
+        r.set_recording(false);
+        assert!(!r.is_recording());
+        assert_eq!(r.len(), 3);
+        // Newest pre-roll samples retained.
+        assert_eq!(r.take_audio(), vec![5.0, 6.0, 7.0]);
     }
 }

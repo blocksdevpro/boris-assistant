@@ -1,4 +1,10 @@
 //! Lean subagent: run a short read-mostly tool loop and return a summary.
+//!
+//! Child tools are filtered with [`ToolMeta::is_read_only`](crate::tool::ToolMeta::is_read_only)
+//! and `risk <= Moderate`. Production tools must set explicit `read_only(true)`
+//! on their meta (kind-only heuristics only treat Read/Search as RO). After the
+//! profile-tool meta fix, `get_user_context` / `recall_notes` / file reads are
+//! eligible; writers (`save_user_fact`, `remember_note`, bash, …) are not.
 
 use std::sync::{Arc, Mutex};
 

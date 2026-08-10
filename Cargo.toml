@@ -24,14 +24,19 @@ boris-sense       = { path = "crates/boris-sense" }
 boris-audio       = { path = "crates/boris-audio" }
 boris-inference   = { path = "crates/boris-inference" }
 boris-ai          = { path = "crates/boris-ai" }
+boris-agent       = { path = "crates/boris-agent" }
 boris-pipeline    = { path = "crates/boris-pipeline" }
 
 # Root package is intentionally not a voice host. Product entrypoint: boris-desktop.
 [package]
-name    = "boris-assistant"
-version = "0.1.0"
-edition = "2021"
-publish = false
+name        = "boris-assistant"
+version     = "0.1.0"
+edition     = "2021"
+description = "Boris Assistant workspace (retired CLI stub; product host is boris-desktop)"
+license     = "Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+publish     = false
 
 [[bin]]
 name = "boris-assistant"

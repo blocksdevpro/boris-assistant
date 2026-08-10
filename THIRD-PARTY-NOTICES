@@ -1,0 +1,25 @@
+Third-Party Notices
+===================
+
+Boris Assistant (this repository's source) is licensed under the Apache License,
+Version 2.0 — see LICENSE.
+
+The product may download or bundle third-party models and native libraries that
+are **not** covered by that Apache-2.0 grant for the Boris source tree. Their
+licenses and terms are defined by their upstream projects. Review those terms
+before redistribution.
+
+Common dependencies / runtime components (non-exhaustive):
+
+  - ONNX Runtime (Microsoft) — https://github.com/microsoft/onnxruntime
+  - DirectML (Microsoft) — used on Windows desktop packaging paths
+  - LiveKit-style / open wake-word ONNX models — see upstream LiveKit / model
+    providers for license and use terms
+  - Parakeet STT weights / graphs — see Hugging Face and model card licenses
+  - Supertone / Supertonic TTS assets — see upstream Supertone / st-tts terms
+  - Kokoro TTS (experimental adapter) — see any-tts / model upstream licenses
+  - Hugging Face Hub downloads — subject to model cards and HF terms; optional
+    auth via HF_TOKEN / HUGGING_FACE_HUB_TOKEN
+
+This file is a pointer only. It is not a substitute for reading upstream
+LICENSE, NOTICE, or model-card files for each component you ship or run.

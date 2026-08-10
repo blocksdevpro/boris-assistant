@@ -1,12 +1,14 @@
 [package]
-name    = "boris-ai"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-ai"
+version     = "0.1.0"
+edition     = "2021"
 license     = "Apache-2.0"
 repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "LLM provider plane: client trait, OpenRouter, stream primitives"
-readme = "README.md"
-publish = false
+readme      = "README.md"
+publish     = false
+keywords    = ["llm", "openrouter", "streaming"]
+categories  = ["api-bindings", "asynchronous"]
 
 [dependencies]
 serde_json  = { workspace = true }

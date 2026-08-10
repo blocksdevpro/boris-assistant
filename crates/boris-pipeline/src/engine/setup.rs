@@ -355,31 +355,30 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     }
 
     let preset = config.capability_preset;
+    // One shared roots config for runtime policy and BuiltinToolPaths so sandbox
+    // / data roots never diverge (Grok layout: state/workspace + memory/sessions).
     let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
     preset.apply_to_sandbox(&mut sandbox);
     // Trusted auto-allow for Moderate tools (notes, workspace writes, clipboard…).
     // Dangerous (bash, open url) still confirm. Disable with BORIS_TRUSTED=0.
     let trusted = !env_flag_false("BORIS_TRUSTED");
     sandbox = sandbox.with_trusted_auto_moderate(trusted);
+    let tool_paths = boris_agent::tools::BuiltinToolPaths {
+        notes_path: paths::notes_path(),
+        profile_path: paths::profile_path(),
+        sandbox_root: sandbox.sandbox_root.clone(),
+        data_roots: sandbox.boris_data_roots.clone(),
+        allow_read: sandbox.allow_read.clone(),
+        allow_write: sandbox.allow_write.clone(),
+        boris_home: paths::boris_home(),
+    };
     agent.configure_runtime(sandbox, Some(paths::audit_path()));
 
     // Core + (optional) power tools filtered by capability preset + personal context.
     let power = preset.wants_power_tools();
     boris_agent::tools::register_builtin_tools_with_preset(
         &mut agent,
-        boris_agent::tools::BuiltinToolPaths {
-            notes_path: paths::notes_path(),
-            profile_path: paths::profile_path(),
-            sandbox_root: paths::workspace_dir(),
-            data_roots: vec![
-                paths::memory_dir(),
-                paths::sessions_root(),
-                paths::workspace_dir(),
-            ],
-            allow_read: boris_agent::default_user_read_roots(),
-            allow_write: vec![],
-            boris_home: paths::boris_home(),
-        },
+        tool_paths,
         true,
         power,
         preset,

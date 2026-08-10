@@ -241,7 +241,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     );
     body.push_str(&toml_body);
 
-    write_atomic(&config_path(), body.as_bytes())
+    write_atomic(&config_path(), body.as_bytes(), false)
         .map_err(|e| PipelineError::settings(format!("write config.toml: {e}")))?;
 
     let auth = AuthFile {
@@ -249,7 +249,8 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     };
     let json = serde_json::to_string_pretty(&auth)
         .map_err(|e| PipelineError::settings(format!("serialize auth.json: {e}")))?;
-    write_atomic(&auth_path(), json.as_bytes())
+    // Secrets: owner-read/write only on Unix (mode applied to temp + final path).
+    write_atomic(&auth_path(), json.as_bytes(), true)
         .map_err(|e| PipelineError::settings(format!("write auth.json: {e}")))?;
 
     tracing::debug!(
@@ -405,27 +406,135 @@ fn archive_legacy_config_toml_if_needed() -> Result<()> {
     Ok(())
 }
 
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+/// Write `bytes` via a sibling `*.tmp`, then replace `path` without an
+/// unlink-first crash window when the platform allows it.
+///
+/// - **Unix:** `rename(tmp, path)` atomically replaces an existing file.
+///   When `private`, temp and final files get mode `0o600` (auth.json).
+/// - **Windows:** move existing aside to `*.replace.bak`, rename temp in,
+///   then remove the backup (never delete the only copy first).
+/// - **Fallback:** direct write to `path` if rename fails.
+fn write_atomic(path: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
+    write_temp_file(&tmp, bytes, private)?;
+
+    #[cfg(unix)]
     {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            let mut f = fs::File::create(path)?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-            let _ = e;
-            Ok(())
+        match fs::rename(&tmp, path) {
+            Ok(()) => {
+                if private {
+                    set_owner_secret_mode(path)?;
+                }
+                Ok(())
+            }
+            Err(_e) => {
+                let _ = fs::remove_file(&tmp);
+                write_direct(path, bytes, private)
+            }
         }
     }
+
+    #[cfg(windows)]
+    {
+        // Never unlink the destination first: move it aside, then promote temp.
+        let bak = path.with_extension("replace.bak");
+        if path.exists() {
+            let _ = fs::remove_file(&bak); // leftover from a prior crashed replace
+            if let Err(_e) = fs::rename(path, &bak) {
+                // Could not park old file; fall back without leaving a hole.
+                let _ = fs::remove_file(&tmp);
+                return write_direct(path, bytes, private);
+            }
+        }
+        match fs::rename(&tmp, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&bak);
+                Ok(())
+            }
+            Err(_e) => {
+                // Restore previous content if we moved it aside.
+                if bak.exists() && !path.exists() {
+                    let _ = fs::rename(&bak, path);
+                } else {
+                    let _ = fs::remove_file(&bak);
+                }
+                let _ = fs::remove_file(&tmp);
+                write_direct(path, bytes, private)
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Best-effort: try rename over existing; fall back to direct write.
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(_e) => {
+                let _ = fs::remove_file(&tmp);
+                write_direct(path, bytes, private)
+            }
+        }
+    }
+}
+
+fn write_temp_file(tmp: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        if private {
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        if private {
+            set_owner_secret_mode(tmp)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = private;
+        let mut f = fs::File::create(tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    }
+}
+
+fn write_direct(path: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        if private {
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        if private {
+            set_owner_secret_mode(path)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = private;
+        let mut f = fs::File::create(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn set_owner_secret_mode(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(test)]

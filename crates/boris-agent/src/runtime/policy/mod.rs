@@ -65,9 +65,9 @@ pub enum ShellPolicy {
 /// Host-injected sandbox + risk policy.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
-    /// Default writable sandbox root (e.g. `~/.boris/sandbox`).
+    /// Default writable sandbox root (e.g. `~/.boris/state/workspace`).
     pub sandbox_root: PathBuf,
-    /// Always-allowed Boris data roots (memory, sessions, …).
+    /// Always-allowed Boris data roots (memory, sessions, workspace, …).
     pub boris_data_roots: Vec<PathBuf>,
     /// Extra user-granted read roots.
     pub allow_read: Vec<PathBuf>,
@@ -106,11 +106,20 @@ impl Default for SandboxConfig {
 
 impl SandboxConfig {
     /// Build a config rooted under a Boris home directory (closed network/shell).
+    ///
+    /// Layout matches Grok / pipeline defaults:
+    /// - write root: `{home}/state/workspace`
+    /// - data roots: memory, sessions, workspace
     pub fn for_boris_home(home: impl Into<PathBuf>) -> Self {
         let home = home.into();
+        let workspace = home.join("state").join("workspace");
         Self {
-            sandbox_root: home.join("sandbox"),
-            boris_data_roots: vec![home.join("memory"), home.join("sessions")],
+            sandbox_root: workspace.clone(),
+            boris_data_roots: vec![
+                home.join("memory"),
+                home.join("sessions"),
+                workspace,
+            ],
             allow_read: vec![],
             allow_write: vec![],
             network: NetworkPolicy::Off,
@@ -477,8 +486,12 @@ mod tests {
 
     fn cfg() -> SandboxConfig {
         SandboxConfig {
-            sandbox_root: PathBuf::from("C:\\Users\\me\\.boris\\sandbox"),
-            boris_data_roots: vec![PathBuf::from("C:\\Users\\me\\.boris\\memory")],
+            sandbox_root: PathBuf::from("C:\\Users\\me\\.boris\\state\\workspace"),
+            boris_data_roots: vec![
+                PathBuf::from("C:\\Users\\me\\.boris\\memory"),
+                PathBuf::from("C:\\Users\\me\\.boris\\sessions"),
+                PathBuf::from("C:\\Users\\me\\.boris\\state\\workspace"),
+            ],
             allow_read: vec![PathBuf::from("C:\\Users\\me\\Documents")],
             allow_write: vec![],
             network: NetworkPolicy::Off,
@@ -488,6 +501,31 @@ mod tests {
             max_confirms_per_turn: 3,
             trusted_auto_moderate: false,
         }
+    }
+
+    #[test]
+    fn for_boris_home_uses_state_workspace_layout() {
+        let home = PathBuf::from(r"C:\Users\me\.boris");
+        let c = SandboxConfig::for_boris_home(&home);
+        let workspace = home.join("state").join("workspace");
+        assert_eq!(c.sandbox_root, workspace);
+        assert!(c.boris_data_roots.contains(&home.join("memory")));
+        assert!(c.boris_data_roots.contains(&home.join("sessions")));
+        assert!(c.boris_data_roots.contains(&workspace));
+    }
+
+    #[test]
+    fn relative_path_write_allowed_by_decide() {
+        let meta = ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite]);
+        let d = decide(&cfg(), &meta, &json!({ "path": "note.txt" }), 0);
+        assert_eq!(d, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn relative_path_escape_denied_by_decide() {
+        let meta = ToolMeta::with_risk(ToolRisk::Moderate).permissions(&[Permission::FsWrite]);
+        let d = decide(&cfg(), &meta, &json!({ "path": "../outside.txt" }), 0);
+        assert!(matches!(d, PolicyDecision::Deny { .. }));
     }
 
     #[test]
@@ -607,7 +645,7 @@ mod tests {
             &cfg(),
             &meta,
             &json!({
-                "source": "C:\\Users\\me\\.boris\\sandbox\\a.txt",
+                "source": "C:\\Users\\me\\.boris\\state\\workspace\\a.txt",
                 "dest": "C:\\Windows\\evil.txt"
             }),
             0,
@@ -621,7 +659,7 @@ mod tests {
         let d = decide(
             &cfg(),
             &meta,
-            &json!({ "path": "C:\\Users\\me\\.boris\\sandbox\\note.txt" }),
+            &json!({ "path": "C:\\Users\\me\\.boris\\state\\workspace\\note.txt" }),
             0,
         );
         assert_eq!(d, PolicyDecision::Allow);

@@ -6,7 +6,8 @@
 //!   confirmation, fall back to sequential (HITL-safe). Otherwise:
 //!   - **wave scheduling** (default): read-only wave (parallel, chunked) then
 //!     write wave (sequential)
-//!   - else: legacy unbounded `join_all` for all auto-allow calls
+//!   - else: legacy parallel path — all auto-allow calls, still chunked by
+//!     `max_parallel_tools` (no unbounded `join_all`)
 //!
 //! Sequential batches can pause mid-batch for HITL and keep remaining siblings.
 
@@ -73,7 +74,8 @@ pub(super) async fn process_tool_calls(
             }
             tracing::debug!(
                 batch = calls.len(),
-                "tool batch: parallel dispatch (legacy join_all)"
+                max_parallel = config.features.max_parallel_tools,
+                "tool batch: parallel dispatch (legacy, chunked)"
             );
             return run_tool_batch_parallel(
                 state,
@@ -206,8 +208,9 @@ async fn run_tool_batch_sequential(
 
 /// Parallel path for batches where every call is auto-allowed or denyable.
 ///
-/// Invokes concurrently; only mutates context after all results are collected,
-/// preserving original call order.
+/// Invokes in chunks of `max_parallel_tools` (same clamp as the wave path);
+/// only mutates context after all results are collected, preserving original
+/// call order.
 async fn run_tool_batch_parallel(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
@@ -221,31 +224,35 @@ async fn run_tool_batch_parallel(
         skip_confirmation: false,
         confirms_used,
     };
+    let max_par = clamp_parallel(calls.len(), config.features.max_parallel_tools);
+    let mut results: Vec<(u64, InvokeResult)> = Vec::with_capacity(calls.len());
 
-    // Borrow tools/runtime only for the concurrent phase (no context mut).
-    let results = {
-        let tools = state.tools;
-        let runtime = state.runtime;
+    // Chunk so we never spawn an unbounded join_all over the full batch.
+    for chunk in calls.chunks(max_par.max(1)) {
+        let chunk_results = {
+            let tools = state.tools;
+            let runtime = state.runtime;
 
-        // Resolve tools + emit starts before concurrent work.
-        let mut tools_for_calls: Vec<&dyn Tool> = Vec::with_capacity(calls.len());
-        for call in &calls {
-            let tool = find_tool(tools, &call.name)?;
-            emit_tool_start(emit, call);
-            tools_for_calls.push(tool);
-        }
-
-        let futs = calls.iter().zip(tools_for_calls).map(|(call, tool)| {
-            let inv = build_tool_invocation(call, config, cancel.clone(), emit);
-            let started = Instant::now();
-            async move {
-                let result = runtime.invoke(tool, inv, opts).await;
-                (started.elapsed().as_millis() as u64, result)
+            let mut tools_for_calls: Vec<&dyn Tool> = Vec::with_capacity(chunk.len());
+            for call in chunk {
+                let tool = find_tool(tools, &call.name)?;
+                emit_tool_start(emit, call);
+                tools_for_calls.push(tool);
             }
-        });
 
-        join_all(futs).await
-    };
+            let futs = chunk.iter().zip(tools_for_calls).map(|(call, tool)| {
+                let inv = build_tool_invocation(call, config, cancel.clone(), emit);
+                let started = Instant::now();
+                async move {
+                    let result = runtime.invoke(tool, inv, opts).await;
+                    (started.elapsed().as_millis() as u64, result)
+                }
+            });
+
+            join_all(futs).await
+        };
+        results.extend(chunk_results);
+    }
 
     commit_batch_results(state, &calls, results, tools_used, emit);
     Ok(ToolBatchResult::Continue)

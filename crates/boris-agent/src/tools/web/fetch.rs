@@ -26,16 +26,15 @@ pub struct WebFetchTool {
 }
 
 impl WebFetchTool {
+    /// Build a fetch tool with the shared web HTTP client (timeouts + SSRF redirect policy).
+    ///
+    /// Fallible: client construction can fail if the TLS/runtime stack is unavailable.
+    /// There is intentionally no panicking [`Default`] — use this constructor in production
+    /// and tests (see `register_builtin_tools` for the registration path).
     pub fn new() -> Result<Self, ToolError> {
         Ok(Self {
             client: http_client()?,
         })
-    }
-}
-
-impl Default for WebFetchTool {
-    fn default() -> Self {
-        Self::new().expect("http client")
     }
 }
 
@@ -177,7 +176,7 @@ mod tests {
 
     #[test]
     fn tool_name_stable() {
-        let t = WebFetchTool::default();
+        let t = WebFetchTool::new().expect("http client for unit test");
         assert_eq!(t.name(), "web_fetch");
     }
 

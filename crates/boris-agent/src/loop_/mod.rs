@@ -13,7 +13,8 @@
 //!
 //! Tool batches that may need HITL run sequentially so remaining sibling calls
 //! can be paused. Auto-allow batches (no confirmation needed) run in parallel
-//! via `join_all` (or read/write waves), preserving original order in context.
+//! via chunked `join_all` (or read/write waves), preserving original order in
+//! context and never exceeding `max_parallel_tools` concurrent invokes.
 
 mod finish;
 mod helpers;

@@ -82,7 +82,8 @@ pub struct SandboxConfig {
     /// Max HITL confirmations per user turn before remaining calls are denied.
     pub max_confirms_per_turn: u32,
     /// When true, auto-allow tools up to Moderate even if `requires_confirmation`
-    /// is set — still force-confirm Dangerous/Critical (trusted session / YOLO-lite).
+    /// is set, and auto-allow Dangerous sandbox-only `FsWrite` tools (file_write /
+    /// file_edit under write roots). Shell, network, and Critical still confirm.
     pub trusted_auto_moderate: bool,
 }
 
@@ -98,7 +99,7 @@ impl Default for SandboxConfig {
             shell: ShellPolicy::Denied,
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         }
     }
@@ -126,7 +127,7 @@ impl SandboxConfig {
             shell: ShellPolicy::Denied,
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         }
     }
@@ -143,9 +144,15 @@ impl SandboxConfig {
         cfg
     }
 
-    /// Enable trusted auto-allow for Moderate tools (sandbox writes, notes, clipboard…).
+    /// Enable trusted auto-allow for ≤ Moderate tools and Dangerous sandbox FsWrite.
     pub fn with_trusted_auto_moderate(mut self, on: bool) -> Self {
         self.trusted_auto_moderate = on;
+        self
+    }
+
+    /// Cap HITL confirmations per user turn (multi-tool budget). Minimum 1.
+    pub fn with_max_confirms_per_turn(mut self, n: u32) -> Self {
+        self.max_confirms_per_turn = n.max(1);
         self
     }
 }
@@ -237,7 +244,7 @@ pub fn decide(
     if !paths.is_empty() {
         let needs_write = meta.permissions.contains(&Permission::FsWrite);
         let needs_read = meta.permissions.contains(&Permission::FsRead) || needs_write;
-        for path in paths {
+        for path in &paths {
             if needs_write {
                 if let Err(reason) = check_path_allowed(config, path, PathAccess::Write) {
                     return PolicyDecision::Deny { reason };
@@ -252,11 +259,24 @@ pub fn decide(
 
     // ── Soft gates (confirmation / risk) ───────────────────────────────────
     // Trusted session: skip HITL for ≤ Moderate even when tool flags confirm.
-    // Shell/network Dangerous+ still force confirm below.
+    // Shell/network Dangerous+ still force confirm below (except sandbox writes).
     if config.trusted_auto_moderate
         && meta.risk <= ToolRisk::Moderate
         && meta.risk < config.force_confirm_at_or_above
         && !meta.permissions.contains(&Permission::Shell)
+    {
+        return PolicyDecision::Allow;
+    }
+
+    // Trusted session: auto-allow Dangerous (not Critical) sandbox file writes.
+    // Path hard-gates above already ensure every path is under write roots.
+    // Shell / network stay confirm; empty path args fall through to confirm.
+    if config.trusted_auto_moderate
+        && meta.risk == ToolRisk::Dangerous
+        && meta.permissions.contains(&Permission::FsWrite)
+        && !meta.permissions.contains(&Permission::Shell)
+        && !meta.permissions.contains(&Permission::Network)
+        && !paths.is_empty()
     {
         return PolicyDecision::Allow;
     }
@@ -498,7 +518,7 @@ mod tests {
             shell: ShellPolicy::Denied,
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         }
     }
@@ -668,8 +688,81 @@ mod tests {
     #[test]
     fn confirm_cap_denies() {
         let meta = ToolMeta::with_risk(ToolRisk::Dangerous);
-        let d = decide(&cfg(), &meta, &json!({}), 3);
+        // Intentionally exercise the limit with a low cap.
+        let mut c = cfg();
+        c.max_confirms_per_turn = 3;
+        let d = decide(&c, &meta, &json!({}), 3);
         assert!(matches!(d, PolicyDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn trusted_auto_allows_dangerous_sandbox_write() {
+        let mut c = cfg();
+        c.trusted_auto_moderate = true;
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .permissions(&[Permission::FsWrite])
+            .confirm(true);
+        let d = decide(
+            &c,
+            &meta,
+            &json!({ "path": "C:\\Users\\me\\.boris\\state\\workspace\\note.txt" }),
+            0,
+        );
+        assert_eq!(d, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn trusted_still_confirms_shell() {
+        let mut c = cfg();
+        c.trusted_auto_moderate = true;
+        c.shell = ShellPolicy::OpenConfirm;
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .permissions(&[Permission::Shell])
+            .confirm(true);
+        let d = decide(&c, &meta, &json!({ "command": "echo hi" }), 0);
+        assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn trusted_off_confirms_dangerous_sandbox_write() {
+        let c = cfg(); // trusted_auto_moderate = false
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .permissions(&[Permission::FsWrite])
+            .confirm(true);
+        let d = decide(
+            &c,
+            &meta,
+            &json!({ "path": "C:\\Users\\me\\.boris\\state\\workspace\\note.txt" }),
+            0,
+        );
+        assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn trusted_does_not_auto_allow_critical_write() {
+        let mut c = cfg();
+        c.trusted_auto_moderate = true;
+        let meta = ToolMeta::with_risk(ToolRisk::Critical)
+            .permissions(&[Permission::FsWrite])
+            .confirm(true);
+        let d = decide(
+            &c,
+            &meta,
+            &json!({ "path": "C:\\Users\\me\\.boris\\state\\workspace\\note.txt" }),
+            0,
+        );
+        assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn trusted_dangerous_write_without_path_falls_through() {
+        let mut c = cfg();
+        c.trusted_auto_moderate = true;
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .permissions(&[Permission::FsWrite])
+            .confirm(true);
+        let d = decide(&c, &meta, &json!({}), 0);
+        assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
     }
 
     #[test]

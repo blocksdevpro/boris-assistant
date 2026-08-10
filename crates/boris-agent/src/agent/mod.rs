@@ -76,6 +76,10 @@ pub struct Agent {
     finish_gate_remaining: u32,
     /// Sandbox snapshot for subagents.
     sandbox_snapshot: SandboxConfig,
+    /// Session-bound todos file (`{session_dir}/todos.json`). None when unbound.
+    todos_path: Option<PathBuf>,
+    /// Session root for subagent artifacts (shared so tools can observe rebinds).
+    subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Agent {
@@ -130,8 +134,10 @@ impl Agent {
             cancel: None,
             skills: None,
             long_term: None,
-            finish_gate_remaining: 2,
+            finish_gate_remaining: 3,
             sandbox_snapshot,
+            todos_path: None,
+            subagent_session_root: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -177,6 +183,10 @@ impl Agent {
     }
 
     /// Register the lean `spawn_subagent` tool (read-mostly child loop).
+    ///
+    /// Shares [`Self::subagent_session_root`] with the tool so
+    /// [`Self::set_subagent_session_root`] / [`Self::bind_session`] rebind
+    /// child storage without re-registering.
     pub fn enable_subagents(&mut self) {
         if self.tools.iter().any(|t| t.name() == "spawn_subagent") {
             return;
@@ -186,20 +196,36 @@ impl Agent {
             Arc::clone(&self.client),
             Arc::clone(&self.shared_tools),
             self.sandbox_snapshot.clone(),
+            Arc::clone(&self.subagent_session_root),
         );
         self.insert_tool(Arc::new(tool));
         info!("spawn_subagent tool enabled");
     }
 
-    /// Enable Grok-style markdown memory under `memory_root` (e.g. `~/.boris/memory`).
+    /// Enable markdown memory: global under `memory_root`, session logs under
+    /// `sessions_root/{id}/memory.md` when bound.
     ///
     /// Registers `memory_search` / `memory_get`, injects a `<memory>` prompt hint,
-    /// and appends each completed turn to a daily session log.
+    /// and appends each completed turn to the **session** `memory.md` after
+    /// [`Self::bind_session`].
     pub fn enable_long_term_memory(
         &mut self,
         memory_root: impl Into<PathBuf>,
     ) -> Result<SharedLongTermMemory, String> {
-        let ltm = LongTermMemory::new(memory_root);
+        self.enable_long_term_memory_with_sessions(memory_root, None)
+    }
+
+    /// Same as [`Self::enable_long_term_memory`] with a sessions workspace for
+    /// cross-chat search (e.g. `~/.boris/sessions/desktop`).
+    pub fn enable_long_term_memory_with_sessions(
+        &mut self,
+        memory_root: impl Into<PathBuf>,
+        sessions_root: Option<PathBuf>,
+    ) -> Result<SharedLongTermMemory, String> {
+        let mut ltm = LongTermMemory::new(memory_root);
+        if let Some(sr) = sessions_root {
+            ltm = ltm.with_sessions_root(sr);
+        }
         ltm.ensure_dirs().map_err(|e| format!("memory dirs: {e}"))?;
         ltm.set_session_id(self.session_id.clone());
         let shared: SharedLongTermMemory = Arc::new(ltm);
@@ -212,6 +238,7 @@ impl Agent {
         self.refresh_system_prompt();
         info!(
             root = %shared.root().display(),
+            sessions = ?shared.sessions_root().map(|p| p.display().to_string()),
             "long-term markdown memory enabled"
         );
         Ok(shared)
@@ -289,6 +316,81 @@ impl Agent {
         }
     }
 
+    /// Clear progressive-listing activations (session isolation).
+    pub fn clear_activations(&mut self) {
+        if let Ok(mut g) = self.activated.lock() {
+            g.clear();
+        }
+    }
+
+    /// Bind or clear the session-local todos file path.
+    ///
+    /// When `Some`, re-registers plan tools against that file (name-dedupe replace).
+    /// When `None`, clears the field only — tools keep the last path until next bind
+    /// (clean break: no workspace fallback re-registration).
+    pub fn set_todos_path(&mut self, path: Option<PathBuf>) {
+        self.todos_path = path.clone();
+        if let Some(p) = path {
+            self.register_tools(crate::tools::plan_tools_at(&p));
+        }
+    }
+
+    /// Swap the audit sink to a session-local JSONL file, or null when unbound.
+    pub fn set_audit_path(&mut self, path: Option<PathBuf>) {
+        if let Some(p) = path {
+            self.runtime
+                .set_audit(Box::new(JsonlAuditSink::new(p)));
+        } else {
+            self.runtime.set_audit(Box::new(NullAuditSink));
+        }
+    }
+
+    /// Set the session root used by subagents for session-local artifacts.
+    pub fn set_subagent_session_root(&mut self, root: Option<PathBuf>) {
+        if let Ok(mut g) = self.subagent_session_root.lock() {
+            *g = root;
+        }
+    }
+
+    /// Shared handle to the subagent session root (live updates via rebind).
+    pub fn subagent_session_root(&self) -> Arc<Mutex<Option<PathBuf>>> {
+        Arc::clone(&self.subagent_session_root)
+    }
+
+    /// Session-bound todos file, if any.
+    pub fn todos_path(&self) -> Option<&std::path::Path> {
+        self.todos_path.as_deref()
+    }
+
+    /// Bind all session-local paths. Best-effort sequential; no multi-step rollback.
+    pub fn bind_session(&mut self, session_dir: &std::path::Path, session_id: &str) {
+        self.set_session_id(Some(session_id.to_string()));
+        self.clear_activations();
+        let todos = session_dir.join("todos.json");
+        self.set_todos_path(Some(todos));
+        self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
+        self.set_subagent_session_root(Some(session_dir.to_path_buf()));
+        if let Some(ltm) = &self.long_term {
+            ltm.set_session_dir(Some(session_dir.to_path_buf()));
+        }
+    }
+
+    /// Unbind session-local paths (session end / go_off).
+    ///
+    /// Clears session id, activations, todos path field, audit sink, subagent
+    /// root, and session memory log binding. Plan tools keep pointing at the last
+    /// todos path until the next bind (no workspace todos migration).
+    pub fn unbind_session(&mut self) {
+        self.set_session_id(None);
+        self.clear_activations();
+        self.set_todos_path(None);
+        self.set_audit_path(None);
+        self.set_subagent_session_root(None);
+        if let Some(ltm) = &self.long_term {
+            ltm.set_session_dir(None);
+        }
+    }
+
     pub fn set_turn_id(&mut self, id: Option<String>) {
         self.turn_id = id;
     }
@@ -310,6 +412,9 @@ impl Agent {
         if self.pending_turn.take().is_some() {
             info!("pending tool confirmation aborted");
         }
+        // Do not keep a turn-scoped shell grant after abort — next turn / retry
+        // must re-confirm shell.
+        self.runtime.clear_turn_grants();
     }
 
     /// Alias for [`Self::abort`] (legacy name used by pipeline).
@@ -377,11 +482,20 @@ impl Agent {
         self.sync_shared_tools();
     }
 
-    /// Toggle trusted auto-allow for Moderate tools (session YOLO-lite).
+    /// Toggle trusted auto-allow for ≤ Moderate tools and Dangerous sandbox writes.
     pub fn set_trusted_auto_moderate(&mut self, on: bool) {
         let mut p = self.runtime.policy().clone();
         p.trusted_auto_moderate = on;
         self.sandbox_snapshot.trusted_auto_moderate = on;
+        self.runtime.set_policy(p);
+    }
+
+    /// Cap HITL confirmations per user turn (multi-tool budget). Minimum 1.
+    pub fn set_max_confirms_per_turn(&mut self, n: u32) {
+        let n = n.max(1);
+        let mut p = self.runtime.policy().clone();
+        p.max_confirms_per_turn = n;
+        self.sandbox_snapshot.max_confirms_per_turn = n;
         self.runtime.set_policy(p);
     }
 

@@ -101,6 +101,9 @@ impl Agent {
             ));
         }
 
+        // Fresh turn: re-require shell HITL even if a prior turn granted it.
+        self.runtime.clear_turn_grants();
+
         if self.personal.is_some() {
             self.refresh_system_prompt();
         }
@@ -112,7 +115,8 @@ impl Agent {
             }
         }
         self.context.compact_mechanical();
-        self.finish_gate_remaining = 2;
+        // Todo + research re-entry budget (each re-enter costs one).
+        self.finish_gate_remaining = 3;
 
         let started = Instant::now();
         let preview = log_preview(user_text, LOG_PREVIEW_CHARS);
@@ -134,7 +138,10 @@ impl Agent {
         self.cancel = Some(ct.clone());
         let config = self.loop_config();
         let emit = self.make_emit();
-        let sandbox_for_gate = self.sandbox_snapshot.sandbox_root.clone();
+        // Finish gate reads the session-bound todos *file* (not sandbox root).
+        let todos_for_gate = self.todos_path.clone().unwrap_or_else(|| {
+            self.sandbox_snapshot.sandbox_root.join("todos.json")
+        });
 
         let loop_out = {
             let state = LoopState {
@@ -153,7 +160,7 @@ impl Agent {
                 0,
                 Some(ct),
                 Some(emit),
-                Some(sandbox_for_gate),
+                Some(todos_for_gate),
                 self.finish_gate_remaining,
             )
             .await
@@ -286,6 +293,7 @@ impl Agent {
             outcome = outcome_label,
             duration_ms = duration.as_millis() as u64,
             tool_rounds = loop_out.tool_rounds,
+            tools_count = loop_out.tools_used.len(),
             tools = ?loop_out.tools_used,
             approx_chars_in,
             "agent turn end"

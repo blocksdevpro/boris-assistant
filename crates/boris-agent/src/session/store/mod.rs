@@ -9,6 +9,11 @@
 //!     summary.json            # Grok-like session summary
 //!     chat_history.jsonl      # full agent transcript (user/assistant/tool/system)
 //!     events.jsonl            # turn lifecycle events
+//!     todos.json              # session todo list (`[]` when empty)
+//!     tool_calls.jsonl        # may be lazy-created by audit sink
+//!     memory.md               # session turn log (LTM; lazy on first append)
+//!     subagents/              # per-session subagent artifacts
+//!     scratch/                # optional empty dir
 //! ```
 //!
 //! # Module layout
@@ -58,6 +63,31 @@ impl SessionStore {
         self.session_dir(id).join("chat_history.jsonl")
     }
 
+    /// Path to session todos (`todos.json`).
+    pub fn todos_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("todos.json")
+    }
+
+    /// Path to tool-call audit log (`tool_calls.jsonl`; may be lazy-created).
+    pub fn tool_calls_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("tool_calls.jsonl")
+    }
+
+    /// Directory for per-session subagent artifacts.
+    pub fn subagents_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("subagents")
+    }
+
+    /// Optional per-session scratch directory.
+    pub fn scratch_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("scratch")
+    }
+
+    /// Session-local turn log (`memory.md`) for long-term memory append/search.
+    pub fn memory_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("memory.md")
+    }
+
     fn summary_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("summary.json")
     }
@@ -70,6 +100,53 @@ impl SessionStore {
         self.root.join("current.json")
     }
 
+    /// Ensure session dir exists; write empty `todos.json` if missing; create
+    /// `subagents/` and `scratch/`.
+    ///
+    /// Does **not** create empty `tool_calls.jsonl` (lazy on first audit write).
+    pub fn ensure_session_artifacts(&self, id: &SessionId) -> Result<(), String> {
+        let dir = self.session_dir(id);
+        fs::create_dir_all(&dir).map_err(|e| format!("create session dir: {e}"))?;
+
+        let todos = self.todos_path(id);
+        if !todos.is_file() {
+            write_atomic(&todos, b"[]").map_err(|e| format!("write todos: {e}"))?;
+        }
+
+        fs::create_dir_all(self.subagents_dir(id))
+            .map_err(|e| format!("create subagents dir: {e}"))?;
+        fs::create_dir_all(self.scratch_dir(id))
+            .map_err(|e| format!("create scratch dir: {e}"))?;
+
+        Ok(())
+    }
+
+    /// Session ids under the root that have a `summary.json`.
+    pub fn list_ids(&self) -> Result<Vec<SessionId>, String> {
+        if !self.root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        let entries =
+            fs::read_dir(&self.root).map_err(|e| format!("read sessions root: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read sessions root entry: {e}"))?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if !path.join("summary.json").is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            ids.push(SessionId::from(name));
+        }
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(ids)
+    }
+
     /// Create a new Active session: write `summary.json`, set `current.json`.
     pub fn create(&self) -> Result<SessionMeta, String> {
         self.ensure_root()?;
@@ -77,6 +154,7 @@ impl SessionStore {
         let meta = SessionMeta::new_active(id.clone());
         fs::create_dir_all(self.session_dir(&id))
             .map_err(|e| format!("create session dir: {e}"))?;
+        self.ensure_session_artifacts(&id)?;
         self.write_summary(&meta, 0)?;
         self.set_current(&id)?;
         let _ = append_event(
@@ -320,6 +398,76 @@ mod tests {
 
         let cur = store.current_id().expect("current_id");
         assert_eq!(cur.as_ref(), Some(&meta.id));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn create_ensures_session_artifacts() {
+        let root = temp_store_root("artifacts");
+        let store = SessionStore::new(&root);
+        let meta = store.create().expect("create");
+
+        let todos = store.todos_path(&meta.id);
+        assert!(todos.is_file(), "todos.json should exist");
+        let todos_raw = fs::read_to_string(&todos).unwrap();
+        assert_eq!(todos_raw.trim(), "[]");
+
+        assert!(
+            store.subagents_dir(&meta.id).is_dir(),
+            "subagents/ should exist"
+        );
+        assert!(store.scratch_dir(&meta.id).is_dir(), "scratch/ should exist");
+
+        // tool_calls.jsonl is lazy — must not be created empty at session start.
+        assert!(
+            !store.tool_calls_path(&meta.id).exists(),
+            "tool_calls.jsonl should not be pre-created"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn ensure_session_artifacts_idempotent_preserves_todos() {
+        let root = temp_store_root("artifacts_idempotent");
+        let store = SessionStore::new(&root);
+        let meta = store.create().expect("create");
+
+        let todos = store.todos_path(&meta.id);
+        fs::write(&todos, b"[{\"id\":\"t1\"}]").unwrap();
+
+        store
+            .ensure_session_artifacts(&meta.id)
+            .expect("ensure again");
+
+        let todos_raw = fs::read_to_string(&todos).unwrap();
+        assert_eq!(todos_raw, "[{\"id\":\"t1\"}]");
+        assert!(store.subagents_dir(&meta.id).is_dir());
+        assert!(store.scratch_dir(&meta.id).is_dir());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn list_ids_finds_sessions_with_summary() {
+        let root = temp_store_root("list_ids");
+        let store = SessionStore::new(&root);
+
+        assert!(store.list_ids().unwrap().is_empty());
+
+        let a = store.create().expect("create a");
+        let b = store.create().expect("create b");
+
+        // Noise: dir without summary.json is ignored.
+        fs::create_dir_all(root.join("not-a-session")).unwrap();
+        fs::write(root.join("junk.txt"), b"x").unwrap();
+
+        let mut ids = store.list_ids().expect("list");
+        ids.sort_by(|x, y| x.as_str().cmp(y.as_str()));
+        let mut expected = vec![a.id.clone(), b.id.clone()];
+        expected.sort_by(|x, y| x.as_str().cmp(y.as_str()));
+        assert_eq!(ids, expected);
 
         cleanup(&root);
     }

@@ -276,7 +276,7 @@ mod tests {
             shell: super::super::ShellPolicy::Denied,
             auto_allow_up_to: crate::tool::ToolRisk::Moderate,
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         }
     }
@@ -403,7 +403,7 @@ mod tests {
             shell: super::super::ShellPolicy::Denied,
             auto_allow_up_to: crate::tool::ToolRisk::Moderate,
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         };
         // If link is a dir symlink to outside, path under link is outside root after canon.

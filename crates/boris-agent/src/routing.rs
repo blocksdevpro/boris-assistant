@@ -41,7 +41,18 @@ const STRONG_NEEDLES: &[&str] = &[
     "research",
     "search",
     "look up",
+    "look for",
     "find out",
+    "find my",
+    "find me",
+    "find the",
+    "linkedin",
+    "linked in",
+    "github",
+    "profile",
+    "who is",
+    "where's my",
+    "where is my",
     "implement",
     "fix",
     "debug",
@@ -255,6 +266,18 @@ mod tests {
     fn classifies_research_as_strong() {
         assert_eq!(
             classify_route("research the latest Rust async runtimes"),
+            RouteMode::Strong
+        );
+    }
+
+    #[test]
+    fn classifies_person_lookup_as_strong() {
+        assert_eq!(
+            classify_route("find my linkedin profile Uttam"),
+            RouteMode::Strong
+        );
+        assert_eq!(
+            classify_route("look for my github"),
             RouteMode::Strong
         );
     }

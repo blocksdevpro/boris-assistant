@@ -1,12 +1,12 @@
 //! [`ToolRuntime`]: policy → (confirm | deny | run) → truncate → audit.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
 
 use crate::reminder::with_reminder;
-use crate::tool::{truncate_tool_result_to, Tool, ToolMeta};
+use crate::tool::{truncate_tool_result_to, Permission, Tool, ToolMeta};
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
 use super::pending::PendingToolCall;
@@ -16,11 +16,14 @@ use super::timeout::{is_timeout, run_with_timeout};
 // Re-export so `crate::runtime::invoke::{ToolInvocation, …}` stays valid.
 pub use super::invocation::{InvokeOptions, InvokeResult, ToolInvocation};
 
-/// Mediates every tool call: policy → (confirm|deny|run) → truncate → audit.
+/// Mediates every tool call: policy → (confirm | deny | run) → truncate → audit.
 pub struct ToolRuntime {
     policy: SandboxConfig,
     audit: Box<dyn AuditSink>,
     pending_seq: AtomicU64,
+    /// After the user approves any shell tool this turn, further shell HITL is
+    /// skipped (hard gates still apply). Reset at each new user turn / abort.
+    shell_granted_this_turn: AtomicBool,
 }
 
 impl ToolRuntime {
@@ -30,6 +33,7 @@ impl ToolRuntime {
             policy,
             audit,
             pending_seq: AtomicU64::new(1),
+            shell_granted_this_turn: AtomicBool::new(false),
         }
     }
 
@@ -53,9 +57,38 @@ impl ToolRuntime {
         self.audit = audit;
     }
 
+    /// Clear turn-scoped shell grant (call at the start of each user turn).
+    pub fn clear_turn_grants(&self) {
+        self.shell_granted_this_turn.store(false, Ordering::Relaxed);
+    }
+
+    /// Record that the user approved a shell tool this turn.
+    ///
+    /// Further shell tools skip the confirm UI only; path/shell/network hard
+    /// gates and the bash deny list still run.
+    pub fn grant_shell_this_turn(&self) {
+        self.shell_granted_this_turn
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Whether shell was already approved once this turn.
+    pub fn shell_granted_this_turn(&self) -> bool {
+        self.shell_granted_this_turn.load(Ordering::Relaxed)
+    }
+
     fn next_pending_id(&self) -> String {
         let n = self.pending_seq.fetch_add(1, Ordering::Relaxed);
         format!("p-{n}-{}", now_ms())
+    }
+
+    /// True when this invoke may skip the confirm UI (one-shot grant or
+    /// turn-scoped shell grant after a prior yes).
+    fn effective_skip_confirmation(&self, meta: &ToolMeta, opts: InvokeOptions) -> bool {
+        if opts.skip_confirmation {
+            return true;
+        }
+        meta.permissions.contains(&Permission::Shell)
+            && self.shell_granted_this_turn.load(Ordering::Relaxed)
     }
 
     /// Policy-only decision (no execute). Used to plan parallel batches.
@@ -72,7 +105,7 @@ impl ToolRuntime {
         let args = normalize_args(args);
         apply_skip_confirmation(
             decide(&self.policy, &meta, &args, opts.confirms_used),
-            opts.skip_confirmation,
+            self.effective_skip_confirmation(&meta, opts),
         )
     }
 
@@ -89,7 +122,7 @@ impl ToolRuntime {
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
         let decision = apply_skip_confirmation(
             decide(&self.policy, &meta, &args, opts.confirms_used),
-            opts.skip_confirmation,
+            self.effective_skip_confirmation(&meta, opts),
         );
 
         match decision {
@@ -238,14 +271,32 @@ fn apply_skip_confirmation(decision: PolicyDecision, skip: bool) -> PolicyDecisi
     }
 }
 
+/// Short voice-friendly confirm line. Prefer the shell command itself when
+/// present so TTS stays snappy ("Run git status?" vs a long args dump).
 fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
-    let summary = if pending.args_summary.chars().count() > 80 {
-        let head: String = pending.args_summary.chars().take(77).collect();
-        format!("{head}…")
+    if pending.name == "bash" {
+        if let Some(cmd) = pending
+            .args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let cmd = truncate_voice_chars(cmd, 56);
+            return format!("Run `{cmd}`?");
+        }
+    }
+    let summary = truncate_voice_chars(&pending.args_summary, 64);
+    format!("Run {summary}?")
+}
+
+fn truncate_voice_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
     } else {
-        pending.args_summary.clone()
-    };
-    format!("I want to run {summary}. Should I go ahead?")
+        let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +416,110 @@ mod tests {
         }
     }
 
+    struct ShellOnceTool {
+        ran: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl Tool for ShellOnceTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "shell"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
+        }
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::with_risk(ToolRisk::Dangerous)
+                .permissions(&[crate::tool::Permission::Shell])
+                .confirm(true)
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolCallContext,
+            _args: Value,
+        ) -> Result<String, ToolError> {
+            *self.ran.lock().unwrap() += 1;
+            Ok("ok".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_turn_grant_skips_later_shell_hitl() {
+        let mut policy = SandboxConfig::default();
+        policy.shell = crate::runtime::ShellPolicy::OpenConfirm;
+        let rt = ToolRuntime::new(policy, Box::new(NullAuditSink));
+        let tool = ShellOnceTool {
+            ran: Mutex::new(0),
+        };
+
+        // First call still needs confirm.
+        let args = json!({ "command": "echo a" });
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c1", "bash", args.clone()),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::NeedsConfirmation { speak_prompt, .. } => {
+                assert!(
+                    speak_prompt.contains("echo a") || speak_prompt.contains('?'),
+                    "expected short speak prompt, got: {speak_prompt}"
+                );
+            }
+            other => panic!("expected confirm, got {other:?}"),
+        }
+
+        // After turn grant, later shell skips HITL (hard gates still run).
+        rt.grant_shell_this_turn();
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c2", "bash", json!({ "command": "echo b" })),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::Observation(s) => {
+                assert!(s.starts_with("ok"));
+                assert_eq!(*tool.ran.lock().unwrap(), 1);
+            }
+            other => panic!("expected auto-run after shell grant, got {other:?}"),
+        }
+
+        // Clear restores confirm requirement.
+        rt.clear_turn_grants();
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c3", "bash", args),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::NeedsConfirmation { .. } => {}
+            other => panic!("expected confirm after clear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn speak_confirm_prompt_prefers_bash_command() {
+        let pending = PendingToolCall::new(
+            "p1",
+            "bash",
+            json!({ "command": "git status" }),
+            "bash (command=git status)",
+            ToolRisk::Dangerous,
+            "c1",
+        );
+        let s = speak_confirm_prompt(&pending);
+        assert_eq!(s, "Run `git status`?");
+    }
+
     #[tokio::test]
     async fn grant_still_enforces_path_policy() {
         use crate::tool::{Permission, ToolKind};
@@ -407,7 +562,7 @@ mod tests {
             shell: crate::runtime::ShellPolicy::Denied,
             auto_allow_up_to: ToolRisk::Moderate,
             force_confirm_at_or_above: ToolRisk::Dangerous,
-            max_confirms_per_turn: 3,
+            max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
         };
         let rt = ToolRuntime::new(policy, Box::new(MemoryAuditSink::new()));

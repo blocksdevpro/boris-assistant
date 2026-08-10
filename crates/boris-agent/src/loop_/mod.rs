@@ -39,7 +39,8 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult};
 
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
-    build_tool_invocation, find_tool, observation_looks_ok, tool_observation_json,
+    build_tool_invocation, find_tool, find_tool_opt, observation_looks_ok, tool_observation_json,
+    unknown_tool_observation,
 };
 use message_parse::{extract_reply_text, parse_raw_tool_calls};
 use round::{
@@ -71,7 +72,7 @@ pub async fn agent_loop(
     confirms_used: u32,
     cancel: Option<CancellationToken>,
     emit: Option<EmitFn>,
-    sandbox_root: Option<std::path::PathBuf>,
+    todos_file: Option<std::path::PathBuf>,
     mut finish_gate_left: u32,
 ) -> Result<LoopResult, AgentError> {
     let emit = emit.unwrap_or_else(noop_emit);
@@ -81,7 +82,10 @@ pub async fn agent_loop(
     let mut tool_rounds = tool_rounds;
     let mut confirms_used = confirms_used;
     let max_rounds = config.max_tool_rounds as usize;
-    let sandbox_root = sandbox_root.unwrap_or_else(crate::finish_gate::default_sandbox_guess);
+    // Full path to todos.json (session-bound or sandbox fallback).
+    let todos_file = todos_file.unwrap_or_else(|| {
+        crate::finish_gate::default_sandbox_guess().join("todos.json")
+    });
     // Last non-empty spoken line this turn (finish-gate re-entry must not discard it).
     let mut last_speakable: Option<String> = None;
 
@@ -170,22 +174,38 @@ pub async fn agent_loop(
             last_speakable = Some(reply.clone());
         }
 
-        // Finish gate: only when *this turn* used tools and open todos remain.
-        // Stale todos from a prior session must not force re-entry (and silence)
-        // on a casual "what are you doing?" reply.
-        if should_reenter_finish_gate(at_cap, finish_gate_left, &reply, &tools_used, &sandbox_root)
-        {
+        // Finish gate: only when *this turn* used tools and either open todos
+        // remain or research was under-tooled. Stale todos from a prior session
+        // must not force re-entry (and silence) on a casual reply.
+        if should_reenter_finish_gate(
+            at_cap,
+            finish_gate_left,
+            &reply,
+            &tools_used,
+            &todos_file,
+            user_text,
+        ) {
             finish_gate_left = finish_gate_left.saturating_sub(1);
-            let pending = crate::finish_gate::pending_todo_count(&sandbox_root);
-            tracing::info!(
-                pending,
-                left = finish_gate_left,
-                "finish gate: open todos — continue tooling"
-            );
-            state.context.push(
-                Role::User,
-                crate::finish_gate::todo_gate_reminder(pending),
-            );
+            let reminder = if crate::finish_gate::should_research_gate(
+                user_text,
+                &reply,
+                &tools_used,
+            ) {
+                tracing::info!(
+                    left = finish_gate_left,
+                    "finish gate: weak research — continue tooling"
+                );
+                crate::finish_gate::research_gate_reminder()
+            } else {
+                let pending = crate::finish_gate::pending_todo_count(&todos_file);
+                tracing::info!(
+                    pending,
+                    left = finish_gate_left,
+                    "finish gate: open todos — continue tooling"
+                );
+                crate::finish_gate::todo_gate_reminder(pending)
+            };
+            state.context.push(Role::User, reminder);
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
             });
@@ -213,7 +233,8 @@ pub async fn agent_loop(
     })
 }
 
-/// Execute one already-approved (or rejected) pending tool, then remaining siblings.
+/// Execute one already-approved (or rejected) pending tool (plus any
+/// `batch_with` siblings covered by the same yes/no), then remaining siblings.
 pub async fn resume_pending_tool(
     mut state: LoopState<'_>,
     pending_turn: PendingTurn,
@@ -226,6 +247,7 @@ pub async fn resume_pending_tool(
     let mut tools_used = pending_turn.tools_used;
     let tool_rounds = pending_turn.tool_rounds;
     let mut confirms_used = pending_turn.confirms_used;
+    let batch_with = pending_turn.batch_with;
     let remaining = pending_turn.remaining_calls;
     let pending = pending_turn.pending;
     let user_text = pending_turn.user_text;
@@ -238,6 +260,12 @@ pub async fn resume_pending_tool(
         args_summary: pending.args_summary.clone(),
     });
     let started = Instant::now();
+
+    // Turn-scoped shell grant: after the user says yes once to shell, later
+    // bash calls this turn skip HITL (hard gates + deny list still apply).
+    if approved && tool.meta().permissions.contains(&crate::tool::Permission::Shell) {
+        state.runtime.grant_shell_this_turn();
+    }
 
     let observation = if approved {
         // Disjoint borrows: `tool` from `state.tools`, invoke via `state.runtime`.
@@ -281,6 +309,76 @@ pub async fn resume_pending_tool(
         Role::Tool,
         tool_observation_json(&pending.call_id, observation),
     );
+
+    // Same yes/no covers batch_with siblings (one HITL decision).
+    for call in batch_with {
+        let summary = crate::runtime::args_summary(&call.name, &call.args);
+        emit(AgentEvent::ToolExecutionStart {
+            call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            args_summary: summary.clone(),
+        });
+        let started = Instant::now();
+        let Some(tool) = find_tool_opt(state.tools, &call.name) else {
+            let observation = unknown_tool_observation(&call.name);
+            let duration_ms = started.elapsed().as_millis() as u64;
+            emit(AgentEvent::ToolExecutionEnd {
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
+                ok: false,
+                duration_ms,
+            });
+            tools_used.push(call.name.clone());
+            state.context.push(
+                Role::Tool,
+                tool_observation_json(&call.call_id, observation),
+            );
+            continue;
+        };
+        let observation = if approved {
+            let mut inv = build_tool_invocation(&call, config, cancel.clone(), &emit);
+            inv.cwd = None;
+            let opts = InvokeOptions {
+                skip_confirmation: true,
+                confirms_used,
+            };
+            match state.runtime.invoke(tool, inv, opts).await {
+                InvokeResult::Observation(s) => s,
+                InvokeResult::Denied { reason } => format!("Error: {reason}"),
+                InvokeResult::NeedsConfirmation { .. } => {
+                    "Error: unexpected confirmation after grant".to_string()
+                }
+            }
+        } else {
+            let risk = tool.meta().risk;
+            let rejected = crate::runtime::PendingToolCall::new(
+                format!("batch-{}", call.call_id),
+                call.name.clone(),
+                call.args.clone(),
+                summary,
+                risk,
+                call.call_id.clone(),
+            );
+            state.runtime.audit_rejection(
+                &rejected,
+                config.session_id.as_deref(),
+                config.turn_id.as_deref(),
+            );
+            "Error: user declined this action".to_string()
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+        emit(AgentEvent::ToolExecutionEnd {
+            call_id: call.call_id.clone(),
+            tool_name: call.name.clone(),
+            ok: approved && observation_looks_ok(&observation),
+            duration_ms,
+        });
+        tools_used.push(call.name.clone());
+        state.context.push(
+            Role::Tool,
+            tool_observation_json(&call.call_id, observation),
+        );
+    }
 
     match process_tool_calls(
         &mut state,

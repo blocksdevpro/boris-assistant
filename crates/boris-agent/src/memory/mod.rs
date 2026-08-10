@@ -1,7 +1,7 @@
 //! Personal context + long-term markdown memory.
 //!
 //! - **Profile** (`profile.json`): compact who-is-the-human facts for every turn.
-//! - **Long-term** (`MEMORY.md` + `desktop/sessions/*.md`): Grok-style cross-session knowledge.
+//! - **Long-term** (global `MEMORY.md` + per-session `sessions/…/memory.md`): curated global + chat-local logs.
 //! - **Extract**: heuristics + optional side-channel LLM → [`ProfileDelta`].
 //!
 //! # Module layout
@@ -11,7 +11,7 @@
 //! | [`profile`]   | [`UserProfile`] / facts / prompt block |
 //! | [`store`]     | load/save `profile.json` |
 //! | [`extract`]   | heuristics + LLM personal extract |
-//! | [`long_term`] | `MEMORY.md` + session logs + search |
+//! | [`long_term`] | global `MEMORY.md` + session `memory.md` + search |
 
 pub mod extract;
 pub mod long_term;

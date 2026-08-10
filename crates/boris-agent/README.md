@@ -94,13 +94,18 @@ There is **no hard cap** on count per message. The loop processes the full batch
 |------|------|----------|
 | **wave scheduling** (default) | batch auto-allowed | read-only tools run in parallel waves (`max_parallel_tools`, default **16**); writes run sequential |
 | **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` at once |
-| **sequential** | any call needs confirm, or batch size 1 | HITL-safe one-by-one (can pause mid-batch) |
+| **sequential** | any call needs confirm, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
 
 Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
+HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).
+
+**Trusted session** (`trusted_auto_moderate`): auto-allows ≤ Moderate tools **and** Dangerous sandbox `FsWrite` (file_write/file_edit under write roots). Shell, open URL, and Critical still need yes.
 
 Host env (pipeline):
 - `BORIS_WAVE_SCHEDULING=0` — disable (legacy `BORIS_CONCURRENCY_V2=0` still works)
 - `BORIS_MAX_PARALLEL_TOOLS=N` — cap concurrent reads in a wave
+- `BORIS_MAX_CONFIRMS=N` — HITL confirm budget per turn (default 12)
+- `BORIS_TRUSTED=0|1` — override trusted auto-moderate
 
 ## Module map
 

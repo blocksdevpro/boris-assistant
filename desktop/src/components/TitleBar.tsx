@@ -19,7 +19,15 @@ function RestoreIcon({ className }: { className?: string }) {
   );
 }
 
-export function TitleBar({ trailing }: { trailing?: ReactNode }) {
+export function TitleBar({
+  title = "Boris",
+  leading,
+  trailing,
+}: {
+  title?: string;
+  leading?: ReactNode;
+  trailing?: ReactNode;
+}) {
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [maximized, setMaximized] = useState(false);
 
@@ -48,39 +56,35 @@ export function TitleBar({ trailing }: { trailing?: ReactNode }) {
   return (
     <header
       data-tauri-drag-region
-      className="flex h-11 shrink-0 select-none items-center border-b border-white/[0.06] bg-[#0c0d10]/80 backdrop-blur-xl"
+      className="flex h-12 shrink-0 select-none items-center border-b border-white/[0.06] bg-[#0b0b0c]/90 backdrop-blur-xl"
     >
       <div
         data-tauri-drag-region
-        className="flex min-w-0 flex-1 items-center gap-2.5 px-4"
+        className="flex min-w-0 flex-1 items-center gap-2 px-3"
       >
-        <div
+        {leading ? (
+          <div className="shrink-0">{leading}</div>
+        ) : (
+          <div
+            data-tauri-drag-region
+            className="flex size-6 items-center justify-center rounded-md bg-white/[0.06]"
+          >
+            <img
+              src="/icons/boris-mark.svg"
+              alt=""
+              className="pointer-events-none size-3.5"
+              draggable={false}
+            />
+          </div>
+        )}
+        <p
           data-tauri-drag-region
-          className="flex size-6 items-center justify-center rounded-md bg-white/[0.06] ring-1 ring-white/10"
+          className="truncate text-[13px] font-semibold tracking-tight text-white/90"
         >
-          <img
-            src="/icons/boris-mark.svg"
-            alt=""
-            className="pointer-events-none size-3.5"
-            draggable={false}
-          />
-        </div>
-        <div data-tauri-drag-region className="min-w-0">
-          <p
-            data-tauri-drag-region
-            className="truncate text-[13px] font-semibold tracking-tight text-white"
-          >
-            Boris
-          </p>
-          <p
-            data-tauri-drag-region
-            className="truncate text-[10px] tracking-wide text-white/35"
-          >
-            Voice console
-          </p>
-        </div>
+          {title}
+        </p>
         {trailing ? (
-          <div className="ml-3 hidden min-w-0 sm:block">{trailing}</div>
+          <div className="ml-auto mr-1 flex shrink-0 items-center">{trailing}</div>
         ) : null}
       </div>
 

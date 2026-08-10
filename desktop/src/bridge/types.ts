@@ -117,17 +117,42 @@ export type AppSettings = {
   /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
   /** Fast / cheap model for simple turns. */
-  openrouter_fast_model?: string;
+  openrouter_fast_model: string;
   /**
    * OpenRouter **model-provider** order for the strong model
    * (e.g. `coreweave` or `coreweave,baseten`) — inference host, not API brand.
    */
-  openrouter_model_provider?: string;
+  openrouter_model_provider: string;
   /** Model-provider order for the fast model. */
-  openrouter_fast_provider?: string;
+  openrouter_fast_provider: string;
   /** When true, do not fall back to other hosts if the preferred list fails. */
-  openrouter_pin_provider?: boolean;
-  capability_preset?: string;
+  openrouter_pin_provider: boolean;
+  /** `full` | `local_power` | `voice_safe` */
+  capability_preset: string;
+  /** Preferred mic device id; empty = OS default. */
+  input_device: string;
+  /** Preferred speaker device id; empty = OS default. */
+  output_device: string;
+  /** Supertone voice stem (e.g. `M4`). */
+  tts_voice_id: string;
+  /** Long-term markdown memory. */
+  long_term_memory: boolean;
+  /**
+   * Trusted mode: auto-allow notes and sandbox file writes.
+   * Shell and open URL still need yes.
+   */
+  trusted_auto_moderate: boolean;
+  /**
+   * Max HITL confirms per user turn before remaining tools are denied.
+   * Default 12 (multi-tool friendly). No dedicated UI control yet.
+   */
+  max_confirms_per_turn: number;
+  /** Prefer showing the floating island on wake. */
+  show_overlay_on_wake: boolean;
+  /** Start the engine when the app opens. */
+  start_engine_on_launch: boolean;
+  /** Optional log filter (`info`, `boris=debug`, …). */
+  logging_filter: string;
 };
 
 export const EMPTY_SETTINGS: AppSettings = {
@@ -137,7 +162,16 @@ export const EMPTY_SETTINGS: AppSettings = {
   openrouter_model_provider: "",
   openrouter_fast_provider: "",
   openrouter_pin_provider: false,
-  capability_preset: "",
+  capability_preset: "full",
+  input_device: "",
+  output_device: "",
+  tts_voice_id: "M4",
+  long_term_memory: true,
+  trusted_auto_moderate: true,
+  max_confirms_per_turn: 12,
+  show_overlay_on_wake: false,
+  start_engine_on_launch: false,
+  logging_filter: "",
 };
 
 /** Common OpenRouter chat models for the preset dropdown. */
@@ -220,8 +254,23 @@ export function normalizeSettings(
     openrouter_model_provider: raw?.openrouter_model_provider ?? "",
     openrouter_fast_provider: raw?.openrouter_fast_provider ?? "",
     openrouter_pin_provider: raw?.openrouter_pin_provider ?? false,
-    capability_preset: raw?.capability_preset ?? "",
+    capability_preset: raw?.capability_preset?.trim() || "full",
+    input_device: raw?.input_device ?? "",
+    output_device: raw?.output_device ?? "",
+    tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
+    long_term_memory: raw?.long_term_memory ?? true,
+    trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
+    max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
+    show_overlay_on_wake: raw?.show_overlay_on_wake ?? false,
+    start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    logging_filter: raw?.logging_filter ?? "",
   };
+}
+
+function normalizeMaxConfirms(raw: number | null | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 12;
+  const n = Math.floor(raw);
+  return n < 1 ? 12 : n;
 }
 
 /** Wire shape for `save_app_settings` (always send full struct to Rust). */

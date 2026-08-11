@@ -20,6 +20,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::logging;
 use crate::orchestrator::AppState;
+use crate::overlay_win;
 
 // ── Event names (emitted to the webview) ─────────────────────────────────────
 
@@ -102,6 +103,9 @@ pub fn start_engine(
             fast_provider,
             pin_provider,
             move |picture| {
+                if let Ok(settings) = load_settings() {
+                    overlay_win::sync_visibility(&app, &settings, &picture);
+                }
                 let _ = app.emit(EVENT_STATUS, picture);
             },
         )
@@ -115,12 +119,18 @@ pub fn start_engine(
 }
 
 #[tauri::command]
-pub fn stop_engine(state: State<'_, AppState>) -> Result<(), String> {
+pub fn stop_engine(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     tracing::info!("stop_engine command");
     state.stop().map_err(|e| {
         tracing::error!(error = %e, "stop_engine failed");
         e
-    })
+    })?;
+    let picture = state.status();
+    if let Ok(settings) = load_settings() {
+        overlay_win::sync_visibility(&app, &settings, &picture);
+    }
+    let _ = app.emit(EVENT_STATUS, picture);
+    Ok(())
 }
 
 #[tauri::command]
@@ -226,7 +236,11 @@ pub fn get_settings() -> Result<AppSettings, String> {
 
 /// Persist prefs to `config.toml` and secrets to `auth.json` (never log key values).
 #[tauri::command]
-pub fn save_app_settings(settings: AppSettings) -> Result<(), String> {
+pub fn save_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<(), String> {
     tracing::info!(
         has_openrouter_key = !settings.openrouter_api_key.trim().is_empty(),
         has_exa_key = !settings.exa_api_key.trim().is_empty(),
@@ -240,5 +254,8 @@ pub fn save_app_settings(settings: AppSettings) -> Result<(), String> {
     save_settings(&settings).map_err(|e| {
         tracing::error!(error = %e, "save_app_settings failed");
         e.to_string()
-    })
+    })?;
+    overlay_win::apply_preferences(&app, &settings);
+    overlay_win::sync_visibility(&app, &settings, &state.status());
+    Ok(())
 }

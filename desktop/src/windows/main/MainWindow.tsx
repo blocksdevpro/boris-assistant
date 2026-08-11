@@ -6,14 +6,21 @@ import {
   useState,
 } from "react";
 import {
+  AlertCircle,
+  Check,
   ChevronLeft,
   ChevronRight,
   Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  LoaderCircle,
   Power,
   PowerOff,
   RefreshCw,
   Settings as SettingsIcon,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,6 +62,9 @@ import {
 import { cn } from "@/lib/utils";
 
 type View = "home" | "settings";
+type SettingsCategory = "general" | "overlay" | "speech" | "connections" | "advanced";
+type ModelCheckState = "loading" | "ready" | "missing" | "error";
+type SaveState = "idle" | "saving" | "saved" | "error";
 
 const CAPABILITY_OPTIONS: { id: string; label: string; footer: string }[] = [
   {
@@ -115,12 +125,17 @@ export function MainWindow() {
   );
 
   const [view, setView] = useState<View>("home");
+  const [settingsCategory, setSettingsCategory] =
+    useState<SettingsCategory>("general");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [inputs, setInputs] = useState<DeviceDto[]>([]);
   const [outputs, setOutputs] = useState<DeviceDto[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelsStatus | null>(null);
+  const [modelCheckState, setModelCheckState] =
+    useState<ModelCheckState>("loading");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] =
     useState<DownloadProgress | null>(null);
@@ -130,15 +145,14 @@ export function MainWindow() {
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
-  const modelsReady = Boolean(
-    models?.parakeet_ready && models?.supertone_ready,
-  );
+  const modelsReady = modelCheckState === "ready";
   const contextMeter = formatContextMeter(
     status.context_used,
     status.context_limit,
   );
 
   const refreshDevices = useCallback(async () => {
+    setError(null);
     try {
       const [ins, outs] = await Promise.all([
         listInputDevices(),
@@ -154,26 +168,38 @@ export function MainWindow() {
   }, []);
 
   const refreshModels = useCallback(async () => {
+    setError(null);
+    setModelCheckState("loading");
     try {
-      setModels(await getModelsStatus());
+      const next = await getModelsStatus();
+      setModels(next);
+      setModelCheckState(
+        next.parakeet_ready && next.supertone_ready ? "ready" : "missing",
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("refreshModels failed", msg);
       setError(msg);
+      setModelCheckState("error");
     }
   }, []);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedIndicatorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
   const flushSave = useCallback(async (next: AppSettings) => {
     try {
       await saveSettings(next);
+      setSaveState("saved");
+      if (savedIndicatorTimer.current) clearTimeout(savedIndicatorTimer.current);
+      savedIndicatorTimer.current = setTimeout(() => setSaveState("idle"), 1800);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("saveSettings failed", msg);
       setError(msg);
+      setSaveState("error");
     }
   }, []);
 
@@ -182,8 +208,11 @@ export function MainWindow() {
       const base = settingsRef.current ?? { ...EMPTY_SETTINGS };
       const next = { ...base, ...patch };
       setSettings(next);
+      setSaveState("saving");
+      setError(null);
       settingsRef.current = next;
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (savedIndicatorTimer.current) clearTimeout(savedIndicatorTimer.current);
       saveTimer.current = setTimeout(() => {
         void flushSave(next);
       }, 320);
@@ -194,6 +223,7 @@ export function MainWindow() {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (savedIndicatorTimer.current) clearTimeout(savedIndicatorTimer.current);
     };
   }, []);
 
@@ -221,7 +251,11 @@ export function MainWindow() {
     };
   }, []);
 
-  // Restore preferred devices once lists + settings are ready.
+  const restoredInput = useRef(false);
+  const restoredOutput = useRef(false);
+
+  // Restore each preferred device once. Unrelated settings edits must not
+  // interrupt the active audio stream by switching the same device again.
   useEffect(() => {
     if (!settings) return;
     if (inputs.length === 0 && outputs.length === 0) return;
@@ -234,12 +268,9 @@ export function MainWindow() {
     const inputId = pick(inputs, settings.input_device);
     const outputId = pick(outputs, settings.output_device);
 
-    if (inputId && inputId !== settings.input_device) {
-      // Keep UI selection without thrashing disk on first match-to-default.
-    }
-    // Apply host preference if we have a stored id.
-    if (settings.input_device && inputId === settings.input_device) {
-      void switchInput(inputId).catch((e) => {
+    if (!restoredInput.current && inputs.length > 0) {
+      restoredInput.current = true;
+      if (settings.input_device && inputId === settings.input_device) void switchInput(inputId).catch((e) => {
         // switchInput() already logs the underlying failure; this is just
         // context that it happened during preferred-device restore, not a
         // user-initiated switch.
@@ -249,19 +280,36 @@ export function MainWindow() {
         });
       });
     }
-    if (settings.output_device && outputId === settings.output_device) {
-      void switchOutput(outputId).catch((e) => {
+    if (!restoredOutput.current && outputs.length > 0) {
+      restoredOutput.current = true;
+      if (settings.output_device && outputId === settings.output_device) void switchOutput(outputId).catch((e) => {
         logger.error("restore preferred output device failed", {
           deviceId: outputId,
           error: e instanceof Error ? e.message : String(e),
         });
       });
     }
-  }, [settings, inputs, outputs]);
+  }, [settings?.input_device, settings?.output_device, inputs, outputs]);
 
   const onStart = async () => {
     const s = settingsRef.current ?? settings;
     if (!s) return;
+    if (!s.openrouter_api_key.trim()) {
+      setError("Add your OpenRouter API key before starting Boris.");
+      setSettingsCategory("connections");
+      setView("settings");
+      return;
+    }
+    if (modelCheckState !== "ready") {
+      setError(
+        modelCheckState === "error"
+          ? "Speech models could not be checked. Retry the check in Speech settings."
+          : "Install the speech models before starting Boris.",
+      );
+      setSettingsCategory("speech");
+      setView("settings");
+      return;
+    }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -347,8 +395,9 @@ export function MainWindow() {
     setInstalling(true);
     setError(null);
     setInstallProgress(null);
-    const unsub = await onModelsProgress((p) => setInstallProgress(p));
+    let unsub = () => {};
     try {
+      unsub = await onModelsProgress((p) => setInstallProgress(p));
       const report = await downloadModels();
       await refreshModels();
       if (!report.ok) {
@@ -421,6 +470,7 @@ export function MainWindow() {
             engineOn={engineOn}
             engineFault={engineFault}
             modelsReady={modelsReady}
+            modelCheckState={modelCheckState}
             busy={busy}
             error={error}
             models={models}
@@ -429,7 +479,10 @@ export function MainWindow() {
             onStart={() => void onStart()}
             onStop={() => void onStop()}
             onInstall={() => void onInstallModels()}
-            onOpenSettings={() => setView("settings")}
+            onOpenSettings={(category = "general") => {
+              setSettingsCategory(category);
+              setView("settings");
+            }}
           />
         ) : settings ? (
           <SettingsView
@@ -441,11 +494,16 @@ export function MainWindow() {
             selectedInput={selectedInput}
             selectedOutput={selectedOutput}
             modelsReady={modelsReady}
+            modelCheckState={modelCheckState}
             installing={installing}
             installProgress={installProgress}
             advancedOpen={advancedOpen}
             logPath={logPath}
             capability={capability}
+            error={error}
+            saveState={saveState}
+            category={settingsCategory}
+            onCategoryChange={setSettingsCategory}
             onPatch={(p) => patchSettings(p)}
             onInputChange={(id) => void onInputChange(id)}
             onOutputChange={(id) => void onOutputChange(id)}
@@ -473,6 +531,7 @@ function HomeView({
   engineOn,
   engineFault,
   modelsReady,
+  modelCheckState,
   busy,
   error,
   models,
@@ -489,6 +548,7 @@ function HomeView({
   engineOn: boolean;
   engineFault: boolean;
   modelsReady: boolean;
+  modelCheckState: ModelCheckState;
   busy: boolean;
   error: string | null;
   models: ModelsStatus | null;
@@ -497,17 +557,18 @@ function HomeView({
   onStart: () => void;
   onStop: () => void;
   onInstall: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (category?: SettingsCategory) => void;
 }) {
   const act = humanizeActivity(status.activity);
   const showActivity =
     act &&
     (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
+  const stopAvailable = engineOn || engineFault;
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-5 py-6">
+    <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5 px-6 py-7">
       {/* Status strip — no glow card, no orb */}
-      <section className="flex items-start justify-between gap-4">
+      <section aria-live="polite" className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
             <span
@@ -518,16 +579,6 @@ function HomeView({
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-white">
               {tone.label}
             </h1>
-            {status.turn ? (
-              <span className="text-[12px] tabular-nums text-white/30">
-                #{status.turn}
-              </span>
-            ) : null}
-            {contextMeter && engineOn ? (
-              <span className="text-[12px] tabular-nums text-white/25">
-                {contextMeter}
-              </span>
-            ) : null}
           </div>
           <p className="mt-1 pl-[18px] text-[13px] leading-snug text-white/45">
             {tone.hint}
@@ -535,9 +586,11 @@ function HomeView({
           {showActivity ? (
             <p className="mt-1.5 pl-[18px] text-[12px] text-white/50">{act}</p>
           ) : null}
-          {status.detail ? (
-            <p className="mt-2 pl-[18px] text-[13px] text-red-300/90">
-              {status.detail}
+          {engineOn && (status.turn || contextMeter) ? (
+            <p className="mt-2 pl-[18px] text-[11px] text-white/30">
+              {status.turn ? `Current turn ${status.turn}` : ""}
+              {status.turn && contextMeter ? " · " : ""}
+              {contextMeter ? `Context ${contextMeter}` : ""}
             </p>
           ) : null}
         </div>
@@ -546,58 +599,53 @@ function HomeView({
           <Button
             type="button"
             size="lg"
-            disabled={busy || engineOn || !modelsReady}
-            onClick={onStart}
+            disabled={busy}
+            onClick={stopAvailable ? onStop : onStart}
             className={cn(
               "h-10 gap-2 rounded-full px-5 text-[13px] font-semibold",
               "bg-white text-[#0b0b0c] hover:bg-white/90",
+              stopAvailable
+                ? "border border-white/10 bg-transparent text-white/75 hover:bg-white/[0.06]"
+                : "bg-white text-[#0b0b0c] hover:bg-white/90",
               "disabled:bg-white/15 disabled:text-white/35",
             )}
             title={
-              modelsReady
-                ? undefined
-                : "Download speech models before starting"
+              !stopAvailable && !modelsReady
+                ? "Open Speech settings to finish setup"
+                : undefined
             }
           >
-            <Power className="size-3.5" strokeWidth={2.25} />
-            Start
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            variant="outline"
-            disabled={busy || status.engine === "Off"}
-            onClick={onStop}
-            className={cn(
-              "h-10 gap-2 rounded-full border-white/10 bg-transparent px-4 text-[13px] font-medium text-white/70",
-              "hover:bg-white/[0.06] hover:text-white",
-              "disabled:opacity-30",
+            {busy ? (
+              <LoaderCircle className="size-3.5 animate-spin" strokeWidth={2.25} />
+            ) : stopAvailable ? (
+              <PowerOff className="size-3.5" strokeWidth={2} />
+            ) : (
+              <Power className="size-3.5" strokeWidth={2.25} />
             )}
-          >
-            <PowerOff className="size-3.5" strokeWidth={2} />
-            Stop
+            {busy ? (stopAvailable ? "Stopping…" : "Starting…") : engineFault ? "Reset" : engineOn ? "Stop" : "Start"}
           </Button>
         </div>
       </section>
 
       {error ? (
-        <p className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300 ring-1 ring-red-500/15">
+        <p role="alert" className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300 ring-1 ring-red-500/15">
           {error}
         </p>
       ) : null}
-      {engineFault ? (
-        <p className="text-[13px] text-amber-200/80">
+      {engineFault && !error && !status.detail ? (
+        <p role="alert" className="text-[13px] text-amber-200/80">
           Something went wrong — try Stop, then Start again.
         </p>
       ) : null}
 
-      {!modelsReady ? (
+      {modelCheckState !== "ready" ? (
         <ModelsBanner
           models={models}
+          state={modelCheckState}
           installing={installing}
           progress={installProgress}
           onInstall={onInstall}
-          onOpenSettings={onOpenSettings}
+          onOpenSettings={() => onOpenSettings("speech")}
         />
       ) : null}
 
@@ -608,12 +656,14 @@ function HomeView({
 
 function ModelsBanner({
   models,
+  state,
   installing,
   progress,
   onInstall,
   onOpenSettings,
 }: {
   models: ModelsStatus | null;
+  state: ModelCheckState;
   installing: boolean;
   progress: DownloadProgress | null;
   onInstall: () => void;
@@ -626,6 +676,27 @@ function ModelsBanner({
           Math.round((progress.bytes_downloaded / progress.total_bytes) * 100),
         )
       : null;
+
+  if (state === "loading" && !installing) {
+    return (
+      <div role="status" className="settings-group flex items-center gap-3 rounded-[12px] px-4 py-3.5 text-[13px] text-white/55">
+        <LoaderCircle className="size-4 animate-spin" />
+        Checking speech models…
+      </div>
+    );
+  }
+
+  if (state === "error" && !installing) {
+    return (
+      <div className="settings-group rounded-[12px] px-4 py-3.5">
+        <p className="text-[15px] font-medium text-white/90">Speech model check failed</p>
+        <p className="mt-1 text-[12px] text-white/50">Open Speech settings to retry. No download has started.</p>
+        <button type="button" onClick={onOpenSettings} className="mt-3 min-h-9 rounded-full bg-white/10 px-3.5 text-[13px] text-white/80 hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25">
+          Open Speech settings
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="settings-group rounded-[12px] px-4 py-3.5">
@@ -640,7 +711,14 @@ function ModelsBanner({
       </p>
       {installing ? (
         <div className="mt-3">
-          <div className="main-progress-track">
+          <div
+            className="main-progress-track"
+            role="progressbar"
+            aria-label="Speech model download"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct ?? undefined}
+          >
             <div
               className="main-progress-fill"
               style={{ width: `${pct ?? 4}%` }}
@@ -679,7 +757,14 @@ function ConversationView({ status }: { status: StatusPicture }) {
   const lines = conversationLines(status);
 
   return (
-    <section className="flex min-h-[160px] flex-col gap-4">
+    <section
+      aria-labelledby="current-turn-heading"
+      aria-live="polite"
+      className="settings-group flex min-h-[220px] flex-col gap-4 rounded-[16px] px-5 py-4"
+    >
+      <h2 id="current-turn-heading" className="text-[12px] font-medium uppercase tracking-[0.08em] text-white/40">
+        Current turn
+      </h2>
       {lines.map((line, i) => {
         switch (line.kind) {
           case "placeholder":
@@ -768,407 +853,127 @@ function Bubble({
 /* ── Settings ─────────────────────────────────────────────────────────────── */
 
 function SettingsView({
-  settings,
-  engineOn,
-  busy,
-  inputs,
-  outputs,
-  selectedInput,
-  selectedOutput,
-  modelsReady,
-  installing,
-  installProgress,
-  advancedOpen,
-  logPath,
-  capability,
-  onPatch,
-  onInputChange,
-  onOutputChange,
-  onRefreshDevices,
-  onRefreshModels,
-  onInstall,
+  settings, engineOn, busy, inputs, outputs, selectedInput, selectedOutput,
+  modelsReady, modelCheckState, installing, installProgress, advancedOpen,
+  logPath, capability, error, saveState, category, onCategoryChange, onPatch,
+  onInputChange, onOutputChange, onRefreshDevices, onRefreshModels, onInstall,
   onToggleAdvanced,
 }: {
-  settings: AppSettings;
-  engineOn: boolean;
-  busy: boolean;
-  inputs: DeviceDto[];
-  outputs: DeviceDto[];
-  selectedInput: string;
-  selectedOutput: string;
-  modelsReady: boolean;
-  installing: boolean;
-  installProgress: DownloadProgress | null;
-  advancedOpen: boolean;
-  logPath: string;
-  capability: (typeof CAPABILITY_OPTIONS)[number];
-  onPatch: (p: Partial<AppSettings>) => void;
-  onInputChange: (id: string) => void;
-  onOutputChange: (id: string) => void;
-  onRefreshDevices: () => void;
-  onRefreshModels: () => void;
-  onInstall: () => void;
-  onToggleAdvanced: () => void;
+  settings: AppSettings; engineOn: boolean; busy: boolean; inputs: DeviceDto[];
+  outputs: DeviceDto[]; selectedInput: string; selectedOutput: string;
+  modelsReady: boolean; modelCheckState: ModelCheckState; installing: boolean;
+  installProgress: DownloadProgress | null; advancedOpen: boolean; logPath: string;
+  capability: (typeof CAPABILITY_OPTIONS)[number]; error: string | null;
+  saveState: SaveState; category: SettingsCategory;
+  onCategoryChange: (category: SettingsCategory) => void;
+  onPatch: (p: Partial<AppSettings>) => void; onInputChange: (id: string) => void;
+  onOutputChange: (id: string) => void; onRefreshDevices: () => void;
+  onRefreshModels: () => void; onInstall: () => void; onToggleAdvanced: () => void;
 }) {
   const locked = engineOn;
-
+  const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
+  const [showExaKey, setShowExaKey] = useState(false);
+  const categories: { id: SettingsCategory; label: string }[] = [
+    { id: "general", label: "General" }, { id: "overlay", label: "Overlay" },
+    { id: "speech", label: "Speech" }, { id: "connections", label: "Connections" },
+    { id: "advanced", label: "Advanced" },
+  ];
+  const openExternal = (url: string) => {
+    void openUrl(url).catch(() => window.open(url, "_blank", "noopener,noreferrer"));
+  };
   return (
-    <div className="mx-auto flex w-full max-w-xl flex-col gap-7 px-5 py-6 pb-12">
-      <h1 className="text-[28px] font-bold tracking-[-0.03em] text-white">
-        Settings
-      </h1>
-
-      {/* General */}
-      <SettingsGroup
-        title="General"
-        footer={
-          locked
-            ? "Some options apply on next Start."
-            : capability.footer
-        }
-      >
-        <SettingsRow label="Start engine on launch">
-          <Toggle
-            checked={settings.start_engine_on_launch}
-            onChange={(v) => onPatch({ start_engine_on_launch: v })}
-            aria-label="Start engine on launch"
-          />
-        </SettingsRow>
-        <SettingsRow label="Show overlay on wake">
-          <Toggle
-            checked={settings.show_overlay_on_wake}
-            onChange={(v) => onPatch({ show_overlay_on_wake: v })}
-            aria-label="Show overlay on wake"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Long-term memory"
-          subtitle="Remember notes across sessions"
-        >
-          <Toggle
-            checked={settings.long_term_memory}
-            disabled={locked}
-            onChange={(v) => onPatch({ long_term_memory: v })}
-            aria-label="Long-term memory"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Trusted mode"
-          subtitle="Auto-allow notes and sandbox file writes. Shell and open URL still need yes. Confirm budget defaults to 12 per turn."
-        >
-          <Toggle
-            checked={settings.trusted_auto_moderate}
-            disabled={locked}
-            onChange={(v) => onPatch({ trusted_auto_moderate: v })}
-            aria-label="Trusted mode"
-          />
-        </SettingsRow>
-        <SettingsRow label="Tools" last>
-          <select
-            className={selectCompactClass}
-            value={
-              CAPABILITY_OPTIONS.some((p) => p.id === settings.capability_preset)
-                ? settings.capability_preset
-                : "full"
-            }
-            disabled={locked}
-            onChange={(e) => onPatch({ capability_preset: e.target.value })}
-          >
-            {CAPABILITY_OPTIONS.map((p) => (
-              <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </SettingsRow>
-      </SettingsGroup>
-
-      {/* Speech */}
-      <SettingsGroup
-        title="Speech"
-        footer="Voice applies on next Start. Models install under ~/.boris/models."
-      >
-        <SettingsRow label="Voice">
-          <select
-            className={selectCompactClass}
-            value={settings.tts_voice_id || "M4"}
-            disabled={locked}
-            onChange={(e) => onPatch({ tts_voice_id: e.target.value })}
-          >
-            <option value="M4" className="bg-[#1c1c1e] text-white">
-              M4
-            </option>
-          </select>
-        </SettingsRow>
-        <SettingsRow
-          label="Speech models"
-          subtitle={
-            modelsReady
-              ? "Ready"
-              : installing
-                ? "Downloading…"
-                : "Not installed"
-          }
-          last={modelsReady && !installing}
-        >
-          {modelsReady ? (
-            <button
-              type="button"
-              onClick={onRefreshModels}
-              className="text-[13px] text-white/40 hover:text-white/70"
-            >
-              Refresh
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={installing}
-              onClick={onInstall}
-              className="text-[13px] font-medium text-white/80 hover:text-white disabled:opacity-40"
-            >
-              {installing ? "…" : "Download"}
-            </button>
-          )}
-        </SettingsRow>
-        {installing && installProgress ? (
-          <div className="border-t border-white/[0.06] px-4 py-3">
-            <div className="main-progress-track">
-              <div
-                className="main-progress-fill"
-                style={{
-                  width: `${
-                    installProgress.total_bytes
-                      ? Math.min(
-                          100,
-                          Math.round(
-                            (installProgress.bytes_downloaded /
-                              installProgress.total_bytes) *
-                              100,
-                          ),
-                        )
-                      : 4
-                  }%`,
-                }}
-              />
-            </div>
-            <p className="mt-1.5 truncate text-[12px] text-white/40">
-              {installProgress.file_name}
-            </p>
-          </div>
-        ) : null}
-      </SettingsGroup>
-
-      {/* API keys — secrets in ~/.boris/auth.json */}
-      <SettingsGroup
-        title="API keys"
-        footer={
-          locked
-            ? "Stop the engine to change API keys."
-            : "Stored only in ~/.boris/auth.json on this PC. Never shared."
-        }
-      >
-        <SettingsField
-          label="OpenRouter"
-          subtitle="Required for chat. openrouter.ai/keys"
-        >
-          <Input
-            type="password"
-            placeholder="sk-or-v1-…"
-            value={settings.openrouter_api_key}
-            disabled={locked}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(e) => onPatch({ openrouter_api_key: e.target.value })}
-            className={fieldInputClass}
-          />
-        </SettingsField>
-        <SettingsField
-          label="Exa (web search)"
-          subtitle="Recommended for reliable web_search. Free tier at dashboard.exa.ai"
-          last
-        >
-          <Input
-            type="password"
-            placeholder="Exa API key"
-            value={settings.exa_api_key}
-            disabled={locked}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(e) => onPatch({ exa_api_key: e.target.value })}
-            className={fieldInputClass}
-          />
-        </SettingsField>
-      </SettingsGroup>
-
-      {/* Models */}
-      <SettingsGroup
-        title="Models"
-        footer={locked ? "Stop the engine to change models." : undefined}
-      >
-        <ModelField
-          label="Model"
-          value={settings.openrouter_model}
-          disabled={locked}
-          onChange={(v) => onPatch({ openrouter_model: v })}
-        />
-        <ModelField
-          label="Fast model"
-          subtitle="Empty matches Model"
-          value={settings.openrouter_fast_model}
-          disabled={locked}
-          onChange={(v) => onPatch({ openrouter_fast_model: v })}
-          allowEmpty
-          last={!advancedOpen}
-        />
-        <button
-          type="button"
-          onClick={onToggleAdvanced}
-          className={cn(
-            "flex w-full min-h-[44px] items-center justify-between px-4 py-2.5 text-left",
-            "border-t border-white/[0.06] text-[15px] text-white/80",
-            "hover:bg-white/[0.03]",
-          )}
-        >
-          <span>Advanced</span>
-          <ChevronRight
-            className={cn(
-              "size-4 text-white/30 transition-transform",
-              advancedOpen && "rotate-90",
-            )}
-          />
-        </button>
-        {advancedOpen ? (
-          <>
-            <ProviderField
-              label="Inference host"
-              value={settings.openrouter_model_provider}
-              disabled={locked}
-              onChange={(v) => onPatch({ openrouter_model_provider: v })}
-            />
-            <ProviderField
-              label="Fast host"
-              value={settings.openrouter_fast_provider}
-              disabled={locked}
-              onChange={(v) => onPatch({ openrouter_fast_provider: v })}
-            />
-            <SettingsRow
-              label="Don’t fall back to other hosts"
-              last
-            >
-              <Toggle
-                checked={settings.openrouter_pin_provider}
-                disabled={
-                  locked ||
-                  (!settings.openrouter_model_provider.trim() &&
-                    !settings.openrouter_fast_provider.trim())
-                }
-                onChange={(v) => onPatch({ openrouter_pin_provider: v })}
-                aria-label="Pin preferred host"
-              />
-            </SettingsRow>
-          </>
-        ) : null}
-      </SettingsGroup>
-
-      {/* Sound */}
-      <SettingsGroup title="Sound">
-        <SettingsRow
-          label="Microphone"
-          stacked
-        >
-          <div className="flex items-center gap-2">
-            <select
-              className={selectDeviceClass}
-              value={selectedInput}
-              disabled={busy || inputs.length === 0}
-              title={
-                inputs.find((d) => d.id === selectedInput)?.name ?? undefined
-              }
-              onChange={(e) => onInputChange(e.target.value)}
-            >
-              {inputs.length === 0 ? (
-                <option value="">No devices</option>
-              ) : (
-                inputs.map((d) => (
-                  <option
-                    key={d.id}
-                    value={d.id}
-                    className="bg-[#1c1c1e] text-white"
-                  >
-                    {shortDeviceName(d.name)}
-                    {d.is_default ? " · default" : ""}
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
-        </SettingsRow>
-        <SettingsRow label="Speakers" stacked last>
-          <div className="flex items-center gap-2">
-            <select
-              className={selectDeviceClass}
-              value={selectedOutput}
-              disabled={busy || outputs.length === 0}
-              title={
-                outputs.find((d) => d.id === selectedOutput)?.name ?? undefined
-              }
-              onChange={(e) => onOutputChange(e.target.value)}
-            >
-              {outputs.length === 0 ? (
-                <option value="">No devices</option>
-              ) : (
-                outputs.map((d) => (
-                  <option
-                    key={d.id}
-                    value={d.id}
-                    className="bg-[#1c1c1e] text-white"
-                  >
-                    {shortDeviceName(d.name)}
-                    {d.is_default ? " · default" : ""}
-                  </option>
-                ))
-              )}
-            </select>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onRefreshDevices}
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-white/[0.06] text-white/50 hover:bg-white/[0.1] hover:text-white/80 disabled:opacity-40"
-              aria-label="Refresh devices"
-            >
-              <RefreshCw className="size-3.5" />
-            </button>
-          </div>
-        </SettingsRow>
-      </SettingsGroup>
-
-      {/* Diagnostics */}
-      <SettingsGroup title="Diagnostics" footer="Log filter applies after restart.">
-        <SettingsField label="Log filter">
-          <Input
-            placeholder="info  or  boris=debug"
-            value={settings.logging_filter}
-            onChange={(e) => onPatch({ logging_filter: e.target.value })}
-            className={cn(fieldInputClass, "font-mono text-[13px]")}
-          />
-        </SettingsField>
-        {logPath ? (
-          <div className="px-4 py-3">
-            <p className="text-[13px] text-white/45">Log file</p>
-            <p
-              className="mt-1 break-all font-mono text-[11px] leading-snug text-white/40"
-              title={logPath}
-            >
-              {logPath.replace(/\\/g, "/")}
-            </p>
-          </div>
-        ) : null}
-      </SettingsGroup>
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-5 py-5 pb-12">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Settings categories">
+        {categories.map((item) => <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab" aria-controls="settings-panel" aria-selected={category === item.id} onClick={() => onCategoryChange(item.id)} className={cn("min-h-9 shrink-0 rounded-full px-3.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25", category === item.id ? "bg-white text-black" : "bg-white/[0.06] text-white/55 hover:bg-white/10 hover:text-white/85")}>{item.label}</button>)}
+        <div role="status" aria-live="polite" className="ml-auto flex min-w-[76px] items-center justify-end gap-1.5 text-[12px] text-white/45">
+          {saveState === "saving" ? <><LoaderCircle className="size-3 animate-spin" /> Saving…</> : null}
+          {saveState === "saved" ? <><Check className="size-3 text-emerald-300" /> Saved</> : null}
+          {saveState === "error" ? <><AlertCircle className="size-3 text-red-300" /> Save failed</> : null}
+        </div>
+      </div>
+      {error ? <p role="alert" className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300 ring-1 ring-red-500/15">{error}</p> : null}
+      <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${category}`}>
+        {category === "general" ? <GeneralSettings settings={settings} locked={locked} capability={capability} onPatch={onPatch} /> : null}
+        {category === "overlay" ? <OverlaySettings settings={settings} onPatch={onPatch} /> : null}
+        {category === "speech" ? <SpeechSettings busy={busy} inputs={inputs} outputs={outputs} selectedInput={selectedInput} selectedOutput={selectedOutput} modelsReady={modelsReady} modelCheckState={modelCheckState} installing={installing} progress={installProgress} onInputChange={onInputChange} onOutputChange={onOutputChange} onRefreshDevices={onRefreshDevices} onRefreshModels={onRefreshModels} onInstall={onInstall} /> : null}
+        {category === "connections" ? <ConnectionsSettings settings={settings} locked={locked} showOpenRouterKey={showOpenRouterKey} showExaKey={showExaKey} onToggleOpenRouter={() => setShowOpenRouterKey((v) => !v)} onToggleExa={() => setShowExaKey((v) => !v)} onOpenExternal={openExternal} onPatch={onPatch} /> : null}
+        {category === "advanced" ? <AdvancedSettings settings={settings} locked={locked} advancedOpen={advancedOpen} logPath={logPath} onToggleAdvanced={onToggleAdvanced} onPatch={onPatch} /> : null}
+      </div>
     </div>
   );
 }
 
-/** Model picker: preset trailing, custom id full-width under the row. */
+function GeneralSettings({ settings, locked, capability, onPatch }: { settings: AppSettings; locked: boolean; capability: (typeof CAPABILITY_OPTIONS)[number]; onPatch: (p: Partial<AppSettings>) => void }) {
+  return <SettingsGroup title="General" footer={locked ? "Some changes apply after Boris is stopped." : capability.footer}>
+    <SettingsRow label="Start Boris when the app opens"><Toggle checked={settings.start_engine_on_launch} onChange={(v) => onPatch({ start_engine_on_launch: v })} aria-label="Start Boris when the app opens" /></SettingsRow>
+    <SettingsRow label="Long-term memory" subtitle="Remember notes across sessions"><Toggle checked={settings.long_term_memory} disabled={locked} onChange={(v) => onPatch({ long_term_memory: v })} aria-label="Long-term memory" /></SettingsRow>
+    <SettingsRow label="Tool access" labelFor="capability-preset" last><select id="capability-preset" className={selectCompactClass} value={CAPABILITY_OPTIONS.some((p) => p.id === settings.capability_preset) ? settings.capability_preset : "full"} disabled={locked} onChange={(e) => onPatch({ capability_preset: e.target.value })}>{CAPABILITY_OPTIONS.map((p) => <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">{p.label}</option>)}</select></SettingsRow>
+  </SettingsGroup>;
+}
+
+function OverlaySettings({ settings, onPatch }: { settings: AppSettings; onPatch: (p: Partial<AppSettings>) => void }) {
+  return <SettingsGroup title="Overlay" footer="Caption privacy controls what can be visible during screen sharing and recordings.">
+    <SettingsRow label="Show overlay when Boris wakes"><Toggle checked={settings.show_overlay_on_wake} onChange={(v) => onPatch({ show_overlay_on_wake: v })} aria-label="Show overlay when Boris wakes" /></SettingsRow>
+    <SettingsRow label="Captions" subtitle="Choose which spoken text appears" labelFor="overlay-captions"><select id="overlay-captions" className={selectCompactClass} value={settings.overlay_caption_mode} onChange={(e) => onPatch({ overlay_caption_mode: e.target.value as AppSettings["overlay_caption_mode"] })}><option value="full">You and Boris</option><option value="assistant">Boris only</option><option value="hidden">Hidden</option></select></SettingsRow>
+    <SettingsRow label="Position" labelFor="overlay-position"><select id="overlay-position" className={selectCompactClass} value={settings.overlay_position} onChange={(e) => onPatch({ overlay_position: e.target.value as AppSettings["overlay_position"] })}><option value="top_center">Top center</option><option value="top_left">Top left</option><option value="top_right">Top right</option></select></SettingsRow>
+    <SettingsField label={`Scale · ${settings.overlay_scale_percent}%`} labelFor="overlay-scale" last><input id="overlay-scale" type="range" min={75} max={125} step={5} value={settings.overlay_scale_percent} onChange={(e) => onPatch({ overlay_scale_percent: Number(e.target.value) })} className="h-9 w-full accent-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25" /></SettingsField>
+  </SettingsGroup>;
+}
+
+function SpeechSettings({ busy, inputs, outputs, selectedInput, selectedOutput, modelsReady, modelCheckState, installing, progress, onInputChange, onOutputChange, onRefreshDevices, onRefreshModels, onInstall }: { busy: boolean; inputs: DeviceDto[]; outputs: DeviceDto[]; selectedInput: string; selectedOutput: string; modelsReady: boolean; modelCheckState: ModelCheckState; installing: boolean; progress: DownloadProgress | null; onInputChange: (id: string) => void; onOutputChange: (id: string) => void; onRefreshDevices: () => void; onRefreshModels: () => void; onInstall: () => void }) {
+  const label = modelCheckState === "loading" ? "Checking…" : modelCheckState === "error" ? "Check failed" : modelsReady ? "Ready" : installing ? "Downloading…" : "Not installed";
+  return <div className="flex flex-col gap-6">
+    <SettingsGroup id="speech-models" title="Speech Models" footer="Speech processing runs locally on this computer.">
+      <SettingsRow label="Voice" subtitle="More voices are coming"><span className="rounded-lg bg-white/[0.06] px-3 py-2 text-[13px] text-white/65">M4 · Default</span></SettingsRow>
+      <SettingsRow label="Local speech models" subtitle={label} last={!installing}>
+        <button type="button" disabled={installing || modelCheckState === "loading"} onClick={modelCheckState === "missing" ? onInstall : onRefreshModels} className="min-h-9 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40">{installing ? "Downloading…" : modelCheckState === "missing" ? "Download" : modelCheckState === "error" ? "Retry" : "Refresh"}</button>
+      </SettingsRow>
+      {installing ? <DownloadProgressView progress={progress} /> : null}
+    </SettingsGroup>
+    <SettingsGroup title="Sound" action={<button type="button" disabled={busy} onClick={onRefreshDevices} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-[12px] text-white/55 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"><RefreshCw className="size-3.5" /> Refresh devices</button>}>
+      <SettingsRow label="Microphone" labelFor="input-device" stacked><select id="input-device" className={selectDeviceClass} value={selectedInput} disabled={busy || inputs.length === 0} title={inputs.find((d) => d.id === selectedInput)?.name} onChange={(e) => onInputChange(e.target.value)}>{inputs.length === 0 ? <option value="">No devices found</option> : inputs.map((d) => <option key={d.id} value={d.id} className="bg-[#1c1c1e] text-white">{shortDeviceName(d.name)}{d.is_default ? " · default" : ""}</option>)}</select></SettingsRow>
+      <SettingsRow label="Speakers" labelFor="output-device" stacked last><select id="output-device" className={selectDeviceClass} value={selectedOutput} disabled={busy || outputs.length === 0} title={outputs.find((d) => d.id === selectedOutput)?.name} onChange={(e) => onOutputChange(e.target.value)}>{outputs.length === 0 ? <option value="">No devices found</option> : outputs.map((d) => <option key={d.id} value={d.id} className="bg-[#1c1c1e] text-white">{shortDeviceName(d.name)}{d.is_default ? " · default" : ""}</option>)}</select></SettingsRow>
+    </SettingsGroup>
+  </div>;
+}
+
+function ConnectionsSettings({ settings, locked, showOpenRouterKey, showExaKey, onToggleOpenRouter, onToggleExa, onOpenExternal, onPatch }: { settings: AppSettings; locked: boolean; showOpenRouterKey: boolean; showExaKey: boolean; onToggleOpenRouter: () => void; onToggleExa: () => void; onOpenExternal: (url: string) => void; onPatch: (p: Partial<AppSettings>) => void }) {
+  return <div className="flex flex-col gap-6">
+    <SettingsGroup title="API Keys" footer={locked ? "Stop Boris to change API keys." : "Keys stay in ~/.boris/auth.json on this computer."}>
+      <SettingsField label="OpenRouter" subtitle="Required for chat" labelFor="openrouter-key"><SecretField id="openrouter-key" shown={showOpenRouterKey} onToggle={onToggleOpenRouter} value={settings.openrouter_api_key} disabled={locked} placeholder="sk-or-v1-…" onChange={(value) => onPatch({ openrouter_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://openrouter.ai/keys")}>Get an OpenRouter key</HelpLink></SettingsField>
+      <SettingsField label="Exa" subtitle="Optional, for more reliable web search" labelFor="exa-key" last><SecretField id="exa-key" shown={showExaKey} onToggle={onToggleExa} value={settings.exa_api_key} disabled={locked} placeholder="Exa API key" onChange={(value) => onPatch({ exa_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://dashboard.exa.ai")}>Open Exa dashboard</HelpLink></SettingsField>
+    </SettingsGroup>
+    <SettingsGroup title="Chat Models" footer={locked ? "Stop Boris to change models." : "The fast model handles simpler requests."}>
+      <ModelField label="Primary model" value={settings.openrouter_model} disabled={locked} onChange={(v) => onPatch({ openrouter_model: v })} />
+      <ModelField label="Fast model" subtitle="Uses the primary model when unset" value={settings.openrouter_fast_model} disabled={locked} onChange={(v) => onPatch({ openrouter_fast_model: v })} allowEmpty last />
+    </SettingsGroup>
+  </div>;
+}
+
+function AdvancedSettings({ settings, locked, advancedOpen, logPath, onToggleAdvanced, onPatch }: { settings: AppSettings; locked: boolean; advancedOpen: boolean; logPath: string; onToggleAdvanced: () => void; onPatch: (p: Partial<AppSettings>) => void }) {
+  return <div className="flex flex-col gap-6">
+    <SettingsGroup title="Safety"><SettingsRow label="Trusted mode" subtitle="Automatically allow notes and writes inside the safe workspace" last><Toggle checked={settings.trusted_auto_moderate} disabled={locked} onChange={(v) => onPatch({ trusted_auto_moderate: v })} aria-label="Trusted mode" /></SettingsRow></SettingsGroup>
+    <SettingsGroup title="Model Routing" footer="Optional. Leave this on Auto unless a specific inference provider is required.">
+      <button type="button" onClick={onToggleAdvanced} aria-expanded={advancedOpen} aria-controls="provider-routing-controls" className="flex min-h-11 w-full items-center justify-between px-4 py-2.5 text-left text-[15px] text-white/80 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25"><span>Provider routing</span><ChevronRight className={cn("size-4 text-white/35 transition-transform", advancedOpen && "rotate-90")} /></button>
+      {advancedOpen ? <div id="provider-routing-controls"><ProviderField label="Primary provider" value={settings.openrouter_model_provider} disabled={locked} onChange={(v) => onPatch({ openrouter_model_provider: v })} /><ProviderField label="Fast provider" value={settings.openrouter_fast_provider} disabled={locked} onChange={(v) => onPatch({ openrouter_fast_provider: v })} /><SettingsRow label="Require selected providers" subtitle="Do not use another provider if these are unavailable" last><Toggle checked={settings.openrouter_pin_provider} disabled={locked || (!settings.openrouter_model_provider.trim() && !settings.openrouter_fast_provider.trim())} onChange={(v) => onPatch({ openrouter_pin_provider: v })} aria-label="Require selected providers" /></SettingsRow></div> : null}
+    </SettingsGroup>
+    <SettingsGroup title="Diagnostics" footer="The log filter applies after restart."><SettingsField label="Log filter" labelFor="logging-filter"><Input id="logging-filter" placeholder="info or boris=debug" value={settings.logging_filter} onChange={(e) => onPatch({ logging_filter: e.target.value })} className={cn(fieldInputClass, "font-mono text-[13px]")} /></SettingsField>{logPath ? <div className="px-4 py-3"><p className="text-[13px] text-white/55">Log file</p><p className="mt-1 break-all font-mono text-[11px] leading-snug text-white/50" title={logPath}>{logPath.replace(/\\/g, "/")}</p></div> : null}</SettingsGroup>
+  </div>;
+}
+
+function DownloadProgressView({ progress }: { progress: DownloadProgress | null }) {
+  const pct = progress?.total_bytes ? Math.min(100, Math.round((progress.bytes_downloaded / progress.total_bytes) * 100)) : null;
+  return <div className="border-t border-white/[0.06] px-4 py-3" role="status" aria-live="polite"><div className="main-progress-track" role="progressbar" aria-label="Speech model download" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}><div className="main-progress-fill" style={{ width: `${pct ?? 4}%` }} /></div><p className="mt-1.5 truncate text-[12px] text-white/50">{progress?.file_name ?? "Preparing…"}{pct != null ? ` · ${pct}%` : ""}</p></div>;
+}
+
+function SecretField({ id, shown, onToggle, value, disabled, placeholder, onChange }: { id: string; shown: boolean; onToggle: () => void; value: string; disabled: boolean; placeholder: string; onChange: (value: string) => void }) {
+  return <div className="relative"><Input id={id} type={shown ? "text" : "password"} placeholder={placeholder} value={value} disabled={disabled} autoComplete="off" spellCheck={false} onChange={(e) => onChange(e.target.value)} className={cn(fieldInputClass, "pr-11")} /><button type="button" disabled={disabled} onClick={onToggle} aria-label={shown ? "Hide API key" : "Show API key"} className="absolute right-1 top-1 inline-flex size-8 items-center justify-center rounded-md text-white/45 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40">{shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button></div>;
+}
+
+function HelpLink({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" onClick={onClick} className="inline-flex min-h-9 w-fit items-center gap-1.5 rounded-md px-1 text-[12px] text-sky-300/75 hover:text-sky-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25">{children}<ExternalLink className="size-3" /></button>;
+}
+
 function ModelField({
   label,
   subtitle,
@@ -1191,11 +996,14 @@ function ModelField({
   // When allowEmpty, empty means "Same as model" — track intentional Custom…
   // so the text field can open before the user types an id.
   const [forceCustom, setForceCustom] = useState(false);
+  const [customDraft, setCustomDraft] = useState(value);
+  const fieldId = `model-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
   useEffect(() => {
     if (match) setForceCustom(false);
     else if (isCustomValue) setForceCustom(true);
-  }, [match, isCustomValue]);
+    setCustomDraft(value);
+  }, [match, isCustomValue, value]);
 
   const inCustomMode =
     forceCustom || isCustomValue || (!allowEmpty && !match);
@@ -1210,8 +1018,9 @@ function ModelField({
 
   return (
     <>
-      <SettingsRow label={label} subtitle={subtitle} last={last && !showCustom}>
+      <SettingsRow label={label} labelFor={fieldId} subtitle={subtitle} last={last && !showCustom}>
         <select
+          id={fieldId}
           className={selectCompactClass}
           disabled={disabled}
           value={selectValue}
@@ -1219,8 +1028,7 @@ function ModelField({
             const v = e.target.value;
             if (v === "__custom__") {
               setForceCustom(true);
-              // Clear preset text so the custom field starts empty for typing.
-              if (match) onChange("");
+              setCustomDraft(isCustomValue ? value : "");
               return;
             }
             setForceCustom(false);
@@ -1250,12 +1058,24 @@ function ModelField({
           )}
         >
           <Input
-            value={value}
+            id={`${fieldId}-custom`}
+            aria-label={`Custom ${label.toLowerCase()} identifier`}
+            value={customDraft}
             disabled={disabled}
             placeholder="provider/model-id"
             onChange={(e) => {
               setForceCustom(true);
-              onChange(e.target.value);
+              setCustomDraft(e.target.value);
+            }}
+            onBlur={() => {
+              const next = customDraft.trim();
+              if (/^\S+\/\S+$/.test(next)) onChange(next);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const next = customDraft.trim();
+                if (/^\S+\/\S+$/.test(next)) onChange(next);
+              }
             }}
             className={cn(fieldInputClass, "h-9 w-full font-mono text-[13px]")}
           />
@@ -1287,11 +1107,14 @@ function ProviderField({
   const isCustomValue = Boolean(value.trim()) && !match;
   // Empty is "Auto" in the preset list — same Custom… sticky mode as ModelField.
   const [forceCustom, setForceCustom] = useState(false);
+  const [customDraft, setCustomDraft] = useState(value);
+  const fieldId = `provider-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
   useEffect(() => {
     if (match) setForceCustom(false);
     else if (isCustomValue) setForceCustom(true);
-  }, [match, isCustomValue]);
+    setCustomDraft(value);
+  }, [match, isCustomValue, value]);
 
   const inCustomMode = forceCustom || isCustomValue;
   const selectValue = inCustomMode ? "__custom__" : match ? first : "";
@@ -1299,8 +1122,9 @@ function ProviderField({
 
   return (
     <>
-      <SettingsRow label={label} last={last && !showCustom}>
+      <SettingsRow label={label} labelFor={fieldId} last={last && !showCustom}>
         <select
+          id={fieldId}
           className={selectCompactClass}
           disabled={disabled}
           value={selectValue}
@@ -1308,7 +1132,7 @@ function ProviderField({
             const v = e.target.value;
             if (v === "__custom__") {
               setForceCustom(true);
-              if (match) onChange("");
+              setCustomDraft(isCustomValue ? value : "");
               return;
             }
             setForceCustom(false);
@@ -1332,12 +1156,21 @@ function ProviderField({
       {showCustom ? (
         <div className="border-b border-white/[0.06] px-4 pb-3">
           <Input
-            value={value}
+            id={`${fieldId}-custom`}
+            aria-label={`Custom ${label.toLowerCase()} value`}
+            value={customDraft}
             disabled={disabled}
             placeholder="coreweave,baseten"
             onChange={(e) => {
               setForceCustom(true);
-              onChange(e.target.value);
+              setCustomDraft(e.target.value);
+            }}
+            onBlur={() => {
+              const next = customDraft.trim();
+              if (next) onChange(next);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && customDraft.trim()) onChange(customDraft.trim());
             }}
             className={cn(fieldInputClass, "h-9 w-full font-mono text-[13px]")}
           />

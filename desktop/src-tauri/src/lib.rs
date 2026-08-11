@@ -73,6 +73,15 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The overlay starts hidden. Apply persisted geometry now; visibility is
+    // derived from the current engine status and the wake-only preference.
+    if let Ok(settings) = boris_pipeline::load_settings() {
+        overlay_win::apply_preferences(app.handle(), &settings);
+        if let Some(state) = app.try_state::<AppState>() {
+            overlay_win::sync_visibility(app.handle(), &settings, &state.status());
+        }
+    }
+
     // Tray keeps control after the main console is closed/hidden.
     if let Err(e) = tray::setup_tray(app.handle()) {
         tracing::error!(error = %e, "failed to create system tray");
@@ -83,7 +92,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(main) = app.get_webview_window("main") {
-        tracing::info!(visible = main.is_visible().unwrap_or(false), "main window present");
+        tracing::info!(
+            visible = main.is_visible().unwrap_or(false),
+            "main window present"
+        );
     } else {
         tracing::warn!("main window missing at setup");
     }

@@ -93,6 +93,14 @@ fn set_overlay_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) {
         }
         Err(e) => tracing::warn!(error = %e, locked, "tray: failed to set overlay input lock"),
     }
+
+    if locked {
+        if let (Ok(settings), Some(state)) =
+            (boris_pipeline::load_settings(), app.try_state::<AppState>())
+        {
+            overlay_win::sync_visibility(app, &settings, &state.status());
+        }
+    }
 }
 
 /// Bring the main console window back (unminimize + show + focus).

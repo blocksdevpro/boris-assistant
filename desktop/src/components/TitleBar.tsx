@@ -2,6 +2,18 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isTauriRuntime } from "@/lib/runtime";
+
+type NativeWindow = ReturnType<typeof getCurrentWindow>;
+
+function currentNativeWindow(): NativeWindow | null {
+  if (!isTauriRuntime()) return null;
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
+}
 
 function RestoreIcon({ className }: { className?: string }) {
   return (
@@ -28,10 +40,13 @@ export function TitleBar({
   leading?: ReactNode;
   trailing?: ReactNode;
 }) {
-  const appWindow = useMemo(() => getCurrentWindow(), []);
+  // Never construct a Tauri window handle in a plain Vite tab. Tauri's API
+  // object can be imported in a browser, but calling it requires IPC globals.
+  const appWindow = useMemo(currentNativeWindow, []);
   const [maximized, setMaximized] = useState(false);
 
   const refreshMaximized = useCallback(async () => {
+    if (!appWindow) return;
     try {
       setMaximized(await appWindow.isMaximized());
     } catch {
@@ -40,6 +55,7 @@ export function TitleBar({
   }, [appWindow]);
 
   useEffect(() => {
+    if (!appWindow) return;
     void refreshMaximized();
     let unlisten: (() => void) | undefined;
     void appWindow
@@ -91,13 +107,13 @@ export function TitleBar({
       <div className="flex h-full shrink-0">
         <TitleBarButton
           aria-label="Minimize"
-          onClick={() => void appWindow.minimize()}
+          onClick={() => void appWindow?.minimize()}
         >
           <Minus className="size-3.5" strokeWidth={1.75} />
         </TitleBarButton>
         <TitleBarButton
           aria-label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void appWindow.toggleMaximize()}
+          onClick={() => void appWindow?.toggleMaximize()}
         >
           {maximized ? (
             <RestoreIcon className="size-3" />
@@ -109,7 +125,7 @@ export function TitleBar({
           aria-label="Close to tray"
           title="Close to system tray (app keeps running)"
           variant="close"
-          onClick={() => void appWindow.close()}
+          onClick={() => void appWindow?.close()}
         >
           <X className="size-3.5" strokeWidth={1.75} />
         </TitleBarButton>

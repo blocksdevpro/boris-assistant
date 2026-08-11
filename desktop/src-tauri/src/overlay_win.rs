@@ -22,10 +22,64 @@
 //! aim clicks land on the island and `data-tauri-drag-region` starts a drag).
 //! Tray / host can temporarily unlock input so the user can reposition.
 
-use tauri::{AppHandle, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use boris_pipeline::{AppSettings, EngineState, Phase, StatusPicture};
+use serde::Serialize;
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl,
+    WebviewWindowBuilder,
+};
 
 /// Fraction of monitor height from the top edge where the island is parked.
 const OVERLAY_TOP_MARGIN_FRAC: f64 = 0.02;
+
+/// Horizontal inset used by the left/right anchor presets.
+const OVERLAY_SIDE_MARGIN: i32 = 18;
+
+/// The React stage's logical dimensions. It contains the island itself.
+const OVERLAY_STAGE_WIDTH: f64 = 380.0;
+const OVERLAY_STAGE_HEIGHT: f64 = 120.0;
+
+/// Clear WebView space around the stage. CSS shadows cannot draw beyond the
+/// native window, so this gutter prevents their blurred edges being cropped
+/// into a visible rectangular slab.
+const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
+
+/// Base logical window size, including the transparent shadow gutter.
+const OVERLAY_BASE_WIDTH: f64 = OVERLAY_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
+const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
+const OVERLAY_MAX_SCALE: f64 = 1.25;
+const OVERLAY_MAX_WIDTH: f64 = OVERLAY_BASE_WIDTH * OVERLAY_MAX_SCALE;
+const OVERLAY_MAX_HEIGHT: f64 = OVERLAY_BASE_HEIGHT * OVERLAY_MAX_SCALE;
+
+/// Keep the final answer around long enough to read, then get out of the game.
+const READY_LINGER: Duration = Duration::from_millis(6_500);
+const FAULT_LINGER: Duration = Duration::from_millis(8_000);
+
+/// Cancels stale delayed hides when another wake/status arrives.
+static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub const EVENT_OVERLAY_PREFERENCES: &str = "overlay-preferences";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayPreferences {
+    caption_mode: String,
+    scale_percent: u16,
+}
+
+impl From<&AppSettings> for OverlayPreferences {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            caption_mode: settings.overlay_caption_mode.clone(),
+            scale_percent: settings.overlay_scale_percent.clamp(75, 125),
+        }
+    }
+}
 
 /// Early script so the first paint is clear (before React mounts).
 const OVERLAY_INIT_SCRIPT: &str = r#"
@@ -71,15 +125,20 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
         tracing::warn!("overlay: no config entry — using hardcoded defaults");
         WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
             .title("Boris")
-            .inner_size(380.0, 120.0)
+            .inner_size(OVERLAY_BASE_WIDTH, OVERLAY_BASE_HEIGHT)
+            .max_inner_size(OVERLAY_MAX_WIDTH, OVERLAY_MAX_HEIGHT)
             .decorations(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
-            .visible(true)
+            .visible(false)
     };
 
     let overlay = builder
+        // Override older config templates whose maximum omitted the shadow
+        // gutter at the 125% accessibility scale.
+        .max_inner_size(OVERLAY_MAX_WIDTH, OVERLAY_MAX_HEIGHT)
+        .visible(false)
         .transparent(true)
         .shadow(false)
         .focused(false)
@@ -105,15 +164,107 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
         tracing::info!("overlay click-through enabled (ignore cursor events)");
     }
 
-    place_overlay_top_center(&overlay);
-
-    tracing::info!("overlay window ready (transparent + a=0 + click-through)");
+    tracing::info!("overlay window ready hidden (transparent + a=0 + click-through)");
     Ok(())
 }
 
-/// Park the island near the top-center of the primary (or current) monitor
-/// so it sits away from typical FPS crosshair / aim areas.
-fn place_overlay_top_center<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+/// Apply geometry and notify the React surface without exposing API keys.
+pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+
+    let scale_percent = settings.overlay_scale_percent.clamp(75, 125);
+    let scale = f64::from(scale_percent) / 100.0;
+    if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(
+        OVERLAY_BASE_WIDTH * scale,
+        OVERLAY_BASE_HEIGHT * scale,
+    ))) {
+        tracing::warn!(error = %e, scale_percent, "overlay resize failed");
+    }
+    place_overlay(&overlay, &settings.overlay_position);
+
+    let _ = app.emit(
+        EVENT_OVERLAY_PREFERENCES,
+        OverlayPreferences::from(settings),
+    );
+}
+
+/// Show only during a wake/turn. Ready captions linger briefly; Off and a
+/// disabled preference hide immediately. Delayed hides are generation-guarded
+/// so a new wake cannot be hidden by an older timer.
+pub fn sync_visibility<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: &AppSettings,
+    status: &StatusPicture,
+) {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let epoch = VISIBILITY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+
+    if !settings.show_overlay_on_wake || status.engine == EngineState::Off {
+        let _ = overlay.hide();
+        return;
+    }
+
+    if status.engine == EngineState::Fault {
+        show_without_focus(&overlay);
+        schedule_hide(app.clone(), epoch, FAULT_LINGER);
+        return;
+    }
+
+    if status.phase == Phase::Off {
+        let _ = overlay.hide();
+        return;
+    }
+
+    let active = matches!(
+        status.phase,
+        Phase::Hearing
+            | Phase::Reading
+            | Phase::Thinking
+            | Phase::Talking
+            | Phase::AwaitingReply
+            | Phase::AwaitingConfirm
+    );
+
+    if active {
+        show_without_focus(&overlay);
+        return;
+    }
+
+    // Armed/Quiet after a completed turn: do not resurrect an already-hidden
+    // overlay at startup, but let the current response remain readable.
+    if overlay.is_visible().unwrap_or(false) {
+        schedule_hide(app.clone(), epoch, READY_LINGER);
+    }
+}
+
+fn show_without_focus<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    if let Err(e) = overlay.show() {
+        tracing::warn!(error = %e, "overlay show failed");
+    }
+    // Showing a window must never turn it into a game input target.
+    if let Err(e) = overlay.set_ignore_cursor_events(true) {
+        tracing::warn!(error = %e, "overlay click-through reassert failed");
+    }
+}
+
+fn schedule_hide<R: Runtime>(app: AppHandle<R>, epoch: u64, delay: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if VISIBILITY_EPOCH.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            let _ = overlay.hide();
+        }
+    });
+}
+
+/// Park the island near the requested top edge of the current monitor.
+fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) {
     let monitor = match overlay.current_monitor() {
         Ok(Some(m)) => m,
         _ => match overlay.primary_monitor() {
@@ -131,13 +282,18 @@ fn place_overlay_top_center<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
         return;
     };
 
-    let x = pos.x + (screen.width as i32 - win_size.width as i32) / 2;
+    let screen_right = pos.x + screen.width as i32;
+    let x = match position {
+        "top_left" => pos.x + OVERLAY_SIDE_MARGIN,
+        "top_right" => screen_right - win_size.width as i32 - OVERLAY_SIDE_MARGIN,
+        _ => pos.x + (screen.width as i32 - win_size.width as i32) / 2,
+    };
     let y = pos.y + (screen.height as f64 * OVERLAY_TOP_MARGIN_FRAC) as i32;
 
     if let Err(e) = overlay.set_position(tauri::Position::Physical(PhysicalPosition::new(x, y))) {
         tracing::warn!(error = %e, "overlay set_position failed");
     } else {
-        tracing::info!(x, y, "overlay parked top-center");
+        tracing::info!(x, y, position, "overlay parked");
     }
 }
 
@@ -149,6 +305,11 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
         return Ok(());
     };
     overlay.set_ignore_cursor_events(locked)?;
+    if !locked {
+        // Unlocking is an explicit request to position the overlay. Make the
+        // otherwise wake-only window visible without focusing it.
+        overlay.show()?;
+    }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())
 }

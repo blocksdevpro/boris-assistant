@@ -151,6 +151,12 @@ export type AppSettings = {
   max_confirms_per_turn: number;
   /** Prefer showing the floating island on wake. */
   show_overlay_on_wake: boolean;
+  /** Which spoken text may appear in the floating overlay. */
+  overlay_caption_mode: "full" | "assistant" | "hidden";
+  /** Preferred overlay anchor on the active display. */
+  overlay_position: "top_center" | "top_left" | "top_right";
+  /** Overlay size as a percentage, clamped to 75-125. */
+  overlay_scale_percent: number;
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
   /** Optional log filter (`info`, `boris=debug`, …). */
@@ -173,6 +179,9 @@ export const EMPTY_SETTINGS: AppSettings = {
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
   show_overlay_on_wake: false,
+  overlay_caption_mode: "full",
+  overlay_position: "top_center",
+  overlay_scale_percent: 100,
   start_engine_on_launch: false,
   logging_filter: "",
 };
@@ -269,9 +278,24 @@ export function normalizeSettings(
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
     show_overlay_on_wake: raw?.show_overlay_on_wake ?? false,
+    overlay_caption_mode:
+      raw?.overlay_caption_mode === "assistant" ||
+      raw?.overlay_caption_mode === "hidden"
+        ? raw.overlay_caption_mode
+        : "full",
+    overlay_position:
+      raw?.overlay_position === "top_left" || raw?.overlay_position === "top_right"
+        ? raw.overlay_position
+        : "top_center",
+    overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
     logging_filter: raw?.logging_filter ?? "",
   };
+}
+
+function normalizeOverlayScale(raw: number | null | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
+  return Math.min(125, Math.max(75, Math.round(raw / 5) * 5));
 }
 
 function normalizeMaxConfirms(raw: number | null | undefined): number {

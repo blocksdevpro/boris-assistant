@@ -43,6 +43,18 @@ fn default_max_confirms_per_turn() -> u32 {
     12
 }
 
+fn default_overlay_caption_mode() -> String {
+    "full".into()
+}
+
+fn default_overlay_position() -> String {
+    "top_center".into()
+}
+
+fn default_overlay_scale_percent() -> u16 {
+    100
+}
+
 /// Desktop prefs restored into the main window on launch.
 ///
 /// **Model vs model-provider**
@@ -92,6 +104,15 @@ pub struct AppSettings {
     /// Show floating island when wake fires (host may honor later).
     #[serde(default)]
     pub show_overlay_on_wake: bool,
+    /// Caption privacy: `full` | `assistant` | `hidden`.
+    #[serde(default = "default_overlay_caption_mode")]
+    pub overlay_caption_mode: String,
+    /// Preferred monitor anchor: `top_center` | `top_left` | `top_right`.
+    #[serde(default = "default_overlay_position")]
+    pub overlay_position: String,
+    /// Overlay scale percentage, clamped to 75..=125.
+    #[serde(default = "default_overlay_scale_percent")]
+    pub overlay_scale_percent: u16,
     /// Auto-start the engine when the desktop app opens.
     #[serde(default)]
     pub start_engine_on_launch: bool,
@@ -118,6 +139,9 @@ impl Default for AppSettings {
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
             show_overlay_on_wake: false,
+            overlay_caption_mode: default_overlay_caption_mode(),
+            overlay_position: default_overlay_position(),
+            overlay_scale_percent: default_overlay_scale_percent(),
             start_engine_on_launch: false,
             logging_filter: String::new(),
         }
@@ -156,6 +180,9 @@ impl std::fmt::Debug for AppSettings {
             .field("trusted_auto_moderate", &self.trusted_auto_moderate)
             .field("max_confirms_per_turn", &self.max_confirms_per_turn)
             .field("show_overlay_on_wake", &self.show_overlay_on_wake)
+            .field("overlay_caption_mode", &self.overlay_caption_mode)
+            .field("overlay_position", &self.overlay_position)
+            .field("overlay_scale_percent", &self.overlay_scale_percent)
             .field("start_engine_on_launch", &self.start_engine_on_launch)
             .field("logging_filter", &self.logging_filter)
             .finish()
@@ -245,12 +272,30 @@ impl Default for AgentSection {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct UiSection {
     #[serde(default)]
     show_overlay_on_wake: bool,
+    #[serde(default = "default_overlay_caption_mode")]
+    overlay_caption_mode: String,
+    #[serde(default = "default_overlay_position")]
+    overlay_position: String,
+    #[serde(default = "default_overlay_scale_percent")]
+    overlay_scale_percent: u16,
     #[serde(default)]
     start_engine_on_launch: bool,
+}
+
+impl Default for UiSection {
+    fn default() -> Self {
+        Self {
+            show_overlay_on_wake: false,
+            overlay_caption_mode: default_overlay_caption_mode(),
+            overlay_position: default_overlay_position(),
+            overlay_scale_percent: default_overlay_scale_percent(),
+            start_engine_on_launch: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,8 +323,27 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
     out.show_overlay_on_wake = cfg.ui.show_overlay_on_wake;
+    out.overlay_caption_mode = normalize_overlay_caption_mode(cfg.ui.overlay_caption_mode);
+    out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
+    out.overlay_scale_percent = cfg.ui.overlay_scale_percent.clamp(75, 125);
     out.start_engine_on_launch = cfg.ui.start_engine_on_launch;
     out.logging_filter = cfg.logging.filter;
+}
+
+fn normalize_overlay_caption_mode(raw: String) -> String {
+    match raw.trim() {
+        "assistant" => "assistant".into(),
+        "hidden" => "hidden".into(),
+        _ => default_overlay_caption_mode(),
+    }
+}
+
+fn normalize_overlay_position(raw: String) -> String {
+    match raw.trim() {
+        "top_left" => "top_left".into(),
+        "top_right" => "top_right".into(),
+        _ => default_overlay_position(),
+    }
 }
 
 fn normalize_device_id(raw: String) -> String {
@@ -397,6 +461,9 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     };
     let ui = UiSection {
         show_overlay_on_wake: settings.show_overlay_on_wake,
+        overlay_caption_mode: normalize_overlay_caption_mode(settings.overlay_caption_mode.clone()),
+        overlay_position: normalize_overlay_position(settings.overlay_position.clone()),
+        overlay_scale_percent: settings.overlay_scale_percent.clamp(75, 125),
         start_engine_on_launch: settings.start_engine_on_launch,
     };
     let logging = LoggingSection {
@@ -418,9 +485,9 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     let logging_val = toml::Value::try_from(&logging)
         .map_err(|e| PipelineError::settings(format!("serialize logging: {e}")))?;
 
-    let table = root.as_table_mut().ok_or_else(|| {
-        PipelineError::settings("config.toml root is not a table")
-    })?;
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| PipelineError::settings("config.toml root is not a table"))?;
     table.insert("models".into(), models_val);
     table.insert("capability".into(), capability_val);
     table.insert("audio".into(), audio_val);
@@ -852,6 +919,9 @@ mod tests {
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
             show_overlay_on_wake: true,
+            overlay_caption_mode: "assistant".into(),
+            overlay_position: "top_right".into(),
+            overlay_scale_percent: 115,
             start_engine_on_launch: true,
             logging_filter: "info".into(),
         };
@@ -868,7 +938,10 @@ mod tests {
         assert!(raw_cfg.contains("max_confirms_per_turn"));
         assert!(raw_cfg.contains("[ui]"));
         assert!(raw_cfg.contains("[logging]"));
-        assert!(!raw_cfg.contains("sk-test"), "key must not be in config.toml");
+        assert!(
+            !raw_cfg.contains("sk-test"),
+            "key must not be in config.toml"
+        );
 
         let raw_auth = fs::read_to_string(auth_path()).unwrap();
         assert!(raw_auth.contains("sk-test"));
@@ -891,6 +964,9 @@ mod tests {
         assert!(!loaded.trusted_auto_moderate);
         assert_eq!(loaded.max_confirms_per_turn, 8);
         assert!(loaded.show_overlay_on_wake);
+        assert_eq!(loaded.overlay_caption_mode, "assistant");
+        assert_eq!(loaded.overlay_position, "top_right");
+        assert_eq!(loaded.overlay_scale_percent, 115);
         assert!(loaded.start_engine_on_launch);
         assert_eq!(loaded.logging_filter, "info");
 

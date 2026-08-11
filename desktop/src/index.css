@@ -158,20 +158,27 @@
 /* ── Voice island (always-on-top) ─────────────────────────────────────────── */
 
 .overlay-surface {
+  /* The native window includes a transparent shadow gutter. Do not crop the
+     island here: clipping a CSS shadow creates hard, rectangular edges. */
+  overflow: visible;
   background: transparent !important;
   background-color: transparent !important;
 }
 
+.overlay-stage {
+  width: 380px;
+  height: 120px;
+  transform: translate(-50%, -50%) scale(var(--overlay-scale, 1));
+  transform-origin: center;
+}
+
 .overlay-island {
   /* Single material — near-opaque glass, alpha < 1 for transparent host */
-  background: rgba(28, 30, 36, 0.94);
+  background: rgba(28, 30, 36, 0.97);
   border: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow:
     0 8px 24px rgba(0, 0, 0, 0.38),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(24px) saturate(1.15);
-  -webkit-backdrop-filter: blur(24px) saturate(1.15);
-  will-change: border-color, box-shadow, transform;
   transition:
     border-color 0.45s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.5s cubic-bezier(0.22, 1, 0.36, 1);
@@ -325,6 +332,35 @@
   color: #f5f5f5;
 }
 
+/* Keep native scrolling visually quiet without hiding its affordance. */
+.main-console,
+.main-console * {
+  scrollbar-color: rgba(255, 255, 255, 0.22) rgba(255, 255, 255, 0.045);
+  scrollbar-width: thin;
+}
+
+.main-console ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.main-console ::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.main-console ::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: padding-box;
+}
+
+.main-console ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+  background-clip: padding-box;
+}
+
 /* Apple-style inset group */
 .settings-group {
   background: #1c1c1e;
@@ -342,4 +378,20 @@
   border-radius: inherit;
   background: rgba(255, 255, 255, 0.75);
   transition: width 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
 }

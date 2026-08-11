@@ -38,9 +38,8 @@ pub fn extract_text_content(v: &Value) -> String {
             }
             out.trim().to_string()
         }
-        Value::Null => String::new(),
-        other if other.is_object() || other.is_boolean() || other.is_number() => String::new(),
-        other => other.to_string().trim().to_string(),
+        // Object / Bool / Number / Null all have no speakable text representation.
+        _ => String::new(),
     }
 }
 

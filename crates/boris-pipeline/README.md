@@ -72,8 +72,8 @@ Override root with `BORIS_HOME`.
 
 ```text
 ~/.boris/
-  config.toml          # prefs: [models], [capability]; hand-edit free: [audio], [ui], [logging]
-  auth.json            # secrets: openrouter_api_key
+  config.toml          # prefs: [models], [capability], [audio], [speech], [agent], [ui]; optional [logging]
+  auth.json            # secrets: openrouter_api_key, exa_api_key
   models/
     parakeet/          # STT
     supertone/onnx/    # TTS graphs
@@ -85,7 +85,26 @@ Override root with `BORIS_HOME`.
   workspace/           # sandboxed agent workspace
 ```
 
-`save_settings` only updates `[models]` and `[capability]`; other TOML tables are preserved.
+`save_settings` unconditionally rewrites `[models]`, `[capability]`, `[audio]`, `[speech]`,
+`[agent]`, and `[ui]`, and conditionally writes `[logging]` (only when a non-empty logging
+filter is set, so fresh installs don't get a stray empty section). All other root tables and
+unknown keys outside those managed sections are preserved on save (see `save_settings` /
+`apply_config_file` in `src/settings.rs`). There is currently no genuinely hand-edit-only
+managed table in `config.toml` — anything the desktop settings UI can persist ends up in one
+of the sections above.
+
+## Model downloads (`download.rs`)
+
+Each catalog entry enforces a `min_bytes` floor, and can optionally pin a `sha256` hex
+digest checked after download (before the file replaces any existing copy — mismatch
+deletes the temp file and fails that entry). All entries currently ship `sha256: None`
+pending independently verified upstream digests; the mechanism is fully wired so hashes
+can be filled in per-entry without further code changes. `min_bytes` alone does not
+protect against a compromised/MITM mirror serving an oversized malicious payload.
+
+`BORIS_MODEL_BASE_URL` accepts `https://` or `http://`. Plain `http://` mirrors are
+still allowed (e.g. local/offline test mirrors) but log a loud `tracing::warn!` since
+they have no transport integrity of their own.
 
 ## Environment variables
 

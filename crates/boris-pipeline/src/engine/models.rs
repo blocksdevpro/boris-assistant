@@ -212,6 +212,14 @@ pub(super) fn create_tts(
     }
 }
 
+/// Build a placeholder STT so a caller can recover from a broken invariant
+/// (e.g. an `Option<SttBox>` slot unexpectedly empty) without panicking the
+/// engine thread. Every call transcribes to an error; the next real load
+/// replaces it as usual.
+pub(super) fn lost_stt() -> SttBox {
+    Box::new(LostStt)
+}
+
 /// Placeholder if the STT handle was lost (load-thread panic or empty slot recovery).
 struct LostStt;
 impl SpeechToText for LostStt {

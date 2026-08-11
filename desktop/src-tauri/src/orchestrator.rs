@@ -171,17 +171,13 @@ impl AppState {
 
         if already_spawned && !fingerprint_match {
             info!("LLM fingerprint changed — tearing down engine before respawn");
-            self.teardown_engine(&mut handle_g);
         }
-
-        if handle_g.is_none() {
-            self.spawn_engine(&mut handle_g, fingerprint.clone(), Arc::clone(&on_status))?;
-        }
-
-        let handle = handle_g
-            .as_ref()
-            .ok_or_else(|| "engine missing".to_string())?
-            .clone();
+        let handle = self.spawn_and_ensure_handle(
+            &mut handle_g,
+            already_spawned && !fingerprint_match,
+            fingerprint.clone(),
+            Arc::clone(&on_status),
+        )?;
         // Release gate before Start send so Stop can interleave after spawn;
         // Start uses a cloned channel sender and remains safe.
         drop(handle_g);
@@ -190,12 +186,8 @@ impl AppState {
             // Dead command channel (engine exited without host teardown).
             warn!(error = %e, "EngineHandle::start failed — rebuilding engine");
             let mut handle_g = lock_or_recover(&self.handle, "handle");
-            self.teardown_engine(&mut handle_g);
-            self.spawn_engine(&mut handle_g, fingerprint, on_status)?;
-            let handle = handle_g
-                .as_ref()
-                .ok_or_else(|| "engine missing after rebuild".to_string())?
-                .clone();
+            let handle =
+                self.spawn_and_ensure_handle(&mut handle_g, true, fingerprint, on_status)?;
             drop(handle_g);
             handle.start().map_err(|e| {
                 let msg = format!("failed to start engine after rebuild: {e}");
@@ -211,6 +203,30 @@ impl AppState {
 
         info!("AppState::start complete");
         Ok(())
+    }
+
+    /// Teardown-if-needed → spawn (if not already live) → return a cloned handle.
+    ///
+    /// Shared by the main Start path (teardown only on fingerprint change) and
+    /// the dead-channel retry path (unconditional teardown) in [`Self::start`].
+    /// Caller holds `handle_g`; pure refactor, no behavior change.
+    fn spawn_and_ensure_handle(
+        &self,
+        handle_g: &mut MutexGuard<'_, Option<EngineHandle>>,
+        force_teardown: bool,
+        fingerprint: LlmFingerprint,
+        on_status: Arc<dyn Fn(StatusPicture) + Send + Sync + 'static>,
+    ) -> Result<EngineHandle, String> {
+        if force_teardown {
+            self.teardown_engine(handle_g);
+        }
+        if handle_g.is_none() {
+            self.spawn_engine(handle_g, fingerprint, on_status)?;
+        }
+        handle_g
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "engine missing".to_string())
     }
 
     /// Validate key + preflight, spawn engine thread, store handle + fingerprint.

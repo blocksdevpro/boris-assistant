@@ -6,6 +6,8 @@ description = "Object-safe SpeechToText / TextToSpeech ports for Boris adapters"
 publish     = false
 readme      = "README.md"
 license = "Apache-2.0"
+keywords = ["speech", "stt", "tts"]
+categories = ["multimedia::audio"]
 
 repository = "https://github.com/blocksdevpro/boris-assistant"
 [dependencies]

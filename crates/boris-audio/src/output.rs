@@ -21,6 +21,15 @@ use crate::resampler::OutputResampler;
 /// [`OutputEvent::Drained`]. Covers OS/driver ring-buffer lag.
 const DRAIN_EMPTY_CALLBACKS: u32 = 12;
 
+/// Poll interval for the command worker's shutdown check.
+///
+/// The worker previously blocked on `cmd_rx.recv()` and relied on its matching
+/// `Sender` (held elsewhere, e.g. [`crate::AudioService::output_command_channel`])
+/// being dropped to unblock it — which in turn relied on undocumented struct
+/// field drop order. Using a short `recv_timeout` instead lets the worker wake
+/// on its own and check `shutdown` regardless of who still holds a `Sender`.
+const OUTPUT_WORKER_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Commands from [`crate::AudioService`] to the output worker.
 #[derive(Debug)]
 pub enum OutputCommand {
@@ -222,7 +231,21 @@ fn run_output_worker(
 ) {
     let mut last_event_drops = 0u64;
 
-    while let Ok(command) = cmd_rx.recv() {
+    loop {
+        // Wake periodically to check `shutdown` instead of blocking indefinitely
+        // on `recv()` — see [`OUTPUT_WORKER_SHUTDOWN_POLL`] for why this must not
+        // depend on the matching `Sender` being dropped.
+        let command = match cmd_rx.recv_timeout(OUTPUT_WORKER_SHUTDOWN_POLL) {
+            Ok(command) => command,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
@@ -366,7 +389,14 @@ where
 impl Drop for OutputPipeline {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // Drop stream before join (callback ends; worker still wakes via cmd channel close).
+        // Drop stream so the device callback stops running.
+        //
+        // The worker's join below no longer depends on this happening before —
+        // or on the matching `OutputCommand` `Sender` (owned outside this struct,
+        // e.g. by `AudioService`) being dropped at all. `run_output_worker` wakes
+        // on its own via `recv_timeout` (see `OUTPUT_WORKER_SHUTDOWN_POLL`) and
+        // exits once it observes `shutdown`, so this join can no longer hang
+        // waiting on someone else's channel handle.
         drop(self.stream.take());
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();

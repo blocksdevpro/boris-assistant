@@ -27,6 +27,22 @@
 //! Optional auth: `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` is sent as a Bearer
 //! token when present (helps with rate limits on large LFS blobs).
 //!
+//! # Integrity verification
+//!
+//! Each [`CatalogEntry`] has a `min_bytes` floor (always enforced) and an
+//! optional pinned `sha256` digest. When `sha256` is `Some`, the downloaded
+//! file is hashed after the size check and before it replaces any existing
+//! file; a mismatch deletes the temp file and fails that entry. All current
+//! catalog entries ship with `sha256: None` — we have not independently
+//! verified digests for the real upstream artifacts, so nothing is
+//! (falsely) pinned yet. `min_bytes` alone does **not** protect against a
+//! compromised/MITM mirror serving an oversized malicious payload; wiring
+//! real verified hashes into the catalog closes that gap for a given entry.
+//!
+//! `BORIS_MODEL_BASE_URL` may be `http://` or `https://`; a plain-http
+//! mirror is allowed (some legitimate local/offline setups use it) but logs
+//! a loud `tracing::warn!` because it has no transport integrity of its own.
+//!
 //! LiveKit wake is **not** downloaded here — it is embedded in the desktop binary.
 //!
 //! # Filenames (required product set)
@@ -154,6 +170,13 @@ struct CatalogEntry {
     /// Minimum acceptable on-disk size (bytes) to treat as present.
     min_bytes: u64,
     default_base: &'static str,
+    /// Expected SHA-256 hex digest of the downloaded file, if known/pinned.
+    ///
+    /// `None` for entries we have not been able to independently verify against
+    /// the real upstream artifact yet (all current entries). When `Some`, a
+    /// mismatch after download is a hard failure — the partial/mismatched file
+    /// is deleted rather than left on disk to be picked up by a later run.
+    sha256: Option<&'static str>,
 }
 
 /// Required product files + conservative min sizes (skip re-download if met).
@@ -165,6 +188,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "encoder-model.int8.onnx",
         min_bytes: 100_000_000, // ~652 MB
         default_base: DEFAULT_PARAKEET_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -172,6 +196,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "decoder_joint-model.int8.onnx",
         min_bytes: 1_000_000, // ~9 MB
         default_base: DEFAULT_PARAKEET_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -179,6 +204,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "config.json",
         min_bytes: 20,
         default_base: DEFAULT_PARAKEET_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -186,6 +212,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "vocab.txt",
         min_bytes: 100,
         default_base: DEFAULT_PARAKEET_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -193,6 +220,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "nemo128.onnx",
         min_bytes: 10_000, // ~140 KB
         default_base: DEFAULT_PARAKEET_HF_BASE,
+        sha256: None,
     },
     // Supertone graphs
     CatalogEntry {
@@ -201,6 +229,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/tts.json",
         min_bytes: 100,
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -208,6 +237,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/unicode_indexer.json",
         min_bytes: 1_000,
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -215,6 +245,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/duration_predictor.onnx",
         min_bytes: 100_000, // ~3.7 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -222,6 +253,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/text_encoder.onnx",
         min_bytes: 1_000_000, // ~36 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -229,6 +261,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/vector_estimator.onnx",
         min_bytes: 10_000_000, // ~256 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -236,6 +269,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/vocoder.onnx",
         min_bytes: 10_000_000, // ~101 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
     // Voice (upstream dir is voice_styles/)
     CatalogEntry {
@@ -244,6 +278,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "voice_styles/M4.json",
         min_bytes: 1_000, // ~290 KB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
+        sha256: None,
     },
 ];
 
@@ -294,9 +329,25 @@ fn resolve_url(entry: &CatalogEntry, base_override: Option<&str>) -> String {
 }
 
 /// `BORIS_MODEL_BASE_URL` must be an absolute http(s) URL when set.
+///
+/// Plain `http://` mirrors remain allowed (rejecting them outright would break
+/// legitimate local/offline mirror setups such as `http://localhost:8080/...`
+/// used in dev/test), but using one for a live install is a MITM risk — a
+/// tampered response could serve an oversized malicious payload that still
+/// passes the per-file `min_bytes` check and gets loaded as an ONNX graph. We
+/// emit a loud warning so the risk is visible instead of silent.
 fn validate_model_base_url(base: &str) -> Result<(), String> {
     let base = base.trim();
-    if base.starts_with("https://") || base.starts_with("http://") {
+    if base.starts_with("https://") {
+        return Ok(());
+    }
+    if base.starts_with("http://") {
+        tracing::warn!(
+            base = %base,
+            "{BORIS_MODEL_BASE_URL_ENV} is using plain http:// — model downloads are \
+             unencrypted and vulnerable to MITM tampering; size checks alone cannot detect a \
+             malicious payload. Prefer an https:// mirror."
+        );
         return Ok(());
     }
     let preview: String = base.chars().take(80).collect();
@@ -586,6 +637,16 @@ fn download_one(
         ));
     }
 
+    if let Some(expected) = entry.sha256 {
+        match verify_sha256(&tmp, expected) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
+
     // Replace destination atomically where possible.
     if dest.exists() {
         let _ = fs::remove_file(dest);
@@ -604,6 +665,35 @@ fn download_one(
     }
 
     Ok(downloaded)
+}
+
+/// Compute the SHA-256 hex digest of `path` and compare (case-insensitively)
+/// against `expected`. On mismatch, returns an error describing both digests
+/// (the caller is responsible for deleting the bad file).
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let mut f = File::open(path).map_err(|e| format!("open for hash check: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read for hash check: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "sha256 mismatch: expected {expected}, got {actual} — file discarded (possible \
+             tampered mirror or corrupted download)"
+        ))
+    }
 }
 
 fn temp_path(dest: &Path) -> PathBuf {
@@ -659,5 +749,50 @@ mod tests {
         let msg = format_download_error("request failed", "error sending request for url: timed out");
         assert!(msg.contains("timed out"), "{msg}");
         assert!(msg.contains("stalled"), "{msg}");
+    }
+
+    fn temp_file_with(bytes: &[u8], suffix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "boris-dl-hash-test-{}-{suffix}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn verify_sha256_accepts_matching_digest() {
+        let path = temp_file_with(b"hello world", "ok");
+        // Well-known test vector: sha256("hello world")
+        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let result = verify_sha256(&path, expected);
+        let _ = fs::remove_file(&path);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn verify_sha256_accepts_case_insensitive_digest() {
+        let path = temp_file_with(b"hello world", "ok-upper");
+        let expected = "B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
+        let result = verify_sha256(&path, expected);
+        let _ = fs::remove_file(&path);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn verify_sha256_rejects_mismatched_digest_and_caller_deletes_file() {
+        let path = temp_file_with(b"totally not the expected model bytes", "bad");
+        let bogus_expected = "0000000000000000000000000000000000000000000000000000000000000000";
+        let result = verify_sha256(&path, bogus_expected);
+        assert!(result.is_err(), "expected mismatch to be rejected");
+        let err = result.unwrap_err();
+        assert!(err.contains("mismatch"), "{err}");
+        // download_one deletes the tmp file itself on mismatch; verify_sha256 does not
+        // touch the file, so simulate that half of the contract here.
+        let _ = fs::remove_file(&path);
+        assert!(!path.exists());
     }
 }

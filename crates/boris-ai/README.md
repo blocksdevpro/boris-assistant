@@ -6,19 +6,24 @@ LLM **provider plane** for Boris: HTTP clients, parsing helpers, no agent loop.
 
 ```text
 src/
-  client.rs          LlmClient trait
-  error.rs           LlmError / LlmErrorKind (+ HTTP status mapping)
-  message.rs         content + tool_calls helpers
-  model_pref.rs      model@provider / provider list
-  usage.rs           TokenUsage + logging
-  stream.rs          optional mpsc event helper (not crate-root re-exported)
+  client.rs          LlmClient trait (private module; re-exported at crate root)
+  error.rs           LlmError / LlmErrorKind (+ HTTP status mapping) — public module
+  message.rs         content + tool_calls helpers (private, internal use only)
+  model_pref.rs      model@provider / provider list (private module; re-exported fns)
+  usage.rs           TokenUsage + logging (private module; TokenUsage re-exported)
+  stream.rs          optional mpsc event helper — public module, not crate-root re-exported
   providers/
     openrouter/
       client.rs      construction / timeouts / base URL / session
+      reasoning.rs    ReasoningConfig / ReasoningEffort (OpenRouter `reasoning` object)
       request.rs     chat completion JSON body
       complete.rs    stream-first complete + blocking fallback
       sse.rs         SSE line parse + StreamAssembler
 ```
+
+Only `error` and `stream` are `pub mod`; everything else is a private module
+whose public items are re-exported from the crate root. Prefer
+`boris_ai::Thing` over reaching into a submodule path.
 
 ## Public API (stable for hosts)
 
@@ -26,7 +31,9 @@ src/
 use boris_ai::{
     LlmClient, OpenRouterClient, LlmError, LlmErrorKind,
     TokenUsage, parse_provider_list, split_model_and_provider,
+    ReasoningConfig, ReasoningEffort,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_BASE_URL, DEFAULT_MODEL,
+    DEFAULT_MAX_TOKENS,
 };
 ```
 
@@ -43,12 +50,23 @@ use boris_ai::{
 - Non-success HTTP statuses map to [`LlmErrorKind::Provider`] (or Timeout for
   408/504); transport failures stay [`LlmErrorKind::Http`].
 - HTTP 200 bodies with a top-level `error` object are treated as provider errors.
+  A top-level `error` object arriving **mid-stream** as an SSE `data:` payload
+  is also detected and aborts assembly with the same `LlmErrorKind::Provider`
+  error, instead of silently producing an empty message.
+- SSE bytes are buffered **raw** (`Vec<u8>`) across network chunks and only
+  decoded once a complete line has accumulated — a multi-byte UTF-8 character
+  split across two TCP chunks decodes correctly instead of corrupting into
+  replacement characters on both halves.
 - SSE assembly flushes a final unterminated line when the byte stream ends.
 - Multi-line SSE events are **not** reassembled (single-line `data:` only).
 - Default model (`DEFAULT_MODEL`) is owned by this crate as a last-resort
   fallback when the host passes `None`; product defaults should set a model
   explicitly.
 - Base URL is injectable via `OpenRouterClient::with_base_url` (default OpenRouter).
+- Reasoning defaults to [`ReasoningConfig::default`] (`High` effort, reasoning
+  text excluded from the response, `DEFAULT_MAX_TOKENS` = 24,576 completion
+  headroom). `ReasoningEffort::None` explicitly sends `"enabled": false`
+  rather than omitting the field.
 
 ## Tests
 

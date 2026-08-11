@@ -22,14 +22,14 @@
 //! use boris_ai::{LlmClient, OpenRouterClient, LlmError, parse_provider_list};
 //! ```
 
-pub mod client;
+mod client;
 pub mod error;
-pub mod message;
-pub mod model_pref;
-pub mod providers;
+mod message;
+mod model_pref;
+mod providers;
 /// Optional mpsc event helper (not re-exported at crate root; unused by the agent loop).
 pub mod stream;
-pub mod usage;
+mod usage;
 
 pub use client::LlmClient;
 pub use error::{LlmError, LlmErrorKind};

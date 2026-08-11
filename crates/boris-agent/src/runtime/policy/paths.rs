@@ -21,6 +21,7 @@ use super::SandboxConfig;
 /// Keys treated as path-like in tool args (all must pass root checks when present).
 const PATH_ARG_KEYS: &[&str] = &[
     "path",
+    "paths",
     "file",
     "filepath",
     "file_path",
@@ -59,15 +60,32 @@ pub(super) enum PathAccess {
 }
 
 /// Collect **all** non-empty path-like string fields from tool args.
+///
+/// Checks both scalar string values (`"path": "a.txt"`) and array-of-string
+/// values (`"paths": ["a.txt", "b.txt"]`) under the tracked [`PATH_ARG_KEYS`],
+/// so a future tool with an array-of-paths arg gets the same path-policy
+/// checking as scalar path args. No current builtin tool uses the array
+/// shape (checked via grep across `tools/`); this is defense in depth.
 pub(super) fn args_path_strings(args: &Value) -> Vec<&str> {
     let mut out = Vec::new();
     let Some(obj) = args.as_object() else {
         return out;
     };
     for key in PATH_ARG_KEYS {
-        if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+        let Some(value) = obj.get(*key) else {
+            continue;
+        };
+        if let Some(s) = value.as_str() {
             if !s.is_empty() {
                 out.push(s);
+            }
+        } else if let Some(arr) = value.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    if !s.is_empty() {
+                        out.push(s);
+                    }
+                }
             }
         }
     }
@@ -338,6 +356,18 @@ mod tests {
         assert!(paths.contains(&"from.txt"));
         assert!(paths.contains(&"to.txt"));
         assert_eq!(paths.len(), 4);
+    }
+
+    #[test]
+    fn args_path_strings_recurses_into_string_arrays() {
+        let args = serde_json::json!({
+            "paths": ["a.txt", "../escape.txt"],
+            "note": "not a path key",
+        });
+        let paths = args_path_strings(&args);
+        assert!(paths.contains(&"a.txt"));
+        assert!(paths.contains(&"../escape.txt"));
+        assert_eq!(paths.len(), 2);
     }
 
     #[test]

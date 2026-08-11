@@ -41,6 +41,9 @@ unsafe impl Send for WebRtcVad {}
 impl WebRtcVad {
     /// Create a quality-mode VAD at [`AUDIO_TARGET_RATE`] (16 kHz).
     pub fn new() -> Self {
+        // Unreachable-by-construction: the compile-time assert above already
+        // pins `AUDIO_TARGET_RATE == 16_000`, which `SampleRate::try_from` always
+        // accepts, so this `expect` can never actually fire.
         let sample_rate = SampleRate::try_from(AUDIO_TARGET_RATE as i32)
             .expect("AUDIO_TARGET_RATE is not a valid WebRTC VAD sample rate");
         // Quality matches the original Boris behavior (reliable on real speech).

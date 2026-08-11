@@ -239,10 +239,23 @@ export function MainWindow() {
     }
     // Apply host preference if we have a stored id.
     if (settings.input_device && inputId === settings.input_device) {
-      void switchInput(inputId).catch(() => {});
+      void switchInput(inputId).catch((e) => {
+        // switchInput() already logs the underlying failure; this is just
+        // context that it happened during preferred-device restore, not a
+        // user-initiated switch.
+        logger.error("restore preferred input device failed", {
+          deviceId: inputId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
     }
     if (settings.output_device && outputId === settings.output_device) {
-      void switchOutput(outputId).catch(() => {});
+      void switchOutput(outputId).catch((e) => {
+        logger.error("restore preferred output device failed", {
+          deviceId: outputId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
     }
   }, [settings, inputs, outputs]);
 

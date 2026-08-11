@@ -29,7 +29,7 @@ pub fn f32_to_pcm16_samples_into(audio: &[AudioSample], out: &mut Vec<i16>) {
     out.clear();
     out.reserve(audio.len());
     for &s in audio {
-        out.push((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+        out.push((s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16);
     }
 }
 

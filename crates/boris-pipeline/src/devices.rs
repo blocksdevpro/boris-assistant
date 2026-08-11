@@ -85,6 +85,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits real cpal/OS audio host enumeration; needs a real audio backend. \
+                Run manually: cargo test -p boris-pipeline --lib -- --ignored"]
     fn listed_device_ids_have_no_debug_quotes() {
         // When hardware is present, wire ids should look like Display (host:id),
         // not Debug (`DeviceId(...)`).

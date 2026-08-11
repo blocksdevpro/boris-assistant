@@ -76,6 +76,10 @@ impl ParakeetStt {
     ///
     /// Prefer [`Self::with_model_dir`] for product hosts.
     #[deprecated(note = "use ParakeetStt::with_model_dir(~/.boris/models/parakeet)")]
+    // No `Default` impl by design (see struct docs): hosts must supply an
+    // explicit model directory, so `new()`'s CWD-relative default is not a
+    // meaningful `Default::default()`.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self::with_model_dir(PathBuf::from("./assets/models/parakeet"))
     }
@@ -109,21 +113,32 @@ impl fmt::Debug for ParakeetStt {
 
 fn format_quantization(q: &Quantization) -> &'static str {
     match q {
-        Quantization::Int8 => "int8",
         Quantization::FP32 => "fp32",
-        // Forward-compat if transcribe-rs adds more variants.
-        _ => "other",
+        Quantization::FP16 => "fp16",
+        Quantization::Int8 => "int8",
+        Quantization::Int4 => "int4",
     }
 }
 
 /// Encoder / decoder basenames for the selected quantization.
+///
+/// Mirrors `transcribe_rs::onnx::session::resolve_model_path`'s suffix
+/// mapping (`FP32` → no suffix, `FP16` → `.fp16.`, `Int8` → `.int8.`,
+/// `Int4` → `.int4.`) so preflight checks the exact files that will load.
 fn quantized_pair(q: &Quantization) -> (&'static str, &'static str) {
     match q {
         Quantization::FP32 => ("encoder-model.onnx", "decoder_joint-model.onnx"),
-        // Int8 and any unknown prefer int8 product filenames.
-        _ => (
+        Quantization::FP16 => (
+            "encoder-model.fp16.onnx",
+            "decoder_joint-model.fp16.onnx",
+        ),
+        Quantization::Int8 => (
             "encoder-model.int8.onnx",
             "decoder_joint-model.int8.onnx",
+        ),
+        Quantization::Int4 => (
+            "encoder-model.int4.onnx",
+            "decoder_joint-model.int4.onnx",
         ),
     }
 }
@@ -150,14 +165,11 @@ fn preflight_model_dir(dir: &Path, quantization: &Quantization) -> Result<()> {
         }
     }
     let (enc, dec) = quantized_pair(quantization);
-    // Accept either exact quantized name or the alternate (transcribe-rs may
-    // resolve variants itself); require at least one encoder + one decoder.
-    let enc_ok = dir.join(enc).is_file()
-        || dir.join("encoder-model.onnx").is_file()
-        || dir.join("encoder-model.int8.onnx").is_file();
-    let dec_ok = dir.join(dec).is_file()
-        || dir.join("decoder_joint-model.onnx").is_file()
-        || dir.join("decoder_joint-model.int8.onnx").is_file();
+    // Require the exact encoder/decoder files implied by the requested
+    // quantization (not "any known" variant) so preflight matches what
+    // `ParakeetModel::load` will actually resolve and open.
+    let enc_ok = dir.join(enc).is_file();
+    let dec_ok = dir.join(dec).is_file();
     if !enc_ok {
         missing.push(enc);
     }
@@ -214,7 +226,7 @@ impl SpeechToText for ParakeetStt {
     }
 
     fn is_loaded(&self) -> bool {
-        self.model.is_some()
+        ParakeetStt::is_loaded(self)
     }
 
     fn backend_id(&self) -> &str {
@@ -290,7 +302,7 @@ mod tests {
         assert_eq!(stt.language(), "en");
         assert!(!stt.is_loaded());
         assert_eq!(SpeechToText::backend_id(&stt), "parakeet");
-        assert_eq!(SpeechToText::is_loaded(&stt), false);
+        assert!(!SpeechToText::is_loaded(&stt));
     }
 
     #[test]
@@ -344,6 +356,53 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
         let msg = err.to_string();
         assert!(msg.contains("incomplete") || msg.contains("missing"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn quantized_pair_maps_all_variants_distinctly() {
+        assert_eq!(
+            quantized_pair(&Quantization::FP32),
+            ("encoder-model.onnx", "decoder_joint-model.onnx")
+        );
+        assert_eq!(
+            quantized_pair(&Quantization::FP16),
+            ("encoder-model.fp16.onnx", "decoder_joint-model.fp16.onnx")
+        );
+        assert_eq!(
+            quantized_pair(&Quantization::Int8),
+            ("encoder-model.int8.onnx", "decoder_joint-model.int8.onnx")
+        );
+        assert_eq!(
+            quantized_pair(&Quantization::Int4),
+            ("encoder-model.int4.onnx", "decoder_joint-model.int4.onnx")
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_int8_files_when_fp16_requested() {
+        // Regression test for the quantized_pair() bug: FP16/Int4 preflight
+        // must NOT be satisfied by int8-suffixed files.
+        let tmp = std::env::temp_dir().join(format!(
+            "boris-parakeet-fp16-mismatch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("nemo128.onnx"), "x").unwrap();
+        std::fs::write(tmp.join("vocab.txt"), "a 0\n").unwrap();
+        // Only int8 files present, not fp16.
+        std::fs::write(tmp.join("encoder-model.int8.onnx"), "x").unwrap();
+        std::fs::write(tmp.join("decoder_joint-model.int8.onnx"), "x").unwrap();
+
+        let err = preflight_model_dir(&tmp, &Quantization::FP16).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("fp16"), "{msg}");
+
+        // Int8 preflight against the same dir should succeed.
+        assert!(preflight_model_dir(&tmp, &Quantization::Int8).is_ok());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

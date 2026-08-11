@@ -23,6 +23,12 @@ use super::meta::ToolMeta;
 /// Bodies stay dumb. Policy, sandbox, timeouts, truncation, audit, and HITL
 /// live in [`crate::runtime::ToolRuntime`] — not inside `execute`.
 ///
+/// That policy runtime enforces gates purely from what [`Tool::meta`] declares
+/// (`Permission`s, `ToolRisk`, `requires_confirmation`) — it never inspects
+/// `execute`'s actual behavior. The default `meta()` is deliberately
+/// permissive (`Safe`, no permissions, no confirmation); see [`Tool::meta`]'s
+/// own doc comment before implementing a tool with real side effects.
+///
 /// # Async
 ///
 /// `execute` is async so I/O tools (web, shell, MCP) can await without blocking
@@ -51,6 +57,20 @@ pub trait Tool: Send + Sync {
     /// Default: [`ToolMeta::safe_default`]. Override for any tool that writes,
     /// networks, or needs confirmation. Production tools should set
     /// [`.read_only(...)`](ToolMeta::read_only) so wave scheduling can fan them out.
+    ///
+    /// # Safety
+    ///
+    /// The runtime's hard gates (path allowlists, [`crate::runtime::ShellPolicy`],
+    /// [`crate::runtime::NetworkPolicy`]) and HITL confirmation are **only as
+    /// strong as the `Permission`s and `risk` a tool declares here** — they never
+    /// inspect what `execute` actually does. The default (`Safe` risk, no
+    /// permissions, no confirmation) is **deliberately permissive**: an
+    /// implementation that forgets to override `meta()` is silently exempted
+    /// from every hard gate and auto-allowed with no user prompt, even if
+    /// `execute` reads the filesystem, makes network calls, or shells out.
+    /// Any tool that touches the filesystem, network, clipboard, or shell —
+    /// or has other side effects a user would want to approve — **must**
+    /// override `meta()` with accurate `Permission`s and `ToolRisk`.
     fn meta(&self) -> ToolMeta {
         ToolMeta::safe_default()
     }

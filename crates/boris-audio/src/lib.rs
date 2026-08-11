@@ -34,6 +34,3 @@ pub use service::AudioService;
 
 // Pipelines (`input::InputPipeline`, `output::OutputPipeline`) are crate-private;
 // hosts go through [`AudioService`].
-
-/// Historical chunk hint (frames); not used by all paths.
-pub const AUDIO_CHUNK_SIZE: u32 = 512;

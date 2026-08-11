@@ -360,7 +360,6 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     // One shared roots config for runtime policy and BuiltinToolPaths so sandbox
     // / data roots never diverge (Grok layout: state/workspace + memory/sessions).
     let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
-    preset.apply_to_sandbox(&mut sandbox);
     // Trusted auto-allow for Moderate tools + sandbox file writes (notes, workspace…).
     // Shell / open URL still confirm. Env `BORIS_TRUSTED` overrides config.
     let trusted = config.trusted_auto_moderate;
@@ -377,18 +376,23 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         allow_write: sandbox.allow_write.clone(),
         boris_home: paths::boris_home(),
     };
-    // Null audit at init — session bind sets per-session tool_calls.jsonl.
-    agent.configure_runtime(sandbox, None);
 
     // Core + (optional) power tools filtered by capability preset + personal context.
+    // Applies `preset` to `sandbox` internally (network/shell lockdown for
+    // VoiceSafe/LocalPower) — must run before `configure_runtime` below so the
+    // registered toolset and the enforced sandbox policy never diverge.
     let power = preset.wants_power_tools();
     boris_agent::tools::register_builtin_tools_with_preset(
         &mut agent,
         tool_paths,
         true,
         power,
+        &mut sandbox,
         preset,
     );
+
+    // Null audit at init — session bind sets per-session tool_calls.jsonl.
+    agent.configure_runtime(sandbox, None);
 
     // Skills: install defaults into ~/.boris/skills if missing, then enable catalog + tools.
     match boris_agent::ensure_default_skills(&paths::boris_home()) {

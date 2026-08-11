@@ -17,26 +17,21 @@ Host (pipeline / desktop)
 ```rust
 use std::sync::Arc;
 use boris_agent::{
-    Agent, AgentOptions, BuiltinToolPaths, CapabilityPreset, OpenRouterClient,
+    Agent, BuiltinToolPaths, CapabilityPreset, OpenRouterClient,
     SandboxConfig, register_builtin_tools_with_preset, AgentOutcome,
 };
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = OpenRouterClient::from_env()?; // or construct with key + model
 let home = dirs_next_home().join(".boris"); // host-specific home
-let sandbox = SandboxConfig::for_desktop_mvp(&home);
+let mut sandbox = SandboxConfig::for_desktop_mvp(&home)
+    .with_trusted_auto_moderate(true);
 
-let mut agent = Agent::from_options(AgentOptions {
-    client: Box::new(client),
-    system_prompt: "You are Boris, a concise voice assistant.".into(),
-    max_tool_rounds: None,
-    tools: vec![],
-    sandbox: Some(sandbox),
-    audit_path: Some(home.join("audit.jsonl")),
-    session_id: None,
-    trusted_auto_moderate: true,
-});
+let mut agent = Agent::new(Box::new(client), "You are Boris, a concise voice assistant.");
 
+// Register tools BEFORE configure_runtime: register_builtin_tools_with_preset
+// mutates `sandbox` in place via `CapabilityPreset::apply_to_sandbox` (network/shell
+// lockdown for VoiceSafe/LocalPower), so preset and sandbox can never drift apart.
 register_builtin_tools_with_preset(
     &mut agent,
     BuiltinToolPaths {
@@ -50,8 +45,12 @@ register_builtin_tools_with_preset(
     },
     true,  // llm extract
     true,  // power tools
+    &mut sandbox,
     CapabilityPreset::Full,
 );
+
+// Now hand the (preset-adjusted) sandbox to the runtime.
+agent.configure_runtime(sandbox, Some(home.join("audit.jsonl")));
 
 match agent.prompt("What time is it?").await? {
     AgentOutcome::Speak { text, .. } => println!("{text}"),
@@ -79,7 +78,7 @@ LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 | **SandboxConfig** | Path roots (`sandbox_root`, `boris_data_roots`, `allow_read` / `allow_write`), `NetworkPolicy`, `ShellPolicy`, risk/HITL thresholds. |
 | **Path policy** | All path-like args checked under roots; best-effort canonicalize for symlink escapes; case-insensitive on Windows. Residual TOCTOU between check and open. |
 | **ShellPolicy** | `Denied` · `Allowlist` (binary/prefix) · `OpenConfirm`. Bash deny list is best-effort; **HITL is authoritative**. Windows PowerShell fallback uses `-ExecutionPolicy Bypass` for usability only. |
-| **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. |
+| **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backend (Exa / DuckDuckGo) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
 | **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset. |
 

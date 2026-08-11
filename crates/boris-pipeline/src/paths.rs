@@ -525,13 +525,25 @@ pub fn preflight() -> PreflightReport {
 pub fn bootstrap_models_if_needed() -> Result<(), String> {
     ensure_model_dirs().map_err(|e| format!("create ~/.boris/models: {e}"))?;
 
+    // This runs on every engine spawn, including packaged releases where the
+    // product models are already installed under ~/.boris. Check readiness
+    // FIRST and short-circuit before walking the filesystem for workspace
+    // `assets/models` — that walk is only useful for a dev checkout that
+    // hasn't bootstrapped yet, so skip it entirely once both models are ready.
+    let pk = parakeet_dir();
+    let onnx = supertone_onnx_dir();
+    let voices = supertone_voices_dir();
+    if parakeet_looks_ready(&pk) && supertone_looks_ready(&onnx, &voices) {
+        tracing::debug!("models already ready under ~/.boris; skipping dev-asset bootstrap walk");
+        return Ok(());
+    }
+
     let src_root = find_dev_assets_models();
     let Some(src_root) = src_root else {
         tracing::debug!("no workspace assets/models found for bootstrap");
         return Ok(());
     };
 
-    let pk = parakeet_dir();
     if !parakeet_looks_ready(&pk) {
         let from = src_root.join("parakeet");
         if from.is_dir() {
@@ -540,8 +552,6 @@ pub fn bootstrap_models_if_needed() -> Result<(), String> {
         }
     }
 
-    let onnx = supertone_onnx_dir();
-    let voices = supertone_voices_dir();
     if !supertone_looks_ready(&onnx, &voices) {
         let from_onnx = src_root.join("supertone").join("onnx");
         let from_voices = src_root.join("supertone").join("voices");

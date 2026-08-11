@@ -646,6 +646,9 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8], private: bool) -> io::Resu
         match fs::rename(&tmp, path) {
             Ok(()) => {
                 let _ = fs::remove_file(&bak);
+                if private {
+                    restrict_to_current_user_windows(path);
+                }
                 Ok(())
             }
             Err(_e) => {
@@ -718,7 +721,17 @@ fn write_direct(path: &std::path::Path, bytes: &[u8], private: bool) -> io::Resu
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let mut f = fs::File::create(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        if private {
+            restrict_to_current_user_windows(path);
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = private;
         let mut f = fs::File::create(path)?;
@@ -732,6 +745,57 @@ fn write_direct(path: &std::path::Path, bytes: &[u8], private: bool) -> io::Resu
 fn set_owner_secret_mode(path: &std::path::Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Windows analog of the Unix `0o600` intent: restrict `auth.json` (plaintext
+/// API keys) to the current user only.
+///
+/// Best-effort, defense-in-depth — mirrors `set_owner_secret_mode` but Windows
+/// has no POSIX mode bits, so this shells out to `icacls` to strip inherited
+/// ACEs and grant Full Control to the current user exclusively:
+/// `icacls <path> /inheritance:r /grant:r "<user>":F`.
+///
+/// Never fails the settings save: on any error (missing `icacls`, no
+/// permission, etc.) this just logs a warning and leaves the file's default
+/// ACL in place. Only call this for files that actually hold secrets — not
+/// every settings file.
+#[cfg(windows)]
+fn restrict_to_current_user_windows(path: &std::path::Path) {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    if user.trim().is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            "USERNAME env var unavailable; skipping Windows ACL restriction on secrets file"
+        );
+        return;
+    }
+    let grant = format!("{user}:F");
+    let result = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(&grant)
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::debug!(path = %path.display(), "restricted secrets file ACL to current user");
+        }
+        Ok(out) => {
+            tracing::warn!(
+                path = %path.display(),
+                status = %out.status,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "icacls did not fully succeed restricting secrets file ACL"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to run icacls to restrict secrets file ACL (best-effort, continuing)"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

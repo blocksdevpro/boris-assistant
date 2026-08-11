@@ -119,19 +119,33 @@ impl OpenRouterClient {
         }
 
         let mut assembler = StreamAssembler::new();
-        let mut line_buf = String::new();
+        // Raw bytes, not `String` — network chunk boundaries don't align with
+        // UTF-8 character boundaries, so decoding must wait for a complete line.
+        let mut line_buf: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
+        let mut stream_error: Option<Value> = None;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| LlmError::http(format!("stream read: {e}")))?;
             push_sse_bytes(&mut line_buf, &chunk, |data| {
                 ingest_sse_data(&mut assembler, data);
             });
+            if let Some(err) = assembler.take_error() {
+                stream_error = Some(err);
+                break;
+            }
         }
-        // Final event may omit trailing newline.
-        flush_sse_buffer(&mut line_buf, |data| {
-            ingest_sse_data(&mut assembler, data);
-        });
+        if stream_error.is_none() {
+            // Final event may omit trailing newline.
+            flush_sse_buffer(&mut line_buf, |data| {
+                ingest_sse_data(&mut assembler, data);
+            });
+            stream_error = assembler.take_error();
+        }
+
+        if let Some(err) = stream_error {
+            return Err(LlmError::from_provider_error_value(&err));
+        }
 
         if let Some(usage) = assembler.last_usage() {
             log_usage(&self.model, usage, "stream");

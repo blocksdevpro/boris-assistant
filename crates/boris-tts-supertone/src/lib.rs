@@ -253,12 +253,13 @@ fn validate_voice_id(voice: &str) -> Result<()> {
 fn reject_english_only_supertone(model_dir: &Path) -> Result<()> {
     let path = model_dir.join("tts.json");
     if !path.is_file() {
-        // st-tts may still load without it; warn only.
-        tracing::warn!(
-            path = %path.display(),
-            "supertone tts.json missing; cannot verify model family"
-        );
-        return Ok(());
+        // README documents tts.json as a hard requirement (ONNX graph +
+        // tts.json) and English-only installs as always rejected; a missing
+        // file means we cannot verify the model family, so fail closed.
+        return Err(Error::config(format!(
+            "supertone model dir missing required tts.json: {}",
+            path.display()
+        )));
     }
 
     let raw = std::fs::read_to_string(&path).map_err(|e| {
@@ -381,7 +382,7 @@ fn preflight_paths(model_dir: &Path, voice_dir: &Path, voice: &str) -> Result<Pa
 
 impl TextToSpeech for SupertoneTts {
     fn is_loaded(&self) -> bool {
-        self.model.is_some()
+        SupertoneTts::is_loaded(self)
     }
 
     fn backend_id(&self) -> &str {
@@ -397,12 +398,14 @@ impl TextToSpeech for SupertoneTts {
             return Ok(());
         }
 
-        self.ensure_runtime()?;
-
+        // Validate paths before paying for the (real, multi-thread) Tokio
+        // runtime build — a bad path shouldn't need a runtime first.
         let model_dir = self.model_dir.clone();
         let voice_dir = self.voice_dir.clone();
         let voice = self.voice.clone();
         let voice_path = preflight_paths(&model_dir, &voice_dir, &voice)?;
+
+        self.ensure_runtime()?;
 
         tracing::info!(
             model = SUPERTONE_MODEL_ID,
@@ -437,20 +440,22 @@ impl TextToSpeech for SupertoneTts {
     }
 
     fn synthesize(&mut self, text: &str) -> Result<AudioBuffer> {
+        // Nested block_on inside an entered runtime panics — fail clearly,
+        // and *before* touching the model, so misuse is rejected without
+        // paying for a (possibly slow) lazy load first.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(Error::other(
+                "supertone synthesize cannot run inside a Tokio runtime \
+                 (nested block_on). Call from a sync host thread only.",
+            ));
+        }
+
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
 
         if self.model.is_none() {
             self.load()?;
-        }
-
-        // Nested block_on inside an entered runtime panics — fail clearly.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(Error::other(
-                "supertone synthesize cannot run inside a Tokio runtime \
-                 (nested block_on). Call from a sync host thread only.",
-            ));
         }
 
         self.ensure_runtime()?;
@@ -466,9 +471,9 @@ impl TextToSpeech for SupertoneTts {
 
         let start = Instant::now();
         let lang = self.lang.as_str();
-        // Own inter-unit silence; zero st-tts internal chunk silence to avoid double pad.
-        let mut params = self.params.clone();
-        params.silence_duration = 0.0;
+        // Own inter-unit silence; st-tts internal chunk silence stays 0
+        // (default_synthesis_params() sets it and nothing mutates it after).
+        let params = self.params.clone();
         let inter_unit = self.inter_unit_silence;
         let units = speakable_units(text);
 
@@ -596,6 +601,44 @@ mod tests {
         );
         let err = tts.load().unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    /// Guard must reject nested `synthesize()` calls made from inside an
+    /// already-entered Tokio runtime *before* touching the model — so this
+    /// works even with fake, nonexistent paths (README safety claim).
+    #[tokio::test]
+    async fn synthesize_inside_tokio_runtime_is_rejected() {
+        let mut tts = SupertoneTts::with_paths(
+            std::env::temp_dir().join("boris-supertone-nested-rt-xyz"),
+            std::env::temp_dir().join("boris-supertone-nested-rt-voices-xyz"),
+            "M4",
+        );
+        let err = tts.synthesize("hello world").unwrap_err();
+        assert!(matches!(err, Error::Other(_)), "got {err:?}");
+        // Rejected before load() ran — model must still be unloaded.
+        assert!(!tts.is_loaded());
+    }
+
+    #[test]
+    fn missing_tts_json_is_config_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "boris-supertone-notts-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let model_dir = tmp.join("onnx");
+        let voice_dir = tmp.join("voices");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::create_dir_all(&voice_dir).unwrap();
+        std::fs::write(voice_dir.join("M4.json"), "{}").unwrap();
+        // Intentionally no tts.json in model_dir.
+
+        let err = preflight_paths(&model_dir, &voice_dir, "M4").unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("tts.json"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -31,6 +31,18 @@ const DEFAULT_INPUT_SUBSCRIBER_QUEUE: usize = 64;
 const DEFAULT_SOURCE_RATE_HZ: u32 = 44_100;
 
 /// Full-duplex audio: mic capture fan-out + TTS playback.
+///
+/// # Field order
+///
+/// `output_command_channel` is declared before `output_pipeline` for readability
+/// (channels grouped near the pipelines that use them), but this ordering is
+/// **not** load-bearing for correctness anymore: `OutputPipeline`'s worker wakes
+/// itself via a `recv_timeout` poll (see `output::OUTPUT_WORKER_SHUTDOWN_POLL`)
+/// rather than relying on `output_command_channel`'s `Sender` being dropped
+/// before `OutputPipeline::drop()` joins the worker. Historically it *was*
+/// load-bearing — Rust drops struct fields in declaration order, and the old
+/// worker blocked on `cmd_rx.recv()` until its `Sender` closed — so reordering
+/// these fields would have silently reintroduced a shutdown hang.
 pub struct AudioService {
     input_pipeline: InputPipeline,
     input_subscribers: InputSubscribers,

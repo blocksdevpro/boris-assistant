@@ -106,4 +106,46 @@ mod tests {
         assert_eq!(r, vec![0, 2]);
         assert_eq!(w, vec![1]);
     }
+
+    /// Documented, checked contract relied on by `loop_/tool_batch.rs`'s
+    /// `ordered[i].expect(...)`: every call index lands in exactly one of
+    /// read_idx/write_idx, so their lengths always sum to `calls.len()`.
+    #[test]
+    fn partition_covers_every_index_exactly_once() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(T {
+                name: "file_read",
+                ro: true,
+            }),
+            Arc::new(T {
+                name: "bash",
+                ro: false,
+            }),
+        ];
+        // Includes a call for an unknown tool name (not in `tools`) — must
+        // still land in exactly one partition (writes, via the `unwrap_or(false)`
+        // fallback), not be dropped or double-counted.
+        let calls = vec![
+            RawToolCall {
+                call_id: "1".into(),
+                name: "file_read".into(),
+                args: json!({}),
+            },
+            RawToolCall {
+                call_id: "2".into(),
+                name: "bash".into(),
+                args: json!({}),
+            },
+            RawToolCall {
+                call_id: "3".into(),
+                name: "unknown_tool".into(),
+                args: json!({}),
+            },
+        ];
+        let (r, w) = partition_read_write(&calls, &tools);
+        assert_eq!(r.len() + w.len(), calls.len());
+        let mut all: Vec<usize> = r.iter().chain(w.iter()).copied().collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..calls.len()).collect::<Vec<_>>());
+    }
 }

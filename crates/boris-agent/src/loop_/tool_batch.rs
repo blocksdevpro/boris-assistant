@@ -443,6 +443,10 @@ async fn run_tool_batch_waves(
         confirms_used,
     };
     let (read_idx, write_idx) = partition_read_write(&calls, state.tools);
+    // Contract with `partition_read_write`: every index in 0..calls.len() lands
+    // in exactly one of read_idx/write_idx (checked below, right before the
+    // `ordered[i]` invariant it backs is relied on via `.expect()`).
+    let partitioned_len = read_idx.len() + write_idx.len();
     let max_par = clamp_parallel(read_idx.len(), config.features.max_parallel_tools);
 
     // Pre-size results in original order.
@@ -499,6 +503,16 @@ async fn run_tool_batch_waves(
         ordered[i] = Some((started.elapsed().as_millis() as u64, result));
     }
 
+    // Every `ordered[i]` must have been filled by exactly one of the read/write
+    // waves above — guaranteed by `partition_read_write` partitioning every
+    // index into exactly one of read_idx/write_idx (see `runtime::concurrency`
+    // unit tests for the checked contract). Debug-only: cheap, and a violation
+    // here would mean the `.expect()` below is masking a real bug.
+    debug_assert_eq!(
+        partitioned_len,
+        calls.len(),
+        "partition_read_write must assign every call index to exactly one wave"
+    );
     let results: Vec<(u64, InvokeResult)> = ordered
         .into_iter()
         .map(|o| o.expect("every call should have a result"))

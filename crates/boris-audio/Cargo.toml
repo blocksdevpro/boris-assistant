@@ -7,6 +7,8 @@ repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Real-time duplex audio I/O for Boris (cpal capture/playback + rubato resample)"
 readme      = "README.md"
 publish     = false
+keywords    = ["audio", "cpal", "voice"]
+categories  = ["multimedia::audio"]
 
 [dependencies]
 boris-core        = { workspace = true }

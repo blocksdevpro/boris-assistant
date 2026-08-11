@@ -33,9 +33,17 @@ impl Tool for ClipboardGetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Moderate)
+        // Dangerous (not Moderate): clipboard contents are attacker-influenceable
+        // (a user can copy anything, or a prior tool/page can coax a copy) and a
+        // subsequent web_fetch/web_search call can exfiltrate them under
+        // NetworkPolicy::Open with no confirmation. Forcing confirmation here
+        // (force_confirm_at_or_above defaults to Dangerous, and trusted_auto_moderate's
+        // auto-allow ceiling tops out at Moderate) closes that unconfirmed
+        // clipboard -> network path. See crates/boris-agent/README.md security table.
+        ToolMeta::with_risk(ToolRisk::Dangerous)
             .kind(ToolKind::System)
             .permissions(&[Permission::Clipboard])
+            .confirm(true)
             .read_only(true)
             .max_concurrency(8)
     }
@@ -120,5 +128,26 @@ impl Tool for ClipboardSetTool {
             "Copied {} characters to clipboard.",
             text.chars().count()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{decide, PolicyDecision, SandboxConfig};
+
+    /// clipboard_get -> web_fetch exfiltration gate: even under the shipped
+    /// desktop defaults (open network) with a trusted session, clipboard_get
+    /// must still pause for HITL confirmation instead of auto-allowing.
+    #[test]
+    fn clipboard_get_requires_confirmation_under_desktop_mvp_trusted() {
+        let config = SandboxConfig::for_desktop_mvp("C:\\Users\\me\\.boris")
+            .with_trusted_auto_moderate(true);
+        let meta = ClipboardGetTool.meta();
+        let decision = decide(&config, &meta, &serde_json::json!({}), 0);
+        assert!(
+            matches!(decision, PolicyDecision::NeedsConfirmation { .. }),
+            "expected clipboard_get to require confirmation, got {decision:?}"
+        );
     }
 }

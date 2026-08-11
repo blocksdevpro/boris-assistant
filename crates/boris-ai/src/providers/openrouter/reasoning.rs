@@ -11,14 +11,18 @@ use serde_json::{json, Value};
 pub enum ReasoningEffort {
     /// Disable extended reasoning when the model allows it.
     None,
+    /// Lightest thinking budget above [`Self::None`]; fastest voice replies.
     Minimal,
+    /// Light thinking budget for simple, low-stakes turns.
     Low,
     /// Balanced default for simple voice facts.
     Medium,
     /// Prefer this for agent / tool / multi-step work.
     #[default]
     High,
+    /// Heavier budget than [`Self::High`] for harder multi-step planning.
     XHigh,
+    /// Maximum thinking budget the provider allows.
     Max,
 }
 
@@ -56,6 +60,7 @@ impl Default for ReasoningConfig {
 }
 
 impl ReasoningConfig {
+    /// [`ReasoningEffort::High`], reasoning text excluded from the response body.
     pub fn high() -> Self {
         Self {
             effort: ReasoningEffort::High,
@@ -63,6 +68,7 @@ impl ReasoningConfig {
         }
     }
 
+    /// [`ReasoningEffort::Medium`], reasoning text excluded from the response body.
     pub fn medium() -> Self {
         Self {
             effort: ReasoningEffort::Medium,
@@ -70,6 +76,7 @@ impl ReasoningConfig {
         }
     }
 
+    /// [`ReasoningEffort::Low`], reasoning text excluded from the response body.
     pub fn low() -> Self {
         Self {
             effort: ReasoningEffort::Low,
@@ -77,16 +84,22 @@ impl ReasoningConfig {
         }
     }
 
-    /// JSON object for the OpenRouter `reasoning` field (None when effort is None).
-    pub fn to_request_value(&self) -> Option<Value> {
+    /// JSON object for the OpenRouter `reasoning` field.
+    ///
+    /// Always returns `Some` — OpenRouter's unified `reasoning` object is
+    /// sent on every request, including [`ReasoningEffort::None`] (which
+    /// explicitly sets `"enabled": false` rather than omitting the field,
+    /// so disabling reasoning is unambiguous instead of relying on
+    /// provider-default behavior).
+    pub fn to_request_value(&self) -> Value {
         if matches!(self.effort, ReasoningEffort::None) {
-            return Some(json!({ "effort": "none", "exclude": true }));
+            return json!({ "effort": "none", "exclude": true, "enabled": false });
         }
-        Some(json!({
+        json!({
             "effort": self.effort.as_str(),
             "exclude": self.exclude,
             "enabled": true,
-        }))
+        })
     }
 }
 
@@ -102,19 +115,22 @@ mod tests {
 
     #[test]
     fn high_config_enables_reasoning() {
-        let v = ReasoningConfig::high().to_request_value().unwrap();
+        let v = ReasoningConfig::high().to_request_value();
         assert_eq!(v["effort"], "high");
         assert_eq!(v["enabled"], true);
         assert_eq!(v["exclude"], true);
     }
 
     #[test]
-    fn none_effort_sends_none() {
+    fn none_effort_disables_reasoning_explicitly() {
         let c = ReasoningConfig {
             effort: ReasoningEffort::None,
             exclude: true,
         };
-        let v = c.to_request_value().unwrap();
+        let v = c.to_request_value();
         assert_eq!(v["effort"], "none");
+        // Must explicitly disable, not just omit `enabled`, so behavior
+        // doesn't depend on unverified provider-default assumptions.
+        assert_eq!(v["enabled"], false);
     }
 }

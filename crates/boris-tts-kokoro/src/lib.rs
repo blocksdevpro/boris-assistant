@@ -167,23 +167,24 @@ fn preflight_model_path(dir: &Path, voice: &str) -> Result<()> {
         )));
     }
 
-    // Voice file is optional for any-tts validate, but product uses named voices.
+    // Product uses named voices: if a voice id is set, both voices/ and the
+    // specific voices/<voice>.pt file are hard requirements (README:
+    // "Missing / incomplete model path → Error::Config"), not a later
+    // Error::Other surprise at synthesize() time.
     if !voice.is_empty() {
-        let voice_pt = dir.join("voices").join(format!("{voice}.pt"));
+        let voices_dir = dir.join("voices");
+        if !voices_dir.is_dir() {
+            return Err(Error::config(format!(
+                "kokoro model incomplete ({}): missing voices/ for voice '{voice}'",
+                dir.display()
+            )));
+        }
+        let voice_pt = voices_dir.join(format!("{voice}.pt"));
         if !voice_pt.is_file() {
-            // Soft-warn path: some installs use a different voice layout.
-            // Still require voices/ dir if a voice name is set.
-            if !dir.join("voices").is_dir() {
-                return Err(Error::config(format!(
-                    "kokoro model incomplete ({}): missing voices/ for voice '{voice}'",
-                    dir.display()
-                )));
-            }
-            tracing::warn!(
-                path = %voice_pt.display(),
-                voice = %voice,
-                "kokoro voice file not found; load may fail if any-tts requires it"
-            );
+            return Err(Error::config(format!(
+                "kokoro model incomplete ({}): missing voice file voices/{voice}.pt",
+                dir.display()
+            )));
         }
     }
 
@@ -233,7 +234,7 @@ impl TextToSpeech for KokoroTts {
     }
 
     fn is_loaded(&self) -> bool {
-        self.model.is_some()
+        KokoroTts::is_loaded(self)
     }
 
     fn backend_id(&self) -> &str {
@@ -272,6 +273,22 @@ impl TextToSpeech for KokoroTts {
                     self.voice
                 ))
             })?;
+
+        // We always report the fixed KOKORO_SAMPLE_RATE constant (public
+        // contract, unchanged) — but cross-check against what any-tts
+        // actually produced so a future upstream Kokoro sample-rate change
+        // doesn't silently desync the reported rate from the real audio.
+        if result.sample_rate != KOKORO_SAMPLE_RATE {
+            tracing::debug!(
+                actual = result.sample_rate,
+                expected = KOKORO_SAMPLE_RATE,
+                "kokoro any-tts result.sample_rate differs from KOKORO_SAMPLE_RATE constant"
+            );
+            debug_assert_eq!(
+                result.sample_rate, KOKORO_SAMPLE_RATE,
+                "any-tts Kokoro sample rate drifted from the adapter's KOKORO_SAMPLE_RATE constant"
+            );
+        }
 
         tracing::info!(
             samples = result.samples.len(),
@@ -336,6 +353,27 @@ mod tests {
         let mut tts = KokoroTts::with_model_path(&tmp);
         let err = tts.load().unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_voice_file_is_config_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "boris-kokoro-novoice-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("config.json"), "{}").unwrap();
+        std::fs::write(tmp.join("model.safetensors"), "fake").unwrap();
+        std::fs::create_dir_all(tmp.join("voices")).unwrap();
+        // voices/ exists but voices/<voice>.pt does not.
+
+        let mut tts = KokoroTts::with_model_path(&tmp).with_voice("nonexistent_voice");
+        let err = tts.load().unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert!(!tts.is_loaded());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

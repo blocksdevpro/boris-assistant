@@ -21,13 +21,12 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 /// `{base}/chat/completions`.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Default model when the host does not pass one.
+/// Default model when the host does not pass one (tool-capable preferred).
 ///
 /// **Ownership:** this crate owns the fallback string for unconfigured hosts.
 /// Product defaults (voice pipeline, desktop settings) may override via
 /// `OpenRouterClient::new(..., Some(model))` / [`OpenRouterClient::with_model`].
 /// Changing this constant only affects callers that pass `None`.
-/// Default when the host does not pass a model (tool-capable preferred).
 pub const DEFAULT_MODEL: &str = "google/gemini-3.6-flash";
 
 /// OpenRouter Chat Completions client.
@@ -64,6 +63,10 @@ pub struct OpenRouterClient {
 
 impl OpenRouterClient {
     /// Create a client with default timeouts, base URL, and model.
+    ///
+    /// Panics if the underlying `reqwest::Client` cannot be constructed
+    /// (TLS backend misconfigured / system configuration). See
+    /// [`Self::with_timeouts`], which shares the same client-construction path.
     pub fn new(api_key: String, model: Option<String>) -> Self {
         Self::build(api_key, model, DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT)
     }

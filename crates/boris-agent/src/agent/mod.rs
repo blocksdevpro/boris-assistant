@@ -433,7 +433,12 @@ impl Agent {
     ) -> impl FnOnce() {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         {
-            let mut guard = self.listeners.lock().unwrap();
+            // Poison-tolerant, same as `emit`: a listener panic during `emit()`
+            // must not permanently break future `subscribe()` calls.
+            let mut guard = self
+                .listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             guard.push((id, Box::new(f)));
         }
         let listeners = Arc::clone(&self.listeners);

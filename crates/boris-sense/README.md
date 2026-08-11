@@ -32,7 +32,10 @@ you only embed the classifier weights (e.g. `boris.onnx` from
 `assets/models/livekit/`).
 
 `model_name` is the classifier key used when multi-label score maps are
-returned — prefer that key, otherwise the adapter takes the max score.
+returned. `select_wake_score` prefers an exact match on that key, then falls
+back to a case-insensitive match on the key, and only then falls back to the
+max score across all entries (so multi-label models never depend on
+`HashMap` iteration order).
 
 ## ORT init
 

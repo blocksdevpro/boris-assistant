@@ -92,6 +92,10 @@ pub(super) struct StreamAssembler {
     tools: BTreeMap<u32, ToolCallAcc>,
     role: String,
     last_usage: Option<TokenUsage>,
+    /// Set when an event carries a top-level `error` object instead of a
+    /// normal delta (e.g. a mid-stream provider error). Callers should check
+    /// this after each ingested chunk and abort the stream if set.
+    error: Option<Value>,
 }
 
 impl StreamAssembler {
@@ -106,8 +110,22 @@ impl StreamAssembler {
         self.last_usage.as_ref()
     }
 
+    /// Take a pending provider error surfaced by an ingested SSE event, if any.
+    pub(super) fn take_error(&mut self) -> Option<Value> {
+        self.error.take()
+    }
+
     /// Ingest one parsed SSE `data:` JSON payload.
     pub(super) fn ingest_event(&mut self, event: &Value) {
+        // A well-formed SSE payload can carry a top-level `error` object
+        // instead of `choices` (e.g. `data: {"error":{"message":"..."}}`).
+        // Surface it instead of silently dropping the event, which used to
+        // leave the stream to "succeed" with an empty assembled message.
+        if let Some(err) = event.get("error") {
+            self.error = Some(err.clone());
+            return;
+        }
+
         if let Some(usage) = event.get("usage") {
             self.last_usage = Some(TokenUsage::from_usage_value(usage));
         }
@@ -166,22 +184,33 @@ impl StreamAssembler {
 
 /// Feed raw HTTP body bytes into an SSE line buffer; invoke `on_data` for each
 /// complete newline-terminated non-empty `data:` payload (excluding `[DONE]`).
-pub(super) fn push_sse_bytes(buffer: &mut String, chunk: &[u8], mut on_data: impl FnMut(&str)) {
-    buffer.push_str(&String::from_utf8_lossy(chunk));
-    while let Some(pos) = buffer.find('\n') {
-        let line = buffer[..pos].trim_end_matches('\r').to_string();
-        buffer.drain(..=pos);
-        dispatch_sse_line(&line, &mut on_data);
+///
+/// `buffer` holds **raw, possibly-incomplete UTF-8 bytes** across calls —
+/// network chunk boundaries have no relationship to UTF-8 character
+/// boundaries, so a multi-byte character can legitimately arrive split
+/// across two chunks. Decoding each chunk independently (the previous
+/// implementation) replaced both halves of a split character with U+FFFD.
+/// Instead we only decode once a complete line has accumulated: the `\n`
+/// (`0x0A`) delimiter we split on can never appear as a byte inside a
+/// multi-byte UTF-8 sequence, so splitting on raw bytes here is always safe.
+pub(super) fn push_sse_bytes(buffer: &mut Vec<u8>, chunk: &[u8], mut on_data: impl FnMut(&str)) {
+    buffer.extend_from_slice(chunk);
+    while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+        let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+        let line = String::from_utf8_lossy(&line_bytes);
+        let line = line.trim_end_matches(['\r', '\n']);
+        dispatch_sse_line(line, &mut on_data);
     }
 }
 
 /// After the byte stream ends, treat any remaining buffer as a final line
 /// (providers sometimes omit the trailing newline on the last event).
-pub(super) fn flush_sse_buffer(buffer: &mut String, mut on_data: impl FnMut(&str)) {
+pub(super) fn flush_sse_buffer(buffer: &mut Vec<u8>, mut on_data: impl FnMut(&str)) {
     if buffer.is_empty() {
         return;
     }
-    let line = std::mem::take(buffer);
+    let line_bytes = std::mem::take(buffer);
+    let line = String::from_utf8_lossy(&line_bytes);
     let line = line.trim_end_matches(['\r', '\n']);
     if !line.is_empty() {
         dispatch_sse_line(line, &mut on_data);
@@ -255,18 +284,18 @@ mod tests {
 
     #[test]
     fn push_sse_bytes_splits_lines() {
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         let mut payloads = Vec::new();
         push_sse_bytes(&mut buf, b"data: {\"a\":1}\n\ndata: [DONE]\n", |p| {
             payloads.push(p.to_string());
         });
         assert_eq!(payloads, vec![r#"{"a":1}"#]);
-        assert!(buf.is_empty() || !buf.contains('\n'));
+        assert!(buf.is_empty() || !buf.contains(&b'\n'));
     }
 
     #[test]
     fn flush_sse_buffer_without_trailing_newline() {
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         let mut payloads = Vec::new();
         push_sse_bytes(&mut buf, br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#, |p| {
             payloads.push(p.to_string());
@@ -285,10 +314,43 @@ mod tests {
 
     #[test]
     fn flush_empty_buffer_is_noop() {
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         let mut called = false;
         flush_sse_buffer(&mut buf, |_| called = true);
         assert!(!called);
+    }
+
+    #[test]
+    fn push_sse_bytes_does_not_corrupt_multibyte_char_split_across_chunks() {
+        // "café" — the 'é' (U+00E9) encodes as the 2 bytes 0xC3 0xA9 in UTF-8.
+        // Simulate a network chunk boundary landing between those two bytes.
+        let full = "data: {\"a\":\"café\"}\n".as_bytes().to_vec();
+        let split_at = full.len() - 2; // splits inside the 2-byte 'é' sequence
+        let (chunk1, chunk2) = full.split_at(split_at);
+
+        let mut buf = Vec::new();
+        let mut payloads = Vec::new();
+        push_sse_bytes(&mut buf, chunk1, |p| payloads.push(p.to_string()));
+        assert!(payloads.is_empty(), "line not complete yet, nothing should decode");
+        push_sse_bytes(&mut buf, chunk2, |p| payloads.push(p.to_string()));
+
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            payloads[0].contains("café"),
+            "multi-byte char split across chunks must decode correctly, got: {:?}",
+            payloads[0]
+        );
+    }
+
+    #[test]
+    fn ingest_event_surfaces_top_level_error() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({ "error": { "message": "rate limited", "code": 429 } }));
+        let err = a.take_error().expect("error should be surfaced");
+        assert_eq!(err["message"], "rate limited");
+        assert_eq!(err["code"], 429);
+        // Error events must not be treated as content.
+        assert_eq!(a.finish()["content"], "");
     }
 
     #[test]

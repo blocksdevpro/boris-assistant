@@ -18,9 +18,7 @@ impl OpenRouterClient {
         obj.insert("max_tokens".into(), json!(self.max_tokens));
 
         // Unified OpenRouter reasoning (DeepSeek / Gemini thinking / Claude / o-series).
-        if let Some(reasoning) = self.reasoning.to_request_value() {
-            obj.insert("reasoning".into(), reasoning);
-        }
+        obj.insert("reasoning".into(), self.reasoning.to_request_value());
 
         if stream {
             obj.insert("stream".into(), json!(true));

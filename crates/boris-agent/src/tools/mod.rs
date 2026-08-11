@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agent::Agent;
 use crate::capability::{filter_tools_for_preset, CapabilityPreset};
+use crate::runtime::SandboxConfig;
 use crate::tool::Tool;
 use crate::tools::files::FsRoots;
 
@@ -179,8 +180,17 @@ pub fn register_time_and_notes(agent: &mut Agent, paths: &BuiltinToolPaths) {
 }
 
 /// Full host setup: personal context + all MVP tool waves (Full preset).
-pub fn register_builtin_tools(agent: &mut Agent, paths: BuiltinToolPaths) {
-    register_builtin_tools_with_preset(agent, paths, true, true, CapabilityPreset::Full);
+///
+/// `sandbox` is mutated in place via [`CapabilityPreset::apply_to_sandbox`] —
+/// pass the same [`SandboxConfig`] you then hand to [`Agent::configure_runtime`]
+/// (call this function *before* `configure_runtime` so the runtime picks up the
+/// preset-adjusted policy).
+pub fn register_builtin_tools(
+    agent: &mut Agent,
+    paths: BuiltinToolPaths,
+    sandbox: &mut SandboxConfig,
+) {
+    register_builtin_tools_with_preset(agent, paths, true, true, sandbox, CapabilityPreset::Full);
 }
 
 /// Same as [`register_builtin_tools`] with control over LLM extract and power tools.
@@ -189,31 +199,41 @@ pub fn register_builtin_tools_with_options(
     paths: BuiltinToolPaths,
     llm_extract: bool,
     power_tools: bool,
+    sandbox: &mut SandboxConfig,
 ) {
     register_builtin_tools_with_preset(
         agent,
         paths,
         llm_extract,
         power_tools,
+        sandbox,
         CapabilityPreset::Full,
     );
 }
 
 /// Full registration with a capability preset (toolset filtering).
 ///
-/// 1. Core time/notes  
-/// 2. Plan tools (todo_read / todo_write) — **always**, even VoiceSafe  
-/// 3. Optional personal-context tools  
-/// 4. Optional power tools (OS / FS / web / bash)  
-/// 5. Filter by [`CapabilityPreset`]  
+/// 1. Core time/notes
+/// 2. Plan tools (todo_read / todo_write) — **always**, even VoiceSafe
+/// 3. Optional personal-context tools
+/// 4. Optional power tools (OS / FS / web / bash)
+/// 5. Filter by [`CapabilityPreset`]
 /// 6. [`Agent::register_tools`]
+///
+/// Also applies `preset` to `sandbox` via [`CapabilityPreset::apply_to_sandbox`]
+/// (network/shell lockdown for `VoiceSafe`/`LocalPower`) so tool registration
+/// and sandbox policy can't structurally drift apart. Call this **before**
+/// [`Agent::configure_runtime`] and pass the same (now preset-adjusted)
+/// `sandbox` value into it — see `crates/boris-agent/README.md`.
 pub fn register_builtin_tools_with_preset(
     agent: &mut Agent,
     paths: BuiltinToolPaths,
     llm_extract: bool,
     power_tools: bool,
+    sandbox: &mut SandboxConfig,
     preset: CapabilityPreset,
 ) {
+    preset.apply_to_sandbox(sandbox);
     let mut tools = builtin_tools(&paths);
     // Always register plan tools. VoiceSafe sets power_tools=false and used to
     // skip os_tools (which previously owned todos), while the prompt still
@@ -329,5 +349,46 @@ mod tests {
         assert!(m.permissions.contains(&crate::tool::Permission::Shell));
         assert_eq!(m.read_only, Some(false));
         assert!(m.requires_confirmation);
+    }
+
+    struct NoopClient;
+    #[async_trait::async_trait]
+    impl boris_ai::LlmClient for NoopClient {
+        async fn complete(
+            &self,
+            _messages: serde_json::Value,
+            _tools: serde_json::Value,
+        ) -> Result<serde_json::Value, boris_ai::LlmError> {
+            Err(boris_ai::LlmError::new("noop"))
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+    }
+
+    /// register_builtin_tools_with_preset must apply the preset to `sandbox`
+    /// itself (not rely on the host calling `apply_to_sandbox` separately),
+    /// so tool registration and sandbox policy can't structurally drift apart.
+    #[test]
+    fn register_builtin_tools_with_preset_applies_preset_to_sandbox() {
+        let paths = test_paths();
+        let mut agent = Agent::new(Box::new(NoopClient), "test");
+        let mut sandbox = SandboxConfig::for_desktop_mvp(&paths.boris_home);
+        assert_eq!(sandbox.network, crate::runtime::NetworkPolicy::Open);
+        assert_eq!(sandbox.shell, crate::runtime::ShellPolicy::OpenConfirm);
+
+        register_builtin_tools_with_preset(
+            &mut agent,
+            paths,
+            true,
+            true,
+            &mut sandbox,
+            CapabilityPreset::VoiceSafe,
+        );
+
+        // VoiceSafe locks network/shell closed; this must happen inside the
+        // function itself, not only when a caller remembers to call it.
+        assert_eq!(sandbox.network, crate::runtime::NetworkPolicy::Off);
+        assert_eq!(sandbox.shell, crate::runtime::ShellPolicy::Denied);
     }
 }

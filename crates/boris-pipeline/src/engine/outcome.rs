@@ -48,6 +48,23 @@ pub(super) struct ConfirmCtx<'a> {
     pub turn: TurnId,
 }
 
+impl ConfirmCtx<'_> {
+    /// Shared teardown for the several near-identical `go_off(...)` call sites
+    /// below: end session, stop audio, release STT/TTS, flip UI to Off.
+    fn go_off(&mut self) {
+        go_off(
+            self.picture,
+            self.audio,
+            self.store,
+            self.active_session,
+            self.transcript_len,
+            self.stt.as_mut(),
+            self.tts.as_mut(),
+            self.agent,
+        )
+    }
+}
+
 /// Drive NeedsConfirmation → speak → freeform yes/no → resume until Speak/Silent.
 pub(super) fn resolve_agent_outcome(
     mut outcome: AgentOutcome,
@@ -123,16 +140,7 @@ pub(super) fn resolve_agent_outcome(
         ) {
             PlaybackWait::Stopped => {
                 ctx.agent.abort();
-                go_off(
-                    ctx.picture,
-                    ctx.audio,
-                    ctx.store,
-                    ctx.active_session,
-                    ctx.transcript_len,
-                    ctx.stt.as_mut(),
-                    ctx.tts.as_mut(),
-                    ctx.agent,
-                );
+                ctx.go_off();
                 return OutcomeResolve::Stopped;
             }
             PlaybackWait::Aborted => {}
@@ -151,16 +159,7 @@ pub(super) fn resolve_agent_outcome(
         }
         if !*ctx.running {
             ctx.agent.abort();
-            go_off(
-                ctx.picture,
-                ctx.audio,
-                ctx.store,
-                ctx.active_session,
-                ctx.transcript_len,
-                ctx.stt.as_mut(),
-                ctx.tts.as_mut(),
-                ctx.agent,
-            );
+            ctx.go_off();
             return OutcomeResolve::Stopped;
         }
 
@@ -173,16 +172,7 @@ pub(super) fn resolve_agent_outcome(
             ctx.picture.clear_activity();
             return match e {
                 HearBreak::Stopped if !*ctx.running => {
-                    go_off(
-                        ctx.picture,
-                        ctx.audio,
-                        ctx.store,
-                        ctx.active_session,
-                        ctx.transcript_len,
-                        ctx.stt.as_mut(),
-                        ctx.tts.as_mut(),
-                        ctx.agent,
-                    );
+                    ctx.go_off();
                     OutcomeResolve::Stopped
                 }
                 HearBreak::Disconnected => {
@@ -211,16 +201,7 @@ pub(super) fn resolve_agent_outcome(
             Ok(c) => c,
             Err(HearBreak::Stopped) if !*ctx.running => {
                 ctx.agent.abort();
-                go_off(
-                    ctx.picture,
-                    ctx.audio,
-                    ctx.store,
-                    ctx.active_session,
-                    ctx.transcript_len,
-                    ctx.stt.as_mut(),
-                    ctx.tts.as_mut(),
-                    ctx.agent,
-                );
+                ctx.go_off();
                 return OutcomeResolve::Stopped;
             }
             Err(_) => {
@@ -252,16 +233,7 @@ pub(super) fn resolve_agent_outcome(
                 }
                 if !*ctx.running {
                     ctx.agent.abort();
-                    go_off(
-                        ctx.picture,
-                        ctx.audio,
-                        ctx.store,
-                        ctx.active_session,
-                        ctx.transcript_len,
-                        ctx.stt.as_mut(),
-                        ctx.tts.as_mut(),
-                        ctx.agent,
-                    );
+                    ctx.go_off();
                     return OutcomeResolve::Stopped;
                 }
                 let _ = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running);
@@ -342,16 +314,7 @@ pub(super) fn resolve_agent_outcome(
                 }
                 if !*ctx.running {
                     ctx.agent.abort();
-                    go_off(
-                        ctx.picture,
-                        ctx.audio,
-                        ctx.store,
-                        ctx.active_session,
-                        ctx.transcript_len,
-                        ctx.stt.as_mut(),
-                        ctx.tts.as_mut(),
-                        ctx.agent,
-                    );
+                    ctx.go_off();
                     return OutcomeResolve::Stopped;
                 }
                 ctx.picture.set_phase(Phase::AwaitingConfirm);

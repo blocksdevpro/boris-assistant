@@ -120,8 +120,7 @@ impl LlmError {
         let mut err = Self::provider(format!("LLM provider error: {}", truncate_error_body(msg)));
         if let Some(code) = error
             .get("code")
-            .and_then(|c| c.as_u64())
-            .or_else(|| error.get("code").and_then(|c| c.as_str()?.parse().ok()))
+            .and_then(|c| c.as_u64().or_else(|| c.as_str()?.parse().ok()))
         {
             if code <= u16::MAX as u64 {
                 err = err.with_status(code as u16);

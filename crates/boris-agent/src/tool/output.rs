@@ -1,7 +1,10 @@
 //! Observation truncation and soft-wrap helpers (voice-sized context).
 
-/// Cap tool observation length so context doesn't explode (voice-sized default).
-pub const MAX_TOOL_RESULT_CHARS: usize = 4000;
+/// Cap tool observation length so context doesn't explode.
+///
+/// Raised from 4k → 12k so web search / file reads keep usable signal for
+/// multi-step agent work (compaction still trims older turns later).
+pub const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 
 /// Higher cap for skill bodies (playbooks must stay intact for multi-step work).
 pub const MAX_SKILL_RESULT_CHARS: usize = 24_000;
@@ -11,7 +14,7 @@ pub const DEFAULT_SOFT_WRAP_WIDTH: usize = 2_000;
 
 const TRUNCATED_SUFFIX: &str = "\n…[truncated]";
 
-/// Cap tool observation length so context doesn't explode (e.g. 4000 chars).
+/// Cap tool observation length so context doesn't explode (default 12k chars).
 ///
 /// When cut, appends a short marker so the model knows the result was truncated.
 pub fn truncate_tool_result(s: String) -> String {

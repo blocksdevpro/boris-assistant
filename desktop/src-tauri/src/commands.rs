@@ -201,13 +201,14 @@ pub async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, Stri
     Ok(report)
 }
 
-/// Restore OpenRouter key + models/providers from `~/.boris/config.toml` + `auth.json`.
+/// Restore API keys + models/providers from `~/.boris/config.toml` + `auth.json`.
 #[tauri::command]
 pub fn get_settings() -> Result<AppSettings, String> {
     match load_settings() {
         Ok(s) => {
             tracing::debug!(
-                has_key = !s.openrouter_api_key.trim().is_empty(),
+                has_openrouter_key = !s.openrouter_api_key.trim().is_empty(),
+                has_exa_key = !s.exa_api_key.trim().is_empty(),
                 model = %s.openrouter_model,
                 fast_model = %s.openrouter_fast_model,
                 model_provider = %s.openrouter_model_provider,
@@ -223,11 +224,12 @@ pub fn get_settings() -> Result<AppSettings, String> {
     }
 }
 
-/// Persist prefs to `config.toml` and key to `auth.json` (never log the key).
+/// Persist prefs to `config.toml` and secrets to `auth.json` (never log key values).
 #[tauri::command]
 pub fn save_app_settings(settings: AppSettings) -> Result<(), String> {
     tracing::info!(
-        has_key = !settings.openrouter_api_key.trim().is_empty(),
+        has_openrouter_key = !settings.openrouter_api_key.trim().is_empty(),
+        has_exa_key = !settings.exa_api_key.trim().is_empty(),
         model = %settings.openrouter_model,
         fast_model = %settings.openrouter_fast_model,
         model_provider = %settings.openrouter_model_provider,

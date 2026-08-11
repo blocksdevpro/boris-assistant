@@ -140,7 +140,9 @@ pub fn fs_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 
 /// Web search + fetch (requires host network policy Open).
 ///
-/// Registration failures are logged and skipped (missing API keys, etc.).
+/// `web_search` prefers Exa when `EXA_API_KEY` / `BORIS_EXA_API_KEY` or
+/// `~/.boris/auth.json` `exa_api_key` is set; otherwise DuckDuckGo HTML scrape.
+/// Registration failures are logged and skipped.
 pub fn web_tools() -> Vec<Box<dyn Tool>> {
     let mut out: Vec<Box<dyn Tool>> = Vec::new();
     match web::WebSearchTool::new() {

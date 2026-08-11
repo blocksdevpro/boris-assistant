@@ -1,9 +1,11 @@
 //! OpenRouter client wiring for the voice agent plane.
 
-use boris_agent::OpenRouterClient;
+use boris_agent::{OpenRouterClient, ReasoningConfig};
 
 /// Default strong/primary model when nothing is configured.
-pub(super) const DEFAULT_STRONG_MODEL: &str = "google/gemini-2.5-flash-lite";
+///
+/// Prefer a current, tool-capable OpenRouter chat model for research / tool turns.
+pub(super) const DEFAULT_STRONG_MODEL: &str = "google/gemini-3.6-flash";
 
 /// Heuristic: specialized apply/merge models (Morph, etc.) usually cannot tool-call.
 pub(super) fn looks_like_non_agent_model(model: &str) -> bool {
@@ -40,15 +42,26 @@ pub(super) fn resolve_model_and_provider(
     (model_id, provider)
 }
 
+/// Build a client with reasoning enabled.
+///
+/// - **strong** path → `high` effort (tools, research, plan)
+/// - **fast** path → `medium` (still thinks; cheaper than high)
 pub(super) fn build_openrouter_client(
     api_key: &str,
     model: &str,
     provider_pref: Option<&str>,
     pin: bool,
     session_id: &str,
+    strong: bool,
 ) -> OpenRouterClient {
+    let reasoning = if strong {
+        ReasoningConfig::high()
+    } else {
+        ReasoningConfig::medium()
+    };
     let mut client = OpenRouterClient::new(api_key.to_string(), Some(model.to_string()))
-        .with_session_id(session_id);
+        .with_session_id(session_id)
+        .with_reasoning(reasoning);
     if let Some(pref) = provider_pref {
         if !pref.trim().is_empty() {
             client = client
@@ -62,6 +75,12 @@ pub(super) fn build_openrouter_client(
             );
         }
     }
+    tracing::info!(
+        model = %model,
+        effort = client.reasoning().effort.as_str(),
+        max_tokens = client.max_tokens(),
+        "OpenRouter reasoning configured"
+    );
     client
 }
 
@@ -73,6 +92,7 @@ mod tests {
     fn non_agent_model_heuristic() {
         assert!(looks_like_non_agent_model("morph/morph-v3-large"));
         assert!(looks_like_non_agent_model("vendor/apply-model"));
+        assert!(!looks_like_non_agent_model("google/gemini-3.6-flash"));
         assert!(!looks_like_non_agent_model("google/gemini-2.5-flash-lite"));
     }
 

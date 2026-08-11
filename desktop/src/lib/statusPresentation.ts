@@ -29,10 +29,16 @@ export function isToolActivity(activity: string | null | undefined): boolean {
   if (a.startsWith("confirm")) return false;
   // "3 tools" / multi-tool sticky — still tool progress while working
   if (/^\d+\s+tools?$/.test(a)) return true;
+  // Pure LLM "next action" thinking is not tool activity
+  if (/^thinking\s*[·.]\s*(next action|step\s*\d+|round\s*\d+)$/i.test(a)) {
+    return false;
+  }
   return (
     a.startsWith("tool") ||
     a.startsWith("done") ||
     a.startsWith("fail") ||
+    /tools?\s+next|calling tools/i.test(a) ||
+    /^thinking\s*[·.]\s*after\b/i.test(a) ||
     a.startsWith("thinking ·") ||
     a.startsWith("thinking.")
   );
@@ -40,7 +46,7 @@ export function isToolActivity(activity: string | null | undefined): boolean {
 
 /**
  * Map pipeline activity strings to short human secondary lines.
- * Ignores sticky “N tools” noise after a turn.
+ * Prefer *what* is happening (tool + query) over empty “Planning step N”.
  */
 export function humanizeActivity(
   activity: string | null | undefined,
@@ -52,7 +58,7 @@ export function humanizeActivity(
   const multi = raw.match(/^(\d+)\s+tools?$/i);
   if (multi) {
     const n = multi[1];
-    return n === "1" ? "Running 1 tool…" : `Running ${n} tools…`;
+    return n === "1" ? "Ran 1 tool this turn" : `Ran ${n} tools this turn`;
   }
 
   const lower = raw.toLowerCase();
@@ -61,9 +67,37 @@ export function humanizeActivity(
     return "Thinking…";
   }
 
-  // thinking · step N | thinking · round N
-  const step = raw.match(/^thinking\s*[·.]\s*(?:step|round)\s*(\d+)/i);
-  if (step) return `Planning step ${step[1]}…`;
+  // thinking · …
+  if (lower.startsWith("thinking")) {
+    const rest = raw.replace(/^thinking\s*[·.]\s*/i, "").trim();
+    if (!rest) return "Thinking…";
+
+    // Legacy step/round numbers → meaningful copy (no more "Planning step 3")
+    if (/^(?:step|round)\s*\d+/i.test(rest)) {
+      return "Choosing next action…";
+    }
+    // "3 tools next" / "1 tool next"
+    const nextTools = rest.match(/^(\d+)\s+tools?\s+next$/i);
+    if (nextTools) {
+      const n = nextTools[1];
+      return n === "1" ? "About to run 1 tool…" : `About to run ${n} tools…`;
+    }
+    if (/^calling tools$/i.test(rest)) return "About to run tools…";
+    if (/^next action$/i.test(rest)) return "Choosing next action…";
+    // "after web_search, web_fetch"
+    const after = rest.match(/^after\s+(.+)$/i);
+    if (after) {
+      const names = after[1]!
+        .split(",")
+        .map((s) => friendlyTool(s.trim()))
+        .filter(Boolean)
+        .join(", ");
+      return names ? `Thinking after ${names}…` : "Choosing next action…";
+    }
+    // drafting / other hints
+    const short = rest.length > 48 ? `${rest.slice(0, 46)}…` : rest;
+    return short.charAt(0).toUpperCase() + short.slice(1);
+  }
 
   // confirm · name | confirm · say yes or no | confirm · listening
   if (lower.startsWith("confirm")) {
@@ -89,17 +123,17 @@ export function humanizeActivity(
     if (msg) {
       // Subagent nests "via bash: …" — keep readable
       if (/^via\s+/i.test(msg) || /^research:/i.test(msg) || /^step\s+\d+/i.test(msg)) {
-        const short = msg.length > 48 ? `${msg.slice(0, 46)}…` : msg;
+        const short = msg.length > 52 ? `${msg.slice(0, 50)}…` : msg;
         return name === "Subagent" ? short : `${name}: ${short}`;
       }
-      const short = msg.length > 44 ? `${msg.slice(0, 42)}…` : msg;
+      const short = msg.length > 52 ? `${msg.slice(0, 50)}…` : msg;
       return `${name}: ${short}`;
     }
     return name === "Subagent" ? "Researching…" : `Running ${name}…`;
   }
 
   // Unknown — soft-sanitize mid-dots
-  return raw.replace(/\s*·\s*/g, " · ").slice(0, 56);
+  return raw.replace(/\s*·\s*/g, " · ").slice(0, 64);
 }
 
 function friendlyTool(name: string): string {
@@ -112,10 +146,32 @@ function friendlyTool(name: string): string {
     web_search: "Search",
     bash: "Bash",
     read_file: "Read",
+    file_read: "Read",
     write_file: "Write",
+    file_write: "Write",
+    file_edit: "Edit",
     list_dir: "List",
-    grep: "Search",
+    grep: "Grep",
+    glob: "Find files",
     open: "Open",
+    open_url: "Open link",
+    open_path: "Open file",
+    load_skill: "Skill",
+    list_skills: "Skills",
+    todo_write: "Todos",
+    todo_read: "Todos",
+    remember_note: "Note",
+    recall_notes: "Notes",
+    memory_search: "Memory",
+    memory_get: "Memory",
+    get_user_context: "Profile",
+    save_user_fact: "Profile",
+    update_user_profile: "Profile",
+    get_time: "Time",
+    get_date: "Date",
+    get_system_info: "System",
+    clipboard_get: "Clipboard",
+    clipboard_set: "Clipboard",
   };
   if (known[n]) return known[n];
   // bash, web_fetch, write_file → readable
@@ -295,7 +351,13 @@ export function pickOverlayPresence(
     if (phase === "Thinking") {
       if (/spawn_subagent/i.test(activity)) {
         primary = "Researching";
+      } else if (/web_search|web_fetch/i.test(activity)) {
+        primary = "Searching";
       } else if (isToolActivity(activity)) {
+        primary = "Working";
+      } else if (/thinking\s*[·.]\s*after/i.test(activity)) {
+        primary = "Thinking";
+      } else if (/tools?\s+next|calling tools/i.test(activity)) {
         primary = "Working";
       } else {
         primary = "Thinking";

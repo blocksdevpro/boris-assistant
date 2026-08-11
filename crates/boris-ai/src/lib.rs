@@ -37,7 +37,8 @@ pub use model_pref::{parse_provider_list, split_model_and_provider};
 pub use providers::OpenRouterClient;
 pub use usage::TokenUsage;
 
-// OpenRouter timeout / base-url constants (hosts may tune with `with_timeouts` / `with_base_url`).
+// OpenRouter timeout / base-url / reasoning (hosts may tune with builders).
 pub use providers::openrouter::{
-    DEFAULT_BASE_URL, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_TIMEOUT,
+    ReasoningConfig, ReasoningEffort, DEFAULT_BASE_URL, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL, DEFAULT_TIMEOUT,
 };

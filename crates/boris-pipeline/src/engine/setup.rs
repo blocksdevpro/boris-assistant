@@ -303,7 +303,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
             model = %strong_model,
             "configured OpenRouter model looks specialized (e.g. Morph apply) and usually \
              cannot use tools (get_time, bash, …). Prefer a chat model such as \
-             google/gemini-2.5-flash-lite. Routing will fall back when tool use is rejected."
+             google/gemini-3.6-flash. Routing will fall back when tool use is rejected."
         );
     }
     // One session id for the engine process → OpenRouter sticky-routes to the
@@ -315,6 +315,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         strong_provider_raw.as_deref(),
         pin,
         &session_id,
+        true, // high reasoning for multi-step / tools
     );
     let fast = build_openrouter_client(
         &config.openrouter_api_key,
@@ -322,6 +323,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         fast_provider_raw.as_deref(),
         pin,
         &session_id,
+        false, // medium reasoning for simple facts
     );
     let client: Box<dyn boris_agent::LlmClient> = if fast_model == strong_model
         && strong_provider_raw == fast_provider_raw

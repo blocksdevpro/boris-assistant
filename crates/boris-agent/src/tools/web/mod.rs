@@ -4,14 +4,14 @@
 //!
 //! | Tool name | Type | Purpose |
 //! |-----------|------|---------|
-//! | `web_search` | [`WebSearchTool`] | Live web search (DuckDuckGo HTML lite) |
+//! | `web_search` | [`WebSearchTool`] | Live web search (Exa API, DDG HTML fallback) |
 //! | `web_fetch`  | [`WebFetchTool`]  | Fetch a single URL as plain text |
 //!
 //! # Module layout
 //!
 //! | Module | Responsibility |
 //! |--------|----------------|
-//! | [`search`] | `web_search` tool + DDG result scrapers |
+//! | [`search`] | `web_search` tool (Exa + DDG scrapers) |
 //! | [`fetch`]  | `web_fetch` tool |
 //! | [`html`]   | HTML→text helpers (strip tags, HTML sniff) |
 //! | [`url`]    | HTTP(S) URL validation + SSRF host checks |

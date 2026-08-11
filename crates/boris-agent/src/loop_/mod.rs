@@ -168,15 +168,41 @@ pub async fn agent_loop(
 
         // Content-only response (or tools withheld / ignored at cap).
         let mut reply = extract_reply_text(&response);
+
+        // Never speak or persist tool XML / pseudo-tool text. Do not execute it.
+        if crate::speech_sanitize::contains_tool_markup(&reply) {
+            let cleaned = crate::speech_sanitize::strip_tool_markup(&reply);
+            if cleaned.is_empty() && !at_cap && finish_gate_left > 0 {
+                finish_gate_left = finish_gate_left.saturating_sub(1);
+                tracing::info!(
+                    left = finish_gate_left,
+                    "tool protocol: markup-only speech rejected — re-enter"
+                );
+                // Keep context free of fake tool XML.
+                state.context.push(
+                    Role::Assistant,
+                    "[invalid tool format in speech; use API tool_calls only]",
+                );
+                state
+                    .context
+                    .push(Role::User, crate::speech_sanitize::TOOL_PROTOCOL_REMINDER);
+                emit(AgentEvent::TurnEnd {
+                    round: round as u32,
+                });
+                continue;
+            }
+            reply = cleaned;
+        }
+
         reply = ensure_spoken_reply_at_cap(&mut state, at_cap, reply).await?;
 
         if !reply.is_empty() {
             last_speakable = Some(reply.clone());
         }
 
-        // Finish gate: only when *this turn* used tools and either open todos
-        // remain or research was under-tooled. Stale todos from a prior session
-        // must not force re-entry (and silence) on a casual reply.
+        // Finish gate: research may re-enter with zero tools; open todos only
+        // when this turn already used tools (stale todos must not silence casual
+        // replies).
         if should_reenter_finish_gate(
             at_cap,
             finish_gate_left,

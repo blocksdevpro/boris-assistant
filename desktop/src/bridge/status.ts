@@ -237,7 +237,7 @@ export async function onModelsProgress(
   };
 }
 
-/** Load OpenRouter key + models/providers from `~/.boris/config.toml` + `auth.json`. */
+/** Load API keys + models/providers from `~/.boris/config.toml` + `auth.json`. */
 export async function getSettings(): Promise<AppSettings> {
   try {
     const raw = await invoke<Partial<AppSettings>>(COMMANDS.getSettings);
@@ -248,13 +248,14 @@ export async function getSettings(): Promise<AppSettings> {
   }
 }
 
-/** Persist OpenRouter key + models/providers (never log the key). */
+/** Persist API keys + models/providers (never log secret values). */
 export async function saveSettings(settings: AppSettings): Promise<void> {
   const wire = settingsToWire(settings);
   try {
     await invoke(COMMANDS.saveAppSettings, { settings: wire });
     logger.info("saveSettings ok", {
-      hasKey: Boolean(wire.openrouter_api_key?.trim()),
+      hasOpenRouterKey: Boolean(wire.openrouter_api_key?.trim()),
+      hasExaKey: Boolean(wire.exa_api_key?.trim()),
       model: wire.openrouter_model || null,
       fastModel: wire.openrouter_fast_model || null,
       capability: wire.capability_preset || null,

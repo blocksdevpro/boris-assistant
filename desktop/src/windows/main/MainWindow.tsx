@@ -21,6 +21,7 @@ import {
   Settings as SettingsIcon,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { Update } from "@tauri-apps/plugin-updater";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,12 +60,26 @@ import {
   conversationLines,
   humanizeActivity,
 } from "@/lib/statusPresentation";
+import {
+  appVersion,
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  type AvailableUpdate,
+  type UpdateProgress,
+} from "@/lib/updater";
 import { cn } from "@/lib/utils";
 
 type View = "home" | "settings";
 type SettingsCategory = "general" | "overlay" | "speech" | "connections" | "advanced";
 type ModelCheckState = "loading" | "ready" | "missing" | "error";
 type SaveState = "idle" | "saving" | "saved" | "error";
+type UpdateUiState =
+  | "idle"
+  | "checking"
+  | "up_to_date"
+  | "available"
+  | "downloading"
+  | "error";
 
 const CAPABILITY_OPTIONS: { id: string; label: string; footer: string }[] = [
   {
@@ -142,6 +157,16 @@ export function MainWindow() {
   const [logPath, setLogPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const autoStarted = useRef(false);
+  const [appVer, setAppVer] = useState<string | null>(null);
+  const [updateUi, setUpdateUi] = useState<UpdateUiState>("idle");
+  const [availableUpdate, setAvailableUpdate] =
+    useState<AvailableUpdate | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(
+    null,
+  );
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
@@ -253,6 +278,78 @@ export function MainWindow() {
 
   const restoredInput = useRef(false);
   const restoredOutput = useRef(false);
+
+  // Resolve packaged version once for Settings / About.
+  useEffect(() => {
+    void appVersion().then((v) => {
+      if (v) setAppVer(v);
+    });
+  }, []);
+
+  /** True while download+install is in progress (survives re-renders / checks). */
+  const installingUpdateRef = useRef(false);
+
+  const runUpdateCheck = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false;
+    if (installingUpdateRef.current) return;
+    if (!silent) {
+      setUpdateUi("checking");
+      setUpdateError(null);
+    }
+    const result = await checkForUpdate();
+    // Don't clobber an in-flight install if one started while we were checking.
+    if (installingUpdateRef.current) return;
+    switch (result.status) {
+      case "unavailable":
+        if (!silent) setUpdateUi("idle");
+        break;
+      case "up_to_date":
+        setAvailableUpdate(null);
+        setPendingUpdate(null);
+        setUpdateError(null);
+        setAppVer(result.currentVersion);
+        setUpdateUi("up_to_date");
+        break;
+      case "available":
+        setAvailableUpdate(result.update);
+        setPendingUpdate(result.raw);
+        setUpdateError(null);
+        setAppVer(result.update.currentVersion);
+        setUpdateUi("available");
+        setUpdateBannerDismissed(false);
+        break;
+      case "error":
+        setUpdateError(result.message);
+        if (!silent) setUpdateUi("error");
+        break;
+    }
+  }, []);
+
+  // Quiet startup check — only surfaces UI when an update exists.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void runUpdateCheck({ silent: true });
+    }, 2500);
+    return () => window.clearTimeout(t);
+  }, [runUpdateCheck]);
+
+  const onInstallUpdate = useCallback(async () => {
+    if (!pendingUpdate || installingUpdateRef.current) return;
+    installingUpdateRef.current = true;
+    setUpdateUi("downloading");
+    setUpdateProgress({ downloaded: 0, contentLength: null });
+    setUpdateError(null);
+    try {
+      await downloadAndInstallUpdate(pendingUpdate, setUpdateProgress);
+      // Windows exits during install; relaunch covers other platforms.
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("update install failed", msg);
+      setUpdateError(msg);
+      setUpdateUi("error");
+      installingUpdateRef.current = false;
+    }
+  }, [pendingUpdate]);
 
   // Restore each preferred device once. Unrelated settings edits must not
   // interrupt the active audio stream by switching the same device again.
@@ -476,9 +573,19 @@ export function MainWindow() {
             models={models}
             installing={installing}
             installProgress={installProgress}
+            availableUpdate={
+              updateUi === "available" || updateUi === "downloading"
+                ? availableUpdate
+                : null
+            }
+            updateUi={updateUi}
+            updateProgress={updateProgress}
+            updateBannerDismissed={updateBannerDismissed}
             onStart={() => void onStart()}
             onStop={() => void onStop()}
             onInstall={() => void onInstallModels()}
+            onInstallUpdate={() => void onInstallUpdate()}
+            onDismissUpdate={() => setUpdateBannerDismissed(true)}
             onOpenSettings={(category = "general") => {
               setSettingsCategory(category);
               setView("settings");
@@ -503,6 +610,11 @@ export function MainWindow() {
             error={error}
             saveState={saveState}
             category={settingsCategory}
+            appVer={appVer}
+            updateUi={updateUi}
+            availableUpdate={availableUpdate}
+            updateProgress={updateProgress}
+            updateError={updateError}
             onCategoryChange={setSettingsCategory}
             onPatch={(p) => patchSettings(p)}
             onInputChange={(id) => void onInputChange(id)}
@@ -511,6 +623,8 @@ export function MainWindow() {
             onRefreshModels={() => void refreshModels()}
             onInstall={() => void onInstallModels()}
             onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+            onCheckUpdate={() => void runUpdateCheck()}
+            onInstallUpdate={() => void onInstallUpdate()}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-[13px] text-white/40">
@@ -537,9 +651,15 @@ function HomeView({
   models,
   installing,
   installProgress,
+  availableUpdate,
+  updateUi,
+  updateProgress,
+  updateBannerDismissed,
   onStart,
   onStop,
   onInstall,
+  onInstallUpdate,
+  onDismissUpdate,
   onOpenSettings,
 }: {
   status: StatusPicture;
@@ -554,9 +674,15 @@ function HomeView({
   models: ModelsStatus | null;
   installing: boolean;
   installProgress: DownloadProgress | null;
+  availableUpdate: AvailableUpdate | null;
+  updateUi: UpdateUiState;
+  updateProgress: UpdateProgress | null;
+  updateBannerDismissed: boolean;
   onStart: () => void;
   onStop: () => void;
   onInstall: () => void;
+  onInstallUpdate: () => void;
+  onDismissUpdate: () => void;
   onOpenSettings: (category?: SettingsCategory) => void;
 }) {
   const act = humanizeActivity(status.activity);
@@ -564,6 +690,10 @@ function HomeView({
     act &&
     (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
   const stopAvailable = engineOn || engineFault;
+  const showUpdateBanner =
+    availableUpdate != null &&
+    !updateBannerDismissed &&
+    (updateUi === "available" || updateUi === "downloading");
 
   return (
     <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5 px-6 py-7">
@@ -636,6 +766,17 @@ function HomeView({
         <p role="alert" className="text-[13px] text-amber-200/80">
           Something went wrong — try Stop, then Start again.
         </p>
+      ) : null}
+
+      {showUpdateBanner && availableUpdate ? (
+        <UpdateBanner
+          update={availableUpdate}
+          downloading={updateUi === "downloading"}
+          progress={updateProgress}
+          onInstall={onInstallUpdate}
+          onDismiss={onDismissUpdate}
+          onOpenSettings={() => onOpenSettings("general")}
+        />
       ) : null}
 
       {modelCheckState !== "ready" ? (
@@ -855,9 +996,10 @@ function Bubble({
 function SettingsView({
   settings, engineOn, busy, inputs, outputs, selectedInput, selectedOutput,
   modelsReady, modelCheckState, installing, installProgress, advancedOpen,
-  logPath, capability, error, saveState, category, onCategoryChange, onPatch,
+  logPath, capability, error, saveState, category, appVer, updateUi,
+  availableUpdate, updateProgress, updateError, onCategoryChange, onPatch,
   onInputChange, onOutputChange, onRefreshDevices, onRefreshModels, onInstall,
-  onToggleAdvanced,
+  onToggleAdvanced, onCheckUpdate, onInstallUpdate,
 }: {
   settings: AppSettings; engineOn: boolean; busy: boolean; inputs: DeviceDto[];
   outputs: DeviceDto[]; selectedInput: string; selectedOutput: string;
@@ -865,10 +1007,16 @@ function SettingsView({
   installProgress: DownloadProgress | null; advancedOpen: boolean; logPath: string;
   capability: (typeof CAPABILITY_OPTIONS)[number]; error: string | null;
   saveState: SaveState; category: SettingsCategory;
+  appVer: string | null;
+  updateUi: UpdateUiState;
+  availableUpdate: AvailableUpdate | null;
+  updateProgress: UpdateProgress | null;
+  updateError: string | null;
   onCategoryChange: (category: SettingsCategory) => void;
   onPatch: (p: Partial<AppSettings>) => void; onInputChange: (id: string) => void;
   onOutputChange: (id: string) => void; onRefreshDevices: () => void;
   onRefreshModels: () => void; onInstall: () => void; onToggleAdvanced: () => void;
+  onCheckUpdate: () => void; onInstallUpdate: () => void;
 }) {
   const locked = engineOn;
   const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
@@ -893,7 +1041,21 @@ function SettingsView({
       </div>
       {error ? <p role="alert" className="rounded-xl bg-red-500/10 px-3.5 py-2.5 text-[13px] text-red-300 ring-1 ring-red-500/15">{error}</p> : null}
       <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${category}`}>
-        {category === "general" ? <GeneralSettings settings={settings} locked={locked} capability={capability} onPatch={onPatch} /> : null}
+        {category === "general" ? (
+          <GeneralSettings
+            settings={settings}
+            locked={locked}
+            capability={capability}
+            appVer={appVer}
+            updateUi={updateUi}
+            availableUpdate={availableUpdate}
+            updateProgress={updateProgress}
+            updateError={updateError}
+            onPatch={onPatch}
+            onCheckUpdate={onCheckUpdate}
+            onInstallUpdate={onInstallUpdate}
+          />
+        ) : null}
         {category === "overlay" ? <OverlaySettings settings={settings} onPatch={onPatch} /> : null}
         {category === "speech" ? <SpeechSettings busy={busy} inputs={inputs} outputs={outputs} selectedInput={selectedInput} selectedOutput={selectedOutput} modelsReady={modelsReady} modelCheckState={modelCheckState} installing={installing} progress={installProgress} onInputChange={onInputChange} onOutputChange={onOutputChange} onRefreshDevices={onRefreshDevices} onRefreshModels={onRefreshModels} onInstall={onInstall} /> : null}
         {category === "connections" ? <ConnectionsSettings settings={settings} locked={locked} showOpenRouterKey={showOpenRouterKey} showExaKey={showExaKey} onToggleOpenRouter={() => setShowOpenRouterKey((v) => !v)} onToggleExa={() => setShowExaKey((v) => !v)} onOpenExternal={openExternal} onPatch={onPatch} /> : null}
@@ -903,12 +1065,268 @@ function SettingsView({
   );
 }
 
-function GeneralSettings({ settings, locked, capability, onPatch }: { settings: AppSettings; locked: boolean; capability: (typeof CAPABILITY_OPTIONS)[number]; onPatch: (p: Partial<AppSettings>) => void }) {
-  return <SettingsGroup title="General" footer={locked ? "Some changes apply after Boris is stopped." : capability.footer}>
-    <SettingsRow label="Start Boris when the app opens"><Toggle checked={settings.start_engine_on_launch} onChange={(v) => onPatch({ start_engine_on_launch: v })} aria-label="Start Boris when the app opens" /></SettingsRow>
-    <SettingsRow label="Long-term memory" subtitle="Remember notes across sessions"><Toggle checked={settings.long_term_memory} disabled={locked} onChange={(v) => onPatch({ long_term_memory: v })} aria-label="Long-term memory" /></SettingsRow>
-    <SettingsRow label="Tool access" labelFor="capability-preset" last><select id="capability-preset" className={selectCompactClass} value={CAPABILITY_OPTIONS.some((p) => p.id === settings.capability_preset) ? settings.capability_preset : "full"} disabled={locked} onChange={(e) => onPatch({ capability_preset: e.target.value })}>{CAPABILITY_OPTIONS.map((p) => <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">{p.label}</option>)}</select></SettingsRow>
-  </SettingsGroup>;
+function GeneralSettings({
+  settings,
+  locked,
+  capability,
+  appVer,
+  updateUi,
+  availableUpdate,
+  updateProgress,
+  updateError,
+  onPatch,
+  onCheckUpdate,
+  onInstallUpdate,
+}: {
+  settings: AppSettings;
+  locked: boolean;
+  capability: (typeof CAPABILITY_OPTIONS)[number];
+  appVer: string | null;
+  updateUi: UpdateUiState;
+  availableUpdate: AvailableUpdate | null;
+  updateProgress: UpdateProgress | null;
+  updateError: string | null;
+  onPatch: (p: Partial<AppSettings>) => void;
+  onCheckUpdate: () => void;
+  onInstallUpdate: () => void;
+}) {
+  const checking = updateUi === "checking";
+  const downloading = updateUi === "downloading";
+  const hasUpdate = updateUi === "available" || downloading;
+  const versionLabel = appVer ? `v${appVer}` : "—";
+  const statusSubtitle = checking
+    ? "Checking…"
+    : downloading
+      ? "Downloading update…"
+      : hasUpdate && availableUpdate
+        ? `v${availableUpdate.version} ready`
+        : updateUi === "up_to_date"
+          ? "You're on the latest version"
+          : updateUi === "error"
+            ? "Check failed"
+            : "Check for a newer installer";
+  const pct =
+    updateProgress?.contentLength != null && updateProgress.contentLength > 0
+      ? Math.min(
+          100,
+          Math.round(
+            (updateProgress.downloaded / updateProgress.contentLength) * 100,
+          ),
+        )
+      : null;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <SettingsGroup
+        title="General"
+        footer={
+          locked
+            ? "Some changes apply after Boris is stopped."
+            : capability.footer
+        }
+      >
+        <SettingsRow label="Start Boris when the app opens">
+          <Toggle
+            checked={settings.start_engine_on_launch}
+            onChange={(v) => onPatch({ start_engine_on_launch: v })}
+            aria-label="Start Boris when the app opens"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Long-term memory"
+          subtitle="Remember notes across sessions"
+        >
+          <Toggle
+            checked={settings.long_term_memory}
+            disabled={locked}
+            onChange={(v) => onPatch({ long_term_memory: v })}
+            aria-label="Long-term memory"
+          />
+        </SettingsRow>
+        <SettingsRow label="Tool access" labelFor="capability-preset" last>
+          <select
+            id="capability-preset"
+            className={selectCompactClass}
+            value={
+              CAPABILITY_OPTIONS.some((p) => p.id === settings.capability_preset)
+                ? settings.capability_preset
+                : "full"
+            }
+            disabled={locked}
+            onChange={(e) => onPatch({ capability_preset: e.target.value })}
+          >
+            {CAPABILITY_OPTIONS.map((p) => (
+              <option key={p.id} value={p.id} className="bg-[#1c1c1e] text-white">
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Updates"
+        footer="Updates are signed and downloaded from GitHub Releases. The app restarts after install."
+      >
+        <SettingsRow
+          label="Version"
+          subtitle={statusSubtitle}
+          last={!hasUpdate && updateUi !== "error"}
+        >
+          <div className="flex items-center gap-2">
+            <span className="rounded-lg bg-white/[0.06] px-3 py-2 text-[13px] text-white/65">
+              {versionLabel}
+            </span>
+            {hasUpdate ? (
+              <button
+                type="button"
+                disabled={downloading}
+                onClick={onInstallUpdate}
+                className="min-h-9 rounded-lg bg-white px-3 text-[13px] font-medium text-black hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
+              >
+                {downloading ? "Installing…" : "Install"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={checking}
+                onClick={onCheckUpdate}
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
+              >
+                {checking ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                {checking ? "Checking…" : "Check"}
+              </button>
+            )}
+          </div>
+        </SettingsRow>
+        {downloading ? (
+          <div className="border-t border-white/[0.06] px-4 py-3" role="status">
+            <div
+              className="main-progress-track"
+              role="progressbar"
+              aria-label="App update download"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={pct ?? undefined}
+            >
+              <div
+                className="main-progress-fill"
+                style={{ width: `${pct ?? 4}%` }}
+              />
+            </div>
+            <p className="mt-1.5 text-[12px] text-white/50">
+              {pct != null ? `${pct}%` : "Downloading…"}
+            </p>
+          </div>
+        ) : null}
+        {updateUi === "error" && updateError ? (
+          <div className="border-t border-white/[0.06] px-4 py-3">
+            <p className="text-[12px] leading-snug text-red-300/90" role="alert">
+              {updateError}
+            </p>
+          </div>
+        ) : null}
+        {hasUpdate && availableUpdate?.body ? (
+          <div className="border-t border-white/[0.06] px-4 py-3">
+            <p className="whitespace-pre-wrap text-[12px] leading-snug text-white/45">
+              {availableUpdate.body}
+            </p>
+          </div>
+        ) : null}
+      </SettingsGroup>
+    </div>
+  );
+}
+
+function UpdateBanner({
+  update,
+  downloading,
+  progress,
+  onInstall,
+  onDismiss,
+  onOpenSettings,
+}: {
+  update: AvailableUpdate;
+  downloading: boolean;
+  progress: UpdateProgress | null;
+  onInstall: () => void;
+  onDismiss: () => void;
+  onOpenSettings: () => void;
+}) {
+  const pct =
+    progress?.contentLength != null && progress.contentLength > 0
+      ? Math.min(
+          100,
+          Math.round((progress.downloaded / progress.contentLength) * 100),
+        )
+      : null;
+
+  return (
+    <div className="settings-group rounded-[12px] px-4 py-3.5" role="status">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[14px] font-medium text-white/90">
+            Update available · v{update.version}
+          </p>
+          <p className="mt-0.5 text-[12px] text-white/50">
+            {downloading
+              ? pct != null
+                ? `Downloading… ${pct}%`
+                : "Downloading…"
+              : `You have v${update.currentVersion}. Install when you're ready.`}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          {!downloading ? (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="min-h-9 rounded-lg px-3 text-[13px] text-white/55 hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+            >
+              Later
+            </button>
+          ) : null}
+          <button
+            type="button"
+            disabled={downloading}
+            onClick={onInstall}
+            className="min-h-9 rounded-full bg-white px-3.5 text-[13px] font-medium text-black hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
+          >
+            {downloading ? "Installing…" : "Install"}
+          </button>
+        </div>
+      </div>
+      {downloading ? (
+        <div className="mt-3">
+          <div
+            className="main-progress-track"
+            role="progressbar"
+            aria-label="App update download"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct ?? undefined}
+          >
+            <div
+              className="main-progress-fill"
+              style={{ width: `${pct ?? 4}%` }}
+            />
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="mt-2 text-[12px] text-white/45 hover:text-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+        >
+          Details in Settings
+        </button>
+      )}
+    </div>
+  );
 }
 
 function OverlaySettings({ settings, onPatch }: { settings: AppSettings; onPatch: (p: Partial<AppSettings>) => void }) {

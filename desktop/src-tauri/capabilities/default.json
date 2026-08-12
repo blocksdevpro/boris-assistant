@@ -14,6 +14,8 @@
     "core:window:allow-is-maximized",
     "core:window:allow-start-dragging",
     "opener:default",
+    "updater:default",
+    "process:default",
     "allow-get-status",
     "allow-preflight-check",
     "allow-start-engine",

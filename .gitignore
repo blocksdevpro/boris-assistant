@@ -5,6 +5,8 @@
 !/assets/models/livekit/
 /assets/models/livekit/*
 !/assets/models/livekit/boris-large.onnx
+# Tauri updater signing private key — never commit
+.tauri/*.key
 .env
 .env.*
 !.env.example

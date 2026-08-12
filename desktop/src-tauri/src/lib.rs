@@ -4,7 +4,7 @@
 //!
 //! | Layer | Crate / module | Owns |
 //! |-------|----------------|------|
-//! | **Host** (this crate) | `commands`, `orchestrator`, `tray`, `overlay_win`, `logging` | Windows, tray, IPC, engine lifecycle, status mirror |
+//! | **Host** (this crate) | `commands`, `orchestrator`, `tray`, `overlay_win`, `logging` | Windows, tray, IPC, engine lifecycle, status mirror, app updater plugins |
 //! | **Pipeline** | `boris_pipeline` | Voice engine, STT/TTS, agent turns, `~/.boris` paths/settings/download |
 //!
 //! Keep this crate thin: no wake/VAD policy, no tool execution, no model math.
@@ -36,6 +36,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,

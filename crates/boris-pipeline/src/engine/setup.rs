@@ -140,6 +140,7 @@ pub(super) fn init_runtime(
         activity: None,
         context_used: None,
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
+        artifact: None,
         status_tx,
     };
     picture.publish();
@@ -182,6 +183,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         activity: None,
         context_used: None,
         context_limit: None,
+        artifact: None,
     });
 }
 
@@ -284,6 +286,7 @@ fn fault(
         activity: None,
         context_used: None,
         context_limit: None,
+        artifact: None,
     });
 }
 

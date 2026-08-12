@@ -177,8 +177,22 @@
   height: 120px;
   transform: translate(-50%, -50%) scale(var(--overlay-scale, 1));
   transform-origin: center;
-  transition: transform 0.36s cubic-bezier(0.22, 1, 0.36, 1);
+  transition:
+    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
+}
+
+.overlay-stage[data-mode="card"] {
+  width: 400px;
+  height: 300px;
+}
+
+/* Glance must never grow scrollbars — overlay is click-through. */
+.overlay-stage[data-mode="card"] .overlay-caption,
+.overlay-stage[data-mode="card"] .artifact-code {
+  overflow: hidden;
 }
 
 .overlay-island {
@@ -210,6 +224,72 @@
 .overlay-caption--confirm {
   background: rgba(255, 190, 100, 0.07);
   border-color: rgba(255, 200, 120, 0.14);
+}
+
+/* Syntax highlighting — Dark+ (VS Code) token colors */
+.artifact-code {
+  color: #d4d4d4;
+  tab-size: 4;
+}
+
+.artifact-code__tokens .hljs-keyword,
+.artifact-code__tokens .hljs-selector-tag,
+.artifact-code__tokens .hljs-literal {
+  color: #c586c0;
+}
+
+.artifact-code__tokens .hljs-built_in,
+.artifact-code__tokens .hljs-type,
+.artifact-code__tokens .hljs-class .hljs-title,
+.artifact-code__tokens .hljs-title.class_ {
+  color: #4ec9b0;
+}
+
+.artifact-code__tokens .hljs-title,
+.artifact-code__tokens .hljs-title.function_,
+.artifact-code__tokens .hljs-function .hljs-title {
+  color: #dcdcaa;
+}
+
+.artifact-code__tokens .hljs-string,
+.artifact-code__tokens .hljs-regexp,
+.artifact-code__tokens .hljs-addition {
+  color: #ce9178;
+}
+
+.artifact-code__tokens .hljs-number,
+.artifact-code__tokens .hljs-symbol {
+  color: #b5cea8;
+}
+
+.artifact-code__tokens .hljs-comment,
+.artifact-code__tokens .hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.artifact-code__tokens .hljs-variable,
+.artifact-code__tokens .hljs-template-variable,
+.artifact-code__tokens .hljs-attr,
+.artifact-code__tokens .hljs-attribute,
+.artifact-code__tokens .hljs-params,
+.artifact-code__tokens .hljs-property {
+  color: #9cdcfe;
+}
+
+.artifact-code__tokens .hljs-meta,
+.artifact-code__tokens .hljs-doctag,
+.artifact-code__tokens .hljs-section {
+  color: #569cd6;
+}
+
+.artifact-code__tokens .hljs-punctuation,
+.artifact-code__tokens .hljs-operator {
+  color: #d4d4d4;
+}
+
+.artifact-code__tokens .hljs-deletion {
+  color: #f44747;
 }
 
 /* Continuous presence loops — single ring, no rotate carnival */

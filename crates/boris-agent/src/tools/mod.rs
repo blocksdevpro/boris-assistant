@@ -7,7 +7,7 @@
 //! | [`time`] | get_time, get_date |
 //! | [`notes`] | remember / recall notes |
 //! | [`profile`] | user profile / facts |
-//! | [`system`] / [`open_tool`] / [`clipboard`] / [`todo`] | OS surface |
+//! | [`system`] / [`open_tool`] / [`clipboard`] / [`todo`] / [`artifacts`] | OS + session cards |
 //! | [`files`] / [`glob`] / [`grep`] | filesystem |
 //! | [`web`] | web_search, web_fetch |
 //! | [`bash`] | shell |
@@ -16,6 +16,7 @@
 //! Hosts (pipeline / desktop) should call [`register_builtin_tools`] once after
 //! constructing [`crate::Agent`] with a [`BuiltinToolPaths`] pointing at `~/.boris`.
 
+pub mod artifacts;
 pub mod bash;
 pub mod clipboard;
 pub mod files;
@@ -113,6 +114,16 @@ pub fn plan_tools_at(todos_file: &Path) -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// Visual cards — always registered (including VoiceSafe), like plan tools.
+pub fn artifact_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+    artifact_tools_at(&paths.sandbox_root.join("artifacts"))
+}
+
+/// Artifact tools bound to `{session_dir}/artifacts` (or a sandbox fallback).
+pub fn artifact_tools_at(artifacts_dir: &Path) -> Vec<Box<dyn Tool>> {
+    artifacts::artifact_tools_at(artifacts_dir)
+}
+
 /// OS surface: system info, open, clipboard (power-tool wave).
 pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
@@ -141,8 +152,9 @@ pub fn fs_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 
 /// Web search + fetch (requires host network policy Open).
 ///
-/// `web_search` prefers Exa when `EXA_API_KEY` / `BORIS_EXA_API_KEY` or
-/// `~/.boris/auth.json` `exa_api_key` is set; otherwise DuckDuckGo HTML scrape.
+/// `web_search` works with no API key (DuckDuckGo + Wikipedia). Exa is an
+/// optional upgrade when `EXA_API_KEY` / `BORIS_EXA_API_KEY` or
+/// `~/.boris/auth.json` `exa_api_key` is set.
 /// Registration failures are logged and skipped.
 pub fn web_tools() -> Vec<Box<dyn Tool>> {
     let mut out: Vec<Box<dyn Tool>> = Vec::new();
@@ -215,10 +227,11 @@ pub fn register_builtin_tools_with_options(
 ///
 /// 1. Core time/notes
 /// 2. Plan tools (todo_read / todo_write) — **always**, even VoiceSafe
-/// 3. Optional personal-context tools
-/// 4. Optional power tools (OS / FS / web / bash)
-/// 5. Filter by [`CapabilityPreset`]
-/// 6. [`Agent::register_tools`]
+/// 3. Artifact tools (present / list / get) — **always**, even VoiceSafe
+/// 4. Optional personal-context tools
+/// 5. Optional power tools (OS / FS / web / bash)
+/// 6. Filter by [`CapabilityPreset`]
+/// 7. [`Agent::register_tools`]
 ///
 /// Also applies `preset` to `sandbox` via [`CapabilityPreset::apply_to_sandbox`]
 /// (network/shell lockdown for `VoiceSafe`/`LocalPower`) so tool registration
@@ -239,6 +252,7 @@ pub fn register_builtin_tools_with_preset(
     // skip os_tools (which previously owned todos), while the prompt still
     // taught the model to call todo_write → "unknown tool" hard-fail loop.
     tools.extend(plan_tools(&paths));
+    tools.extend(artifact_tools(&paths));
     tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {
@@ -303,6 +317,7 @@ mod tests {
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
         tools.extend(builtin_tools(&paths));
         tools.extend(plan_tools(&paths));
+        tools.extend(artifact_tools(&paths));
         tools.extend(os_tools(&paths));
         tools.extend(fs_tools(&paths));
         tools.extend(web_tools());
@@ -325,6 +340,7 @@ mod tests {
         let paths = test_paths();
         let mut tools = builtin_tools(&paths);
         tools.extend(plan_tools(&paths));
+        tools.extend(artifact_tools(&paths));
         // power_tools=false for VoiceSafe (no os/fs/web/bash).
         let tools = filter_tools_for_preset(tools, CapabilityPreset::VoiceSafe);
         let names: Vec<_> = tools.iter().map(|t| t.name().to_string()).collect();
@@ -335,6 +351,18 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "todo_write"),
             "todo_write missing under VoiceSafe: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "present_artifact"),
+            "present_artifact missing under VoiceSafe: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "list_artifacts"),
+            "list_artifacts missing under VoiceSafe: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "get_artifact"),
+            "get_artifact missing under VoiceSafe: {names:?}"
         );
         assert!(!names.iter().any(|n| n == "bash"), "bash must stay off");
         assert!(
@@ -393,5 +421,50 @@ mod tests {
         // function itself, not only when a caller remembers to call it.
         assert_eq!(sandbox.network, crate::runtime::NetworkPolicy::Off);
         assert_eq!(sandbox.shell, crate::runtime::ShellPolicy::Denied);
+    }
+
+    #[tokio::test]
+    async fn bind_session_rebounds_artifact_tools() {
+        let paths = test_paths();
+        let session = paths.boris_home.join("sessions").join("s1");
+        let _ = std::fs::create_dir_all(&session);
+        let mut agent = Agent::new(Box::new(NoopClient), "test");
+        let mut sandbox = SandboxConfig::default();
+        register_builtin_tools_with_preset(
+            &mut agent,
+            paths.clone(),
+            false,
+            false,
+            &mut sandbox,
+            CapabilityPreset::VoiceSafe,
+        );
+
+        agent.bind_session(&session, "s1");
+        let art = session.join("artifacts");
+        assert_eq!(agent.artifacts_dir(), Some(art.as_path()));
+
+        let present = artifacts::PresentArtifactTool::with_dir(&art);
+        let out = present
+            .execute(
+                &crate::tool_context::ToolCallContext::new("c"),
+                serde_json::json!({
+                    "kind": "markdown",
+                    "title": "Grocery list",
+                    "body": "- milk"
+                }),
+            )
+            .await
+            .expect("present");
+        assert!(out.contains("grocery-list-"));
+        assert!(out.contains(".md"));
+
+        assert!(art.join("index.json").is_file());
+        let sandbox_art = paths.sandbox_root.join("artifacts").join("index.json");
+        assert!(
+            !sandbox_art.is_file(),
+            "must not write the pre-bind sandbox fallback"
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.boris_home);
     }
 }

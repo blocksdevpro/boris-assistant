@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use boris_core::TurnId;
 
 use crate::status::{
-    DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
+    ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
 };
 
 /// Mutable engine-side status that publishes a full [`StatusPicture`] on change.
@@ -21,6 +21,7 @@ pub(super) struct Picture {
     pub activity: Option<String>,
     pub context_used: Option<u32>,
     pub context_limit: Option<u32>,
+    pub artifact: Option<ArtifactPeek>,
     pub status_tx: Sender<StatusPicture>,
 }
 
@@ -38,6 +39,7 @@ impl Picture {
             activity: self.activity.clone(),
             context_used: self.context_used,
             context_limit: self.context_limit,
+            artifact: self.artifact.clone(),
         });
     }
 

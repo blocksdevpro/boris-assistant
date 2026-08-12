@@ -28,6 +28,8 @@ import {
   type ModelsInstallReport,
   type ModelsStatus,
   type PreflightReport,
+  type ArtifactCard,
+  type ArtifactListItem,
   type StatusPicture,
 } from "./types";
 
@@ -245,6 +247,30 @@ export async function getSettings(): Promise<AppSettings> {
   } catch (e) {
     logger.warn("get_settings failed", invokeErrorMessage(e));
     return { ...EMPTY_SETTINGS };
+  }
+}
+
+/** Visual cards in the active session (empty when no session). */
+export async function listSessionArtifacts(): Promise<ArtifactListItem[]> {
+  try {
+    return await invoke<ArtifactListItem[]>(COMMANDS.listSessionArtifacts);
+  } catch (e) {
+    logger.warn("list_session_artifacts failed", invokeErrorMessage(e));
+    return [];
+  }
+}
+
+/** One card body. Omit `id` for the current card. */
+export async function getSessionArtifact(
+  id?: string | null,
+): Promise<ArtifactCard | null> {
+  try {
+    return await invoke<ArtifactCard>(COMMANDS.getSessionArtifact, {
+      id: id ?? null,
+    });
+  } catch (e) {
+    logger.warn("get_session_artifact failed", invokeErrorMessage(e));
+    return null;
   }
 }
 

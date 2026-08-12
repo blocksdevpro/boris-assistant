@@ -22,6 +22,7 @@
 //! | Wake / STT / agent turn / talk loop | [`engine`] (+ submodules) |
 //! | Mic capture / VAD / wake wait helpers | [`hear`] |
 //! | UI status DTO | [`status`] |
+//! | Session card list/get | [`artifacts`] |
 //! | `~/.boris` layout, preflight | [`paths`] |
 //! | User prefs + secrets | [`settings`] |
 //! | Model HTTP install | [`download`] |
@@ -31,6 +32,7 @@
 //! | Typed errors | [`error`] |
 //! | System prompt text | [`prompt`] |
 
+pub mod artifacts;
 pub mod config;
 pub mod devices;
 pub mod diagnostics;
@@ -44,6 +46,7 @@ pub mod prompt;
 pub mod settings;
 pub mod status;
 
+pub use artifacts::{get_session_artifact, list_session_artifacts, ArtifactCard, ArtifactListItem};
 pub use config::{LlmPrefs, PipelineConfig};
 pub use devices::DeviceDto;
 pub use diagnostics::{log_environment, log_model_load_failure};
@@ -61,4 +64,4 @@ pub use paths::{
 };
 pub use prompt::BORIS_SYSTEM_PROMPT;
 pub use settings::{load_settings, save_settings, secrets_path, settings_path, AppSettings};
-pub use status::{DeviceHealth, EngineState, Phase, StatusPicture};
+pub use status::{ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture};

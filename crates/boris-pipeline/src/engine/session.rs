@@ -166,5 +166,6 @@ pub(super) fn go_off(
     release_voice_models(stt, tts, "engine stop");
     picture.engine = EngineState::Off;
     picture.turn = None;
+    picture.artifact = None;
     picture.set_phase(Phase::Off);
 }

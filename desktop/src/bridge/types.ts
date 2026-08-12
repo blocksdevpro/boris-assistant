@@ -28,6 +28,39 @@ export type DeviceHealth = {
   ok: boolean;
 };
 
+/** Mirrors `boris_pipeline::ArtifactPeek` — no body. */
+export type ArtifactPeek = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+};
+
+/** Mirrors `boris_pipeline::ArtifactListItem`. */
+export type ArtifactListItem = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+  pinned: boolean;
+  revision: number;
+  current: boolean;
+};
+
+/** Mirrors `boris_pipeline::ArtifactCard`. */
+export type ArtifactCard = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+  pinned: boolean;
+  revision: number;
+  body: string;
+};
+
 /** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
   engine: EngineState;
@@ -44,6 +77,8 @@ export type StatusPicture = {
   context_used?: number | null;
   /** Soft context window for the meter. */
   context_limit?: number | null;
+  /** Current session card peek (body loaded separately). */
+  artifact?: ArtifactPeek | null;
 };
 
 /** Device list entry from `list_input_devices` / `list_output_devices`. */
@@ -114,7 +149,7 @@ export type ModelsInstallReport = {
  */
 export type AppSettings = {
   openrouter_api_key: string;
-  /** Exa Search API key for live `web_search` (optional; falls back to DDG scrape). */
+  /** Optional Exa key. `web_search` works without it (DuckDuckGo + Wikipedia). */
   exa_api_key: string;
   /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
@@ -236,6 +271,7 @@ export const OFF_STATUS: StatusPicture = {
   activity: null,
   context_used: null,
   context_limit: null,
+  artifact: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -255,6 +291,7 @@ export function normalizeStatus(
     activity: raw.activity ?? null,
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
+    artifact: raw.artifact ?? null,
   };
 }
 

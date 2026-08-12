@@ -29,6 +29,8 @@
     "allow-get-settings",
     "allow-save-app-settings",
     "allow-get-log-path",
-    "allow-frontend-log"
+    "allow-frontend-log",
+    "allow-list-session-artifacts",
+    "allow-get-session-artifact"
   ]
 }

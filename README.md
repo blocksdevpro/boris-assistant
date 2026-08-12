@@ -169,7 +169,7 @@ Common runtime vars (also documented in [`boris-pipeline` README](crates/boris-p
   config.toml      # prefs
   auth.json        # secrets (API key)
   models/          # STT / TTS weights
-  sessions/        # transcripts
+  sessions/        # transcripts + per-session artifacts/
   memory/          # long-term notes
   skills/          # skill playbooks
   logs/            # boris-desktop.*.log

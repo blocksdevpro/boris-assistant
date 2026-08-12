@@ -87,7 +87,10 @@ pub use runtime::{
     NullAuditSink, PendingToolCall, ProgressEvent, SandboxConfig, ShellPolicy, ToolRuntime,
     ToolRuntimeFeatures,
 };
-pub use session::{generate_session_id, SessionId, SessionMeta, SessionStatus, SessionStore};
+pub use session::{
+    generate_session_id, ArtifactIndex, ArtifactKind, ArtifactMeta, ArtifactStore, PresentRequest,
+    PresentedArtifact, SessionId, SessionMeta, SessionStatus, SessionStore,
+};
 pub use skills::{
     ensure_default_skills, format_skills_catalog, load_skill_body, load_skills, user_skills_dir,
     LoadedSkills, Skill, SkillSource,
@@ -102,9 +105,9 @@ pub use tool::{
 };
 pub use tool_context::ToolCallContext;
 pub use tools::{
-    bash_tools, builtin_tools, fs_tools, os_tools, register_builtin_tools,
-    register_builtin_tools_with_options, register_builtin_tools_with_preset, web_tools,
-    BuiltinToolPaths,
+    artifact_tools, artifact_tools_at, bash_tools, builtin_tools, fs_tools, os_tools,
+    register_builtin_tools, register_builtin_tools_with_options,
+    register_builtin_tools_with_preset, web_tools, BuiltinToolPaths,
 };
 
 /// Deprecated alias for [`bash_tools`].

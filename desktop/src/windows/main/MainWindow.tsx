@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { SessionArtifactDesk } from "@/components/artifacts";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -791,6 +792,7 @@ function HomeView({
       ) : null}
 
       <ConversationView status={status} />
+      <SessionArtifactDesk peek={status.artifact} engineOn={engineOn} />
     </div>
   );
 }
@@ -1359,7 +1361,7 @@ function ConnectionsSettings({ settings, locked, showOpenRouterKey, showExaKey, 
   return <div className="flex flex-col gap-6">
     <SettingsGroup title="API Keys" footer={locked ? "Stop Boris to change API keys." : "Keys stay in ~/.boris/auth.json on this computer."}>
       <SettingsField label="OpenRouter" subtitle="Required for chat" labelFor="openrouter-key"><SecretField id="openrouter-key" shown={showOpenRouterKey} onToggle={onToggleOpenRouter} value={settings.openrouter_api_key} disabled={locked} placeholder="sk-or-v1-…" onChange={(value) => onPatch({ openrouter_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://openrouter.ai/keys")}>Get an OpenRouter key</HelpLink></SettingsField>
-      <SettingsField label="Exa" subtitle="Optional, for more reliable web search" labelFor="exa-key" last><SecretField id="exa-key" shown={showExaKey} onToggle={onToggleExa} value={settings.exa_api_key} disabled={locked} placeholder="Exa API key" onChange={(value) => onPatch({ exa_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://dashboard.exa.ai")}>Open Exa dashboard</HelpLink></SettingsField>
+      <SettingsField label="Exa" subtitle="Optional upgrade. Web search works without this." labelFor="exa-key" last><SecretField id="exa-key" shown={showExaKey} onToggle={onToggleExa} value={settings.exa_api_key} disabled={locked} placeholder="Exa API key" onChange={(value) => onPatch({ exa_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://dashboard.exa.ai")}>Open Exa dashboard</HelpLink></SettingsField>
     </SettingsGroup>
     <SettingsGroup title="Chat Models" footer={locked ? "Stop Boris to change models." : "The fast model handles simpler requests."}>
       <ModelField label="Primary model" value={settings.openrouter_model} disabled={locked} onChange={(v) => onPatch({ openrouter_model: v })} />

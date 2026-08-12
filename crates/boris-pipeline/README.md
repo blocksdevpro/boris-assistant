@@ -78,7 +78,7 @@ Override root with `BORIS_HOME`.
     parakeet/          # STT
     supertone/onnx/    # TTS graphs
     supertone/voices/  # M4.json
-  sessions/desktop/    # voice session transcripts
+  sessions/desktop/    # voice session transcripts + artifacts/
   memory/              # long-term markdown memory
   skills/              # skill playbooks
   logs/                # boris-desktop.*.log

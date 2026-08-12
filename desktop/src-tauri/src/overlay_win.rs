@@ -23,7 +23,7 @@
 //! Tray / host can temporarily unlock input so the user can reposition.
 
 use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering},
     time::Duration,
 };
 
@@ -52,12 +52,18 @@ const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
 /// Base logical window size, including the transparent shadow gutter.
 const OVERLAY_BASE_WIDTH: f64 = OVERLAY_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
 const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
+/// Glance card stage — clipped body, not a document editor.
+const OVERLAY_CARD_STAGE_WIDTH: f64 = 400.0;
+const OVERLAY_CARD_STAGE_HEIGHT: f64 = 300.0;
+const OVERLAY_CARD_BASE_WIDTH: f64 = OVERLAY_CARD_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
+const OVERLAY_CARD_BASE_HEIGHT: f64 = OVERLAY_CARD_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
 const OVERLAY_MAX_SCALE: f64 = 1.25;
-const OVERLAY_MAX_WIDTH: f64 = OVERLAY_BASE_WIDTH * OVERLAY_MAX_SCALE;
-const OVERLAY_MAX_HEIGHT: f64 = OVERLAY_BASE_HEIGHT * OVERLAY_MAX_SCALE;
+const OVERLAY_MAX_WIDTH: f64 = OVERLAY_CARD_BASE_WIDTH * OVERLAY_MAX_SCALE;
+const OVERLAY_MAX_HEIGHT: f64 = OVERLAY_CARD_BASE_HEIGHT * OVERLAY_MAX_SCALE;
 
 /// Keep the final answer around long enough to read, then get out of the game.
 const READY_LINGER: Duration = Duration::from_millis(6_500);
+const CARD_LINGER: Duration = Duration::from_millis(15_000);
 const FAULT_LINGER: Duration = Duration::from_millis(8_000);
 
 /// Cancels stale delayed hides when another wake/status arrives.
@@ -70,6 +76,12 @@ static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Updated by [`remember_overlay_prefs`] / [`apply_preferences`]. Default
 /// matches [`AppSettings`] (off until prefs are loaded).
 static SHOW_OVERLAY_ON_WAKE: AtomicBool = AtomicBool::new(false);
+
+/// Last layout the host applied so prefs/scale changes keep a live card sized.
+static OVERLAY_CARD_LAYOUT: AtomicBool = AtomicBool::new(false);
+static OVERLAY_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);
+/// 0 = top_center, 1 = top_left, 2 = top_right
+static OVERLAY_POSITION: AtomicU8 = AtomicU8::new(0);
 
 pub const EVENT_OVERLAY_PREFERENCES: &str = "overlay-preferences";
 
@@ -182,6 +194,16 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
 /// correct without disk I/O.
 pub fn remember_overlay_prefs(settings: &AppSettings) {
     SHOW_OVERLAY_ON_WAKE.store(settings.show_overlay_on_wake, Ordering::Relaxed);
+    OVERLAY_SCALE_PERCENT.store(
+        settings.overlay_scale_percent.clamp(75, 125),
+        Ordering::Relaxed,
+    );
+    let pos = match settings.overlay_position.as_str() {
+        "top_left" => 1,
+        "top_right" => 2,
+        _ => 0,
+    };
+    OVERLAY_POSITION.store(pos, Ordering::Relaxed);
 }
 
 /// Apply geometry and notify the React surface without exposing API keys.
@@ -192,15 +214,9 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
         return;
     };
 
-    let scale_percent = settings.overlay_scale_percent.clamp(75, 125);
-    let scale = f64::from(scale_percent) / 100.0;
-    if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(
-        OVERLAY_BASE_WIDTH * scale,
-        OVERLAY_BASE_HEIGHT * scale,
-    ))) {
-        tracing::warn!(error = %e, scale_percent, "overlay resize failed");
-    }
-    place_overlay(&overlay, &settings.overlay_position);
+    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    apply_overlay_size(&overlay, scale, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
+    place_overlay(&overlay, cached_position());
 
     let _ = app.emit(
         EVENT_OVERLAY_PREFERENCES,
@@ -237,6 +253,14 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
         return;
     }
 
+    let card = wants_card_layout(status);
+    let layout_changed = OVERLAY_CARD_LAYOUT.swap(card, Ordering::Relaxed) != card;
+    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    apply_overlay_size(&overlay, scale, card);
+    if layout_changed {
+        place_overlay(&overlay, cached_position());
+    }
+
     let active = matches!(
         status.phase,
         Phase::Hearing
@@ -255,7 +279,44 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     // Armed/Quiet after a completed turn: do not resurrect an already-hidden
     // overlay at startup, but let the current response remain readable.
     if overlay.is_visible().unwrap_or(false) {
-        schedule_hide(app.clone(), epoch, READY_LINGER);
+        let linger = if status.artifact.is_some() {
+            CARD_LINGER
+        } else {
+            READY_LINGER
+        };
+        schedule_hide(app.clone(), epoch, linger);
+    }
+}
+
+fn wants_card_layout(status: &StatusPicture) -> bool {
+    status.artifact.is_some()
+        && status.engine == EngineState::On
+        && !matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off)
+}
+
+fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64, card: bool) {
+    let (w, h) = if card {
+        (
+            OVERLAY_CARD_BASE_WIDTH * scale,
+            OVERLAY_CARD_BASE_HEIGHT * scale,
+        )
+    } else {
+        (OVERLAY_BASE_WIDTH * scale, OVERLAY_BASE_HEIGHT * scale)
+    };
+    let _ = overlay.set_max_size(Some(tauri::Size::Logical(LogicalSize::new(
+        OVERLAY_MAX_WIDTH,
+        OVERLAY_MAX_HEIGHT,
+    ))));
+    if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(w, h))) {
+        tracing::warn!(error = %e, card, "overlay resize failed");
+    }
+}
+
+fn cached_position() -> &'static str {
+    match OVERLAY_POSITION.load(Ordering::Relaxed) {
+        1 => "top_left",
+        2 => "top_right",
+        _ => "top_center",
     }
 }
 

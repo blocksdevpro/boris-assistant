@@ -3,6 +3,24 @@
 All notable changes to Boris Assistant are documented in this file. This
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `web_search` no longer needs an Exa account. Downloads search via DuckDuckGo
+  (Instant Answer + HTML) and Wikipedia with no API key. A configured Exa key
+  is still used first as an optional upgrade.
+
+### Added
+
+- Session-backed visual artifacts: `present_artifact` / `list_artifacts` /
+  `get_artifact` store markdown and code cards under
+  `{session}/artifacts/{slug}-{id}.{ext}` with an `index.json` catalog.
+  Spoken replies stay a short pointer; card bodies are not sent to TTS.
+- Overlay glance + main-window session desk for those cards (no extra window).
+  The island expands to a clipped preview; Home lists and renders the full
+  session catalog.
+
 ## [1.0.0] - 2026-08-12
 
 ### Added

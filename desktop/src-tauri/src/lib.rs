@@ -19,6 +19,7 @@
 //! - [`overlay_win`] — always-on-top click-through island
 //! - [`logging`] — file + stderr tracing, panic hook, frontend log sink
 
+mod artifacts;
 mod commands;
 mod logging;
 mod orchestrator;
@@ -54,6 +55,8 @@ pub fn run() {
             commands::save_app_settings,
             commands::get_log_path,
             commands::frontend_log,
+            commands::list_session_artifacts,
+            commands::get_session_artifact,
         ])
         .setup(setup_app)
         // Closing the console hides it; only tray "Quit Boris" exits the app.

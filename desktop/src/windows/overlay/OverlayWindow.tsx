@@ -1,458 +1,397 @@
-import {
-  useEffect,
-  useMemo,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
-import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
-import { formatContextMeter, useStatus, type StatusPicture } from "@/bridge";
+import { getSettings, useStatus, type AppSettings, type StatusPicture } from "@/bridge";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
+import {
+  isConfirmContext,
+  pickCaption,
+  pickOverlayPresence,
+  type Caption,
+} from "@/lib/statusPresentation";
 
-/** Soft ease-out — calm, no bounce. */
 const soft = [0.22, 1, 0.36, 1] as const;
-const softIdle = [0.16, 1, 0.3, 1] as const;
+const READY_CAPTION_MS = 5_000;
+const OVERLAY_PREFERENCES_EVENT = "overlay-preferences";
 
-const DUR = {
-  fast: 0.28,
-  base: 0.42,
-  slow: 0.55,
-  idle: 0.7,
-} as const;
+type OverlayPreferences = Pick<
+  AppSettings,
+  "overlay_caption_mode" | "overlay_scale_percent"
+>;
 
-/** Collapse to orb-only after this idle on Ready/Quiet. */
-const IDLE_ORB_MS = 15_000;
-
-const fadeSwap = {
-  initial: { opacity: 0, y: 3, filter: "blur(2px)" },
-  animate: { opacity: 1, y: 0, filter: "blur(0px)" },
-  exit: { opacity: 0, y: -2, filter: "blur(2px)" },
-  transition: { duration: DUR.base, ease: soft },
+type OverlayPreferencesEvent = {
+  captionMode: AppSettings["overlay_caption_mode"];
+  scalePercent: number;
 };
 
-/**
- * OVERLAY — always-on-top voice island.
- *
- * - Progressive tool/confirm activity (compact chip)
- * - Context window meter (e.g. 12K / 500K)
- * - Collapses to a lone orb after ~15s idle on Ready
- * - Turn id is intentionally not shown (noisy)
- */
+const DEFAULT_PREFERENCES: OverlayPreferences = {
+  overlay_caption_mode: "full",
+  overlay_scale_percent: 100,
+};
+
+/** Always-on-top, click-through voice presence. */
 export function OverlayWindow() {
   const status = useStatus();
+  const reduceMotion = Boolean(useReducedMotion());
+  const [preferences, setPreferences] =
+    useState<OverlayPreferences>(DEFAULT_PREFERENCES);
+  const [readyCaptionHidden, setReadyCaptionHidden] = useState(false);
+
   const tone = useMemo(
     () => toneFor(status.phase, status.engine),
     [status.phase, status.engine],
   );
-  const caption = pickCaption(status);
+  const { primary, secondary } = useMemo(
+    () => pickOverlayPresence(status, tone.label, tone.hint),
+    [status, tone.label, tone.hint],
+  );
+  const liveCaption = useMemo(() => pickCaption(status), [status]);
   const isReady =
     status.engine === "On" &&
     (status.phase === "Armed" || status.phase === "Quiet");
-  const subtitle = pickSubtitle(status, tone, caption);
-  const contextMeter = formatContextMeter(
-    status.context_used,
-    status.context_limit,
+
+  const privateCaption = filterCaption(
+    liveCaption,
+    preferences.overlay_caption_mode,
   );
-  const activity = status.activity?.trim() || null;
+  const caption = isReady && readyCaptionHidden ? null : privateCaption;
+  const orbOnly = isReady && readyCaptionHidden;
+  const confirm = isConfirmContext(status);
+  const faultKey = deviceFaultKey(status);
+  const scale = Math.min(
+    1.25,
+    Math.max(0.75, preferences.overlay_scale_percent / 100),
+  );
 
-  const [orbOnly, setOrbOnly] = useState(false);
-
-  // Idle → orb: only when Ready/Quiet, engine On, no caption/activity.
   useEffect(() => {
-    const canCollapse =
-      status.engine === "On" &&
-      (status.phase === "Armed" || status.phase === "Quiet") &&
-      !caption &&
-      !activity;
+    let active = true;
+    let unlisten = () => {};
+    let receivedLivePreferences = false;
 
-    if (!canCollapse) {
-      setOrbOnly(false);
+    void getSettings()
+      .then((settings) => {
+        if (!active || receivedLivePreferences) return;
+        setPreferences({
+          overlay_caption_mode: settings.overlay_caption_mode,
+          overlay_scale_percent: settings.overlay_scale_percent,
+        });
+      })
+      .catch(() => {
+        // Browser fixtures have no native settings bridge.
+      });
+
+    void listen<OverlayPreferencesEvent>(
+      OVERLAY_PREFERENCES_EVENT,
+      ({ payload }) => {
+        if (!active) return;
+        receivedLivePreferences = true;
+        setPreferences({
+          overlay_caption_mode: payload.captionMode,
+          overlay_scale_percent: payload.scalePercent,
+        });
+      },
+    )
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {
+        // Browser fixtures have no native event bus.
+      });
+
+    return () => {
+      active = false;
+      unlisten();
+    };
+  }, []);
+
+  // The host hides the window shortly after this. Collapsing first makes the
+  // disappearance feel deliberate and fixes the former 9s + 12s timer chain.
+  useEffect(() => {
+    if (!isReady || liveCaption?.kind !== "said") {
+      setReadyCaptionHidden(false);
       return;
     }
-    const t = window.setTimeout(() => setOrbOnly(true), IDLE_ORB_MS);
-    return () => window.clearTimeout(t);
-  }, [
-    status.engine,
-    status.phase,
-    status.said,
-    status.heard,
-    status.detail,
-    activity,
-    caption,
-  ]);
+    setReadyCaptionHidden(false);
+    const timer = window.setTimeout(
+      () => setReadyCaptionHidden(true),
+      READY_CAPTION_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [isReady, liveCaption?.kind, liveCaption?.text, status.turn]);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";
     const meta = document.querySelector('meta[name="color-scheme"]');
-    const prev = meta?.getAttribute("content") ?? null;
+    const previous = meta?.getAttribute("content") ?? null;
     meta?.setAttribute("content", "only light");
     return () => {
-      if (prev != null) meta?.setAttribute("content", prev);
+      if (previous != null) meta?.setAttribute("content", previous);
     };
   }, []);
 
-  // ── Orb-only idle presence ─────────────────────────────────────────────
-  if (orbOnly) {
-    return (
-      <div className="overlay-surface flex h-full w-full items-center justify-center bg-transparent p-3">
+  return (
+    <div className="overlay-surface relative h-full w-full bg-transparent">
+      <div
+        className="overlay-stage absolute left-1/2 top-1/2 flex items-center justify-center bg-transparent p-3"
+        style={{
+          ["--overlay-scale" as string]: scale,
+        } as CSSProperties}
+      >
         <motion.div
           data-tauri-drag-region
-          layout
-          className="overlay-island relative flex items-center justify-center rounded-full p-2.5"
-          initial={{ opacity: 0, scale: 0.85 }}
+          layout={reduceMotion ? false : "size"}
+          className={cn(
+            "overlay-island relative flex select-none",
+            orbOnly
+              ? "items-center justify-center p-2.5"
+              : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
+          )}
+          initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
           animate={{
             opacity: 1,
             scale: 1,
-            borderColor: `color-mix(in oklch, ${tone.accent} 28%, rgba(255,255,255,0.12))`,
-            boxShadow: `
-              0 8px 22px rgba(12, 14, 20, 0.4),
-              inset 0 1px 0 rgba(255, 255, 255, 0.1),
-              0 0 16px color-mix(in oklch, ${tone.glow} 40%, transparent)
-            `,
-          }}
-          transition={{ duration: DUR.idle, ease: softIdle }}
-          title={tone.hint}
-        >
-          <PresenceOrb motion={tone.motion} accent={tone.accent} size="md" />
-        </motion.div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="overlay-surface flex h-full w-full items-center justify-center bg-transparent p-3">
-      <LayoutGroup id="boris-overlay">
-        <motion.div
-          data-tauri-drag-region
-          layout
-          className={cn(
-            "overlay-island relative flex w-max min-w-[272px] max-w-[min(360px,100%)]",
-            "select-none flex-col rounded-[22px] px-3.5 py-2.5",
-          )}
-          animate={{
-            borderColor: `color-mix(in oklch, ${tone.accent} 32%, rgba(255,255,255,0.12))`,
-            boxShadow: `
-              0 10px 28px rgba(12, 14, 20, 0.45),
-              inset 0 1px 0 rgba(255, 255, 255, 0.1),
-              0 0 ${isReady ? 18 : 28}px color-mix(in oklch, ${tone.glow} ${isReady ? 35 : 50}%, transparent)
-            `,
+            borderRadius: orbOnly ? 999 : 18,
+            backgroundColor: confirm
+              ? "rgba(34, 30, 24, 0.95)"
+              : "rgba(28, 30, 36, 0.97)",
+            borderColor: confirm
+              ? `color-mix(in oklch, ${tone.accent} 45%, rgba(255,255,255,0.12))`
+              : "rgba(255,255,255,0.14)",
+            boxShadow: reduceMotion
+              ? "0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09)"
+              : `0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09), 0 0 12px color-mix(in oklch, ${tone.glow} 55%, transparent)`,
           }}
           transition={{
-            duration: isReady ? DUR.idle : DUR.slow,
-            ease: isReady ? softIdle : soft,
-            layout: { duration: DUR.slow, ease: softIdle },
+            duration: reduceMotion ? 0 : 0.32,
+            ease: soft,
+            layout: { duration: reduceMotion ? 0 : 0.36, ease: soft },
           }}
+          role="status"
+          aria-live={status.engine === "Fault" ? "assertive" : "polite"}
+          aria-atomic="true"
+          aria-label={orbOnly ? "Boris is ready" : undefined}
         >
-          {/* ── Primary row ─────────────────────────────────────────── */}
-          <div data-tauri-drag-region className="flex h-9 items-center gap-3">
-            <PresenceOrb motion={tone.motion} accent={tone.accent} />
-
-            <div
-              data-tauri-drag-region
-              className="flex min-w-0 flex-1 flex-col justify-center gap-0.5"
-            >
-              <div
+          <AnimatePresence mode="popLayout" initial={false}>
+            {orbOnly ? (
+              <motion.div
+                key="ready-orb"
                 data-tauri-drag-region
-                className="flex h-[1.125rem] items-center gap-2"
+                className="flex items-center justify-center"
+                initial={reduceMotion ? false : { opacity: 0, scale: 0.82 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={reduceMotion ? undefined : { opacity: 0, scale: 0.86 }}
+                transition={{ duration: reduceMotion ? 0 : 0.24, ease: soft }}
               >
-                <div className="relative min-w-0 flex-1 overflow-hidden">
-                  <AnimatePresence mode="sync" initial={false}>
-                    <motion.span
-                      key={`label-${tone.label}`}
-                      data-tauri-drag-region
-                      className="absolute inset-x-0 top-0 block truncate text-[13px] font-semibold leading-[1.125rem] tracking-tight text-white"
-                      initial={fadeSwap.initial}
-                      animate={fadeSwap.animate}
-                      exit={fadeSwap.exit}
-                      transition={{
-                        duration: isReady ? DUR.slow : DUR.base,
-                        ease: isReady ? softIdle : soft,
-                      }}
-                    >
-                      {tone.label}
-                    </motion.span>
-                  </AnimatePresence>
-                  <span
-                    aria-hidden
-                    className="invisible block truncate text-[13px] font-semibold leading-[1.125rem]"
+                <PresenceOrb
+                  motion="none"
+                  accent={tone.accent}
+                  reducedMotion={reduceMotion}
+                  size="md"
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="overlay-details"
+                data-tauri-drag-region
+                className="flex w-full flex-col"
+                initial={reduceMotion ? false : { opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98 }}
+                transition={{ duration: reduceMotion ? 0 : 0.22, ease: soft }}
+              >
+                <div
+                  data-tauri-drag-region
+                  className="flex min-h-8 items-center gap-2"
+                >
+                  <PresenceOrb
+                    motion={tone.motion}
+                    accent={tone.accent}
+                    reducedMotion={reduceMotion}
+                  />
+
+                  <motion.div
+                    layout={reduceMotion ? false : true}
+                    data-tauri-drag-region
+                    className="flex min-w-0 flex-1 items-baseline gap-1.5"
                   >
-                    {tone.label}
-                  </span>
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      <motion.span
+                        layout={reduceMotion ? false : "position"}
+                        key={primary}
+                        data-tauri-drag-region
+                        className="shrink-0 text-[13px] font-semibold leading-tight tracking-[-0.02em] text-white"
+                        initial={reduceMotion ? false : { opacity: 0, y: 2 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={reduceMotion ? undefined : { opacity: 0, y: -2 }}
+                        transition={{ duration: reduceMotion ? 0 : 0.2, ease: soft }}
+                      >
+                        {primary}
+                      </motion.span>
+                    </AnimatePresence>
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      {secondary ? (
+                        <motion.span
+                          layout={reduceMotion ? false : "position"}
+                          key={secondary}
+                          data-tauri-drag-region
+                          className="min-w-0 truncate text-[11px] leading-tight text-white/65"
+                          initial={reduceMotion ? false : { opacity: 0, x: -3 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={reduceMotion ? undefined : { opacity: 0, x: 3 }}
+                          transition={{ duration: reduceMotion ? 0 : 0.2, ease: soft }}
+                        >
+                          · {secondary}
+                        </motion.span>
+                      ) : null}
+                    </AnimatePresence>
+                  </motion.div>
+
+                  <AnimatePresence mode="popLayout" initial={false}>
+                    {faultKey ? (
+                      <DeviceFaultBadge
+                        key={faultKey}
+                        status={status}
+                        reducedMotion={reduceMotion}
+                      />
+                    ) : null}
+                  </AnimatePresence>
                 </div>
 
-                {/* Context window meter (Grok-style 12K / 500K) — not turn id */}
-                <AnimatePresence initial={false}>
-                  {contextMeter ? (
-                    <motion.span
-                      key={`ctx-${contextMeter}`}
+                <AnimatePresence mode="popLayout" initial={false}>
+                  {caption ? (
+                    <motion.div
+                      layout={reduceMotion ? false : "size"}
+                      key={caption.kind}
                       data-tauri-drag-region
-                      className="shrink-0 font-mono text-[10px] tabular-nums text-white/40"
-                      initial={{ opacity: 0, scale: 0.92 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.92 }}
-                      transition={{ duration: DUR.base, ease: soft }}
-                      title="Estimated context window"
+                      className={cn(
+                        "overlay-caption mt-1.5 min-w-0 max-w-[324px] overflow-hidden rounded-[10px] px-2 py-1.5",
+                        confirm && "overlay-caption--confirm",
+                      )}
+                      initial={reduceMotion ? false : { opacity: 0, height: 0, y: -2 }}
+                      animate={{ opacity: 1, height: "auto", y: 0 }}
+                      exit={reduceMotion ? undefined : { opacity: 0, height: 0, y: -2 }}
+                      transition={{ duration: reduceMotion ? 0 : 0.28, ease: soft }}
+                      role={caption.kind === "error" ? "alert" : undefined}
                     >
-                      {contextMeter}
-                    </motion.span>
+                      <CaptionBody caption={caption} />
+                    </motion.div>
                   ) : null}
                 </AnimatePresence>
-              </div>
-
-              <div className="relative h-[1rem] overflow-hidden">
-                <AnimatePresence mode="sync" initial={false}>
-                  <motion.p
-                    key={`sub-${activity ?? subtitle}`}
-                    data-tauri-drag-region
-                    className="absolute inset-x-0 top-0 truncate text-[11px] leading-4"
-                    initial={fadeSwap.initial}
-                    animate={{
-                      ...fadeSwap.animate,
-                      color: activity
-                        ? "rgba(196, 181, 253, 0.85)"
-                        : caption
-                          ? "rgba(255,255,255,0.3)"
-                          : "rgba(255,255,255,0.45)",
-                    }}
-                    exit={fadeSwap.exit}
-                    transition={{
-                      duration: isReady ? DUR.slow : DUR.base,
-                      ease: isReady ? softIdle : soft,
-                    }}
-                  >
-                    {activity ?? subtitle}
-                  </motion.p>
-                </AnimatePresence>
-              </div>
-            </div>
-
-            <DevicePips status={status} />
-          </div>
-
-          {/* Compact progressive tool strip (Thinking only, no extra card bulk) */}
-          <AnimatePresence initial={false}>
-            {status.phase === "Thinking" && activity ? (
-              <motion.div
-                key="think-progress"
-                data-tauri-drag-region
-                className="mt-1.5 flex items-center gap-2 overflow-hidden"
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: DUR.base, ease: soft }}
-              >
-                <span
-                  className="overlay-think-bar h-0.5 flex-1 rounded-full"
-                  style={
-                    {
-                      ["--think-accent" as string]: tone.accent,
-                    } as CSSProperties
-                  }
-                />
               </motion.div>
-            ) : null}
-          </AnimatePresence>
-
-          {/* ── Caption (You / Boris) ───────────────────────────────── */}
-          <AnimatePresence initial={false} mode="popLayout">
-            {caption ? (
-              <motion.div
-                key={`caption-${caption.kind}`}
-                data-tauri-drag-region
-                layout
-                className="overlay-caption min-w-0 max-w-[320px] overflow-hidden rounded-xl px-2.5 py-1.5"
-                initial={{ opacity: 0, height: 0, marginTop: 0, y: 8 }}
-                animate={{
-                  opacity: isReady && caption.kind === "said" ? 0.72 : 1,
-                  height: "auto",
-                  marginTop: 8,
-                  y: 0,
-                }}
-                exit={{
-                  opacity: 0,
-                  height: 0,
-                  marginTop: 0,
-                  y: -4,
-                  transition: {
-                    height: { duration: DUR.slow, ease: softIdle },
-                    opacity: { duration: DUR.base, ease: softIdle },
-                    marginTop: { duration: DUR.slow, ease: softIdle },
-                    y: { duration: DUR.base, ease: softIdle },
-                  },
-                }}
-                transition={{
-                  height: { duration: DUR.slow, ease: soft },
-                  opacity: {
-                    duration: isReady ? DUR.slow : DUR.base,
-                    ease: isReady ? softIdle : soft,
-                  },
-                  marginTop: { duration: DUR.slow, ease: soft },
-                  y: { duration: DUR.base, ease: soft },
-                  layout: { duration: DUR.slow, ease: softIdle },
-                }}
-              >
-                <CaptionBody
-                  caption={caption}
-                  isReady={isReady}
-                  streamKey={status.turn ?? status.phase}
-                />
-              </motion.div>
-            ) : null}
+            )}
           </AnimatePresence>
         </motion.div>
-      </LayoutGroup>
+      </div>
     </div>
   );
 }
 
-function CaptionBody({
-  caption,
-  isReady,
-  streamKey,
-}: {
-  caption: Caption;
-  isReady: boolean;
-  streamKey: string;
-}) {
-  const textColor =
-    caption.kind === "error"
-      ? "rgba(252, 165, 165, 0.95)"
-      : caption.kind === "said"
-        ? isReady
-          ? "rgba(255,255,255,0.55)"
-          : "rgba(255,255,255,0.8)"
-        : "rgba(255,255,255,0.65)";
+function filterCaption(
+  caption: Caption | null,
+  mode: AppSettings["overlay_caption_mode"],
+): Caption | null {
+  if (!caption || mode === "hidden") return null;
+  if (mode === "assistant" && caption.kind === "heard") return null;
+  return caption;
+}
 
-  const textKey =
+function CaptionBody({ caption }: { caption: Caption }) {
+  const color =
     caption.kind === "error"
-      ? `err-${caption.text.slice(0, 48)}`
+      ? "text-red-200"
       : caption.kind === "said"
-        ? `said-${caption.text.slice(0, 96)}`
-        : `heard-${streamKey}`;
+        ? "text-white/90"
+        : "text-white/80";
 
   return (
-    <motion.p
+    <p
       data-tauri-drag-region
-      className="line-clamp-2 text-[12px] leading-snug tracking-tight"
-      animate={{ color: textColor }}
-      transition={{
-        duration: isReady ? DUR.idle : DUR.base,
-        ease: isReady ? softIdle : soft,
-      }}
+      className={cn(
+        "line-clamp-1 text-[12px] leading-[1.35] tracking-[-0.01em]",
+        color,
+      )}
     >
       {caption.kind !== "error" ? (
-        <motion.span
-          className="mr-1.5 text-[10px] font-medium uppercase tracking-wider"
-          animate={{ color: "rgba(255,255,255,0.3)" }}
-          transition={{ duration: DUR.base, ease: soft }}
-        >
+        <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-white/60">
           {caption.kind === "said" ? "Boris" : "You"}
-        </motion.span>
+        </span>
       ) : null}
-      <AnimatePresence mode="sync" initial={false}>
-        <motion.span
-          key={textKey}
-          initial={{ opacity: 0.35 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: DUR.fast, ease: soft }}
-        >
-          {caption.text}
-        </motion.span>
-      </AnimatePresence>
-    </motion.p>
+      {caption.text}
+    </p>
   );
 }
 
 function PresenceOrb({
   motion: motionKind,
   accent,
+  reducedMotion,
   size = "sm",
 }: {
   motion: ReturnType<typeof toneFor>["motion"];
   accent: string;
+  reducedMotion: boolean;
   size?: "sm" | "md";
 }) {
-  const box = size === "md" ? "size-10" : "size-9";
-  const core = size === "md" ? "size-3.5" : "size-3";
+  const box = size === "md" ? "size-9" : "size-8";
+  const core = size === "md" ? "size-3" : "size-2.5";
+  const effectiveMotion = reducedMotion ? "none" : motionKind;
 
   return (
     <div
       data-tauri-drag-region
       className={cn("relative flex shrink-0 items-center justify-center", box)}
-      aria-hidden
+      aria-hidden="true"
     >
       <AnimatePresence initial={false}>
-        {motionKind !== "none" ? (
+        {effectiveMotion !== "none" ? (
           <motion.span
-            key={`ring-a-${motionKind}`}
+            key={effectiveMotion}
             className="absolute inset-0"
-            initial={{ opacity: 0, scale: 0.86 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.06 }}
-            transition={{ duration: DUR.slow, ease: soft }}
+            initial={reducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reducedMotion ? undefined : { opacity: 0 }}
+            transition={{ duration: reducedMotion ? 0 : 0.22, ease: soft }}
           >
             <motion.span
               className={cn(
-                "absolute inset-0 rounded-full border-[1.5px]",
-                motionKind === "listen" && "overlay-ring-listen",
-                motionKind === "think" && "overlay-ring-think",
-                motionKind === "speak" && "overlay-ring-speak",
-                motionKind === "breathe" && "overlay-ring-breathe",
+                "absolute inset-0 rounded-full border",
+                effectiveMotion === "listen" && "overlay-ring-listen",
+                effectiveMotion === "think" && "overlay-ring-think",
+                effectiveMotion === "speak" && "overlay-ring-speak",
+                effectiveMotion === "breathe" && "overlay-ring-breathe",
               )}
               animate={{ borderColor: accent }}
-              transition={{ duration: DUR.slow, ease: soft }}
+              transition={{ duration: reducedMotion ? 0 : 0.3, ease: soft }}
             />
           </motion.span>
         ) : null}
       </AnimatePresence>
-
       <AnimatePresence initial={false}>
-        {motionKind === "listen" || motionKind === "speak" ? (
-          <motion.span
-            key={`ring-b-${motionKind}`}
-            className="absolute inset-0.5"
-            initial={{ opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 0.7, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.04 }}
-            transition={{ duration: DUR.base, ease: soft }}
-          >
-            <motion.span
-              className="overlay-ring-listen-delay absolute inset-0 rounded-full border"
-              animate={{ borderColor: accent }}
-              transition={{ duration: DUR.slow, ease: soft }}
-            />
-          </motion.span>
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence mode="sync" initial={false}>
         <motion.span
-          key={`core-wrap-${motionKind}`}
-          className={cn("absolute flex items-center justify-center", core)}
-          initial={{ opacity: 0, scale: 0.7 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 1.15 }}
-          transition={{ duration: DUR.slow, ease: soft }}
+          key={effectiveMotion}
+          className={cn("absolute", core)}
+          initial={reducedMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={reducedMotion ? undefined : { opacity: 0 }}
+          transition={{ duration: reducedMotion ? 0 : 0.2, ease: soft }}
         >
           <motion.span
             className={cn(
-              "rounded-full",
-              core,
-              motionKind === "breathe" && "overlay-core-breathe",
-              motionKind === "listen" && "overlay-core-listen",
-              motionKind === "think" && "overlay-core-think",
-              motionKind === "speak" && "overlay-core-speak",
+              "absolute inset-0 rounded-full",
+              effectiveMotion === "listen" && "overlay-core-listen",
+              effectiveMotion === "think" && "overlay-core-think",
+              effectiveMotion === "speak" && "overlay-core-speak",
+              effectiveMotion === "breathe" && "overlay-core-breathe",
             )}
             animate={{
               backgroundColor: accent,
-              boxShadow: `0 0 16px ${accent}`,
+              boxShadow: `0 0 10px color-mix(in oklch, ${accent} 55%, transparent)`,
             }}
-            transition={{ duration: DUR.slow, ease: soft }}
+            transition={{ duration: reducedMotion ? 0 : 0.3, ease: soft }}
           />
         </motion.span>
       </AnimatePresence>
@@ -460,123 +399,52 @@ function PresenceOrb({
   );
 }
 
-function DevicePips({ status }: { status: StatusPicture }) {
-  return (
-    <div
-      data-tauri-drag-region
-      className="flex h-9 shrink-0 items-center gap-1.5"
-    >
-      <Pip
-        ok={status.mic.ok && status.engine !== "Off"}
-        title={`Mic · ${status.mic.label}`}
-        icon={<Mic className="size-3" strokeWidth={2} />}
-      />
-      <Pip
-        ok={status.speaker.ok && status.engine !== "Off"}
-        title={`Speaker · ${status.speaker.label}`}
-        icon={<Volume2 className="size-3" strokeWidth={2} />}
-      />
-    </div>
-  );
+function deviceFaultKey(status: StatusPicture): string | null {
+  if (status.engine === "Off") return null;
+  const micBad = !status.mic.ok;
+  const speakerBad = !status.speaker.ok;
+  if (!micBad && !speakerBad) return null;
+  if (micBad && speakerBad) return "audio";
+  return micBad ? "mic" : "speaker";
 }
 
-function Pip({
-  ok,
-  title,
-  icon,
+/** Visible labels are required because the locked overlay cannot be hovered. */
+function DeviceFaultBadge({
+  status,
+  reducedMotion,
 }: {
-  ok: boolean;
-  title: string;
-  icon: ReactNode;
+  status: StatusPicture;
+  reducedMotion: boolean;
 }) {
+  const micBad = !status.mic.ok;
+  const speakerBad = !status.speaker.ok;
+
+  const both = micBad && speakerBad;
+  const label = both ? "Audio" : micBad ? "Mic" : "Speaker";
+  const detail = both
+    ? `${status.mic.label}; ${status.speaker.label}`
+    : micBad
+      ? status.mic.label
+      : status.speaker.label;
+
   return (
-    <motion.div
+    <motion.span
+      layout={reducedMotion ? false : "position"}
       data-tauri-drag-region
-      title={title}
-      className="relative flex size-7 items-center justify-center rounded-full border"
-      animate={{
-        opacity: ok ? 1 : 0.55,
-        borderColor: ok ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)",
-        backgroundColor: ok
-          ? "rgba(255,255,255,0.05)"
-          : "rgba(255,255,255,0.03)",
-        color: ok ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.25)",
-      }}
-      transition={{ duration: DUR.base, ease: soft }}
+      title={detail}
+      className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-amber-300/35 bg-amber-300/12 px-1.5 text-[10px] font-semibold text-amber-100"
+      aria-label={`${label} unavailable: ${detail}`}
+      initial={reducedMotion ? false : { opacity: 0, scale: 0.92, x: 4 }}
+      animate={{ opacity: 1, scale: 1, x: 0 }}
+      exit={reducedMotion ? undefined : { opacity: 0, scale: 0.92, x: 4 }}
+      transition={{ duration: reducedMotion ? 0 : 0.22, ease: soft }}
     >
-      {icon}
-      <motion.span
-        className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-1 ring-black/40"
-        animate={{
-          backgroundColor: ok ? "rgb(52 211 153)" : "rgba(255,255,255,0.2)",
-          scale: ok ? 1 : 0.9,
-        }}
-        transition={{ duration: DUR.base, ease: soft }}
-        aria-hidden
-      />
-    </motion.div>
+      {speakerBad && !micBad ? (
+        <Volume2 className="size-3" strokeWidth={2} aria-hidden="true" />
+      ) : (
+        <Mic className="size-3" strokeWidth={2} aria-hidden="true" />
+      )}
+      {label} unavailable
+    </motion.span>
   );
-}
-
-type Caption = {
-  kind: "heard" | "said" | "error";
-  text: string;
-};
-
-function pickSubtitle(
-  status: StatusPicture,
-  tone: ReturnType<typeof toneFor>,
-  caption: Caption | null,
-): string {
-  if (!caption) return tone.hint;
-  if (caption.kind === "error") return "Something came up";
-  if (caption.kind === "said") {
-    if (status.phase === "Armed" || status.phase === "Quiet") {
-      return "Say the wake word";
-    }
-    if (status.phase === "AwaitingReply") return "Your turn to answer";
-    if (status.phase === "AwaitingConfirm") return "Yes, no, sure, cancel…";
-    return "Speaking…";
-  }
-  return "Listening…";
-}
-
-function pickCaption(status: StatusPicture): Caption | null {
-  // detail is errors only (confirm text lives in activity / said)
-  if (status.detail?.trim()) {
-    return { kind: "error", text: status.detail.trim() };
-  }
-  if (
-    (status.phase === "Talking" ||
-      status.phase === "AwaitingReply" ||
-      status.phase === "AwaitingConfirm") &&
-    status.said?.trim()
-  ) {
-    return { kind: "said", text: status.said.trim() };
-  }
-  if (
-    (status.phase === "Thinking" ||
-      status.phase === "Reading" ||
-      status.phase === "Hearing" ||
-      status.phase === "Talking" ||
-      status.phase === "AwaitingReply" ||
-      status.phase === "AwaitingConfirm") &&
-    status.heard?.trim()
-  ) {
-    if (
-      (status.phase !== "Talking" &&
-        status.phase !== "AwaitingReply" &&
-        status.phase !== "AwaitingConfirm") ||
-      !status.said?.trim()
-    ) {
-      return { kind: "heard", text: status.heard.trim() };
-    }
-  }
-  if (status.said?.trim() && status.phase === "Armed") {
-    return { kind: "said", text: status.said.trim() };
-  }
-  if (status.heard?.trim() && status.engine === "On") {
-    return { kind: "heard", text: status.heard.trim() };
-  }
-  return null;
 }

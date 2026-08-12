@@ -45,17 +45,29 @@ impl Tool for ListSkillsTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Skill)
+            .read_only(true)
+            .max_concurrency(4)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let guard = self
             .skills
             .lock()
             .map_err(|_| ToolError::failed("skills lock poisoned"))?;
         if guard.skills.is_empty() {
-            return Ok("No skills installed. User can add SKILL.md under ~/.boris/skills/<name>/."
-                .into());
+            return Ok(
+                "No skills installed. User can add SKILL.md under ~/.boris/skills/<name>/.".into(),
+            );
         }
         let mut out = format!("{} skill(s):\n", guard.skills.len());
         for s in &guard.skills {
@@ -86,6 +98,7 @@ impl Tool for LoadSkillTool {
     fn description(&self) -> &str {
         "Load the full instructions for a named skill playbook. Call this when the user's \
          request matches a skill description, then follow the steps with other tools. \
+         For research, plan multi-query web_search + fetch waves (parent verifies). \
          Required arg: name (skill id, e.g. research, get-things-done)."
     }
 
@@ -111,9 +124,19 @@ impl Tool for LoadSkillTool {
         ToolMeta::with_risk(ToolRisk::Safe)
             .kind(ToolKind::Skill)
             .max_result_chars(MAX_SKILL_RESULT_CHARS)
+            .read_only(true)
+            .max_concurrency(4)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let name = require_string(obj, "name")?;
         let name = name.trim();
@@ -127,15 +150,10 @@ impl Tool for LoadSkillTool {
                 .skills
                 .lock()
                 .map_err(|_| ToolError::failed("skills lock poisoned"))?;
-            guard
-                .get(name)
-                .cloned()
-                .ok_or_else(|| {
-                    let available = guard.names().join(", ");
-                    ToolError::failed(format!(
-                        "unknown skill '{name}'. Available: {available}"
-                    ))
-                })?
+            guard.get(name).cloned().ok_or_else(|| {
+                let available = guard.names().join(", ");
+                ToolError::failed(format!("unknown skill '{name}'. Available: {available}"))
+            })?
         };
 
         let mut body = skills::load_skill_body(&skill).map_err(ToolError::failed)?;

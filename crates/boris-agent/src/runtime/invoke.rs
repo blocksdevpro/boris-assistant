@@ -1,0 +1,604 @@
+//! [`ToolRuntime`]: policy → (confirm | deny | run) → truncate → audit.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
+
+use serde_json::Value;
+
+use crate::reminder::with_reminder;
+use crate::tool::{truncate_tool_result_to, Permission, Tool, ToolMeta};
+
+use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
+use super::pending::PendingToolCall;
+use super::policy::{decide, PolicyDecision, SandboxConfig};
+use super::timeout::{is_timeout, run_with_timeout};
+
+// Re-export so `crate::runtime::invoke::{ToolInvocation, …}` stays valid.
+pub use super::invocation::{InvokeOptions, InvokeResult, ToolInvocation};
+
+/// Mediates every tool call: policy → (confirm | deny | run) → truncate → audit.
+pub struct ToolRuntime {
+    policy: SandboxConfig,
+    audit: Box<dyn AuditSink>,
+    pending_seq: AtomicU64,
+    /// After the user approves any shell tool this turn, further shell HITL is
+    /// skipped (hard gates still apply). Reset at each new user turn / abort.
+    shell_granted_this_turn: AtomicBool,
+}
+
+impl ToolRuntime {
+    /// Create a runtime with the given sandbox policy and audit sink.
+    pub fn new(policy: SandboxConfig, audit: Box<dyn AuditSink>) -> Self {
+        Self {
+            policy,
+            audit,
+            pending_seq: AtomicU64::new(1),
+            shell_granted_this_turn: AtomicBool::new(false),
+        }
+    }
+
+    /// Default in-memory policy + null audit (tests / early init).
+    pub fn null() -> Self {
+        Self::new(SandboxConfig::default(), Box::new(NullAuditSink))
+    }
+
+    /// Current sandbox policy.
+    pub fn policy(&self) -> &SandboxConfig {
+        &self.policy
+    }
+
+    /// Replace sandbox policy.
+    pub fn set_policy(&mut self, policy: SandboxConfig) {
+        self.policy = policy;
+    }
+
+    /// Replace audit sink.
+    pub fn set_audit(&mut self, audit: Box<dyn AuditSink>) {
+        self.audit = audit;
+    }
+
+    /// Clear turn-scoped shell grant (call at the start of each user turn).
+    pub fn clear_turn_grants(&self) {
+        self.shell_granted_this_turn.store(false, Ordering::Relaxed);
+    }
+
+    /// Record that the user approved a shell tool this turn.
+    ///
+    /// Further shell tools skip the confirm UI only; path/shell/network hard
+    /// gates and the bash deny list still run.
+    pub fn grant_shell_this_turn(&self) {
+        self.shell_granted_this_turn.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether shell was already approved once this turn.
+    pub fn shell_granted_this_turn(&self) -> bool {
+        self.shell_granted_this_turn.load(Ordering::Relaxed)
+    }
+
+    fn next_pending_id(&self) -> String {
+        let n = self.pending_seq.fetch_add(1, Ordering::Relaxed);
+        format!("p-{n}-{}", now_ms())
+    }
+
+    /// True when this invoke may skip the confirm UI (one-shot grant or
+    /// turn-scoped shell grant after a prior yes).
+    fn effective_skip_confirmation(&self, meta: &ToolMeta, opts: InvokeOptions) -> bool {
+        if opts.skip_confirmation {
+            return true;
+        }
+        meta.permissions.contains(&Permission::Shell)
+            && self.shell_granted_this_turn.load(Ordering::Relaxed)
+    }
+
+    /// Policy-only decision (no execute). Used to plan parallel batches.
+    ///
+    /// Hard gates (path / shell / network) always apply. `skip_confirmation`
+    /// only collapses [`PolicyDecision::NeedsConfirmation`] → Allow.
+    pub fn decide_only(
+        &self,
+        tool: &dyn Tool,
+        args: &Value,
+        opts: InvokeOptions,
+    ) -> PolicyDecision {
+        let meta = tool.meta();
+        let args = normalize_args(args);
+        apply_skip_confirmation(
+            decide(&self.policy, &meta, &args, opts.confirms_used),
+            self.effective_skip_confirmation(&meta, opts),
+        )
+    }
+
+    /// Run policy + optional execute for one tool (async).
+    pub async fn invoke(
+        &self,
+        tool: &dyn Tool,
+        inv: ToolInvocation,
+        opts: InvokeOptions,
+    ) -> InvokeResult {
+        let meta = tool.meta();
+        let args = normalize_args(&inv.args);
+
+        // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
+        let decision = apply_skip_confirmation(
+            decide(&self.policy, &meta, &args, opts.confirms_used),
+            self.effective_skip_confirmation(&meta, opts),
+        );
+
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                self.audit_event(&inv, &meta, "deny", None, Some(false), Some("denied"));
+                InvokeResult::Denied { reason }
+            }
+            PolicyDecision::NeedsConfirmation { reason: _ } => {
+                let pending = PendingToolCall::new(
+                    self.next_pending_id(),
+                    inv.name.clone(),
+                    args.clone(),
+                    args_summary(&inv.name, &args),
+                    meta.risk,
+                    inv.call_id.clone(),
+                );
+                self.audit_event(
+                    &inv,
+                    &meta,
+                    "confirm",
+                    None,
+                    None,
+                    Some("needs_confirmation"),
+                );
+                let speak_prompt = speak_confirm_prompt(&pending);
+                InvokeResult::NeedsConfirmation {
+                    pending,
+                    speak_prompt,
+                }
+            }
+            PolicyDecision::Allow => self.execute_allowed(tool, inv, meta, args, opts).await,
+        }
+    }
+
+    async fn execute_allowed(
+        &self,
+        tool: &dyn Tool,
+        inv: ToolInvocation,
+        meta: ToolMeta,
+        args: Value,
+        opts: InvokeOptions,
+    ) -> InvokeResult {
+        let decision_label = if opts.skip_confirmation {
+            "confirmed"
+        } else {
+            "allow"
+        };
+        let ctx = inv.call_context();
+        let started = Instant::now();
+        let result = run_with_timeout(tool, &ctx, args, meta.default_timeout).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        let budget = meta.result_char_budget();
+        match result {
+            Ok(output) => {
+                let obs = with_reminder(&inv.name, truncate_tool_result_to(output, budget));
+                self.audit_event(
+                    &inv,
+                    &meta,
+                    decision_label,
+                    Some(duration_ms),
+                    Some(true),
+                    None,
+                );
+                InvokeResult::Observation(obs)
+            }
+            Err(e) => {
+                let timed_out = is_timeout(&e);
+                let kind = if timed_out { "timeout" } else { "error" };
+                let decision = if timed_out { "timeout" } else { decision_label };
+                self.audit_event(
+                    &inv,
+                    &meta,
+                    decision,
+                    Some(duration_ms),
+                    Some(false),
+                    Some(kind),
+                );
+                let obs = with_reminder(
+                    &inv.name,
+                    truncate_tool_result_to(format!("Error: {}", e.message), budget),
+                );
+                InvokeResult::Observation(obs)
+            }
+        }
+    }
+
+    /// Record a user rejection without executing.
+    pub fn audit_rejection(
+        &self,
+        pending: &PendingToolCall,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+    ) {
+        self.audit.write(&AuditEvent {
+            ts_ms: now_ms(),
+            session_id: session_id.map(|s| s.to_string()),
+            turn_id: turn_id.map(|s| s.to_string()),
+            tool: pending.name.clone(),
+            risk: pending.risk.as_str().to_string(),
+            decision: "rejected".into(),
+            args_digest: args_digest(&pending.args),
+            ok: Some(false),
+            duration_ms: None,
+            error_kind: Some("user_rejected".into()),
+        });
+    }
+
+    fn audit_event(
+        &self,
+        inv: &ToolInvocation,
+        meta: &ToolMeta,
+        decision: &str,
+        duration_ms: Option<u64>,
+        ok: Option<bool>,
+        error_kind: Option<&str>,
+    ) {
+        self.audit.write(&AuditEvent {
+            ts_ms: now_ms(),
+            session_id: inv.session_id.clone(),
+            turn_id: inv.turn_id.clone(),
+            tool: inv.name.clone(),
+            risk: meta.risk.as_str().to_string(),
+            decision: decision.to_string(),
+            args_digest: args_digest(&inv.args),
+            ok,
+            duration_ms,
+            error_kind: error_kind.map(|s| s.to_string()),
+        });
+    }
+}
+
+fn normalize_args(args: &Value) -> Value {
+    if args.is_object() {
+        args.clone()
+    } else {
+        Value::Object(Default::default())
+    }
+}
+
+/// After HITL grant, only skip the confirmation branch — never path/shell/network denials.
+fn apply_skip_confirmation(decision: PolicyDecision, skip: bool) -> PolicyDecision {
+    match decision {
+        PolicyDecision::NeedsConfirmation { .. } if skip => PolicyDecision::Allow,
+        other => other,
+    }
+}
+
+/// Short voice-friendly confirm line. Prefer the shell command itself when
+/// present so TTS stays snappy ("Run git status?" vs a long args dump).
+fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
+    if pending.name == "bash" {
+        if let Some(cmd) = pending
+            .args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let cmd = truncate_voice_chars(cmd, 56);
+            return format!("Run `{cmd}`?");
+        }
+    }
+    let summary = truncate_voice_chars(&pending.args_summary, 64);
+    format!("Run {summary}?")
+}
+
+fn truncate_voice_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::audit::MemoryAuditSink;
+    use crate::tool::{Tool, ToolError, ToolMeta, ToolRisk, MAX_TOOL_RESULT_CHARS};
+    use crate::tool_context::ToolCallContext;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct LongTool;
+
+    #[async_trait]
+    impl Tool for LongTool {
+        fn name(&self) -> &str {
+            "long"
+        }
+        fn description(&self) -> &str {
+            "long"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{},"required":[]})
+        }
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
+            Ok("x".repeat(MAX_TOOL_RESULT_CHARS + 100))
+        }
+    }
+
+    struct ConfirmTool {
+        ran: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl Tool for ConfirmTool {
+        fn name(&self) -> &str {
+            "danger"
+        }
+        fn description(&self) -> &str {
+            "needs confirm"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{},"required":[]})
+        }
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::with_risk(ToolRisk::Dangerous)
+        }
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
+            *self.ran.lock().unwrap() = true;
+            Ok("ran".into())
+        }
+    }
+
+    fn inv(id: &str, name: &str) -> ToolInvocation {
+        ToolInvocation::new(id, name, json!({}))
+    }
+
+    #[tokio::test]
+    async fn invoke_truncates() {
+        let audit = MemoryAuditSink::new();
+        let rt = ToolRuntime::new(SandboxConfig::default(), Box::new(audit));
+        match rt
+            .invoke(&LongTool, inv("1", "long"), InvokeOptions::default())
+            .await
+        {
+            InvokeResult::Observation(s) => {
+                assert!(s.contains("[truncated]"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dangerous_pauses_without_running() {
+        let tool = ConfirmTool {
+            ran: Mutex::new(false),
+        };
+        let rt = ToolRuntime::null();
+        match rt
+            .invoke(&tool, inv("c1", "danger"), InvokeOptions::default())
+            .await
+        {
+            InvokeResult::NeedsConfirmation { pending, .. } => {
+                assert_eq!(pending.name, "danger");
+                assert!(!*tool.ran.lock().unwrap());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grant_skips_confirm_and_runs() {
+        let tool = ConfirmTool {
+            ran: Mutex::new(false),
+        };
+        let rt = ToolRuntime::null();
+        let opts = InvokeOptions {
+            skip_confirmation: true,
+            confirms_used: 1,
+        };
+        match rt.invoke(&tool, inv("c1", "danger"), opts).await {
+            InvokeResult::Observation(s) => {
+                assert!(s.starts_with("ran"));
+                assert!(*tool.ran.lock().unwrap());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    struct ShellOnceTool {
+        ran: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl Tool for ShellOnceTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "shell"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
+        }
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::with_risk(ToolRisk::Dangerous)
+                .permissions(&[crate::tool::Permission::Shell])
+                .confirm(true)
+        }
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
+            *self.ran.lock().unwrap() += 1;
+            Ok("ok".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_turn_grant_skips_later_shell_hitl() {
+        let policy = SandboxConfig {
+            shell: crate::runtime::ShellPolicy::OpenConfirm,
+            ..Default::default()
+        };
+        let rt = ToolRuntime::new(policy, Box::new(NullAuditSink));
+        let tool = ShellOnceTool { ran: Mutex::new(0) };
+
+        // First call still needs confirm.
+        let args = json!({ "command": "echo a" });
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c1", "bash", args.clone()),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::NeedsConfirmation { speak_prompt, .. } => {
+                assert!(
+                    speak_prompt.contains("echo a") || speak_prompt.contains('?'),
+                    "expected short speak prompt, got: {speak_prompt}"
+                );
+            }
+            other => panic!("expected confirm, got {other:?}"),
+        }
+
+        // After turn grant, later shell skips HITL (hard gates still run).
+        rt.grant_shell_this_turn();
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c2", "bash", json!({ "command": "echo b" })),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::Observation(s) => {
+                assert!(s.starts_with("ok"));
+                assert_eq!(*tool.ran.lock().unwrap(), 1);
+            }
+            other => panic!("expected auto-run after shell grant, got {other:?}"),
+        }
+
+        // Clear restores confirm requirement.
+        rt.clear_turn_grants();
+        match rt
+            .invoke(
+                &tool,
+                ToolInvocation::new("c3", "bash", args),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::NeedsConfirmation { .. } => {}
+            other => panic!("expected confirm after clear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn speak_confirm_prompt_prefers_bash_command() {
+        let pending = PendingToolCall::new(
+            "p1",
+            "bash",
+            json!({ "command": "git status" }),
+            "bash (command=git status)",
+            ToolRisk::Dangerous,
+            "c1",
+        );
+        let s = speak_confirm_prompt(&pending);
+        assert_eq!(s, "Run `git status`?");
+    }
+
+    #[tokio::test]
+    async fn grant_still_enforces_path_policy() {
+        use crate::tool::{Permission, ToolKind};
+        use std::path::PathBuf;
+
+        struct PathTool;
+        #[async_trait]
+        impl Tool for PathTool {
+            fn name(&self) -> &str {
+                "path_read"
+            }
+            fn description(&self) -> &str {
+                "r"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::with_risk(ToolRisk::Dangerous)
+                    .kind(ToolKind::Read)
+                    .permissions(&[Permission::FsRead])
+                    .confirm(true)
+                    .read_only(true)
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("should-not-run".into())
+            }
+        }
+
+        let policy = SandboxConfig {
+            sandbox_root: PathBuf::from("C:\\Users\\me\\.boris\\sandbox"),
+            boris_data_roots: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+            network: crate::runtime::NetworkPolicy::Off,
+            shell: crate::runtime::ShellPolicy::Denied,
+            auto_allow_up_to: ToolRisk::Moderate,
+            force_confirm_at_or_above: ToolRisk::Dangerous,
+            max_confirms_per_turn: 12,
+            trusted_auto_moderate: false,
+        };
+        let rt = ToolRuntime::new(policy, Box::new(MemoryAuditSink::new()));
+        let inv = ToolInvocation::new(
+            "1",
+            "path_read",
+            json!({ "path": "C:\\Windows\\System32\\config" }),
+        );
+        let opts = InvokeOptions {
+            skip_confirmation: true,
+            confirms_used: 1,
+        };
+        match rt.invoke(&PathTool, inv, opts).await {
+            InvokeResult::Denied { reason } => {
+                assert!(reason.contains("outside") || reason.contains("path"));
+            }
+            other => panic!("expected Denied after grant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_becomes_error_observation() {
+        struct Slow;
+        #[async_trait]
+        impl Tool for Slow {
+            fn name(&self) -> &str {
+                "slow"
+            }
+            fn description(&self) -> &str {
+                "s"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{},"required":[]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().timeout(Duration::from_millis(40))
+            }
+            async fn execute(&self, _ctx: &ToolCallContext, _: Value) -> Result<String, ToolError> {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok("nope".into())
+            }
+        }
+        let rt = ToolRuntime::null();
+        match rt
+            .invoke(&Slow, inv("1", "slow"), InvokeOptions::default())
+            .await
+        {
+            InvokeResult::Observation(s) => assert!(s.contains("timed out") || s.contains("Error")),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}

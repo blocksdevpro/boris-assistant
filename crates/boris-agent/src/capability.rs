@@ -7,8 +7,8 @@ use crate::tool::{Tool, ToolKind, ToolRisk};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityPreset {
-    /// Safe / moderate local facts only (time, notes, profile, skills list).
-    /// No shell, network, or arbitrary filesystem writes outside memory.
+    /// Safe / moderate local facts only (time, notes, profile, skills, todos).
+    /// No shell, network, or arbitrary filesystem writes outside memory/sandbox plan files.
     VoiceSafe,
     /// Sandboxed files + OS helpers; still no shell / network until confirmed host opts in.
     LocalPower,
@@ -38,10 +38,11 @@ impl CapabilityPreset {
 
     /// Whether power-tool waves (os/fs/web/bash) are registered before kind filtering.
     ///
-    /// Always `true`: the preset filter drops disallowed tools. Core tools are
-    /// always registered first; this only controls the power waves.
+    /// - [`VoiceSafe`](Self::VoiceSafe): core + profile only (no power wave).
+    /// - [`LocalPower`](Self::LocalPower) / [`Full`](Self::Full): register power
+    ///   tools, then [`allows_tool`](Self::allows_tool) drops shell/web as needed.
     pub fn wants_power_tools(self) -> bool {
-        true
+        !matches!(self, Self::VoiceSafe)
     }
 
     /// Adjust sandbox network/shell to match the preset (defense in depth).
@@ -178,5 +179,12 @@ mod tests {
             Some(CapabilityPreset::Full)
         );
         assert_eq!(CapabilityPreset::parse("nope"), None);
+    }
+
+    #[test]
+    fn wants_power_tools_by_preset() {
+        assert!(!CapabilityPreset::VoiceSafe.wants_power_tools());
+        assert!(CapabilityPreset::LocalPower.wants_power_tools());
+        assert!(CapabilityPreset::Full.wants_power_tools());
     }
 }

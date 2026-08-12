@@ -113,6 +113,10 @@ impl MemoryAuditSink {
     pub fn len(&self) -> usize {
         self.events.lock().map(|v| v.len()).unwrap_or(0)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl AuditSink for MemoryAuditSink {

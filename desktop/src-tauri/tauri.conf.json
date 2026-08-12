@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Boris",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.boris.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bun run build",
+    "beforeBundleCommand": "bun run verify:bundle-runtime",
     "frontendDist": "../dist"
   },
   "app": {
@@ -27,12 +28,12 @@
         "label": "overlay",
         "create": false,
         "title": "Boris",
-        "width": 380,
-        "height": 120,
-        "minWidth": 280,
-        "minHeight": 88,
-        "maxWidth": 420,
-        "maxHeight": 160,
+        "width": 444,
+        "height": 184,
+        "minWidth": 333,
+        "minHeight": 138,
+        "maxWidth": 555,
+        "maxHeight": 230,
         "decorations": false,
         "alwaysOnTop": true,
         "visible": true,
@@ -46,12 +47,20 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: http://asset.localhost https://asset.localhost data: blob:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://ipc.localhost"
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -63,6 +72,17 @@
     ],
     "resources": {
       "resources/ort/": "./"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3QkMwRTEwN0RCRUQxODMKUldTRDBiNTlFQTY4TjZqQ3QyR3p4VVozeGovanlGczMwM2ZpbjdNSXpCYTFMR1hNWVg3NGMzcXMK",
+      "endpoints": [
+        "https://github.com/blocksdevpro/boris-assistant/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

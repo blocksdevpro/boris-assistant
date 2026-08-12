@@ -1,13 +1,13 @@
 //! System tray — keep Boris running when the main window is closed.
 //!
+//! # Responsibility (host shell)
+//!
 //! Close on the console window hides it (app + overlay keep running).
 //! The tray is the way back: left-click or "Open Boris" shows the console;
-//! "Quit Boris" stops the engine and exits fully.
+//! "Quit Boris" stops the engine (via [`AppState`]) and exits fully.
 //!
-//! Overlay is click-through while gaming; use "Unlock overlay to move" when you
-//! need to drag it, then "Lock overlay (click-through)" before playing again.
-
-use std::sync::atomic::{AtomicBool, Ordering};
+//! Overlay input lock is delegated to [`crate::overlay_win`] — tray only
+//! exposes menu actions. No voice/engine policy lives here.
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -18,30 +18,33 @@ use tauri::{
 use crate::orchestrator::AppState;
 use crate::overlay_win;
 
+const TRAY_ID: &str = "boris-tray";
 const TRAY_TOOLTIP: &str = "Boris — voice assistant";
 
-/// Whether the overlay currently ignores mouse (true = gaming-safe).
-static OVERLAY_INPUT_LOCKED: AtomicBool = AtomicBool::new(true);
+const MENU_OPEN: &str = "open";
+const MENU_OVERLAY_UNLOCK: &str = "overlay_unlock";
+const MENU_OVERLAY_LOCK: &str = "overlay_lock";
+const MENU_QUIT: &str = "quit";
 
-/// Build the tray icon and attach show / quit handlers.
+/// Build the tray icon and attach show / quit / overlay-lock handlers.
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Boris", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, MENU_OPEN, "Open Boris", true, None::<&str>)?;
     let unlock_overlay = MenuItem::with_id(
         app,
-        "overlay_unlock",
+        MENU_OVERLAY_UNLOCK,
         "Unlock overlay to move",
         true,
         None::<&str>,
     )?;
     let lock_overlay = MenuItem::with_id(
         app,
-        "overlay_lock",
+        MENU_OVERLAY_LOCK,
         "Lock overlay (click-through)",
         true,
         None::<&str>,
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Boris", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, MENU_QUIT, "Quit Boris", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[&open, &sep, &unlock_overlay, &lock_overlay, &sep, &quit],
@@ -51,16 +54,16 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         tauri::Error::AssetNotFound("default window icon required for tray".into())
     })?;
 
-    let _tray = TrayIconBuilder::with_id("boris-tray")
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .menu(&menu)
         .tooltip(TRAY_TOOLTIP)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => show_main_window(app),
-            "overlay_unlock" => set_overlay_locked(app, false),
-            "overlay_lock" => set_overlay_locked(app, true),
-            "quit" => quit_app(app),
+            MENU_OPEN => show_main_window(app),
+            MENU_OVERLAY_UNLOCK => set_overlay_locked(app, false),
+            MENU_OVERLAY_LOCK => set_overlay_locked(app, true),
+            MENU_QUIT => quit_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -82,7 +85,6 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 fn set_overlay_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) {
     match overlay_win::set_overlay_input_locked(app, locked) {
         Ok(()) => {
-            OVERLAY_INPUT_LOCKED.store(locked, Ordering::Relaxed);
             if locked {
                 tracing::info!("tray: overlay locked (click-through) — safe for games");
             } else {
@@ -90,6 +92,13 @@ fn set_overlay_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) {
             }
         }
         Err(e) => tracing::warn!(error = %e, locked, "tray: failed to set overlay input lock"),
+    }
+
+    if locked {
+        if let Some(state) = app.try_state::<AppState>() {
+            // Prefs already cached at boot / save — do not re-read disk here.
+            overlay_win::sync_visibility(app, &state.status());
+        }
     }
 }
 

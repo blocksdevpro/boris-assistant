@@ -1,14 +1,31 @@
 [package]
-name    = "boris-sense"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-sense"
+version     = "1.0.0"
+edition     = "2021"
+rust-version.workspace = true
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+description = "Local perception: WebRTC VAD, LiveKit wake-word ONNX scoring, ORT process init"
+readme      = "README.md"
+publish     = false
+keywords    = ["vad", "wake-word", "onnx", "audio"]
+categories  = ["multimedia::audio"]
+
+[features]
+default = ["vad", "wake"]
+# WebRTC VAD adapter (`webrtc-vad`). Independent of wake / ORT.
+vad = ["dep:webrtc-vad"]
+# LiveKit open-wake-word ONNX path (`livekit-wakeword` + `ort`).
+wake = ["dep:livekit-wakeword", "dep:ort"]
 
 [dependencies]
 boris-core = { workspace = true }
 tracing    = { workspace = true }
 
-livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks" }
+# Pinned to the rev resolved in the workspace Cargo.lock so desktop builds
+# do not float on git main. Bump intentionally when upgrading the SDK.
+livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks", rev = "9cf2528fe649e8846d96a3ec1aedb97ec8b4cfda", optional = true }
 # Same line as livekit-wakeword; we configure the process-global ORT env
 # before any wakeword sessions are created (shared pool + no spin).
-ort        = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"] }
-webrtc-vad = "0.4"
+ort        = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"], optional = true }
+webrtc-vad = { version = "0.4", optional = true }

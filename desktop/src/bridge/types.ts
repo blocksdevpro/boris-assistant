@@ -1,6 +1,13 @@
 /**
- * UI contract shared by WINDOW and OVERLAY.
- * Mirrors Rust `boris_pipeline::StatusPicture`.
+ * UI DTOs shared by main window and overlay.
+ *
+ * # Host vs pipeline
+ *
+ * These shapes mirror **pipeline** serde types (`boris_pipeline::{StatusPicture,
+ * DeviceDto, PreflightReport, ModelsStatus, DownloadProgress, AppSettings, …}`).
+ * The host only forwards them over Tauri IPC — it does not invent alternate fields.
+ *
+ * Keep this file aligned with Rust DTO sources in one atomic PR when fields change.
  */
 
 export type EngineState = "Off" | "Starting" | "On" | "Fault";
@@ -21,6 +28,7 @@ export type DeviceHealth = {
   ok: boolean;
 };
 
+/** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
   engine: EngineState;
   phase: Phase;
@@ -100,18 +108,120 @@ export type ModelsInstallReport = {
   errors: string[];
 };
 
-/** Persisted under `~/.boris/settings.json` (Rust `AppSettings`). */
+/**
+ * Prefs + secrets from `~/.boris/config.toml` + `auth.json`.
+ * Mirrors Rust `boris_pipeline::AppSettings` (snake_case wire format).
+ */
 export type AppSettings = {
   openrouter_api_key: string;
+  /** Exa Search API key for live `web_search` (optional; falls back to DDG scrape). */
+  exa_api_key: string;
+  /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
-  capability_preset?: string;
+  /** Fast / cheap model for simple turns. */
+  openrouter_fast_model: string;
+  /**
+   * OpenRouter **model-provider** order for the strong model
+   * (e.g. `coreweave` or `coreweave,baseten`) — inference host, not API brand.
+   */
+  openrouter_model_provider: string;
+  /** Model-provider order for the fast model. */
+  openrouter_fast_provider: string;
+  /** When true, do not fall back to other hosts if the preferred list fails. */
+  openrouter_pin_provider: boolean;
+  /** `full` | `local_power` | `voice_safe` */
+  capability_preset: string;
+  /** Preferred mic device id; empty = OS default. */
+  input_device: string;
+  /** Preferred speaker device id; empty = OS default. */
+  output_device: string;
+  /** Supertone voice stem (e.g. `M4`). */
+  tts_voice_id: string;
+  /** Long-term markdown memory. */
+  long_term_memory: boolean;
+  /**
+   * Trusted mode: auto-allow notes and sandbox file writes.
+   * Shell and open URL still need yes.
+   */
+  trusted_auto_moderate: boolean;
+  /**
+   * Max HITL confirms per user turn before remaining tools are denied.
+   * Default 12 (multi-tool friendly). No dedicated UI control yet.
+   */
+  max_confirms_per_turn: number;
+  /** Prefer showing the floating island on wake. */
+  show_overlay_on_wake: boolean;
+  /** Which spoken text may appear in the floating overlay. */
+  overlay_caption_mode: "full" | "assistant" | "hidden";
+  /** Preferred overlay anchor on the active display. */
+  overlay_position: "top_center" | "top_left" | "top_right";
+  /** Overlay size as a percentage, clamped to 75-125. */
+  overlay_scale_percent: number;
+  /** Start the engine when the app opens. */
+  start_engine_on_launch: boolean;
+  /** Optional log filter (`info`, `boris=debug`, …). */
+  logging_filter: string;
 };
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
+  exa_api_key: "",
   openrouter_model: "",
-  capability_preset: "",
+  openrouter_fast_model: "",
+  openrouter_model_provider: "",
+  openrouter_fast_provider: "",
+  openrouter_pin_provider: false,
+  capability_preset: "full",
+  input_device: "",
+  output_device: "",
+  tts_voice_id: "M4",
+  long_term_memory: true,
+  trusted_auto_moderate: true,
+  max_confirms_per_turn: 12,
+  show_overlay_on_wake: false,
+  overlay_caption_mode: "full",
+  overlay_position: "top_center",
+  overlay_scale_percent: 100,
+  start_engine_on_launch: false,
+  logging_filter: "",
 };
+
+/** Common OpenRouter chat models for the preset dropdown (kept current for agents). */
+export const MODEL_PRESETS: { id: string; label: string }[] = [
+  { id: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (recommended)" },
+  { id: "google/gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (cheap/fast)" },
+  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731" },
+  { id: "deepseek/deepseek-v4-flash-latest", label: "DeepSeek V4 Flash Latest" },
+  { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5" },
+  { id: "anthropic/claude-opus-5", label: "Claude Opus 5" },
+  { id: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { id: "x-ai/grok-4.5", label: "Grok 4.5" },
+  { id: "qwen/qwen3.8-max", label: "Qwen3.8 Max" },
+  { id: "qwen/qwen3.7-flash", label: "Qwen3.7 Flash" },
+  { id: "minimax/minimax-m3", label: "MiniMax M3" },
+  { id: "moonshotai/kimi-k2.7-code", label: "Kimi K2.7 Code" },
+];
+
+/**
+ * Common OpenRouter **model-provider** slugs (inference hosts on a model page).
+ * Copy exact slug from OpenRouter when in doubt (`coreweave`, `deepinfra/turbo`).
+ */
+export const PROVIDER_PRESETS: { id: string; label: string }[] = [
+  { id: "", label: "Auto (OpenRouter default)" },
+  { id: "coreweave", label: "CoreWeave" },
+  { id: "baseten", label: "Baseten" },
+  { id: "siliconflow", label: "SiliconFlow" },
+  { id: "novita", label: "NovitaAI" },
+  { id: "fireworks", label: "Fireworks" },
+  { id: "deepinfra", label: "DeepInfra" },
+  { id: "phala", label: "Phala" },
+  { id: "cloudflare", label: "Cloudflare" },
+  { id: "venice", label: "Venice" },
+  { id: "atlas-cloud", label: "AtlasCloud" },
+  { id: "together", label: "Together" },
+  { id: "groq", label: "Groq" },
+];
 
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {
@@ -129,7 +239,9 @@ export const OFF_STATUS: StatusPicture = {
 };
 
 /** Normalize partial / missing Option fields from serde. */
-export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined): StatusPicture {
+export function normalizeStatus(
+  raw: Partial<StatusPicture> | null | undefined,
+): StatusPicture {
   if (!raw) return { ...OFF_STATUS };
   return {
     engine: raw.engine ?? "Off",
@@ -144,6 +256,57 @@ export function normalizeStatus(raw: Partial<StatusPicture> | null | undefined):
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
   };
+}
+
+/** Merge a partial settings payload into a full [`AppSettings`] with defaults. */
+export function normalizeSettings(
+  raw: Partial<AppSettings> | null | undefined,
+): AppSettings {
+  return {
+    openrouter_api_key: raw?.openrouter_api_key ?? "",
+    exa_api_key: raw?.exa_api_key ?? "",
+    openrouter_model: raw?.openrouter_model ?? "",
+    openrouter_fast_model: raw?.openrouter_fast_model ?? "",
+    openrouter_model_provider: raw?.openrouter_model_provider ?? "",
+    openrouter_fast_provider: raw?.openrouter_fast_provider ?? "",
+    openrouter_pin_provider: raw?.openrouter_pin_provider ?? false,
+    capability_preset: raw?.capability_preset?.trim() || "full",
+    input_device: raw?.input_device ?? "",
+    output_device: raw?.output_device ?? "",
+    tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
+    long_term_memory: raw?.long_term_memory ?? true,
+    trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
+    max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
+    show_overlay_on_wake: raw?.show_overlay_on_wake ?? false,
+    overlay_caption_mode:
+      raw?.overlay_caption_mode === "assistant" ||
+      raw?.overlay_caption_mode === "hidden"
+        ? raw.overlay_caption_mode
+        : "full",
+    overlay_position:
+      raw?.overlay_position === "top_left" || raw?.overlay_position === "top_right"
+        ? raw.overlay_position
+        : "top_center",
+    overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
+    start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    logging_filter: raw?.logging_filter ?? "",
+  };
+}
+
+function normalizeOverlayScale(raw: number | null | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
+  return Math.min(125, Math.max(75, Math.round(raw / 5) * 5));
+}
+
+function normalizeMaxConfirms(raw: number | null | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 12;
+  const n = Math.floor(raw);
+  return n < 1 ? 12 : n;
+}
+
+/** Wire shape for `save_app_settings` (always send full struct to Rust). */
+export function settingsToWire(settings: AppSettings): AppSettings {
+  return normalizeSettings(settings);
 }
 
 /** Format token counts for the overlay meter: `233K / 500K`. */

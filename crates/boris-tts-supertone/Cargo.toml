@@ -1,16 +1,23 @@
 [package]
-name    = "boris-tts-supertone"
-version = "0.1.0"
-edition = "2021"
-
-
+name              = "boris-tts-supertone"
+version           = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description       = "Supertone / Supertonic TextToSpeech adapter for Boris (st-tts)"
+publish           = false
+readme            = "README.md"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 boris-core      = { workspace = true }
 boris-inference = { workspace = true }
 tracing         = { workspace = true }
 
-st-tts = "0.3"
-tokio  = { version = "1", features = ["rt-multi-thread", "macros"] }
-hound  = "3.5"
-clap   = { version = "4", features = ["derive"] }
+st-tts     = "0.3"
+serde_json = { workspace = true }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[example]]
+name = "smoke_synth"
+path = "examples/smoke_synth.rs"

@@ -22,6 +22,30 @@ bun run tauri dev
 bun run tauri build
 ```
 
+## App updates (Tauri updater)
+
+Release builds can self-update from GitHub Releases using signed installers.
+
+| Piece | Location |
+|-------|----------|
+| Plugin (Rust) | `tauri-plugin-updater` + `tauri-plugin-process` in `src-tauri` |
+| Plugin (JS) | `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-process` |
+| Endpoint | `plugins.updater.endpoints` in `src-tauri/tauri.conf.json` → `latest.json` on GitHub Releases |
+| Public key | `plugins.updater.pubkey` (matches `.tauri/boris.key.pub`) |
+| Private key | `.tauri/boris.key` — **gitignored**, required to sign builds |
+
+Signing and publishing steps: [`.tauri/README.md`](../.tauri/README.md).
+
+```powershell
+# Sign a release build (PowerShell)
+# tauri build reads TAURI_SIGNING_PRIVATE_KEY (path or key contents), not _PATH
+$env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path ..\.tauri\boris.key).Path
+# $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""   # if key has empty/no password prompt issues
+bun run tauri build
+```
+
+In the UI: **Settings → General → Updates**, plus a home banner when a newer version is published.
+
 ## Logs (debug packaged / release builds)
 
 Release Windows builds have **no console window**, so **all** pipeline diagnostics

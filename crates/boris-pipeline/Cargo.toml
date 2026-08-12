@@ -1,8 +1,15 @@
 [package]
-name    = "boris-pipeline"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-pipeline"
+version     = "1.0.0"
+edition     = "2021"
+rust-version.workspace = true
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
 description = "Desktop voice engine: sequential turns, status, no worker mesh"
+readme      = "README.md"
+publish     = false
+keywords    = ["voice", "assistant", "pipeline"]
+categories  = ["multimedia::audio"]
 
 [features]
 default = ["stt-parakeet", "tts-supertone"]
@@ -14,14 +21,19 @@ boris-core      = { workspace = true }
 boris-audio     = { workspace = true }
 boris-sense     = { workspace = true }
 boris-inference = { workspace = true }
-boris-agent     = { path = "../boris-agent" }
+boris-agent     = { workspace = true }
 
 crossbeam-channel = { workspace = true }
 tracing           = { workspace = true }
+thiserror         = { workspace = true }
 serde             = { version = "1", features = ["derive"] }
 serde_json        = { workspace = true }
-reqwest           = { version = "0.13", default-features = true, features = ["blocking", "json"] }
-tokio             = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+toml              = "0.8"
+reqwest           = { workspace = true, features = ["blocking", "json"] }
+tokio             = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# Local (not workspace) dep: boris-pipeline is the only consumer of SHA-256
+# model-download integrity verification (see download.rs).
+sha2              = "0.10"
 
 boris-stt-parakeet  = { path = "../boris-stt-parakeet", optional = true }
 boris-tts-supertone = { path = "../boris-tts-supertone", optional = true }

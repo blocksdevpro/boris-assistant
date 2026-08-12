@@ -2,6 +2,16 @@
 //!
 //! Keeps the base persona, OS/user_info, personal memory, skills catalog, and
 //! optional memory hints as named sections instead of opaque string concat.
+//!
+//! # Surface
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`UserInfo`] | Host facts for the `<user_info>` block |
+//! | [`PromptContext`] | Inspectable sections + stable `render()` order |
+//!
+//! Render order is fixed: base → user_info → personal → skills → memory_hint.
+//! Empty / whitespace-only optional sections are omitted.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +48,7 @@ impl UserInfo {
         }
     }
 
+    /// Render the `<user_info>` block, or empty string when all fields are absent.
     pub fn render_block(&self) -> String {
         if self.os_name.is_none()
             && self.shell.is_none()
@@ -158,7 +169,9 @@ mod tests {
                 working_directory: Some("C:\\proj".into()),
                 current_date: Some("2026-08-04".into()),
             })
-            .with_personal(Some("<personal_context>\nName: Ada\n</personal_context>".into()))
+            .with_personal(Some(
+                "<personal_context>\nName: Ada\n</personal_context>".into(),
+            ))
             .with_skills(Some("<skills>\n- research\n</skills>".into()));
         let out = ctx.render();
         assert!(out.starts_with("You are Boris."));
@@ -174,5 +187,72 @@ mod tests {
             .with_personal(Some("  ".into()))
             .with_skills(None);
         assert_eq!(ctx.render(), "Base only.");
+    }
+
+    #[test]
+    fn with_filters_drop_whitespace_blocks() {
+        let ctx = PromptContext::new("Base")
+            .with_personal(Some("\n  \t".into()))
+            .with_skills(Some("   ".into()))
+            .with_memory_hint(Some("\n".into()));
+        assert!(ctx.personal_context.is_none());
+        assert!(ctx.skills_catalog.is_none());
+        assert!(ctx.memory_hint.is_none());
+        assert_eq!(ctx.render(), "Base");
+    }
+
+    #[test]
+    fn render_includes_memory_hint_last() {
+        let ctx = PromptContext::new("Base")
+            .with_skills(Some("<skills/>".into()))
+            .with_memory_hint(Some("<memory_hint>x</memory_hint>".into()));
+        let out = ctx.render();
+        let skills_pos = out.find("<skills/>").unwrap();
+        let mem_pos = out.find("<memory_hint>").unwrap();
+        assert!(skills_pos < mem_pos);
+    }
+
+    #[test]
+    fn user_info_render_block_empty_when_all_none() {
+        assert_eq!(UserInfo::default().render_block(), "");
+    }
+
+    #[test]
+    fn user_info_render_block_partial_fields() {
+        let info = UserInfo {
+            os_name: Some("windows".into()),
+            shell: None,
+            working_directory: None,
+            current_date: Some("2026-01-01".into()),
+        };
+        let block = info.render_block();
+        assert!(block.starts_with("<user_info>"));
+        assert!(block.ends_with("</user_info>"));
+        assert!(block.contains("OS: windows"));
+        assert!(block.contains("Today's date: 2026-01-01"));
+        assert!(!block.contains("Shell:"));
+        assert!(!block.contains("Working directory:"));
+    }
+
+    #[test]
+    fn user_info_capture_sets_os_and_date() {
+        let info = UserInfo::capture();
+        assert_eq!(info.os_name.as_deref(), Some(std::env::consts::OS));
+        assert!(info.current_date.is_some());
+        let date = info.current_date.as_deref().unwrap();
+        assert_eq!(date.len(), 10, "YYYY-MM-DD");
+        assert!(date.chars().nth(4) == Some('-'));
+    }
+
+    #[test]
+    fn empty_base_omitted_from_render() {
+        let ctx = PromptContext::new("   ").with_memory_hint(Some("hint".into()));
+        assert_eq!(ctx.render(), "hint");
+    }
+
+    #[test]
+    fn blank_line_separators_between_sections() {
+        let ctx = PromptContext::new("A").with_skills(Some("B".into()));
+        assert_eq!(ctx.render(), "A\n\nB");
     }
 }

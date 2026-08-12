@@ -1,23 +1,23 @@
 //! Live smoke: exercise every registered Boris tool body (direct `execute`).
-//! Run: `cargo test -p boris-agent --test tool_live_smoke -- --nocapture`
+//!
+//! This test has real side effects (clipboard writes, a local shell command,
+//! network access, and an OS open request). It is ignored by default and also
+//! requires explicit consent to run:
+//! `BORIS_RUN_LIVE_TOOL_SMOKE=1 cargo test -p boris-agent --test tool_live_smoke -- --ignored --nocapture`
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use boris_agent::memory::profile::UserProfile;
 use boris_agent::tool::Tool;
-use boris_agent::tools::clipboard::{ClipboardGetTool, ClipboardSetTool};
 use boris_agent::tools::bash::BashTool;
-use boris_agent::tools::files::{
-    EditFileTool, FsRoots, ListDirTool, ReadFileTool, WriteFileTool,
-};
+use boris_agent::tools::clipboard::{ClipboardGetTool, ClipboardSetTool};
+use boris_agent::tools::files::{EditFileTool, FsRoots, ListDirTool, ReadFileTool, WriteFileTool};
 use boris_agent::tools::glob::GlobTool;
 use boris_agent::tools::grep::GrepTool;
 use boris_agent::tools::notes::{RecallNotesTool, RememberNoteTool};
 use boris_agent::tools::open_tool::{OpenPathTool, OpenUrlTool};
-use boris_agent::tools::profile::{
-    GetUserContextTool, SaveUserFactTool, UpdateUserProfileTool,
-};
+use boris_agent::tools::profile::{GetUserContextTool, SaveUserFactTool, UpdateUserProfileTool};
 use boris_agent::tools::system::GetSystemInfoTool;
 use boris_agent::tools::time::{GetDateTool, GetTimeTool};
 use boris_agent::tools::todo::{TodoReadTool, TodoWriteTool};
@@ -31,7 +31,10 @@ struct SmokeResult {
     ms: u128,
 }
 
-async fn run_one(name: &'static str, f: impl std::future::Future<Output = Result<String, String>>) -> SmokeResult {
+async fn run_one(
+    name: &'static str,
+    f: impl std::future::Future<Output = Result<String, String>>,
+) -> SmokeResult {
     let t0 = Instant::now();
     match f.await {
         Ok(out) => {
@@ -53,11 +56,15 @@ async fn run_one(name: &'static str, f: impl std::future::Future<Output = Result
 }
 
 #[tokio::test]
+#[ignore = "live smoke performs clipboard, shell, network, and OS-open side effects"]
 async fn live_smoke_all_boris_tools() {
-    let root = std::env::temp_dir().join(format!(
-        "boris-tool-smoke-{}",
-        std::process::id()
-    ));
+    assert_eq!(
+        std::env::var("BORIS_RUN_LIVE_TOOL_SMOKE").as_deref(),
+        Ok("1"),
+        "set BORIS_RUN_LIVE_TOOL_SMOKE=1 before running this live, side-effecting smoke test"
+    );
+
+    let root = std::env::temp_dir().join(format!("boris-tool-smoke-{}", std::process::id()));
     let sandbox = root.join("sandbox");
     let memory = root.join("memory");
     std::fs::create_dir_all(&sandbox).unwrap();
@@ -98,7 +105,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("remember_note", async {
             RememberNoteTool::new(notes_path.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"note": "smoke test note from tool_live_smoke"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"note": "smoke test note from tool_live_smoke"}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -119,7 +129,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("save_user_fact", async {
             SaveUserFactTool::with_path(profile.clone(), profile_path.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"fact": "likes smoke tests", "category": "preference"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"fact": "likes smoke tests", "category": "preference"}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -128,7 +141,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("update_user_profile", async {
             UpdateUserProfileTool::with_path(profile.clone(), profile_path.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"preferred_name": "Smoke Tester", "address_as": "Tester"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"preferred_name": "Smoke Tester", "address_as": "Tester"}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -159,7 +175,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("clipboard_set", async {
             ClipboardSetTool
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"text": "boris-smoke-clipboard"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"text": "boris-smoke-clipboard"}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -179,11 +198,14 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("todo_write", async {
             TodoWriteTool::new(&sandbox)
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({
-                    "items": [
-                        {"id": "1", "content": "smoke item", "status": "pending"}
-                    ]
-                }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({
+                        "items": [
+                            {"id": "1", "content": "smoke item", "status": "pending"}
+                        ]
+                    }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -203,10 +225,13 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_write", async {
             WriteFileTool::new(roots.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({
-                    "path": "hello.txt",
-                    "content": "hello from boris smoke\nfindme-token\n"
-                }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({
+                        "path": "hello.txt",
+                        "content": "hello from boris smoke\nfindme-token\n"
+                    }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -215,7 +240,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_read", async {
             ReadFileTool::new(roots.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "path": "hello.txt" }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({ "path": "hello.txt" }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -224,11 +252,14 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("file_edit", async {
             EditFileTool::new(roots.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({
-                    "path": "hello.txt",
-                    "old_string": "hello from boris smoke",
-                    "new_string": "hello edited"
-                }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({
+                        "path": "hello.txt",
+                        "old_string": "hello from boris smoke",
+                        "new_string": "hello edited"
+                    }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -246,7 +277,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("glob", async {
             GlobTool::new(roots.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "pattern": "*.txt" }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({ "pattern": "*.txt" }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -255,7 +289,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("grep", async {
             GrepTool::new(roots.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({ "pattern": "findme-token" }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({ "pattern": "findme-token" }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -266,10 +303,13 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("bash", async {
             BashTool::new(vec![sandbox.clone()], sandbox.clone())
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({
-                    "command": "echo bash-smoke-ok",
-                    "cwd": sandbox.to_string_lossy()
-                }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({
+                        "command": "echo bash-smoke-ok",
+                        "cwd": sandbox.to_string_lossy()
+                    }),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -281,7 +321,10 @@ async fn live_smoke_all_boris_tools() {
         run_one("web_search", async {
             WebSearchTool::new()
                 .map_err(|e| e.message)?
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"query": "rust programming language", "limit": 3}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"query": "rust programming language", "limit": 3}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -291,7 +334,10 @@ async fn live_smoke_all_boris_tools() {
         run_one("web_fetch", async {
             WebFetchTool::new()
                 .map_err(|e| e.message)?
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"url": "https://example.com"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"url": "https://example.com"}),
+                )
                 .await
                 .map_err(|e| e.message)
         })
@@ -303,7 +349,10 @@ async fn live_smoke_all_boris_tools() {
     results.push(
         run_one("open_url (invalid scheme denied)", async {
             match OpenUrlTool
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({"url": "ftp://example.com"}))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({"url": "ftp://example.com"}),
+                )
                 .await
             {
                 Err(e) if e.message.contains("http") => {
@@ -319,9 +368,12 @@ async fn live_smoke_all_boris_tools() {
         run_one("open_path", async {
             // Opening may launch Explorer/editor; still verifies OS handoff works.
             OpenPathTool::new(vec![sandbox.clone()])
-                .execute(&boris_agent::ToolCallContext::new("t"), json!({
-                    "path": sandbox.join("hello.txt").to_string_lossy()
-                }))
+                .execute(
+                    &boris_agent::ToolCallContext::new("t"),
+                    json!({
+                        "path": sandbox.join("hello.txt").to_string_lossy()
+                    }),
+                )
                 .await
                 .map_err(|e| e.message)
         })

@@ -1,4 +1,4 @@
-# ACL for app-level Tauri commands (boris-desktop lib.rs).
+# ACL for app-level Tauri commands (boris-desktop commands.rs).
 
 [[permission]]
 identifier = "allow-get-status"
@@ -52,12 +52,12 @@ commands.allow = ["download_models"]
 
 [[permission]]
 identifier = "allow-get-settings"
-description = "Load OpenRouter key and model from ~/.boris/settings.json"
+description = "Load OpenRouter key and models/providers from ~/.boris/config.toml + auth.json"
 commands.allow = ["get_settings"]
 
 [[permission]]
 identifier = "allow-save-app-settings"
-description = "Persist OpenRouter key and model to ~/.boris/settings.json"
+description = "Persist OpenRouter key and models/providers to ~/.boris/config.toml + auth.json"
 commands.allow = ["save_app_settings"]
 
 [[permission]]

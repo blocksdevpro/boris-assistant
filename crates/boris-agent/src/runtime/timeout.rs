@@ -36,8 +36,8 @@ pub fn is_timeout(err: &ToolError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::tool::{Tool, ToolError, ToolMeta};
+    use async_trait::async_trait;
     use serde_json::json;
     use std::time::Duration;
 

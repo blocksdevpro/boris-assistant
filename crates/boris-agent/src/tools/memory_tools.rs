@@ -31,9 +31,9 @@ impl Tool for MemorySearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search cross-session markdown memory (MEMORY.md + session logs) for past facts, \
-         decisions, or conversations. Use when the user references prior work, prefs not in \
-         personal_context, or after a long gap. Arg: query (required), max_results (optional 1–10)."
+        "Search markdown memory: global MEMORY.md plus each chat's session/{{id}}/memory.md turn logs. \
+         Use when the user references prior work, prefs not in personal_context, or after a long gap. \
+         Arg: query (required), max_results (optional 1–10)."
     }
 
     fn parameters(&self) -> Value {
@@ -54,7 +54,14 @@ impl Tool for MemorySearchTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
+            .read_only(true)
+            .max_concurrency(8)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -65,14 +72,9 @@ impl Tool for MemorySearchTool {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(5);
-        let hits = self
-            .memory
-            .search(&query, max)
-            .map_err(ToolError::failed)?;
+        let hits = self.memory.search(&query, max).map_err(ToolError::failed)?;
         if hits.is_empty() {
-            return Ok(truncate_tool_result(format!(
-                "No memory hits for: {query}"
-            )));
+            return Ok(truncate_tool_result(format!("No memory hits for: {query}")));
         }
         let mut out = format!("{} hit(s) for: {query}\n", hits.len());
         for (i, h) in hits.iter().enumerate() {
@@ -106,8 +108,8 @@ impl Tool for MemoryGetTool {
     }
 
     fn description(&self) -> &str {
-        "Read a markdown memory file by relative path under the memory root \
-         (e.g. MEMORY.md or sessions/2026-08-04-abc123.md). Use after memory_search. \
+        "Read a markdown memory file by path from memory_search hits \
+         (e.g. MEMORY.md, desktop/MEMORY.md, or session/{uuid}/memory.md). \
          Optional max_chars (default 6000)."
     }
 
@@ -117,7 +119,7 @@ impl Tool for MemoryGetTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Relative path from memory root"
+                    "description": "Hit path: MEMORY.md or session/{id}/memory.md"
                 },
                 "max_chars": {
                     "type": "integer",
@@ -129,7 +131,14 @@ impl Tool for MemoryGetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
+            .read_only(true)
+            .max_concurrency(8)
+    }
+
+    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
+        true // soft-core when progressive listing is on
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
@@ -141,10 +150,7 @@ impl Tool for MemoryGetTool {
             .map(|n| n as usize)
             .unwrap_or(6000);
         let _ = optional_string(obj, "unused");
-        let body = self
-            .memory
-            .get(&path, max)
-            .map_err(ToolError::failed)?;
+        let body = self.memory.get(&path, max).map_err(ToolError::failed)?;
         Ok(truncate_tool_result(format!(
             "<memory_file path=\"{}\">\n{body}\n</memory_file>",
             path.trim()

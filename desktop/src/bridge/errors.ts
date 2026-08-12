@@ -1,3 +1,10 @@
+/**
+ * Invoke error helpers for the desktop bridge.
+ *
+ * Tauri rejections may be strings, `Error`, or opaque objects depending on
+ * the host and serialization path — normalize to a single human message.
+ */
+
 /** Pull a human message out of a Tauri invoke rejection. */
 export function invokeErrorMessage(err: unknown): string {
   if (err == null) return "Unknown error";

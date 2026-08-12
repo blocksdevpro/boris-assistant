@@ -1,5 +1,11 @@
 //! Load / save [`UserProfile`] under a host-supplied path (typically
 //! `~/.boris/memory/profile.json`).
+//!
+//! # On-disk format
+//!
+//! Pretty-printed JSON matching the serde shape of [`UserProfile`]. Missing or
+//! empty files load as [`UserProfile::default`]. Writes are temp+rename
+//! (atomic-ish) so a crash mid-write does not leave a half JSON file.
 
 use std::fs;
 use std::io::Write;
@@ -50,6 +56,7 @@ impl ProfileStore {
     }
 }
 
+/// Write `bytes` to `path` via `{path}.json.tmp` then rename (fallback: direct write).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     {

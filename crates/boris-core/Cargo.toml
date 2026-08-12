@@ -1,7 +1,15 @@
 [package]
-name    = "boris-core"
-version = "0.1.0"
-edition = "2021"
+name        = "boris-core"
+version     = "1.0.0"
+edition     = "2021"
+rust-version.workspace = true
+license     = "Apache-2.0"
+repository  = "https://github.com/blocksdevpro/boris-assistant"
+description = "Shared foundation types for the Boris assistant (audio buffers, turn ids, errors)"
+readme      = "README.md"
+publish     = false
+keywords    = ["assistant", "audio", "types"]
+categories  = ["multimedia::audio"]
 
 [dependencies]
 thiserror = { workspace = true }

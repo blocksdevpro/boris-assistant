@@ -50,11 +50,13 @@ pub struct RawToolCall {
 #[derive(Debug, Clone)]
 pub struct PendingTurn {
     pub pending: PendingToolCall,
-    /// Sibling tool calls in the same assistant message after the pending one.
+    /// Extra confirm-needed calls approved by the same yes (NOT including pending).
+    pub batch_with: Vec<RawToolCall>,
+    /// Sibling tool calls after `pending` + `batch_with` (may still need their own confirms).
     pub remaining_calls: Vec<RawToolCall>,
     pub tools_used: Vec<String>,
     pub tool_rounds: u32,
-    /// Confirms already used this user turn (including this pending one).
+    /// Confirms already used this user turn (including this pending HITL decision).
     pub confirms_used: u32,
     /// Original user text for post-turn learn after final outcome.
     pub user_text: String,

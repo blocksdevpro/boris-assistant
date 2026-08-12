@@ -1,13 +1,11 @@
 //! Session persistence scaffolding for the agent.
 //!
 //! - [`types`] — session identity / metadata
-//! - [`transcript`] — append-only message log shapes
-//! - [`store`] — filesystem (or other) persistence backends
+//! - [`transcript`] — append-only message log shapes + pure wire helpers
+//! - [`store`] — filesystem persistence (`summary.json`, `chat_history.jsonl`, …)
 //!
 //! Working memory remains [`crate::context::Context`]; session code loads and
 //! saves message snapshots via [`crate::Agent`] session-facing methods.
-//!
-//! Submodule bodies are owned by other P1 slices — declare modules here only.
 
 pub mod store;
 pub mod transcript;

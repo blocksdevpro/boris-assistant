@@ -44,7 +44,7 @@ Display prefixes are stable contracts: `config error: …`, `audio error: …`; 
 ## Design notes
 
 - **Small on purpose.** Keep this crate free of `cpal`, ORT, HTTP, and Tokio so
-  unit tests and CI can compile it everywhere.
+  unit tests can compile it everywhere.
 - **Sequential engine.** The product voice path is a single engine thread, not
   a multi-worker event bus. Do not reintroduce session-FSM event types here.
 - **Richer errors live higher.** `boris-agent` and `boris-ai` own domain errors;

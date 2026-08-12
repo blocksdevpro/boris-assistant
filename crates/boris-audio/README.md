@@ -34,4 +34,4 @@ Never block inside cpal callbacks.
 cargo test -p boris-audio --lib
 ```
 
-Hardware integration tests are not run by default (headless CI).
+Hardware integration tests are not run by default (no audio hardware required).

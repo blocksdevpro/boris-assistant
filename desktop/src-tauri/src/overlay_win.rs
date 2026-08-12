@@ -23,7 +23,7 @@
 //! Tray / host can temporarily unlock input so the user can reposition.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -62,6 +62,14 @@ const FAULT_LINGER: Duration = Duration::from_millis(8_000);
 
 /// Cancels stale delayed hides when another wake/status arrives.
 static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Cached `show_overlay_on_wake` so the status mirror never re-reads
+/// `config.toml` / `auth.json` on every engine snapshot (that path ran on the
+/// hot status thread and could lag the UI under high update rates).
+///
+/// Updated by [`remember_overlay_prefs`] / [`apply_preferences`]. Default
+/// matches [`AppSettings`] (off until prefs are loaded).
+static SHOW_OVERLAY_ON_WAKE: AtomicBool = AtomicBool::new(false);
 
 pub const EVENT_OVERLAY_PREFERENCES: &str = "overlay-preferences";
 
@@ -168,8 +176,18 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
     Ok(())
 }
 
+/// Cache overlay-related prefs for the hot status path.
+///
+/// Call whenever settings are loaded or saved so [`sync_visibility`] stays
+/// correct without disk I/O.
+pub fn remember_overlay_prefs(settings: &AppSettings) {
+    SHOW_OVERLAY_ON_WAKE.store(settings.show_overlay_on_wake, Ordering::Relaxed);
+}
+
 /// Apply geometry and notify the React surface without exposing API keys.
 pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) {
+    remember_overlay_prefs(settings);
+
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
@@ -193,17 +211,17 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
 /// Show only during a wake/turn. Ready captions linger briefly; Off and a
 /// disabled preference hide immediately. Delayed hides are generation-guarded
 /// so a new wake cannot be hidden by an older timer.
-pub fn sync_visibility<R: Runtime>(
-    app: &AppHandle<R>,
-    settings: &AppSettings,
-    status: &StatusPicture,
-) {
+///
+/// Uses the cached wake-overlay preference (see [`remember_overlay_prefs`]) —
+/// do not re-load settings here; status updates can fire many times per second.
+pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
     let epoch = VISIBILITY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    let show_on_wake = SHOW_OVERLAY_ON_WAKE.load(Ordering::Relaxed);
 
-    if !settings.show_overlay_on_wake || status.engine == EngineState::Off {
+    if !show_on_wake || status.engine == EngineState::Off {
         let _ = overlay.hide();
         return;
     }

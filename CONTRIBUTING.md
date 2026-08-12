@@ -41,8 +41,7 @@ cargo check -p boris-desktop
 cd desktop && bun install && bun run tauri dev
 ```
 
-CI runs the lightweight library suite above (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-Prefer that path for day-to-day PR validation unless you are changing desktop packaging.
+Prefer the lightweight library suite above for day-to-day PR validation unless you are changing desktop packaging.
 
 ## Pull request guidance
 

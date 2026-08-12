@@ -173,9 +173,21 @@ pub fn init_tracing() {
         tracing::debug!(log_dir = %log_dir.display(), "log prune: nothing to remove");
     }
 
-    // Dump paths / models / audio / sidecar DLLs immediately so a crash on
-    // first Start still leaves a useful file on the other PC.
-    boris_pipeline::log_environment("app_boot");
+    // Dump paths / models / audio / sidecar DLLs so a crash on first Start
+    // still leaves a useful file. Run off this thread: device enum + dir walks
+    // can take hundreds of ms and previously delayed the first paint / made
+    // the window look frozen at launch.
+    std::thread::Builder::new()
+        .name("boris-boot-diag".into())
+        .spawn(|| {
+            boris_pipeline::log_environment("app_boot");
+        })
+        .map(|_handle| ())
+        .unwrap_or_else(|e| {
+            // Fallback: still dump on this thread if we cannot spawn.
+            eprintln!("boot diagnostics thread spawn failed ({e}); running inline");
+            boris_pipeline::log_environment("app_boot");
+        });
 }
 
 /// Delete old `boris-desktop.*.log` files past a retention window or count

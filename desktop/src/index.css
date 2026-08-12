@@ -134,6 +134,13 @@
     @apply bg-background text-foreground antialiased;
   }
 
+  /* WebView2 can paint an opened native select menu with a light background
+     while retaining the select's inherited light text. */
+  select option {
+    color: #f5f5f5;
+    background-color: #1c1c1e;
+  }
+
   /*
    * Overlay transparency (Tauri official model):
    * - Window: transparent: true

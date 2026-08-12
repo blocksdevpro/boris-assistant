@@ -15,7 +15,7 @@
 //! | `wake`  | yes     | LiveKit wake-word + ORT init |
 //!
 //! Desktop / pipeline use the default feature set. Disable `wake` to build
-//! without `ort` / `livekit-wakeword` (e.g. lighter CI).
+//! without `ort` / `livekit-wakeword` (e.g. lighter local builds).
 
 pub mod pcm;
 pub mod time;

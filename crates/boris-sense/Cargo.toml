@@ -22,7 +22,7 @@ wake = ["dep:livekit-wakeword", "dep:ort"]
 boris-core = { workspace = true }
 tracing    = { workspace = true }
 
-# Pinned to the rev resolved in the workspace Cargo.lock so CI/desktop builds
+# Pinned to the rev resolved in the workspace Cargo.lock so desktop builds
 # do not float on git main. Bump intentionally when upgrading the SDK.
 livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks", rev = "9cf2528fe649e8846d96a3ec1aedb97ec8b4cfda", optional = true }
 # Same line as livekit-wakeword; we configure the process-global ORT env

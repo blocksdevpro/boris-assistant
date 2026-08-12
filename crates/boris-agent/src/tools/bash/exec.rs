@@ -501,7 +501,7 @@ mod tests {
             )
             .await;
 
-        // Skip if python/yes unavailable in CI — unit test above covers the cap.
+        // Skip if python/yes unavailable on this host — unit test above covers the cap.
         let Ok(out) = out else {
             let _ = tokio::fs::remove_dir_all(&dir).await;
             return;

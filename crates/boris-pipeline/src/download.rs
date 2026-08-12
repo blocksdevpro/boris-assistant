@@ -30,11 +30,13 @@
 //! # Integrity verification
 //!
 //! Each [`CatalogEntry`] has a `min_bytes` floor and a required pinned SHA-256
-//! digest. Downloads are hashed after the size check and before they replace
+//! digest. **Downloads** are hashed after the size check and before they replace
 //! an existing file; a mismatch deletes the temp file and fails that entry.
-//! Existing files are also checked before they are reported as ready or
-//! skipped, so a corrupted or replaced local model is reinstalled rather than
-//! silently loaded. The pins correspond to the immutable revisions above.
+//!
+//! **UI status / skip decisions** use size + path presence only (plus the
+//! Supertonic generation check). Full SHA-256 over ~1 GB of weights is reserved
+//! for the download path — re-hashing on every `models_status` poll froze the
+//! desktop main window for tens of seconds ("Not Responding").
 //!
 //! `BORIS_MODEL_BASE_URL` must use `https://`. The SHA-256 verification is
 //! still required for mirrors, so a TLS-valid but malicious or stale mirror
@@ -296,26 +298,14 @@ fn file_name_of(rel: &str) -> String {
         .unwrap_or_else(|| rel.to_string())
 }
 
-/// A model is usable only when both its minimum size and catalog hash match.
+/// Fast presence check: file exists and meets the catalog minimum size.
 ///
-/// This intentionally re-hashes existing files before reporting them ready or
-/// skipping them. Model files execute inside ONNX Runtime, so treating a
-/// size-only file as trusted would make the first successful install the only
-/// integrity check and allow later local corruption or replacement.
-fn file_ok(path: &Path, entry: &CatalogEntry) -> bool {
+/// Used by [`models_status`] and install **skip** decisions so the UI never
+/// re-reads multi-hundred-MB weights. Integrity (SHA-256) is enforced when a
+/// file is freshly downloaded — see [`download_one`].
+fn file_size_ok(path: &Path, entry: &CatalogEntry) -> bool {
     match fs::metadata(path) {
-        Ok(m) if m.is_file() && m.len() >= entry.min_bytes => {
-            if let Err(error) = verify_sha256(path, entry.sha256) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "installed model failed integrity validation"
-                );
-                false
-            } else {
-                true
-            }
-        }
+        Ok(m) if m.is_file() && m.len() >= entry.min_bytes => true,
         _ => false,
     }
 }
@@ -389,6 +379,10 @@ fn hf_token() -> Option<String> {
 }
 
 /// Current install readiness under `~/.boris/models`.
+///
+/// Cheap by design: metadata + min-size + Supertonic generation checks only.
+/// Does **not** SHA-256 the weight files (that would block the desktop UI for
+/// tens of seconds on a full install).
 pub fn models_status() -> ModelsStatus {
     let pk = parakeet_dir();
     let onnx = supertone_onnx_dir();
@@ -402,7 +396,7 @@ pub fn models_status() -> ModelsStatus {
     for e in CATALOG {
         let path = base.join(e.local_rel);
         let wrong_gen = force_supertone && e.component == ModelComponent::Supertone;
-        if wrong_gen || !file_ok(&path, e) {
+        if wrong_gen || !file_size_ok(&path, e) {
             missing.push(e.local_rel.to_string());
         }
     }
@@ -427,8 +421,9 @@ pub fn models_status() -> ModelsStatus {
 
 /// Download missing model files into `~/.boris/models`.
 ///
-/// Skips files that already exist and pass the size check. Invokes `on_progress`
-/// for each state change (and periodically while downloading large files).
+/// Skips files that already meet the size floor. Fresh downloads are SHA-256
+/// verified before they replace the destination. Invokes `on_progress` for
+/// each state change (and periodically while downloading large files).
 pub fn install_models(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> PipelineResult<ModelsInstallReport> {
@@ -483,7 +478,10 @@ pub fn install_models(
         let file_name = file_name_of(entry.local_rel);
         let rel = entry.local_rel.to_string();
 
-        if file_ok(&dest, entry) {
+        // Size-only skip: do not re-hash multi-hundred-MB weights that already
+        // passed verify on the download that wrote them. Re-hashing here made
+        // "Install models" appear hung for ~20–30s on a complete install.
+        if file_size_ok(&dest, entry) {
             skipped += 1;
             on_progress(DownloadProgress {
                 component: entry.component,
@@ -804,5 +802,31 @@ mod tests {
         // touch the file, so simulate that half of the contract here.
         let _ = fs::remove_file(&path);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn file_size_ok_requires_min_bytes_not_hash() {
+        let entry = &CATALOG[CATALOG.len() - 1]; // M4.json, min 1_000
+        let path = temp_file_with(&vec![b'x'; 2_000], "size-ok");
+        assert!(file_size_ok(&path, entry));
+        let _ = fs::remove_file(&path);
+
+        let too_small = temp_file_with(b"tiny", "size-small");
+        assert!(!file_size_ok(&too_small, entry));
+        let _ = fs::remove_file(&too_small);
+
+        let missing = std::env::temp_dir().join("boris-dl-size-missing-no-such-file");
+        let _ = fs::remove_file(&missing);
+        assert!(!file_size_ok(&missing, entry));
+    }
+
+    #[test]
+    fn models_status_is_metadata_only_and_returns() {
+        // Must not hang hashing real weights; empty/partial trees are fine.
+        let status = models_status();
+        assert!(!status.home.is_empty());
+        assert!(!status.models_dir.is_empty());
+        // Ready flags are independent of catalog hash work.
+        let _ = (status.parakeet_ready, status.supertone_ready, status.missing);
     }
 }

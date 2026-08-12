@@ -75,10 +75,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // The overlay starts hidden. Apply persisted geometry now; visibility is
     // derived from the current engine status and the wake-only preference.
+    // apply_preferences also seeds the in-memory overlay-prefs cache so later
+    // status snapshots never re-read config from disk.
     if let Ok(settings) = boris_pipeline::load_settings() {
         overlay_win::apply_preferences(app.handle(), &settings);
         if let Some(state) = app.try_state::<AppState>() {
-            overlay_win::sync_visibility(app.handle(), &settings, &state.status());
+            overlay_win::sync_visibility(app.handle(), &state.status());
         }
     }
 

@@ -127,4 +127,4 @@ src/
 cargo test -p boris-agent --lib
 ```
 
-Do not run `tests/tool_live_smoke.rs` in default CI (live environment).
+Do not run `tests/tool_live_smoke.rs` in routine checks (live environment).

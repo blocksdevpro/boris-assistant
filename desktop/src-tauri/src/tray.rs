@@ -95,10 +95,9 @@ fn set_overlay_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) {
     }
 
     if locked {
-        if let (Ok(settings), Some(state)) =
-            (boris_pipeline::load_settings(), app.try_state::<AppState>())
-        {
-            overlay_win::sync_visibility(app, &settings, &state.status());
+        if let Some(state) = app.try_state::<AppState>() {
+            // Prefs already cached at boot / save — do not re-read disk here.
+            overlay_win::sync_visibility(app, &state.status());
         }
     }
 }

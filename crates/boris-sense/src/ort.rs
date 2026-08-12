@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn repeat_calls_are_idempotent_and_agree() {
         // Whatever the first call resolves to (Ok or Err depends on the ORT
-        // build/environment in CI), repeat calls must return the same result
+        // build/environment), repeat calls must return the same result
         // without panicking or re-running the init body.
         let first = init_onnx_runtime();
         let second = init_onnx_runtime();

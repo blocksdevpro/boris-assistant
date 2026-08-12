@@ -10,7 +10,7 @@ Boris is a Windows-first desktop voice assistant: wake word → listen → trans
 
 ## Commands
 
-### Rust workspace (day-to-day, matches CI)
+### Rust workspace (day-to-day)
 
 ```bash
 # Library crates — no Tauri UI, no wake ONNX required
@@ -29,9 +29,9 @@ cargo check -p boris-pipeline --features stt-parakeet,tts-supertone
 cargo check -p boris-desktop
 ```
 
-CI (`.github/workflows/ci.yml`) only runs `cargo test -p boris-core -p boris-ai -p boris-agent --lib` on Linux. Prefer that subset for quick validation; run the rest locally on Windows when touching audio/sense/pipeline.
+Prefer `cargo test -p boris-core -p boris-ai -p boris-agent --lib` for a quick validation subset; run the rest locally on Windows when touching audio/sense/pipeline.
 
-Do **not** run `crates/boris-agent/tests/tool_live_smoke.rs` in default CI — it exercises a live environment.
+Do **not** run `crates/boris-agent/tests/tool_live_smoke.rs` in routine local checks — it exercises a live environment.
 
 ### Desktop app
 

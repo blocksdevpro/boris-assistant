@@ -25,7 +25,7 @@ pub fn should_llm_extract(
     }
     // Heuristics already got signal — optional LLM polish only every few turns.
     if heuristic_nonempty {
-        return turns_seen % 2 == 0;
+        return turns_seen.is_multiple_of(2);
     }
     // Personal language markers.
     let personal = [
@@ -51,7 +51,7 @@ pub fn should_llm_extract(
         return true;
     }
     // Slow cadence for ambient learning.
-    turns_seen > 0 && turns_seen % 4 == 0 && t.chars().count() >= 24
+    turns_seen > 0 && turns_seen.is_multiple_of(4) && t.chars().count() >= 24
 }
 
 pub(super) fn is_ephemeral_query(lower: &str) -> bool {
@@ -80,7 +80,12 @@ mod tests {
     #[test]
     fn skips_short_and_ephemeral() {
         assert!(!should_llm_extract("hi", &[], 4, false));
-        assert!(!should_llm_extract("what time is it right now", &[], 4, false));
+        assert!(!should_llm_extract(
+            "what time is it right now",
+            &[],
+            4,
+            false
+        ));
     }
 
     #[test]

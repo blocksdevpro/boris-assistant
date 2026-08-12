@@ -1,7 +1,8 @@
 [package]
 name        = "boris-agent"
-version     = "0.1.0"
+version     = "1.0.0"
 edition     = "2021"
+rust-version.workspace = true
 description = "Voice-aware agent harness: loop, tools, runtime, memory, sessions"
 license     = "Apache-2.0"
 repository  = "https://github.com/blocksdevpro/boris-assistant"

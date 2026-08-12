@@ -188,7 +188,10 @@ pub fn default_sandbox_guess() -> PathBuf {
         return PathBuf::from(h).join("state").join("workspace");
     }
     if let Ok(h) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        return PathBuf::from(h).join(".boris").join("state").join("workspace");
+        return PathBuf::from(h)
+            .join(".boris")
+            .join("state")
+            .join("workspace");
     }
     PathBuf::from(".boris-workspace")
 }
@@ -297,7 +300,7 @@ mod tests {
             // USERPROFILE/HOME path or local fallback
             assert!(
                 p.ends_with(Path::new(".boris").join("state").join("workspace"))
-                    || p == PathBuf::from(".boris-workspace")
+                    || p == Path::new(".boris-workspace")
             );
         }
     }
@@ -309,7 +312,9 @@ mod tests {
         assert!(looks_like_research_request("Find Jane Doe on LinkedIn"));
         assert!(looks_like_research_request("look up the CEO of Acme"));
         assert!(looks_like_research_request("Who is Satya Nadella?"));
-        assert!(looks_like_research_request("search for rust async runtimes"));
+        assert!(looks_like_research_request(
+            "search for rust async runtimes"
+        ));
         assert!(looks_like_research_request("research this company"));
         assert!(looks_like_research_request("investigate the outage"));
         assert!(looks_like_research_request("where is their github profile"));

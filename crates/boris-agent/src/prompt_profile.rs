@@ -169,7 +169,9 @@ mod tests {
                 working_directory: Some("C:\\proj".into()),
                 current_date: Some("2026-08-04".into()),
             })
-            .with_personal(Some("<personal_context>\nName: Ada\n</personal_context>".into()))
+            .with_personal(Some(
+                "<personal_context>\nName: Ada\n</personal_context>".into(),
+            ))
             .with_skills(Some("<skills>\n- research\n</skills>".into()));
         let out = ctx.render();
         assert!(out.starts_with("You are Boris."));

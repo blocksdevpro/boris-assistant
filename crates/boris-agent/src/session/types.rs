@@ -141,11 +141,7 @@ mod tests {
         assert_eq!(parts[3].len(), 4);
         assert_eq!(parts[4].len(), 12);
         // Version nibble is 4.
-        assert!(
-            parts[2].starts_with('4'),
-            "version 4 uuid: {}",
-            id.as_str()
-        );
+        assert!(parts[2].starts_with('4'), "version 4 uuid: {}", id.as_str());
     }
 
     #[test]

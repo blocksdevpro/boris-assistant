@@ -68,21 +68,12 @@ impl ToolInvocation {
 }
 
 /// Options for a single invoke.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct InvokeOptions {
     /// Skip HITL (one-shot grant after user approved).
     pub skip_confirmation: bool,
     /// Confirms already used this turn (for cap).
     pub confirms_used: u32,
-}
-
-impl Default for InvokeOptions {
-    fn default() -> Self {
-        Self {
-            skip_confirmation: false,
-            confirms_used: 0,
-        }
-    }
 }
 
 /// Result of runtime mediation (before the engine continues the ReAct loop).

@@ -64,6 +64,7 @@ pub fn preflight_check() -> PreflightReport {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn start_engine(
     app: AppHandle,
     state: State<'_, AppState>,

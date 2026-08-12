@@ -75,15 +75,13 @@ impl Vad for WebRtcVad {
     fn predict(&mut self, audio: &[AudioSample]) -> Result<bool> {
         validate_frame_len(audio.len())?;
         f32_to_pcm16_samples_into(audio, &mut self.pcm_scratch);
-        self.model
-            .is_voice_segment(&self.pcm_scratch)
-            .map_err(|_| {
-                Error::other(format!(
-                    "webrtc-vad prediction failed (samples={}, expected one of {:?})",
-                    self.pcm_scratch.len(),
-                    WEBRTC_VAD_FRAME_SAMPLES_16K
-                ))
-            })
+        self.model.is_voice_segment(&self.pcm_scratch).map_err(|_| {
+            Error::other(format!(
+                "webrtc-vad prediction failed (samples={}, expected one of {:?})",
+                self.pcm_scratch.len(),
+                WEBRTC_VAD_FRAME_SAMPLES_16K
+            ))
+        })
     }
 }
 

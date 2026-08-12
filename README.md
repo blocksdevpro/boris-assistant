@@ -101,11 +101,7 @@ cd boris-assistant
 cp .env.example .env
 # edit .env — OPENROUTER_API_KEY=...
 
-# 3. Wake ONNX required for desktop compile (path is gitignored under assets/)
-#    Place: assets/models/livekit/boris-large.onnx
-#    See "Models" below.
-
-# 4. Run
+# 3. Run
 cd desktop
 bun install
 bun run tauri dev
@@ -126,17 +122,20 @@ More desktop/ops detail: [`desktop/README.md`](desktop/README.md).
 
 | Model | When needed | How |
 |-------|-------------|-----|
-| **Wake** (`boris-large.onnx`) | **Compile** of `boris-desktop` | Embedded via `include_bytes!` from `assets/models/livekit/` (directory is **gitignored** — you must supply the file locally) |
+| **Wake** (`boris-large.onnx`) | **Compile** of `boris-desktop` | Tracked release asset, embedded via `include_bytes!` from `assets/models/livekit/` |
 | **Parakeet STT** | Runtime | App install / HF download into `~/.boris/models/parakeet` |
 | **Supertone TTS** | Runtime | App install into `~/.boris/models/supertone` |
 
-- `/assets` is listed in `.gitignore` (large weights and local-only trees).
+- `/assets` is ignored except for the versioned wake classifier at
+  `assets/models/livekit/boris-large.onnx`; its SHA-256 is
+  `cf786dbfc65508b6adc1168855cf42a694c76cccb450533ced9cf9322e980d1a`.
 - Product runtime prefers **`~/.boris/models`** (download / bootstrap), not repo `assets/`.
 - Override data root: `BORIS_HOME`.
-- Override download base: `BORIS_MODEL_BASE_URL`.
+- Override download base: `BORIS_MODEL_BASE_URL` (HTTPS only; downloaded
+  models are verified against pinned SHA-256 digests).
 - Hugging Face token (if required): `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`.
 
-Until the wake ONNX is relocated into a tracked resource path, **a bare git clone cannot build `boris-desktop` without placing that file**.
+The tracked wake asset makes a bare clone sufficient to build `boris-desktop`.
 
 ---
 
@@ -232,5 +231,6 @@ not every binary weight you download at runtime. See [THIRD-PARTY-NOTICES](THIRD
 
 ## Status
 
-Early **0.1.x** — actively developed. APIs and crate surfaces may change. Crates are
-marked `publish = false` until intentionally released to crates.io.
+**1.0.0** — the first stable Boris Desktop release. Public product configuration
+follows semantic versioning. Workspace crates are marked `publish = false` and
+are distributed as part of the desktop product rather than through crates.io.

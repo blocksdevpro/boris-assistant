@@ -128,18 +128,9 @@ fn format_quantization(q: &Quantization) -> &'static str {
 fn quantized_pair(q: &Quantization) -> (&'static str, &'static str) {
     match q {
         Quantization::FP32 => ("encoder-model.onnx", "decoder_joint-model.onnx"),
-        Quantization::FP16 => (
-            "encoder-model.fp16.onnx",
-            "decoder_joint-model.fp16.onnx",
-        ),
-        Quantization::Int8 => (
-            "encoder-model.int8.onnx",
-            "decoder_joint-model.int8.onnx",
-        ),
-        Quantization::Int4 => (
-            "encoder-model.int4.onnx",
-            "decoder_joint-model.int4.onnx",
-        ),
+        Quantization::FP16 => ("encoder-model.fp16.onnx", "decoder_joint-model.fp16.onnx"),
+        Quantization::Int8 => ("encoder-model.int8.onnx", "decoder_joint-model.int8.onnx"),
+        Quantization::Int4 => ("encoder-model.int4.onnx", "decoder_joint-model.int4.onnx"),
     }
 }
 
@@ -342,10 +333,8 @@ mod tests {
 
     #[test]
     fn incomplete_dir_preflight() {
-        let tmp = std::env::temp_dir().join(format!(
-            "boris-parakeet-incomplete-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("boris-parakeet-incomplete-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         // Only vocab — missing onnx files.
@@ -355,7 +344,10 @@ mod tests {
         let err = stt.load().unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
         let msg = err.to_string();
-        assert!(msg.contains("incomplete") || msg.contains("missing"), "{msg}");
+        assert!(
+            msg.contains("incomplete") || msg.contains("missing"),
+            "{msg}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

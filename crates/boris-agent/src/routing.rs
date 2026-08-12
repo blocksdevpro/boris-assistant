@@ -279,10 +279,7 @@ mod tests {
             classify_route("find my linkedin profile Uttam"),
             RouteMode::Strong
         );
-        assert_eq!(
-            classify_route("look for my github"),
-            RouteMode::Strong
-        );
+        assert_eq!(classify_route("look for my github"), RouteMode::Strong);
     }
 
     #[test]
@@ -307,7 +304,10 @@ mod tests {
 
     #[test]
     fn classifies_long_request_as_strong() {
-        let long = (0..20).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" ");
+        let long = (0..20)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(classify_route(&long), RouteMode::Strong);
     }
 

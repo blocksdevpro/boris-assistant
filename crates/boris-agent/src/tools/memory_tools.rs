@@ -54,7 +54,8 @@ impl Tool for MemorySearchTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
             .read_only(true)
             .max_concurrency(8)
     }
@@ -71,14 +72,9 @@ impl Tool for MemorySearchTool {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(5);
-        let hits = self
-            .memory
-            .search(&query, max)
-            .map_err(ToolError::failed)?;
+        let hits = self.memory.search(&query, max).map_err(ToolError::failed)?;
         if hits.is_empty() {
-            return Ok(truncate_tool_result(format!(
-                "No memory hits for: {query}"
-            )));
+            return Ok(truncate_tool_result(format!("No memory hits for: {query}")));
         }
         let mut out = format!("{} hit(s) for: {query}\n", hits.len());
         for (i, h) in hits.iter().enumerate() {
@@ -135,7 +131,8 @@ impl Tool for MemoryGetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Memory)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Memory)
             .read_only(true)
             .max_concurrency(8)
     }
@@ -153,10 +150,7 @@ impl Tool for MemoryGetTool {
             .map(|n| n as usize)
             .unwrap_or(6000);
         let _ = optional_string(obj, "unused");
-        let body = self
-            .memory
-            .get(&path, max)
-            .map_err(ToolError::failed)?;
+        let body = self.memory.get(&path, max).map_err(ToolError::failed)?;
         Ok(truncate_tool_result(format!(
             "<memory_file path=\"{}\">\n{body}\n</memory_file>",
             path.trim()

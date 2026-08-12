@@ -63,6 +63,7 @@ pub struct LoopState<'a> {
 ///
 /// `user_text` is only used for pending-turn bookkeeping (post-turn learn).
 /// Context must already contain the user message (and any prior history).
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_loop(
     mut state: LoopState<'_>,
     user_text: &str,
@@ -83,9 +84,8 @@ pub async fn agent_loop(
     let mut confirms_used = confirms_used;
     let max_rounds = config.max_tool_rounds as usize;
     // Full path to todos.json (session-bound or sandbox fallback).
-    let todos_file = todos_file.unwrap_or_else(|| {
-        crate::finish_gate::default_sandbox_guess().join("todos.json")
-    });
+    let todos_file = todos_file
+        .unwrap_or_else(|| crate::finish_gate::default_sandbox_guess().join("todos.json"));
     // Last non-empty spoken line this turn (finish-gate re-entry must not discard it).
     let mut last_speakable: Option<String> = None;
 
@@ -212,25 +212,22 @@ pub async fn agent_loop(
             user_text,
         ) {
             finish_gate_left = finish_gate_left.saturating_sub(1);
-            let reminder = if crate::finish_gate::should_research_gate(
-                user_text,
-                &reply,
-                &tools_used,
-            ) {
-                tracing::info!(
-                    left = finish_gate_left,
-                    "finish gate: weak research — continue tooling"
-                );
-                crate::finish_gate::research_gate_reminder()
-            } else {
-                let pending = crate::finish_gate::pending_todo_count(&todos_file);
-                tracing::info!(
-                    pending,
-                    left = finish_gate_left,
-                    "finish gate: open todos — continue tooling"
-                );
-                crate::finish_gate::todo_gate_reminder(pending)
-            };
+            let reminder =
+                if crate::finish_gate::should_research_gate(user_text, &reply, &tools_used) {
+                    tracing::info!(
+                        left = finish_gate_left,
+                        "finish gate: weak research — continue tooling"
+                    );
+                    crate::finish_gate::research_gate_reminder()
+                } else {
+                    let pending = crate::finish_gate::pending_todo_count(&todos_file);
+                    tracing::info!(
+                        pending,
+                        left = finish_gate_left,
+                        "finish gate: open todos — continue tooling"
+                    );
+                    crate::finish_gate::todo_gate_reminder(pending)
+                };
             state.context.push(Role::User, reminder);
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
@@ -250,9 +247,7 @@ pub async fn agent_loop(
 
     // Unreachable with 0..=max_rounds + return inside, but keep a soft landing.
     Ok(LoopResult {
-        outcome: AgentOutcome::speak(
-            "I ran out of steps on that. Ask me to pick it up again.",
-        ),
+        outcome: AgentOutcome::speak("I ran out of steps on that. Ask me to pick it up again."),
         tool_rounds,
         tools_used,
         pending_turn: None,
@@ -289,7 +284,12 @@ pub async fn resume_pending_tool(
 
     // Turn-scoped shell grant: after the user says yes once to shell, later
     // bash calls this turn skip HITL (hard gates + deny list still apply).
-    if approved && tool.meta().permissions.contains(&crate::tool::Permission::Shell) {
+    if approved
+        && tool
+            .meta()
+            .permissions
+            .contains(&crate::tool::Permission::Shell)
+    {
         state.runtime.grant_shell_this_turn();
     }
 
@@ -679,9 +679,20 @@ mod tests {
             client: &client,
             activated: None,
         };
-        let result = agent_loop(state, "run both", &config, vec![], 0, 0, None, None, None, 0)
-            .await
-            .unwrap();
+        let result = agent_loop(
+            state,
+            "run both",
+            &config,
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             result.tools_used,

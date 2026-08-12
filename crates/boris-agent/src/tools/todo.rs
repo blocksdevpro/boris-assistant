@@ -58,8 +58,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 async fn load_todos(path: &Path) -> Result<Vec<TodoItem>, ToolError> {
     match tokio::fs::read_to_string(path).await {
         Ok(s) if s.trim().is_empty() => Ok(vec![]),
-        Ok(s) => serde_json::from_str(&s)
-            .map_err(|e| ToolError::failed(format!("parse todos: {e}"))),
+        Ok(s) => {
+            serde_json::from_str(&s).map_err(|e| ToolError::failed(format!("parse todos: {e}")))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(ToolError::failed(format!("read todos: {e}"))),
     }
@@ -141,7 +142,11 @@ impl Tool for TodoReadTool {
             .max_concurrency(8)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let items = load_todos(&self.path).await?;
         Ok(truncate_tool_result(format_todos(&items)))
     }
@@ -209,7 +214,11 @@ impl Tool for TodoWriteTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let items = if let Some(arr) = obj.get("items").and_then(|v| v.as_array()) {
             parse_items_value(arr)?
@@ -288,17 +297,23 @@ mod tests {
         let read = TodoReadTool::new(&dir);
 
         let out = write
-            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({
-                "items": [
-                    {"id": "1", "content": "ship tools", "status": "pending"},
-                    {"id": "2", "content": "test", "status": "done"}
-                ]
-            }))
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({
+                    "items": [
+                        {"id": "1", "content": "ship tools", "status": "pending"},
+                        {"id": "2", "content": "test", "status": "done"}
+                    ]
+                }),
+            )
             .await
             .unwrap();
         assert!(out.contains("ship tools"));
 
-        let listed = read.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
+        let listed = read
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
+            .await
+            .unwrap();
         assert!(listed.contains("[ ] 1"));
         assert!(listed.contains("[x] 2"));
 

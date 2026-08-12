@@ -85,7 +85,11 @@ impl Tool for SaveUserFactTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let fact = require_string(obj, "fact")?;
         let category = optional_string(obj, "category")
@@ -156,7 +160,11 @@ impl Tool for UpdateUserProfileTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let mut changed = false;
         with_profile(&self.profile, &self.store, |p| {
@@ -230,7 +238,11 @@ impl Tool for GetUserContextTool {
             .max_concurrency(8)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let guard = self
             .profile
             .lock()

@@ -74,7 +74,9 @@ fn observation_looks_like_research_skill(observation: &str) -> bool {
         || lower.contains("# research")
         || lower.contains("wave 1")
         || (lower.contains("research")
-            && (lower.contains("web_search") || lower.contains("multi-query") || lower.contains("fan-out")))
+            && (lower.contains("web_search")
+                || lower.contains("multi-query")
+                || lower.contains("fan-out")))
 }
 
 fn is_weak_subagent(observation: &str) -> bool {
@@ -147,7 +149,9 @@ mod tests {
             "Child under-tooled; limited dig only.".into(),
         );
         assert!(out.contains("<system-reminder>"));
-        assert!(out.contains("web_search") || out.contains("under-tooled") || out.contains("multi"));
+        assert!(
+            out.contains("web_search") || out.contains("under-tooled") || out.contains("multi")
+        );
     }
 
     #[test]

@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::AgentError;
 use crate::outcome::AgentOutcome;
 use crate::runtime::{
-    args_summary, clamp_parallel, partition_read_write, InvokeOptions, InvokeResult, PendingToolCall,
-    PendingTurn, PolicyDecision, RawToolCall,
+    args_summary, clamp_parallel, partition_read_write, InvokeOptions, InvokeResult,
+    PendingToolCall, PendingTurn, PolicyDecision, RawToolCall,
 };
 use crate::tool::{Permission, Tool, ToolRisk};
 use crate::types::{AgentLoopConfig, EmitFn};
@@ -37,6 +37,10 @@ use super::helpers::{
 use super::LoopState;
 
 /// Outcome of processing one model tool-call batch.
+///
+/// The pause path intentionally carries the complete pending-turn state so a
+/// confirmed batch can resume without reconstructing model inputs.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ToolBatchResult {
     /// All calls finished; loop should request another LLM completion.
     Continue,
@@ -48,6 +52,7 @@ pub(super) enum ToolBatchResult {
 }
 
 /// Process a batch of tool calls with the appropriate concurrency strategy.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_tool_calls(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
@@ -139,6 +144,7 @@ fn batch_needs_confirmation(
 }
 
 /// Sequential path — HITL-safe; can pause mid-batch with remaining siblings.
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_batch_sequential(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
@@ -653,7 +659,10 @@ mod tests {
         .unwrap();
 
         match result {
-            ToolBatchResult::Paused { pending_turn, outcome } => {
+            ToolBatchResult::Paused {
+                pending_turn,
+                outcome,
+            } => {
                 assert_eq!(pending_turn.pending.name, "file_write");
                 assert_eq!(pending_turn.batch_with.len(), 1);
                 assert_eq!(pending_turn.batch_with[0].name, "file_edit");
@@ -704,8 +713,10 @@ mod tests {
         }
 
         // OpenConfirm shell so hard gate does not Deny.
-        let mut policy = crate::runtime::SandboxConfig::default();
-        policy.shell = crate::runtime::ShellPolicy::OpenConfirm;
+        let policy = crate::runtime::SandboxConfig {
+            shell: crate::runtime::ShellPolicy::OpenConfirm,
+            ..Default::default()
+        };
         let runtime = ToolRuntime::new(policy, Box::new(crate::runtime::NullAuditSink));
 
         let tools: Vec<Arc<dyn Tool>> = vec![
@@ -802,8 +813,10 @@ mod tests {
             }
         }
 
-        let mut policy = crate::runtime::SandboxConfig::default();
-        policy.shell = crate::runtime::ShellPolicy::OpenConfirm;
+        let policy = crate::runtime::SandboxConfig {
+            shell: crate::runtime::ShellPolicy::OpenConfirm,
+            ..Default::default()
+        };
         let runtime = ToolRuntime::new(policy, Box::new(crate::runtime::NullAuditSink));
 
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(ShellTool)];

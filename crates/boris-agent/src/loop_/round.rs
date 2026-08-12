@@ -49,10 +49,7 @@ pub(super) async fn complete_round(
 }
 
 /// Non-empty tool_calls array when tools are allowed this round.
-pub(super) fn tool_calls_if_runnable<'a>(
-    response: &'a Value,
-    at_cap: bool,
-) -> Option<&'a Vec<Value>> {
+pub(super) fn tool_calls_if_runnable(response: &Value, at_cap: bool) -> Option<&Vec<Value>> {
     if at_cap {
         return None;
     }

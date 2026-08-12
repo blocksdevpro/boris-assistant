@@ -338,8 +338,7 @@ impl Agent {
     /// Swap the audit sink to a session-local JSONL file, or null when unbound.
     pub fn set_audit_path(&mut self, path: Option<PathBuf>) {
         if let Some(p) = path {
-            self.runtime
-                .set_audit(Box::new(JsonlAuditSink::new(p)));
+            self.runtime.set_audit(Box::new(JsonlAuditSink::new(p)));
         } else {
             self.runtime.set_audit(Box::new(NullAuditSink));
         }
@@ -427,18 +426,12 @@ impl Agent {
     ///
     /// Listeners are stored by monotonic id; calling the returned closure
     /// removes that listener (no index-based leak / noop placeholders).
-    pub fn subscribe(
-        &mut self,
-        f: impl Fn(&AgentEvent) + Send + Sync + 'static,
-    ) -> impl FnOnce() {
+    pub fn subscribe(&mut self, f: impl Fn(&AgentEvent) + Send + Sync + 'static) -> impl FnOnce() {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         {
             // Poison-tolerant, same as `emit`: a listener panic during `emit()`
             // must not permanently break future `subscribe()` calls.
-            let mut guard = self
-                .listeners
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
             guard.push((id, Box::new(f)));
         }
         let listeners = Arc::clone(&self.listeners);

@@ -64,9 +64,7 @@ pub(super) fn build_openrouter_client(
         .with_reasoning(reasoning);
     if let Some(pref) = provider_pref {
         if !pref.trim().is_empty() {
-            client = client
-                .with_provider_pref(pref)
-                .with_allow_fallbacks(!pin);
+            client = client.with_provider_pref(pref).with_allow_fallbacks(!pin);
             tracing::info!(
                 model = %model,
                 provider = %pref,

@@ -14,7 +14,10 @@ fn main() {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .expect("HOME or USERPROFILE must be set");
-    let base = PathBuf::from(home).join(".boris").join("models").join("supertone");
+    let base = PathBuf::from(home)
+        .join(".boris")
+        .join("models")
+        .join("supertone");
     let onnx = base.join("onnx");
     let voices = base.join("voices");
 

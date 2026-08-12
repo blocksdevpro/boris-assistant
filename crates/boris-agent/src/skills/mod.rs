@@ -106,11 +106,7 @@ mod tests {
         let skill_dir = dir.join("wrong");
         fs::create_dir_all(&skill_dir).unwrap();
         let path = skill_dir.join("SKILL.md");
-        fs::write(
-            &path,
-            "---\nname: right\ndescription: x\n---\nbody",
-        )
-        .unwrap();
+        fs::write(&path, "---\nname: right\ndescription: x\n---\nbody").unwrap();
         assert!(parse_skill_file(&path, SkillSource::User).is_err());
         let _ = fs::remove_dir_all(&dir);
     }

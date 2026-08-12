@@ -73,9 +73,7 @@ fn split_long_unit(text: &str, max_chars: usize) -> Vec<String> {
         return vec![text.to_string()];
     }
 
-    let tokens: Vec<&str> = text
-        .split_inclusive(|c: char| matches!(c, ',' | ';' | ':'))
-        .collect();
+    let tokens: Vec<&str> = text.split_inclusive([',', ';', ':']).collect();
 
     if tokens.len() <= 1 {
         return pack_words(text, max_chars);

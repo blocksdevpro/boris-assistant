@@ -92,12 +92,7 @@ impl SpawnSubagentTool {
         tools: SharedTools,
         sandbox: SandboxConfig,
     ) -> Self {
-        Self::new(
-            client,
-            tools,
-            sandbox,
-            Arc::new(Mutex::new(None)),
-        )
+        Self::new(client, tools, sandbox, Arc::new(Mutex::new(None)))
     }
 }
 
@@ -197,10 +192,7 @@ impl Tool for SpawnSubagentTool {
         let child_id = generate_child_id();
         let child_dir = session_root.join("subagents").join(&child_id);
         fs::create_dir_all(&child_dir).map_err(|e| {
-            ToolError::failed(format!(
-                "subagent create dir {}: {e}",
-                child_dir.display()
-            ))
+            ToolError::failed(format!("subagent create dir {}: {e}", child_dir.display()))
         })?;
 
         let started_ms = now_ms();
@@ -237,10 +229,12 @@ impl Tool for SpawnSubagentTool {
             self.sandbox.clone(),
             Box::new(JsonlAuditSink::new(audit_path)),
         );
-        let mut features = ToolRuntimeFeatures::default();
-        features.wave_scheduling = true;
-        features.progress_events = true;
-        features.force_list_all = true;
+        let features = ToolRuntimeFeatures {
+            wave_scheduling: true,
+            progress_events: true,
+            force_list_all: true,
+            ..Default::default()
+        };
         let config = AgentLoopConfig {
             max_tool_rounds: max_rounds.min(DEFAULT_MAX_TOOL_ROUNDS),
             session_id: ctx.session_id.clone(),
@@ -434,7 +428,7 @@ fn research_effort_low(tools_used: &[String], summary: &str) -> bool {
 }
 
 fn is_research_tool(name: &str) -> bool {
-    RESEARCH_TOOL_NAMES.iter().any(|&n| n == name)
+    RESEARCH_TOOL_NAMES.contains(&name)
 }
 
 fn summary_looks_thin(summary: &str) -> bool {
@@ -470,30 +464,21 @@ fn child_progress_emit(ctx: &ToolCallContext) -> EmitFn {
                 }
             }
             AgentEvent::ToolProgress {
-                tool_name,
-                message,
-                ..
+                tool_name, message, ..
             } => {
                 let msg = message.trim();
                 if msg.is_empty() {
                     Some(format!("via {tool_name}"))
                 } else {
-                    Some(format!(
-                        "via {tool_name}: {}",
-                        truncate_chars(msg, 48)
-                    ))
+                    Some(format!("via {tool_name}: {}", truncate_chars(msg, 48)))
                 }
             }
-            AgentEvent::ToolExecutionEnd {
-                tool_name, ok, ..
-            } => Some(if *ok {
+            AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
                 format!("via {tool_name} · done")
             } else {
                 format!("via {tool_name} · failed")
             }),
-            AgentEvent::TurnStart { round } if *round > 0 => {
-                Some(format!("step {}", round + 1))
-            }
+            AgentEvent::TurnStart { round } if *round > 0 => Some(format!("step {}", round + 1)),
             AgentEvent::Error { message } => {
                 let m = message.trim();
                 if m.is_empty() {
@@ -539,8 +524,8 @@ fn truncate_tool_result_to_summary(s: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boris_ai::error::LlmError;
     use crate::tool_context::ToolCallContext;
+    use boris_ai::error::LlmError;
 
     #[test]
     fn truncate_chars_short_unchanged() {
@@ -637,7 +622,6 @@ mod tests {
         assert_eq!(DEFAULT_SUBAGENT_ROUNDS, 8);
         assert_eq!(MAX_SUBAGENT_ROUNDS, 16);
         assert_eq!(SUBAGENT_TIMEOUT_SECS, 180);
-        assert!(SUBAGENT_CONTEXT_MAX_TURNS >= 16);
     }
 
     #[test]
@@ -723,10 +707,8 @@ mod tests {
             SandboxConfig::default(),
             Arc::clone(&session_root),
         );
-        let ctx = ToolCallContext::new("call-bound").with_session(
-            Some("sess-abc".into()),
-            Some("turn-1".into()),
-        );
+        let ctx = ToolCallContext::new("call-bound")
+            .with_session(Some("sess-abc".into()), Some("turn-1".into()));
         let err = tool
             .execute(&ctx, json!({ "goal": "find Bob" }))
             .await

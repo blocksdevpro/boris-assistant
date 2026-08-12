@@ -56,10 +56,7 @@ mod tests {
     fn parse_timeout_defaults_and_clamps() {
         assert_eq!(parse_timeout_secs(&map(json!({}))), 120);
         assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 30 }))), 30);
-        assert_eq!(
-            parse_timeout_secs(&map(json!({ "timeout_secs": 45 }))),
-            45
-        );
+        assert_eq!(parse_timeout_secs(&map(json!({ "timeout_secs": 45 }))), 45);
         assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 0 }))), 1);
         assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 999 }))), 300);
         // `timeout` wins over `timeout_secs` when both present
@@ -77,18 +74,13 @@ mod tests {
 
     #[test]
     fn truncate_output_by_lines_keeps_tail() {
-        let many: String = (0..MAX_LINES + 50)
-            .map(|i| format!("line-{i}\n"))
-            .collect();
+        let many: String = (0..MAX_LINES + 50).map(|i| format!("line-{i}\n")).collect();
         let out = truncate_output(many);
         assert!(out.contains("[Output truncated:"));
         assert!(out.contains(&format!("line-{}", MAX_LINES + 49)));
         assert!(!out.contains("line-0\n"));
         // Last MAX_LINES lines of original, plus trailing newline + notice.
-        let body_lines: Vec<&str> = out
-            .lines()
-            .filter(|l| l.starts_with("line-"))
-            .collect();
+        let body_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("line-")).collect();
         assert_eq!(body_lines.len(), MAX_LINES);
     }
 

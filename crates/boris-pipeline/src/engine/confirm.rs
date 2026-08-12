@@ -12,8 +12,6 @@ pub(super) fn normalize_confirm_text(text: &str) -> String {
     for ch in text.chars() {
         if ch.is_ascii_alphanumeric() || ch.is_whitespace() || ch == '\'' {
             out.push(ch.to_ascii_lowercase());
-        } else if ch == '-' {
-            out.push(' ');
         } else {
             out.push(' ');
         }
@@ -120,8 +118,8 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
         "mhmm",
     ];
     const NO: &[&str] = &[
-        "no", "nope", "nah", "cancel", "stop", "never", "negative", "decline", "abort",
-        "refuse", "reject", "denied", "pass", "skip",
+        "no", "nope", "nah", "cancel", "stop", "never", "negative", "decline", "abort", "refuse",
+        "reject", "denied", "pass", "skip",
     ];
     const YES_ULTRA: &[&str] = &["y"];
     const NO_ULTRA: &[&str] = &["n"];

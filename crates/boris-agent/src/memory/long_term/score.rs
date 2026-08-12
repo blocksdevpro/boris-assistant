@@ -159,7 +159,10 @@ mod tests {
     fn best_snippet_centers_on_match() {
         let raw = "aaaa ".repeat(20) + "dark mode rocks " + &"bbbb ".repeat(20);
         let snip = best_snippet(&raw, "dark", 80);
-        assert!(snip.to_ascii_lowercase().contains("dark"), "snippet={snip:?}");
+        assert!(
+            snip.to_ascii_lowercase().contains("dark"),
+            "snippet={snip:?}"
+        );
         assert!(snip.starts_with('…'));
     }
 

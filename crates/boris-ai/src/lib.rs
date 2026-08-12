@@ -39,6 +39,6 @@ pub use usage::TokenUsage;
 
 // OpenRouter timeout / base-url / reasoning (hosts may tune with builders).
 pub use providers::openrouter::{
-    ReasoningConfig, ReasoningEffort, DEFAULT_BASE_URL, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_TOKENS,
-    DEFAULT_MODEL, DEFAULT_TIMEOUT,
+    ReasoningConfig, ReasoningEffort, DEFAULT_BASE_URL, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_TIMEOUT,
 };

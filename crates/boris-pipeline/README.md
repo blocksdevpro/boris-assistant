@@ -95,16 +95,13 @@ of the sections above.
 
 ## Model downloads (`download.rs`)
 
-Each catalog entry enforces a `min_bytes` floor, and can optionally pin a `sha256` hex
-digest checked after download (before the file replaces any existing copy — mismatch
-deletes the temp file and fails that entry). All entries currently ship `sha256: None`
-pending independently verified upstream digests; the mechanism is fully wired so hashes
-can be filled in per-entry without further code changes. `min_bytes` alone does not
-protect against a compromised/MITM mirror serving an oversized malicious payload.
+Each catalog entry enforces a `min_bytes` floor and a mandatory pinned SHA-256
+digest. Downloads and existing model files are hashed before being accepted; a
+mismatch is discarded or reinstalled. Default Hugging Face sources use pinned
+commit revisions.
 
-`BORIS_MODEL_BASE_URL` accepts `https://` or `http://`. Plain `http://` mirrors are
-still allowed (e.g. local/offline test mirrors) but log a loud `tracing::warn!` since
-they have no transport integrity of their own.
+`BORIS_MODEL_BASE_URL` accepts only `https://` mirrors. Mirror responses must
+still match the catalog hash.
 
 ## Environment variables
 

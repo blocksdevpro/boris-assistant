@@ -49,7 +49,11 @@ impl Tool for OpenUrlTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let url_arg = require_string(obj, "url")?;
         // Align with web_fetch: scheme + blocked hosts (no localhost / private / metadata).
@@ -111,7 +115,11 @@ impl Tool for OpenPathTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let path = resolve_under_roots(&raw, &self.read_roots)?;

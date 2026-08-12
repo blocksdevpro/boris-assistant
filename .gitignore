@@ -1,5 +1,10 @@
 /target
-/assets
+/assets/*
+!/assets/models/
+/assets/models/*
+!/assets/models/livekit/
+/assets/models/livekit/*
+!/assets/models/livekit/boris-large.onnx
 .env
 .env.*
 !.env.example

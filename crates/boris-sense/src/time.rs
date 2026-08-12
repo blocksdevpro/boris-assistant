@@ -17,13 +17,19 @@ pub fn duration_to_samples(d: Duration, sample_rate: u32) -> usize {
 /// Samples of non-speech after speech before endpointing (`VAD_SILENCE_WINDOW`).
 #[cfg(feature = "vad")]
 pub fn vad_silence_samples() -> usize {
-    duration_to_samples(crate::vad::VAD_SILENCE_WINDOW, boris_core::AUDIO_TARGET_RATE)
+    duration_to_samples(
+        crate::vad::VAD_SILENCE_WINDOW,
+        boris_core::AUDIO_TARGET_RATE,
+    )
 }
 
 /// Samples of non-speech before any speech before giving up (`VAD_INITIAL_TIMEOUT`).
 #[cfg(feature = "vad")]
 pub fn vad_initial_timeout_samples() -> usize {
-    duration_to_samples(crate::vad::VAD_INITIAL_TIMEOUT, boris_core::AUDIO_TARGET_RATE)
+    duration_to_samples(
+        crate::vad::VAD_INITIAL_TIMEOUT,
+        boris_core::AUDIO_TARGET_RATE,
+    )
 }
 
 #[cfg(test)]
@@ -32,10 +38,7 @@ mod tests {
 
     #[test]
     fn one_second_at_16k() {
-        assert_eq!(
-            duration_to_samples(Duration::from_secs(1), 16_000),
-            16_000
-        );
+        assert_eq!(duration_to_samples(Duration::from_secs(1), 16_000), 16_000);
     }
 
     #[test]
@@ -46,10 +49,7 @@ mod tests {
     #[test]
     fn subsecond_rounding() {
         // 40 ms @ 16 kHz = 640 samples
-        assert_eq!(
-            duration_to_samples(Duration::from_millis(40), 16_000),
-            640
-        );
+        assert_eq!(duration_to_samples(Duration::from_millis(40), 16_000), 640);
     }
 
     #[cfg(feature = "vad")]

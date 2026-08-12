@@ -83,10 +83,7 @@ pub(super) fn join_stt_load(job: ModelLoadJob<SttBox>) -> (SttBox, Result<(), St
         ModelLoadJob::Thread(h) => h.join().unwrap_or_else(|_| {
             tracing::error!("stt load thread panicked");
             // Recover with a no-op stub so the engine can still stop cleanly.
-            (
-                Box::new(LostStt),
-                Err("stt load thread panicked".into()),
-            )
+            (Box::new(LostStt), Err("stt load thread panicked".into()))
         }),
         ModelLoadJob::Ready(stt, r) => (stt, r),
     }
@@ -155,10 +152,7 @@ pub(super) fn join_tts_load(job: ModelLoadJob<TtsBox>) -> (TtsBox, Result<(), St
     match job {
         ModelLoadJob::Thread(h) => h.join().unwrap_or_else(|_| {
             tracing::error!("tts load thread panicked");
-            (
-                Box::new(LostTts),
-                Err("tts load thread panicked".into()),
-            )
+            (Box::new(LostTts), Err("tts load thread panicked".into()))
         }),
         ModelLoadJob::Ready(tts, r) => (tts, r),
     }

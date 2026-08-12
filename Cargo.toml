@@ -15,8 +15,8 @@ members = [
 ]
 
 [workspace.package]
-# No rust-toolchain.toml pinned yet; keep MSRV aligned with modern stable (edition 2021).
-rust-version = "1.85"
+# `rust-toolchain.toml` pins the release compiler; this is the supported MSRV.
+rust-version = "1.97"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/blocksdevpro/boris-assistant"
@@ -42,9 +42,9 @@ boris-pipeline    = { path = "crates/boris-pipeline" }
 # Root package is intentionally not a voice host. Product entrypoint: boris-desktop.
 [package]
 name         = "boris-assistant"
-version      = "0.1.0"
+version      = "1.0.0"
 edition      = "2021"
-rust-version = "1.85"
+rust-version = "1.97"
 description  = "Boris Assistant workspace (retired CLI stub; product host is boris-desktop)"
 license      = "Apache-2.0"
 readme       = "README.md"

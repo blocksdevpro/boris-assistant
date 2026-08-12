@@ -3,7 +3,8 @@
 //! On Windows, stages ONNX Runtime runtime DLLs into `resources/ort/` so
 //! `tauri.conf.json` `bundle.resources` can ship them next to the executable
 //! (required for clean-machine installs; ort's `copy-dylibs` only covers
-//! `cargo run` / `target/{profile}/`).
+//! `cargo run` / `target/{profile}/`). Debug checks warn when the runtime is
+//! unavailable; release builds fail so installers cannot omit it silently.
 
 use std::env;
 use std::fs;
@@ -24,13 +25,26 @@ fn main() {
     #[cfg(windows)]
     {
         if let Err(e) = stage_ort_runtime_dlls(&resources_ort) {
-            // Don't hard-fail `cargo check` / first-time builds; packaging will
-            // simply omit missing DLLs (empty resource dir is fine).
+            if is_release_profile() {
+                panic!(
+                    "ORT runtime DLL staging failed for a release build: {e}. \\
+                     A Windows installer must include onnxruntime.dll and DirectML.dll. \\
+                     Build once with the configured ORT backend or populate the ort.pyke.io cache."
+                );
+            }
+            // Keep normal debug `cargo check` / first-time development builds
+            // usable. A later release build will repeat staging and fail closed.
             println!("cargo:warning=ORT runtime DLL staging: {e}");
         }
     }
 
     tauri_build::build()
+}
+
+/// Tauri's production bundles compile with Cargo's release profile.
+#[cfg(windows)]
+fn is_release_profile() -> bool {
+    env::var("PROFILE").is_ok_and(|profile| profile == "release")
 }
 
 /// Runtime DLLs we ship next to the Windows app binary.
@@ -88,12 +102,17 @@ fn stage_ort_runtime_dlls(dest_dir: &Path) -> Result<(), String> {
         }
     }
 
-    if staged.is_empty() {
-        return Err(
-            "no onnxruntime/DirectML DLLs found under target/ or ort.pyke.io cache; \
-             run a full Windows build first so ort can download/copy them"
-                .into(),
-        );
+    let missing: Vec<&str> = ESSENTIAL_DLL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !seen.contains(&name.to_ascii_lowercase()))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "missing required runtime DLL(s): {}; searched target/ and the ort.pyke.io cache; \
+             run a full Windows build first so ort can download/copy them",
+            missing.join(", ")
+        ));
     }
 
     println!(

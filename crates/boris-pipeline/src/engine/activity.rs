@@ -33,9 +33,7 @@ pub(super) fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option
             format!("fail · {tool_name}")
         }),
         AgentEvent::ToolProgress {
-            tool_name,
-            message,
-            ..
+            tool_name, message, ..
         } => {
             let msg = message.trim();
             if msg.is_empty() {
@@ -80,9 +78,7 @@ pub(super) fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option
                 Some(format!("thinking · after {names}"))
             }
         }
-        AgentEvent::NeedsConfirmation { pending } => {
-            Some(format!("confirm · {}", pending.name))
-        }
+        AgentEvent::NeedsConfirmation { pending } => Some(format!("confirm · {}", pending.name)),
         _ => None,
     }
 }
@@ -114,8 +110,7 @@ fn extract_arg_value(summary: &str, key: &str) -> Option<String> {
     let needle = format!("{key}=");
     let idx = summary.find(&needle)?;
     let rest = &summary[idx + needle.len()..];
-    if rest.starts_with('"') {
-        let body = &rest[1..];
+    if let Some(body) = rest.strip_prefix('"') {
         let end = body.find('"')?;
         let v = body[..end].trim();
         if v.is_empty() {
@@ -155,7 +150,10 @@ mod tests {
             tool_name: "bash".into(),
             args_summary: String::new(),
         };
-        assert_eq!(activity_label(&start, empty).as_deref(), Some("tool · bash"));
+        assert_eq!(
+            activity_label(&start, empty).as_deref(),
+            Some("tool · bash")
+        );
 
         let start_args = AgentEvent::ToolExecutionStart {
             call_id: "2".into(),
@@ -183,7 +181,10 @@ mod tests {
             ok: true,
             duration_ms: 1,
         };
-        assert_eq!(activity_label(&end_ok, empty).as_deref(), Some("done · bash"));
+        assert_eq!(
+            activity_label(&end_ok, empty).as_deref(),
+            Some("done · bash")
+        );
 
         let end_fail = AgentEvent::ToolExecutionEnd {
             call_id: "1".into(),

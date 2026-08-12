@@ -11,7 +11,9 @@ use boris_sense::{init_onnx_runtime, LivekitWakeWord, WebRtcVad};
 use crate::config::PipelineConfig;
 use crate::error::{PipelineError, Result};
 use crate::paths;
-use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS};
+use crate::status::{
+    DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
+};
 
 use super::llm::{
     build_openrouter_client, looks_like_non_agent_model, resolve_model_and_provider,
@@ -208,7 +210,10 @@ fn open_audio(
     config: &PipelineConfig,
     status_tx: &std::sync::mpsc::Sender<StatusPicture>,
 ) -> Result<AudioService> {
-    tracing::info!(play_source_rate, "opening AudioService (default mic + speaker)…");
+    tracing::info!(
+        play_source_rate,
+        "opening AudioService (default mic + speaker)…"
+    );
     match AudioService::with_source_rate(play_source_rate) {
         Ok(audio) => {
             tracing::info!("AudioService ready");
@@ -256,7 +261,11 @@ fn load_wakeword(
     }
 }
 
-fn fault(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: &PipelineConfig, detail: impl Into<String>) {
+fn fault(
+    status_tx: &std::sync::mpsc::Sender<StatusPicture>,
+    config: &PipelineConfig,
+    detail: impl Into<String>,
+) {
     let _ = status_tx.send(StatusPicture {
         engine: EngineState::Fault,
         phase: Phase::Off,
@@ -325,31 +334,30 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         &session_id,
         false, // medium reasoning for simple facts
     );
-    let client: Box<dyn boris_agent::LlmClient> = if fast_model == strong_model
-        && strong_provider_raw == fast_provider_raw
-    {
-        tracing::info!(
-            model = %strong_model,
-            provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
-            session_id = %session_id,
-            "single-model LLM (set fast model + provider for dual routing)"
-        );
-        Box::new(strong)
-    } else {
-        tracing::info!(
-            fast = %fast_model,
-            fast_provider = fast_provider_raw.as_deref().unwrap_or("(auto)"),
-            strong = %strong_model,
-            strong_provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
-            pin_provider = pin,
-            session_id = %session_id,
-            "dual-model routing enabled"
-        );
-        Box::new(boris_agent::RoutingClient::new(
-            Box::new(fast),
-            Box::new(strong),
-        ))
-    };
+    let client: Box<dyn boris_agent::LlmClient> =
+        if fast_model == strong_model && strong_provider_raw == fast_provider_raw {
+            tracing::info!(
+                model = %strong_model,
+                provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
+                session_id = %session_id,
+                "single-model LLM (set fast model + provider for dual routing)"
+            );
+            Box::new(strong)
+        } else {
+            tracing::info!(
+                fast = %fast_model,
+                fast_provider = fast_provider_raw.as_deref().unwrap_or("(auto)"),
+                strong = %strong_model,
+                strong_provider = strong_provider_raw.as_deref().unwrap_or("(auto)"),
+                pin_provider = pin,
+                session_id = %session_id,
+                "dual-model routing enabled"
+            );
+            Box::new(boris_agent::RoutingClient::new(
+                Box::new(fast),
+                Box::new(strong),
+            ))
+        };
     let mut agent = Agent::new(client, &config.system_prompt);
     paths::migrate_home_if_needed();
     if let Err(e) = paths::ensure_agent_dirs() {
@@ -408,10 +416,9 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     agent.enable_skills(loaded);
 
     if config.long_term_memory {
-        match agent.enable_long_term_memory_with_sessions(
-            paths::memory_dir(),
-            Some(paths::sessions_dir()),
-        ) {
+        match agent
+            .enable_long_term_memory_with_sessions(paths::memory_dir(), Some(paths::sessions_dir()))
+        {
             Ok(_) => tracing::info!(
                 memory_md = %paths::memory_md_path().display(),
                 sessions = %paths::sessions_dir().display(),

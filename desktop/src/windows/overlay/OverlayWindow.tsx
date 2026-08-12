@@ -59,6 +59,7 @@ export function OverlayWindow() {
   const caption = isReady && readyCaptionHidden ? null : privateCaption;
   const orbOnly = isReady && readyCaptionHidden;
   const confirm = isConfirmContext(status);
+  const faultKey = deviceFaultKey(status);
   const scale = Math.min(
     1.25,
     Math.max(0.75, preferences.overlay_scale_percent / 100),
@@ -140,102 +141,150 @@ export function OverlayWindow() {
           ["--overlay-scale" as string]: scale,
         } as CSSProperties}
       >
-        {orbOnly ? (
-          <motion.div
-            data-tauri-drag-region
-            className="overlay-island relative flex items-center justify-center rounded-full p-2.5"
-            initial={reduceMotion ? false : { opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: reduceMotion ? 0 : 0.3, ease: soft }}
-            role="status"
-            aria-live="polite"
-            aria-label="Boris is ready"
-          >
-            <PresenceOrb
-              motion="none"
-              accent={tone.accent}
-              reducedMotion={reduceMotion}
-              size="md"
-            />
-          </motion.div>
-        ) : (
-          <motion.div
-            data-tauri-drag-region
-            className={cn(
-              "overlay-island relative flex w-max min-w-[220px] max-w-[356px] select-none flex-col rounded-[18px] px-3 py-2",
-              confirm && "overlay-island--confirm",
-            )}
-            animate={{
-              borderColor: confirm
-                ? `color-mix(in oklch, ${tone.accent} 45%, rgba(255,255,255,0.12))`
-                : "rgba(255,255,255,0.14)",
-              boxShadow: reduceMotion
-                ? "0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09)"
-                : `0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09), 0 0 12px color-mix(in oklch, ${tone.glow} 55%, transparent)`,
-            }}
-            transition={{ duration: reduceMotion ? 0 : 0.32, ease: soft }}
-            role="status"
-            aria-live={status.engine === "Fault" ? "assertive" : "polite"}
-            aria-atomic="true"
-          >
-            <div data-tauri-drag-region className="flex min-h-8 items-center gap-2">
-              <PresenceOrb
-                motion={tone.motion}
-                accent={tone.accent}
-                reducedMotion={reduceMotion}
-              />
-
-              <div
+        <motion.div
+          data-tauri-drag-region
+          layout={reduceMotion ? false : "size"}
+          className={cn(
+            "overlay-island relative flex select-none",
+            orbOnly
+              ? "items-center justify-center p-2.5"
+              : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
+          )}
+          initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
+          animate={{
+            opacity: 1,
+            scale: 1,
+            borderRadius: orbOnly ? 999 : 18,
+            backgroundColor: confirm
+              ? "rgba(34, 30, 24, 0.95)"
+              : "rgba(28, 30, 36, 0.97)",
+            borderColor: confirm
+              ? `color-mix(in oklch, ${tone.accent} 45%, rgba(255,255,255,0.12))`
+              : "rgba(255,255,255,0.14)",
+            boxShadow: reduceMotion
+              ? "0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09)"
+              : `0 8px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.09), 0 0 12px color-mix(in oklch, ${tone.glow} 55%, transparent)`,
+          }}
+          transition={{
+            duration: reduceMotion ? 0 : 0.32,
+            ease: soft,
+            layout: { duration: reduceMotion ? 0 : 0.36, ease: soft },
+          }}
+          role="status"
+          aria-live={status.engine === "Fault" ? "assertive" : "polite"}
+          aria-atomic="true"
+          aria-label={orbOnly ? "Boris is ready" : undefined}
+        >
+          <AnimatePresence mode="popLayout" initial={false}>
+            {orbOnly ? (
+              <motion.div
+                key="ready-orb"
                 data-tauri-drag-region
-                className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                className="flex items-center justify-center"
+                initial={reduceMotion ? false : { opacity: 0, scale: 0.82 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={reduceMotion ? undefined : { opacity: 0, scale: 0.86 }}
+                transition={{ duration: reduceMotion ? 0 : 0.24, ease: soft }}
               >
-                <AnimatePresence mode="wait" initial={false}>
-                  <motion.span
-                    key={primary}
-                    data-tauri-drag-region
-                    className="shrink-0 text-[13px] font-semibold leading-tight tracking-[-0.02em] text-white"
-                    initial={reduceMotion ? false : { opacity: 0, y: 1 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={reduceMotion ? undefined : { opacity: 0, y: -1 }}
-                    transition={{ duration: reduceMotion ? 0 : 0.2, ease: soft }}
-                  >
-                    {primary}
-                  </motion.span>
-                </AnimatePresence>
-                {secondary ? (
-                  <span
-                    data-tauri-drag-region
-                    className="min-w-0 truncate text-[11px] leading-tight text-white/65"
-                  >
-                    · {secondary}
-                  </span>
-                ) : null}
-              </div>
-
-              <DeviceFaultBadge status={status} />
-            </div>
-
-            <AnimatePresence initial={false}>
-              {caption ? (
-                <motion.div
-                  key={`${caption.kind}-${caption.text.slice(0, 32)}`}
+                <PresenceOrb
+                  motion="none"
+                  accent={tone.accent}
+                  reducedMotion={reduceMotion}
+                  size="md"
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="overlay-details"
+                data-tauri-drag-region
+                className="flex w-full flex-col"
+                initial={reduceMotion ? false : { opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98 }}
+                transition={{ duration: reduceMotion ? 0 : 0.22, ease: soft }}
+              >
+                <div
                   data-tauri-drag-region
-                  className={cn(
-                    "overlay-caption mt-1.5 min-w-0 max-w-[324px] overflow-hidden rounded-[10px] px-2 py-1.5",
-                    confirm && "overlay-caption--confirm",
-                  )}
-                  initial={reduceMotion ? false : { opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={reduceMotion ? undefined : { opacity: 0, height: 0 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.28, ease: soft }}
-                  role={caption.kind === "error" ? "alert" : undefined}
+                  className="flex min-h-8 items-center gap-2"
                 >
-                  <CaptionBody caption={caption} />
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
-          </motion.div>
-        )}
+                  <PresenceOrb
+                    motion={tone.motion}
+                    accent={tone.accent}
+                    reducedMotion={reduceMotion}
+                  />
+
+                  <motion.div
+                    layout={reduceMotion ? false : true}
+                    data-tauri-drag-region
+                    className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                  >
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      <motion.span
+                        layout={reduceMotion ? false : "position"}
+                        key={primary}
+                        data-tauri-drag-region
+                        className="shrink-0 text-[13px] font-semibold leading-tight tracking-[-0.02em] text-white"
+                        initial={reduceMotion ? false : { opacity: 0, y: 2 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={reduceMotion ? undefined : { opacity: 0, y: -2 }}
+                        transition={{ duration: reduceMotion ? 0 : 0.2, ease: soft }}
+                      >
+                        {primary}
+                      </motion.span>
+                    </AnimatePresence>
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      {secondary ? (
+                        <motion.span
+                          layout={reduceMotion ? false : "position"}
+                          key={secondary}
+                          data-tauri-drag-region
+                          className="min-w-0 truncate text-[11px] leading-tight text-white/65"
+                          initial={reduceMotion ? false : { opacity: 0, x: -3 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={reduceMotion ? undefined : { opacity: 0, x: 3 }}
+                          transition={{ duration: reduceMotion ? 0 : 0.2, ease: soft }}
+                        >
+                          · {secondary}
+                        </motion.span>
+                      ) : null}
+                    </AnimatePresence>
+                  </motion.div>
+
+                  <AnimatePresence mode="popLayout" initial={false}>
+                    {faultKey ? (
+                      <DeviceFaultBadge
+                        key={faultKey}
+                        status={status}
+                        reducedMotion={reduceMotion}
+                      />
+                    ) : null}
+                  </AnimatePresence>
+                </div>
+
+                <AnimatePresence mode="popLayout" initial={false}>
+                  {caption ? (
+                    <motion.div
+                      layout={reduceMotion ? false : "size"}
+                      key={caption.kind}
+                      data-tauri-drag-region
+                      className={cn(
+                        "overlay-caption mt-1.5 min-w-0 max-w-[324px] overflow-hidden rounded-[10px] px-2 py-1.5",
+                        confirm && "overlay-caption--confirm",
+                      )}
+                      initial={reduceMotion ? false : { opacity: 0, height: 0, y: -2 }}
+                      animate={{ opacity: 1, height: "auto", y: 0 }}
+                      exit={reduceMotion ? undefined : { opacity: 0, height: 0, y: -2 }}
+                      transition={{ duration: reduceMotion ? 0 : 0.28, ease: soft }}
+                      role={caption.kind === "error" ? "alert" : undefined}
+                    >
+                      <CaptionBody caption={caption} />
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
       </div>
     </div>
   );
@@ -297,42 +346,78 @@ function PresenceOrb({
       className={cn("relative flex shrink-0 items-center justify-center", box)}
       aria-hidden="true"
     >
-      {effectiveMotion !== "none" ? (
-        <span
-          className={cn(
-            "absolute inset-0 rounded-full border",
-            effectiveMotion === "listen" && "overlay-ring-listen",
-            effectiveMotion === "think" && "overlay-ring-think",
-            effectiveMotion === "speak" && "overlay-ring-speak",
-            effectiveMotion === "breathe" && "overlay-ring-breathe",
-          )}
-          style={{ borderColor: accent }}
-        />
-      ) : null}
-      <span
-        className={cn(
-          "absolute rounded-full",
-          core,
-          effectiveMotion === "listen" && "overlay-core-listen",
-          effectiveMotion === "think" && "overlay-core-think",
-          effectiveMotion === "speak" && "overlay-core-speak",
-          effectiveMotion === "breathe" && "overlay-core-breathe",
-        )}
-        style={{
-          backgroundColor: accent,
-          boxShadow: `0 0 10px color-mix(in oklch, ${accent} 55%, transparent)`,
-        }}
-      />
+      <AnimatePresence initial={false}>
+        {effectiveMotion !== "none" ? (
+          <motion.span
+            key={effectiveMotion}
+            className="absolute inset-0"
+            initial={reducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reducedMotion ? undefined : { opacity: 0 }}
+            transition={{ duration: reducedMotion ? 0 : 0.22, ease: soft }}
+          >
+            <motion.span
+              className={cn(
+                "absolute inset-0 rounded-full border",
+                effectiveMotion === "listen" && "overlay-ring-listen",
+                effectiveMotion === "think" && "overlay-ring-think",
+                effectiveMotion === "speak" && "overlay-ring-speak",
+                effectiveMotion === "breathe" && "overlay-ring-breathe",
+              )}
+              animate={{ borderColor: accent }}
+              transition={{ duration: reducedMotion ? 0 : 0.3, ease: soft }}
+            />
+          </motion.span>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        <motion.span
+          key={effectiveMotion}
+          className={cn("absolute", core)}
+          initial={reducedMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={reducedMotion ? undefined : { opacity: 0 }}
+          transition={{ duration: reducedMotion ? 0 : 0.2, ease: soft }}
+        >
+          <motion.span
+            className={cn(
+              "absolute inset-0 rounded-full",
+              effectiveMotion === "listen" && "overlay-core-listen",
+              effectiveMotion === "think" && "overlay-core-think",
+              effectiveMotion === "speak" && "overlay-core-speak",
+              effectiveMotion === "breathe" && "overlay-core-breathe",
+            )}
+            animate={{
+              backgroundColor: accent,
+              boxShadow: `0 0 10px color-mix(in oklch, ${accent} 55%, transparent)`,
+            }}
+            transition={{ duration: reducedMotion ? 0 : 0.3, ease: soft }}
+          />
+        </motion.span>
+      </AnimatePresence>
     </div>
   );
 }
 
-/** Visible labels are required because the locked overlay cannot be hovered. */
-function DeviceFaultBadge({ status }: { status: StatusPicture }) {
+function deviceFaultKey(status: StatusPicture): string | null {
   if (status.engine === "Off") return null;
   const micBad = !status.mic.ok;
   const speakerBad = !status.speaker.ok;
   if (!micBad && !speakerBad) return null;
+  if (micBad && speakerBad) return "audio";
+  return micBad ? "mic" : "speaker";
+}
+
+/** Visible labels are required because the locked overlay cannot be hovered. */
+function DeviceFaultBadge({
+  status,
+  reducedMotion,
+}: {
+  status: StatusPicture;
+  reducedMotion: boolean;
+}) {
+  const micBad = !status.mic.ok;
+  const speakerBad = !status.speaker.ok;
 
   const both = micBad && speakerBad;
   const label = both ? "Audio" : micBad ? "Mic" : "Speaker";
@@ -343,11 +428,16 @@ function DeviceFaultBadge({ status }: { status: StatusPicture }) {
       : status.speaker.label;
 
   return (
-    <span
+    <motion.span
+      layout={reducedMotion ? false : "position"}
       data-tauri-drag-region
       title={detail}
       className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-amber-300/35 bg-amber-300/12 px-1.5 text-[10px] font-semibold text-amber-100"
       aria-label={`${label} unavailable: ${detail}`}
+      initial={reducedMotion ? false : { opacity: 0, scale: 0.92, x: 4 }}
+      animate={{ opacity: 1, scale: 1, x: 0 }}
+      exit={reducedMotion ? undefined : { opacity: 0, scale: 0.92, x: 4 }}
+      transition={{ duration: reducedMotion ? 0 : 0.22, ease: soft }}
     >
       {speakerBad && !micBad ? (
         <Volume2 className="size-3" strokeWidth={2} aria-hidden="true" />
@@ -355,6 +445,6 @@ function DeviceFaultBadge({ status }: { status: StatusPicture }) {
         <Mic className="size-3" strokeWidth={2} aria-hidden="true" />
       )}
       {label} unavailable
-    </span>
+    </motion.span>
   );
 }

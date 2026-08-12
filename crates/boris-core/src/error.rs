@@ -129,14 +129,8 @@ mod tests {
     #[test]
     fn display_prefixes_are_stable_contracts() {
         // Config and Audio carry a stable prefix used by hosts/logs.
-        assert_eq!(
-            Error::config("x").to_string(),
-            "config error: x"
-        );
-        assert_eq!(
-            Error::audio("y").to_string(),
-            "audio error: y"
-        );
+        assert_eq!(Error::config("x").to_string(), "config error: x");
+        assert_eq!(Error::audio("y").to_string(), "audio error: y");
         // Other has no prefix — message is the Display form.
         assert_eq!(Error::other("z").to_string(), "z");
     }

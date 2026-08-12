@@ -35,9 +35,7 @@ pub(crate) enum EditError {
 impl EditError {
     pub fn into_tool_error(self, path_display: &str) -> ToolError {
         match self {
-            EditError::EmptyOldString => {
-                ToolError::invalid_args("old_string must not be empty")
-            }
+            EditError::EmptyOldString => ToolError::invalid_args("old_string must not be empty"),
             EditError::IdenticalStrings => {
                 ToolError::invalid_args("old_string and new_string are identical")
             }

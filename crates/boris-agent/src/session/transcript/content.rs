@@ -133,7 +133,10 @@ mod tests {
             { "type": "text", "text": "hello" },
             { "type": "text", "text": "world" }
         ]);
-        assert_eq!(blocks_to_content(blocks), Value::String("hello\nworld".into()));
+        assert_eq!(
+            blocks_to_content(blocks),
+            Value::String("hello\nworld".into())
+        );
     }
 
     #[test]

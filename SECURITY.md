@@ -67,5 +67,9 @@ actions and keep capability presets appropriate to the user’s trust level.
 
 ## Supported versions
 
-This project is early **0.1.x**. Security fixes target the current `main`
-branch. There is no long-term support branch yet.
+| Version | Supported |
+|---------|-----------|
+| 1.0.x   | Yes |
+
+Security fixes target the currently supported 1.x release on `main`. There is
+no long-term-support branch at this time.

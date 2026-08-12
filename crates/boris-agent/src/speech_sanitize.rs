@@ -96,10 +96,7 @@ fn find_markup_start(s: &str) -> Option<usize> {
         "</tool_call",
         "</function",
     ];
-    needles
-        .iter()
-        .filter_map(|n| lower.find(n))
-        .min()
+    needles.iter().filter_map(|n| lower.find(n)).min()
 }
 
 fn find_markup_end(from_start: &str) -> Option<usize> {

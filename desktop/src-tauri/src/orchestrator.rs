@@ -130,6 +130,7 @@ impl AppState {
     /// `model` / `fast_model` are OpenRouter model ids. `model_provider` /
     /// `fast_provider` are OpenRouter **model-providers** (CoreWeave, Baseten, …),
     /// not API brands — comma-separated slugs for `provider.order`.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
         api_key: String,
@@ -243,8 +244,7 @@ impl AppState {
         if fingerprint.api_key.is_empty() {
             error!("start rejected: empty API key");
             return Err(
-                "API key is required. Paste an OpenRouter key or set OPENROUTER_API_KEY."
-                    .into(),
+                "API key is required. Paste an OpenRouter key or set OPENROUTER_API_KEY.".into(),
             );
         }
 
@@ -273,8 +273,7 @@ impl AppState {
         let config =
             PipelineConfig::with_llm(prefs, SUPERTONE_SAMPLE_RATE, WAKEWORD_MODEL_BYTES.to_vec());
 
-        let (engine, handle, status_rx) =
-            Engine::spawn(config).map_err(|e| e.to_string())?;
+        let (engine, handle, status_rx) = Engine::spawn(config).map_err(|e| e.to_string())?;
         *lock_or_recover(&self.engine, "engine") = Some(engine);
         *handle_g = Some(handle.clone());
         *lock_or_recover(&self.live_llm, "live_llm") = Some(fingerprint);

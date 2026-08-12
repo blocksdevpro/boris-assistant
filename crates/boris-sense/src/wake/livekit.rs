@@ -43,8 +43,8 @@ impl LivekitWakeWord {
             sample_rate,
             "LivekitWakeWord::try_new — loading ORT sessions from bytes"
         );
-        let model = WakeWordModel::with_bytes(model_name, model_bytes, sample_rate).map_err(
-            |e| {
+        let model =
+            WakeWordModel::with_bytes(model_name, model_bytes, sample_rate).map_err(|e| {
                 tracing::error!(
                     error = %e,
                     %model_name,
@@ -55,8 +55,7 @@ impl LivekitWakeWord {
                 Error::other(format!(
                     "failed to initialise wakeword model from embedded bytes: {e}"
                 ))
-            },
-        )?;
+            })?;
         tracing::info!(%model_name, "LivekitWakeWord model ready");
         Ok(Self {
             model,
@@ -103,11 +102,7 @@ pub(crate) fn select_wake_score(scores: &HashMap<String, f32>, preferred_name: &
     {
         return score;
     }
-    scores
-        .values()
-        .copied()
-        .reduce(f32::max)
-        .unwrap_or(0.0)
+    scores.values().copied().reduce(f32::max).unwrap_or(0.0)
 }
 
 #[cfg(test)]

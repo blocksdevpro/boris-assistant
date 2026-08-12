@@ -24,18 +24,13 @@ pub(super) fn find_tool<'a>(
         .iter()
         .find(|t| t.name() == name)
         .map(|t| t.as_ref())
-        .ok_or_else(|| {
-            AgentError::unknown_tool(format!("unknown tool requested by model: {name}"))
-        })
+        .ok_or_else(|| AgentError::unknown_tool(format!("unknown tool requested by model: {name}")))
 }
 
 /// Soft lookup — `None` when the model named a tool that is not registered
 /// (e.g. history / prompt drift vs capability preset). Callers should commit an
 /// error observation instead of aborting the whole turn.
-pub(super) fn find_tool_opt<'a>(
-    tools: &'a [Arc<dyn Tool>],
-    name: &str,
-) -> Option<&'a dyn Tool> {
+pub(super) fn find_tool_opt<'a>(tools: &'a [Arc<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
 }
 
@@ -208,18 +203,20 @@ mod tests {
             }),
             Some("Error: nope".into())
         );
-        assert!(observation_text_from_invoke(InvokeResult::NeedsConfirmation {
-            pending: crate::runtime::PendingToolCall::new(
-                "id",
-                "t",
-                json!({}),
-                "sum",
-                crate::tool::ToolRisk::Safe,
-                "c1",
-            ),
-            speak_prompt: "confirm?".into(),
-        })
-        .is_none());
+        assert!(
+            observation_text_from_invoke(InvokeResult::NeedsConfirmation {
+                pending: crate::runtime::PendingToolCall::new(
+                    "id",
+                    "t",
+                    json!({}),
+                    "sum",
+                    crate::tool::ToolRisk::Safe,
+                    "c1",
+                ),
+                speak_prompt: "confirm?".into(),
+            })
+            .is_none()
+        );
     }
 
     #[test]

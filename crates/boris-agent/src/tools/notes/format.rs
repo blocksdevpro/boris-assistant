@@ -54,10 +54,7 @@ mod tests {
     #[test]
     fn format_empty_and_bullets() {
         assert_eq!(format_notes_list(&[]), "No notes found.");
-        assert_eq!(
-            format_notes_list(&["a".into(), "b".into()]),
-            "- a\n- b"
-        );
+        assert_eq!(format_notes_list(&["a".into(), "b".into()]), "- a\n- b");
     }
 
     #[test]

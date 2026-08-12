@@ -9,7 +9,7 @@ use crate::tool::{
 };
 use crate::tools::fs_common::resolve_under_roots;
 
-use super::{DEFAULT_LIST_LIMIT, FsRoots, MAX_LIST};
+use super::{FsRoots, DEFAULT_LIST_LIMIT, MAX_LIST};
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ pub(crate) fn entry_kind(is_dir: bool, is_file: bool) -> &'static str {
 
 /// Sort entries by name (case-insensitive ASCII).
 pub(crate) fn sort_entries(entries: &mut [(String, String)]) {
-    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    entries.sort_by_key(|entry| entry.0.to_ascii_lowercase());
 }
 
 /// Format a directory listing for the model.
@@ -208,9 +208,8 @@ mod tests {
 
     #[test]
     fn format_listing_truncates() {
-        let entries: Vec<(String, String)> = (0..5)
-            .map(|i| (format!("f{i}"), "file".into()))
-            .collect();
+        let entries: Vec<(String, String)> =
+            (0..5).map(|i| (format!("f{i}"), "file".into())).collect();
         let out = format_listing("/sandbox", &entries, 2);
         assert!(out.contains("2 of 5 entries"));
         assert!(out.contains("file\tf0"));
@@ -235,10 +234,7 @@ mod tests {
 
         let list = ListDirTool::new(roots);
         let listing = list
-            .execute(
-                &crate::tool_context::ToolCallContext::new("t"),
-                json!({}),
-            )
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
             .await
             .unwrap();
         assert!(listing.contains("hello.txt"));

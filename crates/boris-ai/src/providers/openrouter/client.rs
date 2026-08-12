@@ -124,11 +124,7 @@ impl OpenRouterClient {
     /// Session id for OpenRouter sticky routing (prompt-cache hits across turns).
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         let s = session_id.into();
-        self.session_id = if s.trim().is_empty() {
-            None
-        } else {
-            Some(s)
-        };
+        self.session_id = if s.trim().is_empty() { None } else { Some(s) };
         self
     }
 

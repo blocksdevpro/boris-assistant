@@ -92,11 +92,7 @@ impl Tool for ToolSearchTool {
             .map_err(|_| ToolError::failed("tool registry lock poisoned"))?
             .clone();
 
-        let already: HashSet<String> = self
-            .activated
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let already: HashSet<String> = self.activated.lock().map(|g| g.clone()).unwrap_or_default();
 
         let mut scored: Vec<(u32, Arc<dyn Tool>)> = Vec::new();
         for tool in snapshot {
@@ -171,13 +167,22 @@ fn score_tool(tool: &dyn Tool, query: &str) -> u32 {
     }
     // Aliases
     let aliases: &[(&str, &[&str])] = &[
-        ("files", &["file", "list_dir", "glob", "grep", "read", "write", "edit"]),
-        ("file", &["file_read", "file_write", "file_edit", "list_dir"]),
+        (
+            "files",
+            &["file", "list_dir", "glob", "grep", "read", "write", "edit"],
+        ),
+        (
+            "file",
+            &["file_read", "file_write", "file_edit", "list_dir"],
+        ),
         ("web", &["web_search", "web_fetch", "http", "url"]),
         ("shell", &["bash", "command", "cmd"]),
         ("bash", &["bash", "shell"]),
         ("clipboard", &["clipboard"]),
-        ("memory", &["memory_search", "memory_get", "remember", "recall"]),
+        (
+            "memory",
+            &["memory_search", "memory_get", "remember", "recall"],
+        ),
         ("skill", &["list_skills", "load_skill"]),
     ];
     for (key, needles) in aliases {
@@ -207,11 +212,7 @@ fn required_param_summary(tool: &dyn Tool) -> String {
     let required = params
         .get("required")
         .and_then(|r| r.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
     if required.is_empty() {
         return String::new();

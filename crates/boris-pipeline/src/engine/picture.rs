@@ -4,7 +4,9 @@ use std::sync::mpsc::Sender;
 
 use boris_core::TurnId;
 
-use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS};
+use crate::status::{
+    DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
+};
 
 /// Mutable engine-side status that publishes a full [`StatusPicture`] on change.
 pub(super) struct Picture {

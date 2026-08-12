@@ -79,7 +79,10 @@ mod tests {
 
     #[test]
     fn normalize_collapses_ws_and_caps() {
-        assert_eq!(normalize_fact_text("  hello   world  ".into()), "hello world");
+        assert_eq!(
+            normalize_fact_text("  hello   world  ".into()),
+            "hello world"
+        );
         let long = "x".repeat(200);
         let n = normalize_fact_text(long);
         assert!(n.chars().count() <= 160);
@@ -88,7 +91,10 @@ mod tests {
 
     #[test]
     fn clean_name_takes_few_tokens() {
-        assert_eq!(clean_name("  Ada Lovelace, Esq.  ".into()), "Ada Lovelace, Esq");
+        assert_eq!(
+            clean_name("  Ada Lovelace, Esq.  ".into()),
+            "Ada Lovelace, Esq"
+        );
         assert_eq!(clean_name("\"Sam\"".into()), "Sam");
     }
 

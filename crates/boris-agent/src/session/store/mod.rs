@@ -1,4 +1,4 @@
-﻿//! Filesystem-backed session store (Grok-like layout).
+//! Filesystem-backed session store (Grok-like layout).
 //!
 //! On-disk layout under `sessions_root` (pipeline passes `~/.boris/sessions/desktop`):
 //!
@@ -115,8 +115,7 @@ impl SessionStore {
 
         fs::create_dir_all(self.subagents_dir(id))
             .map_err(|e| format!("create subagents dir: {e}"))?;
-        fs::create_dir_all(self.scratch_dir(id))
-            .map_err(|e| format!("create scratch dir: {e}"))?;
+        fs::create_dir_all(self.scratch_dir(id)).map_err(|e| format!("create scratch dir: {e}"))?;
 
         Ok(())
     }
@@ -127,8 +126,7 @@ impl SessionStore {
             return Ok(Vec::new());
         }
         let mut ids = Vec::new();
-        let entries =
-            fs::read_dir(&self.root).map_err(|e| format!("read sessions root: {e}"))?;
+        let entries = fs::read_dir(&self.root).map_err(|e| format!("read sessions root: {e}"))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("read sessions root entry: {e}"))?;
             let path = entry.path();
@@ -169,10 +167,7 @@ impl SessionStore {
     pub fn open(&self, id: &SessionId) -> Result<SessionMeta, String> {
         let summary = self.summary_path(id);
         if !summary.is_file() {
-            return Err(format!(
-                "session summary not found: {}",
-                summary.display()
-            ));
+            return Err(format!("session summary not found: {}", summary.display()));
         }
         let raw = fs::read_to_string(&summary)
             .map_err(|e| format!("read summary {}: {e}", summary.display()))?;
@@ -417,7 +412,10 @@ mod tests {
             store.subagents_dir(&meta.id).is_dir(),
             "subagents/ should exist"
         );
-        assert!(store.scratch_dir(&meta.id).is_dir(), "scratch/ should exist");
+        assert!(
+            store.scratch_dir(&meta.id).is_dir(),
+            "scratch/ should exist"
+        );
 
         // tool_calls.jsonl is lazy — must not be created empty at session start.
         assert!(

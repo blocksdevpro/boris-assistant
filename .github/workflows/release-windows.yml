@@ -1,0 +1,253 @@
+name: Release Windows
+
+# The protected `release` environment must provide:
+# - WINDOWS_CERTIFICATE_BASE64: base64-encoded code-signing PFX
+# - WINDOWS_CERTIFICATE_PASSWORD: password for that PFX
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to package and publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-publish:
+    name: Sign and publish Windows installers
+    runs-on: windows-latest
+    environment: release
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Validate release and signing configuration
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v.+') {
+            throw "Release tags must start with v (received '$env:RELEASE_TAG')."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            throw "Missing release environment secret WINDOWS_CERTIFICATE_BASE64."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "Missing release environment secret WINDOWS_CERTIFICATE_PASSWORD."
+          }
+
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Validate tag matches the packaged version
+        shell: pwsh
+        run: |
+          $desktopVersion = (Get-Content 'desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG.Substring(1) -ne $desktopVersion) {
+            throw "Tag '$env:RELEASE_TAG' does not match desktop version '$desktopVersion'."
+          }
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend assets
+        working-directory: desktop
+        run: bun run build
+
+      - name: Materialize signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'boris-code-signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $pfxPath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          )
+          "BORIS_SIGNING_CERTIFICATE=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build production application binary
+        run: cargo build --release -p boris-desktop
+
+      - name: Sign and verify production executables
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signTool = Get-ChildItem `
+            -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) {
+            throw 'signtool.exe was not found in the Windows SDK.'
+          }
+
+          $application = Join-Path $env:GITHUB_WORKSPACE 'target\release\boris-desktop.exe'
+          $ortRuntime = Get-ChildItem `
+            -Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\src-tauri\resources\ort') `
+            -Filter '*.dll' `
+            -File
+          if (-not (Test-Path -LiteralPath $application -PathType Leaf) -or $ortRuntime.Count -eq 0) {
+            throw 'The production executable or required ORT runtime DLLs were not produced.'
+          }
+
+          $executables = @($application) + @($ortRuntime.FullName)
+          foreach ($executable in $executables) {
+            & $signTool sign /fd SHA256 /f $env:BORIS_SIGNING_CERTIFICATE /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+              /tr http://timestamp.digicert.com /td SHA256 /d Boris `
+              /du https://github.com/blocksdevpro/boris-assistant $executable
+            if ($LASTEXITCODE -ne 0) {
+              throw "Signing failed for $executable."
+            }
+            & $signTool verify /pa /all /v $executable
+            if ($LASTEXITCODE -ne 0) {
+              throw "Signature verification failed for $executable."
+            }
+          }
+
+      - name: Bundle Windows installers from signed application
+        working-directory: desktop
+        run: bun run tauri bundle --bundles msi,nsis --ci
+
+      - name: Sign and verify release installers
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signTool = Get-ChildItem `
+            -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) {
+            throw 'signtool.exe was not found in the Windows SDK.'
+          }
+
+          $artifacts = Get-ChildItem `
+            -Path (Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle') `
+            -Recurse `
+            -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' }
+          if ($artifacts.Count -eq 0) {
+            throw 'No .exe or .msi installer artifacts were produced.'
+          }
+
+          foreach ($artifact in $artifacts) {
+            & $signTool sign /fd SHA256 /f $env:BORIS_SIGNING_CERTIFICATE /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+              /tr http://timestamp.digicert.com /td SHA256 /d Boris `
+              /du https://github.com/blocksdevpro/boris-assistant $artifact.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Signing failed for $($artifact.FullName)."
+            }
+
+            & $signTool verify /pa /all /v $artifact.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Signature verification failed for $($artifact.FullName)."
+            }
+          }
+
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:BORIS_SIGNING_CERTIFICATE)) {
+            Remove-Item -LiteralPath $env:BORIS_SIGNING_CERTIFICATE -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate release provenance manifest
+        shell: pwsh
+        run: |
+          $releaseFiles = @(
+            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle') -Recurse -File |
+              Where-Object { $_.Extension -in '.exe', '.msi' }
+          ) + @(
+            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\src-tauri\resources\ort') -File |
+              Where-Object { $_.Extension -eq '.dll' }
+          ) + @(
+            Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'assets\models\livekit\boris-large.onnx')
+          )
+
+          $records = foreach ($file in $releaseFiles) {
+            [ordered]@{
+              path = $file.FullName.Substring($env:GITHUB_WORKSPACE.Length + 1).Replace('\', '/')
+              bytes = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          $manifest = [ordered]@{
+            product = 'Boris'
+            version = $env:RELEASE_TAG.TrimStart('v')
+            release_tag = $env:RELEASE_TAG
+            source_commit = $env:GITHUB_SHA
+            generated_utc = (Get-Date).ToUniversalTime().ToString('o')
+            files = $records
+            dependency_lockfiles = @('Cargo.lock', 'desktop/package-lock.json', 'desktop/bun.lock')
+            notices = 'THIRD-PARTY-NOTICES'
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'target\release\BORIS-RELEASE-MANIFEST.json') -Encoding utf8
+
+      - name: Upload signed installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: Boris-${{ env.RELEASE_TAG }}-windows
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            target/release/BORIS-RELEASE-MANIFEST.json
+            THIRD-PARTY-NOTICES
+            Cargo.lock
+            desktop/package-lock.json
+            desktop/bun.lock
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifacts = @(
+            Get-ChildItem `
+            -Path (Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle') `
+            -Recurse `
+            -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            Select-Object -ExpandProperty FullName
+          ) + @(
+            Join-Path $env:GITHUB_WORKSPACE 'target\release\BORIS-RELEASE-MANIFEST.json'
+          ) + @(
+            Join-Path $env:GITHUB_WORKSPACE 'THIRD-PARTY-NOTICES'
+          )
+
+          gh release view $env:RELEASE_TAG 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @artifacts --clobber
+          }
+          else {
+            gh release create $env:RELEASE_TAG @artifacts --generate-notes --title "Boris $env:RELEASE_TAG"
+          }

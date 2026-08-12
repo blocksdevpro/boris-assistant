@@ -337,7 +337,10 @@ mod tests {
             "todo_write missing under VoiceSafe: {names:?}"
         );
         assert!(!names.iter().any(|n| n == "bash"), "bash must stay off");
-        assert!(!names.iter().any(|n| n == "web_search"), "web must stay off");
+        assert!(
+            !names.iter().any(|n| n == "web_search"),
+            "web must stay off"
+        );
     }
 
     #[test]

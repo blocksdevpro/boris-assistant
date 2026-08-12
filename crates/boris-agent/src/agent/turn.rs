@@ -89,8 +89,8 @@ impl Agent {
             {
                 "role": "system",
                 "content": "Summarize the conversation for an assistant continuing the work. \
-Keep: names, URLs, file paths, decisions, open tasks, tool findings (facts, numbers, links). \
-Max 20 short bullet lines. Prefer concrete facts over narrative. No fluff."
+        Keep: names, URLs, file paths, decisions, open tasks, tool findings (facts, numbers, links). \
+        Max 20 short bullet lines. Prefer concrete facts over narrative. No fluff."
             },
             {
                 "role": "user",
@@ -188,9 +188,10 @@ Max 20 short bullet lines. Prefer concrete facts over narrative. No fluff."
         let config = self.loop_config();
         let emit = self.make_emit();
         // Finish gate reads the session-bound todos *file* (not sandbox root).
-        let todos_for_gate = self.todos_path.clone().unwrap_or_else(|| {
-            self.sandbox_snapshot.sandbox_root.join("todos.json")
-        });
+        let todos_for_gate = self
+            .todos_path
+            .clone()
+            .unwrap_or_else(|| self.sandbox_snapshot.sandbox_root.join("todos.json"));
 
         let loop_out = {
             let state = LoopState {
@@ -284,15 +285,8 @@ Max 20 short bullet lines. Prefer concrete facts over narrative. No fluff."
                 client: self.client.as_ref(),
                 activated: Some(&self.activated),
             };
-            loop_::resume_pending_tool(
-                state,
-                pending_turn,
-                approved,
-                &config,
-                Some(emit),
-                Some(ct),
-            )
-            .await
+            loop_::resume_pending_tool(state, pending_turn, approved, &config, Some(emit), Some(ct))
+                .await
         };
 
         self.cancel = None;

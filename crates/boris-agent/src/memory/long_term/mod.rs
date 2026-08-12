@@ -254,8 +254,8 @@ impl LongTermMemory {
         // Per-session logs under sessions_root/{uuid}/memory.md
         if let Some(sessions_root) = &self.sessions_root {
             if sessions_root.is_dir() {
-                let entries = fs::read_dir(sessions_root)
-                    .map_err(|e| format!("read sessions root: {e}"))?;
+                let entries =
+                    fs::read_dir(sessions_root).map_err(|e| format!("read sessions root: {e}"))?;
                 let mut session_logs: Vec<(String, PathBuf)> = Vec::new();
                 for entry in entries {
                     let entry = entry.map_err(|e| format!("read sessions entry: {e}"))?;
@@ -337,10 +337,7 @@ impl LongTermMemory {
             return Err("session memory root not configured".into());
         };
         // Expect exactly `{session_id}/memory.md`
-        let parts: Vec<&str> = rest
-            .split(['/', '\\'])
-            .filter(|p| !p.is_empty())
-            .collect();
+        let parts: Vec<&str> = rest.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
         if parts.len() != 2 || parts[1] != SESSION_MEMORY_FILE {
             return Err(format!(
                 "session path must be session/{{id}}/{SESSION_MEMORY_FILE}"
@@ -427,14 +424,18 @@ mod tests {
 
         let hits = mem.search("dark mode", 5).unwrap();
         assert!(!hits.is_empty(), "expected hits, got {hits:?}");
-        assert!(hits.iter().any(|h| h.path.contains("MEMORY")
-            || h.path.starts_with(SESSION_PATH_PREFIX)));
+        assert!(hits
+            .iter()
+            .any(|h| h.path.contains("MEMORY") || h.path.starts_with(SESSION_PATH_PREFIX)));
 
         let body = mem.get("MEMORY.md", 2000).unwrap();
         assert!(body.contains("dark mode"));
 
         let sess_body = mem
-            .get(&format!("{SESSION_PATH_PREFIX}{session_id}/{SESSION_MEMORY_FILE}"), 2000)
+            .get(
+                &format!("{SESSION_PATH_PREFIX}{session_id}/{SESSION_MEMORY_FILE}"),
+                2000,
+            )
             .unwrap();
         assert!(sess_body.contains("dark mode"));
 
@@ -471,9 +472,7 @@ mod tests {
         let mem_root = tmp_root("sess-esc-m");
         let sessions = tmp_root("sess-esc-s");
         let mem = LongTermMemory::new(&mem_root).with_sessions_root(&sessions);
-        let err = mem
-            .get("session/../evil/memory.md", 100)
-            .unwrap_err();
+        let err = mem.get("session/../evil/memory.md", 100).unwrap_err();
         assert!(
             err.contains("escape") || err.contains("must be") || err.contains("not a file"),
             "{err}"

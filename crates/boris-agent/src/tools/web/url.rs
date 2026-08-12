@@ -170,7 +170,7 @@ fn is_blocked_ipv6(v6: Ipv6Addr) -> bool {
     }
     // Documentation 2001:db8::/32
     let seg = v6.segments();
-    if seg[0] == 0x2001 && (seg[1] & 0xfff0) == 0x0db8 {
+    if seg[0] == 0x2001 && seg[1] == 0x0db8 {
         return true;
     }
     false
@@ -247,6 +247,14 @@ mod tests {
         assert!(host_blocked("fe80::1"));
         assert!(parse_safe_http_url("http://[fe80::1]/").is_err());
         assert!(parse_safe_http_url("http://[fd00::1]/").is_err());
+    }
+
+    #[test]
+    fn blocks_ipv6_documentation_range() {
+        assert!(host_blocked("2001:db8::1"));
+        assert!(host_blocked("2001:db8:ffff:ffff::1"));
+        assert!(parse_safe_http_url("https://[2001:db8::1]/").is_err());
+        assert!(!host_blocked("2001:db9::1"));
     }
 
     #[test]

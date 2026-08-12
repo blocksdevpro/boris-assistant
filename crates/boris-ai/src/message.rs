@@ -97,11 +97,7 @@ pub fn normalize_assistant_message(mut message: Value) -> Value {
 }
 
 /// Build a final assistant message from assembled stream pieces.
-pub fn assistant_message_from_stream(
-    role: &str,
-    content: String,
-    tool_calls: Vec<Value>,
-) -> Value {
+pub fn assistant_message_from_stream(role: &str, content: String, tool_calls: Vec<Value>) -> Value {
     let mut message = json!({
         "role": role,
         "content": content,

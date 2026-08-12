@@ -111,6 +111,13 @@ impl KokoroTts {
     }
 }
 
+impl Default for KokoroTts {
+    #[allow(deprecated)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl fmt::Debug for KokoroTts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KokoroTts")
@@ -210,13 +217,11 @@ impl TextToSpeech for KokoroTts {
         );
         let t = Instant::now();
 
-        let model = load_model(
-            TtsConfig::new(ModelType::Kokoro).with_model_path(path_str.clone()),
-        )
-        .map_err(|e| {
-            tracing::error!(error = %e, path = %path.display(), "Kokoro load failed");
-            Error::other(format!("kokoro load failed: {e} (path={})", path.display()))
-        })?;
+        let model = load_model(TtsConfig::new(ModelType::Kokoro).with_model_path(path_str.clone()))
+            .map_err(|e| {
+                tracing::error!(error = %e, path = %path.display(), "Kokoro load failed");
+                Error::other(format!("kokoro load failed: {e} (path={})", path.display()))
+            })?;
         self.model = Some(model);
 
         tracing::info!(
@@ -341,10 +346,8 @@ mod tests {
 
     #[test]
     fn incomplete_dir_preflight() {
-        let tmp = std::env::temp_dir().join(format!(
-            "boris-kokoro-incomplete-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("boris-kokoro-incomplete-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("config.json"), "{}").unwrap();
@@ -359,10 +362,7 @@ mod tests {
 
     #[test]
     fn missing_voice_file_is_config_error() {
-        let tmp = std::env::temp_dir().join(format!(
-            "boris-kokoro-novoice-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("boris-kokoro-novoice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("config.json"), "{}").unwrap();

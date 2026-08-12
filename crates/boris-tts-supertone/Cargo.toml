@@ -1,7 +1,8 @@
 [package]
 name              = "boris-tts-supertone"
-version           = "0.1.0"
+version           = "1.0.0"
 edition.workspace = true
+rust-version.workspace = true
 description       = "Supertone / Supertonic TextToSpeech adapter for Boris (st-tts)"
 publish           = false
 readme            = "README.md"

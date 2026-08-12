@@ -51,9 +51,7 @@ const DEFAULT_INTER_UNIT_SILENCE: f32 = 0.15;
 
 /// Supertone TTS backend (lazy-loaded; private runtime for async synth).
 ///
-/// Construct with [`SupertoneTts::with_paths`]. There is intentionally no
-/// `Default` impl that points at legacy `assets/` paths — hosts must pass
-/// explicit directories.
+/// Construct with [`SupertoneTts::with_paths`].
 pub struct SupertoneTts {
     /// Built lazily so construction never panics.
     runtime: Option<tokio::runtime::Runtime>,
@@ -202,6 +200,13 @@ impl SupertoneTts {
     }
 }
 
+impl Default for SupertoneTts {
+    #[allow(deprecated)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl fmt::Debug for SupertoneTts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SupertoneTts")
@@ -262,12 +267,8 @@ fn reject_english_only_supertone(model_dir: &Path) -> Result<()> {
         )));
     }
 
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        Error::config(format!(
-            "supertone failed to read {}: {e}",
-            path.display()
-        ))
-    })?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| Error::config(format!("supertone failed to read {}: {e}", path.display())))?;
 
     if let Some(msg) = english_only_problem_from_tts_json(&raw, model_dir) {
         return Err(Error::config(msg));
@@ -279,14 +280,8 @@ fn reject_english_only_supertone(model_dir: &Path) -> Result<()> {
 fn english_only_problem_from_tts_json(raw: &str, model_dir: &Path) -> Option<String> {
     // Prefer structured parse.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
-        let split = v
-            .get("split")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-        let version = v
-            .get("tts_version")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
+        let split = v.get("split").and_then(|s| s.as_str()).unwrap_or("");
+        let version = v.get("tts_version").and_then(|s| s.as_str()).unwrap_or("");
 
         if split.contains("opensource-en") || split == "en" {
             return Some(format!(
@@ -500,13 +495,15 @@ impl TextToSpeech for SupertoneTts {
                 })?;
 
             if i > 0 && gap > 0 {
-                full.extend(std::iter::repeat(0.0f32).take(gap));
+                full.extend(std::iter::repeat_n(0.0f32, gap));
                 total_duration += inter_unit;
             }
 
             let pcm = prefer_full_pcm(&result.audio, result.duration_secs, result.sample_rate);
             full.extend_from_slice(pcm);
-            total_duration += result.duration_secs.max(pcm.len() as f32 / sample_rate as f32);
+            total_duration += result
+                .duration_secs
+                .max(pcm.len() as f32 / sample_rate as f32);
 
             tracing::debug!(
                 unit = i + 1,
@@ -621,10 +618,8 @@ mod tests {
 
     #[test]
     fn missing_tts_json_is_config_error() {
-        let tmp = std::env::temp_dir().join(format!(
-            "boris-supertone-notts-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("boris-supertone-notts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let model_dir = tmp.join("onnx");
         let voice_dir = tmp.join("voices");

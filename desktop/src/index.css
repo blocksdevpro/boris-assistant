@@ -170,6 +170,8 @@
   height: 120px;
   transform: translate(-50%, -50%) scale(var(--overlay-scale, 1));
   transform-origin: center;
+  transition: transform 0.36s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
 
 .overlay-island {
@@ -180,6 +182,7 @@
     0 8px 24px rgba(0, 0, 0, 0.38),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
   transition:
+    background-color 0.32s cubic-bezier(0.22, 1, 0.36, 1),
     border-color 0.45s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -193,7 +196,8 @@
   border: 1px solid rgba(255, 255, 255, 0.06);
   transition:
     opacity 0.4s cubic-bezier(0.22, 1, 0.36, 1),
-    background-color 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    background-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .overlay-caption--confirm {

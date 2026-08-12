@@ -9,7 +9,7 @@ use crate::tool::{
 };
 use crate::tools::fs_common::resolve_under_roots;
 
-use super::{DEFAULT_READ_LINES, FsRoots, MAX_READ_BYTES, MAX_READ_LINES};
+use super::{FsRoots, DEFAULT_READ_LINES, MAX_READ_BYTES, MAX_READ_LINES};
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -249,7 +249,14 @@ mod tests {
     fn select_line_window_basic() {
         let lines = ["a", "b", "c", "d"];
         let refs: Vec<&str> = lines.to_vec();
-        let slice = select_line_window(&refs, ReadWindow { offset: 2, limit: 2 }).unwrap();
+        let slice = select_line_window(
+            &refs,
+            ReadWindow {
+                offset: 2,
+                limit: 2,
+            },
+        )
+        .unwrap();
         assert_eq!(slice.lines, &["b", "c"]);
         assert_eq!(slice.start_line, 2);
         assert_eq!(slice.end_idx, 3);
@@ -260,7 +267,14 @@ mod tests {
     fn select_line_window_offset_past_end() {
         let lines = ["only"];
         let refs: Vec<&str> = lines.to_vec();
-        let err = select_line_window(&refs, ReadWindow { offset: 5, limit: 10 }).unwrap_err();
+        let err = select_line_window(
+            &refs,
+            ReadWindow {
+                offset: 5,
+                limit: 10,
+            },
+        )
+        .unwrap_err();
         assert!(err.contains("exceeds"));
         assert!(err.contains("1 lines"));
     }
@@ -269,7 +283,14 @@ mod tests {
     fn select_line_window_clamps_to_end() {
         let lines = ["a", "b"];
         let refs: Vec<&str> = lines.to_vec();
-        let slice = select_line_window(&refs, ReadWindow { offset: 1, limit: 100 }).unwrap();
+        let slice = select_line_window(
+            &refs,
+            ReadWindow {
+                offset: 1,
+                limit: 100,
+            },
+        )
+        .unwrap();
         assert_eq!(slice.lines.len(), 2);
         assert_eq!(slice.end_idx, 2);
     }
@@ -309,7 +330,14 @@ mod tests {
     #[test]
     fn build_read_output_empty() {
         assert_eq!(
-            build_read_output("", ReadWindow { offset: 1, limit: 10 }).unwrap(),
+            build_read_output(
+                "",
+                ReadWindow {
+                    offset: 1,
+                    limit: 10
+                }
+            )
+            .unwrap(),
             "(empty file)"
         );
     }
@@ -317,7 +345,14 @@ mod tests {
     #[test]
     fn build_read_output_window_and_footer() {
         let content = "a\nb\nc\nd\ne\n";
-        let out = build_read_output(content, ReadWindow { offset: 2, limit: 2 }).unwrap();
+        let out = build_read_output(
+            content,
+            ReadWindow {
+                offset: 2,
+                limit: 2,
+            },
+        )
+        .unwrap();
         assert!(out.contains("2\tb"));
         assert!(out.contains("3\tc"));
         assert!(!out.contains("1\ta"));
@@ -327,7 +362,14 @@ mod tests {
 
     #[test]
     fn build_read_output_offset_edge() {
-        let err = build_read_output("only\n", ReadWindow { offset: 99, limit: 1 }).unwrap_err();
+        let err = build_read_output(
+            "only\n",
+            ReadWindow {
+                offset: 99,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
         assert!(err.contains("exceeds"));
     }
 

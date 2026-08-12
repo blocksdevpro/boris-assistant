@@ -53,10 +53,7 @@ impl OpenRouterClient {
     ) -> Result<Value, LlmError> {
         let body = self.request_body(messages, tools, false);
 
-        let req = self
-            .http
-            .post(self.chat_completions_url())
-            .json(&body);
+        let req = self.http.post(self.chat_completions_url()).json(&body);
         let req = self.apply_common_headers(req);
 
         let response = req.send().await.map_err(LlmError::from)?;
@@ -68,7 +65,9 @@ impl OpenRouterClient {
         }
 
         let json: Value = response.json().await.map_err(|e| {
-            LlmError::parse(format!("failed to parse chat completion response JSON: {e}"))
+            LlmError::parse(format!(
+                "failed to parse chat completion response JSON: {e}"
+            ))
         })?;
 
         // Some gateways return HTTP 200 with a top-level error object.
@@ -77,7 +76,11 @@ impl OpenRouterClient {
         }
 
         if let Some(usage) = json.get("usage") {
-            log_usage(&self.model, &TokenUsage::from_usage_value(usage), "blocking");
+            log_usage(
+                &self.model,
+                &TokenUsage::from_usage_value(usage),
+                "blocking",
+            );
         }
 
         let message = json

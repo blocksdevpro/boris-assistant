@@ -67,8 +67,7 @@ impl ToolRuntime {
     /// Further shell tools skip the confirm UI only; path/shell/network hard
     /// gates and the bash deny list still run.
     pub fn grant_shell_this_turn(&self) {
-        self.shell_granted_this_turn
-            .store(true, Ordering::Relaxed);
+        self.shell_granted_this_turn.store(true, Ordering::Relaxed);
     }
 
     /// Whether shell was already approved once this turn.
@@ -323,11 +322,7 @@ mod tests {
         fn parameters(&self) -> Value {
             json!({"type":"object","properties":{},"required":[]})
         }
-        async fn execute(
-            &self,
-            _ctx: &ToolCallContext,
-            _args: Value,
-        ) -> Result<String, ToolError> {
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
             Ok("x".repeat(MAX_TOOL_RESULT_CHARS + 100))
         }
     }
@@ -350,11 +345,7 @@ mod tests {
         fn meta(&self) -> ToolMeta {
             ToolMeta::with_risk(ToolRisk::Dangerous)
         }
-        async fn execute(
-            &self,
-            _ctx: &ToolCallContext,
-            _args: Value,
-        ) -> Result<String, ToolError> {
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
             *self.ran.lock().unwrap() = true;
             Ok("ran".into())
         }
@@ -436,11 +427,7 @@ mod tests {
                 .permissions(&[crate::tool::Permission::Shell])
                 .confirm(true)
         }
-        async fn execute(
-            &self,
-            _ctx: &ToolCallContext,
-            _args: Value,
-        ) -> Result<String, ToolError> {
+        async fn execute(&self, _ctx: &ToolCallContext, _args: Value) -> Result<String, ToolError> {
             *self.ran.lock().unwrap() += 1;
             Ok("ok".into())
         }
@@ -448,12 +435,12 @@ mod tests {
 
     #[tokio::test]
     async fn shell_turn_grant_skips_later_shell_hitl() {
-        let mut policy = SandboxConfig::default();
-        policy.shell = crate::runtime::ShellPolicy::OpenConfirm;
-        let rt = ToolRuntime::new(policy, Box::new(NullAuditSink));
-        let tool = ShellOnceTool {
-            ran: Mutex::new(0),
+        let policy = SandboxConfig {
+            shell: crate::runtime::ShellPolicy::OpenConfirm,
+            ..Default::default()
         };
+        let rt = ToolRuntime::new(policy, Box::new(NullAuditSink));
+        let tool = ShellOnceTool { ran: Mutex::new(0) };
 
         // First call still needs confirm.
         let args = json!({ "command": "echo a" });
@@ -600,11 +587,7 @@ mod tests {
             fn meta(&self) -> ToolMeta {
                 ToolMeta::safe_default().timeout(Duration::from_millis(40))
             }
-            async fn execute(
-                &self,
-                _ctx: &ToolCallContext,
-                _: Value,
-            ) -> Result<String, ToolError> {
+            async fn execute(&self, _ctx: &ToolCallContext, _: Value) -> Result<String, ToolError> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 Ok("nope".into())
             }

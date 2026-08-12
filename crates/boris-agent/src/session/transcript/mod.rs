@@ -175,8 +175,9 @@ impl TranscriptRecord {
                         .cloned()
                         .unwrap_or(Value::String(String::new()));
                     obj.insert("content".into(), flatten_content_value(content));
-                    let calls =
-                        openai_tool_calls_from_disk(v.get("tool_calls").cloned().unwrap_or(Value::Null));
+                    let calls = openai_tool_calls_from_disk(
+                        v.get("tool_calls").cloned().unwrap_or(Value::Null),
+                    );
                     obj.insert("tool_calls".into(), calls);
                     return Ok(Self {
                         ts_ms,

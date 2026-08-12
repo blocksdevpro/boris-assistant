@@ -75,8 +75,7 @@ mod tests {
 
     #[test]
     fn extract_uddg_from_redirect() {
-        let wrapped =
-            "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath&rut=abc";
+        let wrapped = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath&rut=abc";
         let got = extract_uddg(wrapped).expect("uddg");
         assert_eq!(got, "https://example.com/path");
     }

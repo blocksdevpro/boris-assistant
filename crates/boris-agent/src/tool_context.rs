@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime::{NullProgressSink, ProgressEvent, ProgressSink};
 
 /// Context stamped onto every tool invocation by the runtime / loop.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ToolCallContext {
     /// LLM-supplied tool call id (for correlation).
     pub call_id: String,
@@ -24,19 +24,6 @@ pub struct ToolCallContext {
     pub cancel: Option<CancellationToken>,
     /// Optional host progress sink (rate-limited UI events).
     progress: Option<Arc<dyn ProgressSink>>,
-}
-
-impl Default for ToolCallContext {
-    fn default() -> Self {
-        Self {
-            call_id: String::new(),
-            session_id: None,
-            turn_id: None,
-            cwd: None,
-            cancel: None,
-            progress: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for ToolCallContext {

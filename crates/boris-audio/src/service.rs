@@ -113,8 +113,7 @@ impl AudioService {
         tracing::info!(%input_name, "opening default input device");
 
         let input_subscribers: InputSubscribers = Arc::new(Mutex::new(Vec::new()));
-        let input_pipeline =
-            InputPipeline::from_device(&input_device, input_subscribers.clone())?;
+        let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone())?;
         tracing::info!(%input_name, "input pipeline open");
 
         let output_device = host.default_output_device().ok_or_else(|| {
@@ -247,11 +246,7 @@ impl AudioService {
     /// Prefer `try_send`; fall back to a blocking `send` if the queue is full so
     /// a Flush is not lost behind pending Play buffers.
     pub fn stop(&self) {
-        match self
-            .output_command_channel
-            .0
-            .try_send(OutputCommand::Flush)
-        {
+        match self.output_command_channel.0.try_send(OutputCommand::Flush) {
             Ok(()) => {}
             Err(crossbeam_channel::TrySendError::Full(_)) => {
                 if self

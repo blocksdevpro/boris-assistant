@@ -212,7 +212,7 @@ fn prune_old_logs(log_dir: &std::path::Path) -> usize {
         .collect();
 
     // Newest first: index 0 is the current/most-recent file.
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     let now = std::time::SystemTime::now();
     let max_age = std::time::Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);

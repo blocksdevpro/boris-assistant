@@ -279,7 +279,10 @@ mod tests {
         assert_eq!(msg["content"], "Hello");
         assert_eq!(msg["tool_calls"][0]["id"], "call_1");
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "bash");
-        assert_eq!(msg["tool_calls"][0]["function"]["arguments"], "{\"c\":\"ls\"}");
+        assert_eq!(
+            msg["tool_calls"][0]["function"]["arguments"],
+            "{\"c\":\"ls\"}"
+        );
     }
 
     #[test]
@@ -297,9 +300,13 @@ mod tests {
     fn flush_sse_buffer_without_trailing_newline() {
         let mut buf = Vec::new();
         let mut payloads = Vec::new();
-        push_sse_bytes(&mut buf, br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#, |p| {
-            payloads.push(p.to_string());
-        });
+        push_sse_bytes(
+            &mut buf,
+            br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+            |p| {
+                payloads.push(p.to_string());
+            },
+        );
         // No newline yet — payload stays buffered.
         assert!(payloads.is_empty());
         assert!(!buf.is_empty());
@@ -331,7 +338,10 @@ mod tests {
         let mut buf = Vec::new();
         let mut payloads = Vec::new();
         push_sse_bytes(&mut buf, chunk1, |p| payloads.push(p.to_string()));
-        assert!(payloads.is_empty(), "line not complete yet, nothing should decode");
+        assert!(
+            payloads.is_empty(),
+            "line not complete yet, nothing should decode"
+        );
         push_sse_bytes(&mut buf, chunk2, |p| payloads.push(p.to_string()));
 
         assert_eq!(payloads.len(), 1);

@@ -69,7 +69,10 @@ pub fn log_environment(context: &str) {
     let key_present = std::env::var("OPENROUTER_API_KEY")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    tracing::info!(openrouter_api_key_in_env = key_present, "credentials env (value redacted)");
+    tracing::info!(
+        openrouter_api_key_in_env = key_present,
+        "credentials env (value redacted)"
+    );
 
     let home = paths::boris_home();
     tracing::info!(boris_home = %home.display(), "paths");
@@ -238,7 +241,9 @@ pub fn log_model_load_failure(component: &str, dir: &Path, error: &str) {
 pub fn log_writable_check(label: &str, dir: PathBuf) {
     match fs::create_dir_all(&dir) {
         Ok(()) => tracing::info!(%label, path = %dir.display(), "directory writable/created"),
-        Err(e) => tracing::error!(%label, path = %dir.display(), error = %e, "directory NOT writable"),
+        Err(e) => {
+            tracing::error!(%label, path = %dir.display(), error = %e, "directory NOT writable")
+        }
     }
     let probe = dir.join(".boris_write_probe");
     match fs::write(&probe, b"ok") {

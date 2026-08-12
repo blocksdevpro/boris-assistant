@@ -148,9 +148,10 @@ impl Agent {
 
     /// Refresh system prompt when profile tools mutated personal context mid-turn.
     pub(super) fn maybe_refresh_after_tools(&mut self, tools_used: &[String]) {
-        if tools_used.iter().any(|n| {
-            n == "save_user_fact" || n == "update_user_profile" || n == "get_user_context"
-        }) {
+        if tools_used
+            .iter()
+            .any(|n| n == "save_user_fact" || n == "update_user_profile" || n == "get_user_context")
+        {
             self.refresh_system_prompt();
         }
     }

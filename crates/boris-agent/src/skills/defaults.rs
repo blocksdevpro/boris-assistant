@@ -73,6 +73,7 @@ pub(crate) fn skill_frontmatter_version(content: &str) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use std::fs;
@@ -106,10 +107,13 @@ mod tests {
         // ensure uses user_skills_dir(boris_home) = boris_home/skills
         let written = ensure_default_skills(&dir).unwrap();
         assert!(
-            written.iter().any(|p| p.to_string_lossy().contains("research")),
+            written
+                .iter()
+                .any(|p| p.to_string_lossy().contains("research")),
             "expected research skill upgrade, got {written:?}"
         );
-        let body = fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
+        let body =
+            fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
         assert!(body.contains("version: 4"));
         assert!(
             body.contains("Minimum effort")
@@ -140,10 +144,13 @@ mod tests {
 
         let written = ensure_default_skills(&dir).unwrap();
         assert!(
-            written.iter().any(|p| p.to_string_lossy().contains("research")),
+            written
+                .iter()
+                .any(|p| p.to_string_lossy().contains("research")),
             "expected research v2->v4 upgrade, got {written:?}"
         );
-        let body = fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
+        let body =
+            fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
         assert!(body.contains("version: 4"));
         assert!(body.contains("wave 1") || body.contains("spawn_subagent"));
         let _ = fs::remove_dir_all(&dir);

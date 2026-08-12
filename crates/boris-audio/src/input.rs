@@ -50,7 +50,10 @@ pub(crate) struct InputPipeline {
 
 impl InputPipeline {
     /// Open `device`, start capture, and fan resampled mono frames to `subscribers`.
-    pub(crate) fn from_device(device: &cpal::Device, subscribers: InputSubscribers) -> Result<Self> {
+    pub(crate) fn from_device(
+        device: &cpal::Device,
+        subscribers: InputSubscribers,
+    ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (audio_tx, audio_rx) =
             crossbeam_channel::bounded::<AudioBuffer>(CAPTURE_QUEUE_CAPACITY);

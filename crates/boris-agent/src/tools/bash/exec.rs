@@ -16,7 +16,7 @@ use super::CAPTURE_MAX_BYTES;
 use crate::runtime::ProgressEvent;
 use crate::tool::{
     optional_string, require_object, require_string, soft_wrap_text, truncate_tool_result,
-    DEFAULT_SOFT_WRAP_WIDTH, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
+    Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk, DEFAULT_SOFT_WRAP_WIDTH,
 };
 use crate::tool_context::ToolCallContext;
 use crate::tools::fs_common::resolve_under_roots;
@@ -409,8 +409,7 @@ mod tests {
     async fn cancel_kills_long_command() {
         use tokio_util::sync::CancellationToken;
 
-        let dir =
-            std::env::temp_dir().join(format!("boris-bash-cancel-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("boris-bash-cancel-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let tool = BashTool::new(vec![dir.clone()], dir.clone());
         let token = CancellationToken::new();
@@ -485,10 +484,7 @@ mod tests {
     /// End-to-end: flooding stdout still returns a finite truncated tool result.
     #[tokio::test]
     async fn high_volume_output_is_truncated_not_unbounded() {
-        let dir = std::env::temp_dir().join(format!(
-            "boris-bash-flood-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("boris-bash-flood-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let tool = BashTool::new(vec![dir.clone()], dir.clone());
 

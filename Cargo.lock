@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "boris-agent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arboard",
  "async-trait",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "boris-ai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -503,11 +503,11 @@ dependencies = [
 
 [[package]]
 name = "boris-assistant"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "boris-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-core",
  "cpal",
@@ -518,14 +518,14 @@ dependencies = [
 
 [[package]]
 name = "boris-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "boris-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-pipeline",
  "boris-tts-supertone",
@@ -541,14 +541,14 @@ dependencies = [
 
 [[package]]
 name = "boris-inference"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-core",
 ]
 
 [[package]]
 name = "boris-pipeline"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-agent",
  "boris-audio",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "boris-sense"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-core",
  "livekit-wakeword",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "boris-stt-parakeet"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-core",
  "boris-inference",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "boris-tts-kokoro"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "any-tts",
  "boris-core",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "boris-tts-supertone"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "boris-core",
  "boris-inference",

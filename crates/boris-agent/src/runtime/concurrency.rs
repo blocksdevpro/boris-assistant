@@ -1,7 +1,7 @@
 //! Wave-scheduling batch planner: parallel read-only wave, then sequential writes.
 
-use crate::tool::Tool;
 use crate::runtime::RawToolCall;
+use crate::tool::Tool;
 
 /// Partition auto-allow calls into read-only (parallel) vs write (sequential).
 ///

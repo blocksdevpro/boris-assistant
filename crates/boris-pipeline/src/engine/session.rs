@@ -150,6 +150,7 @@ pub(super) fn end_session(
     *transcript_len = 0;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn go_off(
     picture: &mut Picture,
     audio: &AudioService,

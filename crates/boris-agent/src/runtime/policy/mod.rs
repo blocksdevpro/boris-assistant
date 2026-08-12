@@ -25,11 +25,11 @@ use serde_json::Value;
 
 use crate::tool::{Permission, ToolMeta, ToolRisk};
 
+use paths::{args_path_strings, check_path_allowed, PathAccess};
 pub use paths::{
     default_user_read_roots, normalize_path, path_is_within, resolve_in_roots,
     resolve_path_for_policy,
 };
-use paths::{args_path_strings, check_path_allowed, PathAccess};
 
 /// Network access policy for tools that declare [`Permission::Network`].
 ///
@@ -121,11 +121,7 @@ impl SandboxConfig {
         let workspace = home.join("state").join("workspace");
         Self {
             sandbox_root: workspace.clone(),
-            boris_data_roots: vec![
-                home.join("memory"),
-                home.join("sessions"),
-                workspace,
-            ],
+            boris_data_roots: vec![home.join("memory"), home.join("sessions"), workspace],
             allow_read: vec![],
             allow_write: vec![],
             network: NetworkPolicy::Off,
@@ -200,9 +196,8 @@ pub fn decide(
                 };
                 if !shell_command_allowed(cmd, patterns) {
                     return PolicyDecision::Deny {
-                        reason: format!(
-                            "command not on shell allowlist (first token / prefix must match)"
-                        ),
+                        reason: "command not on shell allowlist (first token / prefix must match)"
+                            .to_string(),
                     };
                 }
             }
@@ -666,12 +661,7 @@ mod tests {
             0,
         );
         assert_eq!(ok2, PolicyDecision::Allow);
-        let bad = decide(
-            &c,
-            &meta,
-            &json!({ "url": "https://evil.example.org/" }),
-            0,
-        );
+        let bad = decide(&c, &meta, &json!({ "url": "https://evil.example.org/" }), 0);
         assert!(matches!(bad, PolicyDecision::Deny { .. }));
     }
 
@@ -862,6 +852,9 @@ mod tests {
             host_from_urlish("https://API.Example.COM/x"),
             Some("api.example.com".into())
         );
-        assert_eq!(host_from_urlish("example.com:443"), Some("example.com".into()));
+        assert_eq!(
+            host_from_urlish("example.com:443"),
+            Some("example.com".into())
+        );
     }
 }

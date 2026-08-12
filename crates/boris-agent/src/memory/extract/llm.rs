@@ -58,22 +58,24 @@ pub(super) fn parse_llm_delta(content: &str) -> Result<ProfileDelta, LlmError> {
     let raw: LlmDeltaRaw = serde_json::from_str(json_str)
         .map_err(|e| LlmError::parse(format!("personal extract parse: {e}")))?;
 
-    let mut delta = ProfileDelta::default();
-    delta.preferred_name = raw
-        .preferred_name
-        .filter(|s| !s.trim().is_empty() && looks_like_name(s));
-    delta.address_as = raw.address_as.filter(|s| !s.trim().is_empty());
-    delta.preferences_add = raw
-        .preferences_add
-        .into_iter()
-        .filter(|s| s.len() >= 3)
-        .take(5)
-        .collect();
-    delta.facts_remove_query = raw.facts_remove_query;
-    delta.ongoing_add = raw.ongoing_add.into_iter().take(5).collect();
-    delta.ongoing_replace = raw
-        .ongoing_replace
-        .map(|v| v.into_iter().take(10).collect());
+    let mut delta = ProfileDelta {
+        preferred_name: raw
+            .preferred_name
+            .filter(|s| !s.trim().is_empty() && looks_like_name(s)),
+        address_as: raw.address_as.filter(|s| !s.trim().is_empty()),
+        preferences_add: raw
+            .preferences_add
+            .into_iter()
+            .filter(|s| s.len() >= 3)
+            .take(5)
+            .collect(),
+        facts_remove_query: raw.facts_remove_query,
+        ongoing_add: raw.ongoing_add.into_iter().take(5).collect(),
+        ongoing_replace: raw
+            .ongoing_replace
+            .map(|v| v.into_iter().take(10).collect()),
+        ..Default::default()
+    };
     for f in raw.facts_add.into_iter().take(5) {
         let text = f.text.trim();
         if text.len() < 3 {

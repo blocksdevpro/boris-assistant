@@ -38,12 +38,17 @@ impl Tool for GetSystemInfoTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::System)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::System)
             .read_only(true)
             .max_concurrency(8)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
         let username = std::env::var("USERNAME")
@@ -75,7 +80,10 @@ mod tests {
     #[tokio::test]
     async fn system_info_ok() {
         let t = GetSystemInfoTool::new("/tmp/.boris");
-        let out = t.execute(&crate::tool_context::ToolCallContext::new("t"), json!({})).await.unwrap();
+        let out = t
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
+            .await
+            .unwrap();
         assert!(out.contains("OS:"));
         assert!(out.contains("Boris home:"));
     }

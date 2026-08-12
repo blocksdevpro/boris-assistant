@@ -23,10 +23,7 @@ impl OpenRouterClient {
         if stream {
             obj.insert("stream".into(), json!(true));
             // Final SSE event includes usage (incl. cached_tokens) when supported.
-            obj.insert(
-                "stream_options".into(),
-                json!({ "include_usage": true }),
-            );
+            obj.insert("stream_options".into(), json!({ "include_usage": true }));
         }
 
         if !self.provider_order.is_empty() {

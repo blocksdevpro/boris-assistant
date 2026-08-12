@@ -11,10 +11,7 @@ const MIN_TRANSCRIPT_ALNUM: usize = 2;
 /// [`MIN_TRANSCRIPT_ALNUM`] alphanumeric characters (noise, partial wake,
 /// accidental clicks).
 pub(super) fn transcript_usable(text: &str) -> bool {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .count()
-        >= MIN_TRANSCRIPT_ALNUM
+    text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_TRANSCRIPT_ALNUM
 }
 
 /// Lightweight OpenRouter sticky-session token without the `uuid` crate.

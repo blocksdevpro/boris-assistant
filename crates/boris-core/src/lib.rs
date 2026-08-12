@@ -34,6 +34,4 @@ mod types;
 // ── Crate-root re-exports (preferred import path for hosts & siblings) ───────
 
 pub use error::{Error, Result};
-pub use types::{
-    ArcAudioBuffer, AudioBuffer, AudioSample, TurnId, AUDIO_TARGET_RATE,
-};
+pub use types::{ArcAudioBuffer, AudioBuffer, AudioSample, TurnId, AUDIO_TARGET_RATE};

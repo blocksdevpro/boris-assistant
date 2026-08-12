@@ -100,7 +100,7 @@ pub fn is_core_name(name: &str, features: &ToolRuntimeFeatures) -> bool {
     if let Some(ref override_names) = features.core_tools {
         return override_names.iter().any(|n| n == name);
     }
-    DEFAULT_CORE_TOOL_NAMES.iter().any(|n| *n == name)
+    DEFAULT_CORE_TOOL_NAMES.contains(&name)
 }
 
 /// Filter tools for the model tool list.
@@ -119,9 +119,7 @@ pub fn filter_listed_tools<'a>(
         .iter()
         .filter(|t| {
             let name = t.name();
-            is_core_name(name, &ctx.features)
-                || ctx.activated.contains(name)
-                || t.should_list(ctx)
+            is_core_name(name, &ctx.features) || ctx.activated.contains(name) || t.should_list(ctx)
         })
         .collect()
 }
@@ -214,8 +212,10 @@ mod tests {
             }));
         }
 
-        let mut features = ToolRuntimeFeatures::default();
-        features.progressive_listing = true;
+        let features = ToolRuntimeFeatures {
+            progressive_listing: true,
+            ..Default::default()
+        };
         let mut activated = HashSet::new();
         activated.insert("file_read".into());
         let ctx = ListToolsContext {

@@ -474,7 +474,10 @@ mod tests {
             ctx.push(Role::Assistant, format!("a{i}"));
         }
         // Pad to hard budget so collapse engages.
-        ctx.push(Role::User, "pad".repeat(Context::COMPACT_TOKEN_HARD * 4 / 3));
+        ctx.push(
+            Role::User,
+            "pad".repeat(Context::COMPACT_TOKEN_HARD * 4 / 3),
+        );
 
         assert!(ctx.estimate_tokens() > Context::COMPACT_TOKEN_HARD);
         ctx.compact_mechanical();
@@ -492,11 +495,7 @@ mod tests {
             .expect("collapsed tool batch summary");
         assert!(collapsed.content.is_string());
         assert!(
-            collapsed
-                .content
-                .as_str()
-                .unwrap()
-                .contains("bash"),
+            collapsed.content.as_str().unwrap().contains("bash"),
             "collapse summary should retain tool name"
         );
 
@@ -538,7 +537,11 @@ mod tests {
             .find(|m| matches!(m.role, Role::Tool))
             .unwrap();
         let s = tool.content["content"].as_str().unwrap();
-        assert_eq!(s.len(), body.len(), "10k tool result must not compact under soft");
+        assert_eq!(
+            s.len(),
+            body.len(),
+            "10k tool result must not compact under soft"
+        );
         assert!(!s.contains("…[compacted]…"));
     }
 
@@ -548,10 +551,7 @@ mod tests {
         ctx.push(Role::System, "sys");
         ctx.push(Role::User, "u1");
         let big = "z".repeat(80_000);
-        ctx.push(
-            Role::Tool,
-            json!({ "tool_call_id": "c1", "content": big }),
-        );
+        ctx.push(Role::Tool, json!({ "tool_call_id": "c1", "content": big }));
         ctx.compact_mechanical();
         let tool = ctx
             .messages

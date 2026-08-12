@@ -1,25 +1,69 @@
-Third-Party Notices
-===================
+Third-Party Notices and Release Provenance
+===========================================
 
-Boris Assistant (this repository's source) is licensed under the Apache License,
-Version 2.0 — see LICENSE.
+This notice applies to Boris Assistant 1.0.0 source and to release artifacts
+built from the matching `v1.0.0` source tag. It identifies the third-party
+components that are intentionally bundled, downloaded, or used to build the
+product. It must accompany a binary distribution together with the license
+texts and notices required by each component's license.
 
-The product may download or bundle third-party models and native libraries that
-are **not** covered by that Apache-2.0 grant for the Boris source tree. Their
-licenses and terms are defined by their upstream projects. Review those terms
-before redistribution.
+Boris Assistant source code
+---------------------------
 
-Common dependencies / runtime components (non-exhaustive):
+Copyright 2026 BlocksDevPro.
 
-  - ONNX Runtime (Microsoft) — https://github.com/microsoft/onnxruntime
-  - DirectML (Microsoft) — used on Windows desktop packaging paths
-  - LiveKit-style / open wake-word ONNX models — see upstream LiveKit / model
-    providers for license and use terms
-  - Parakeet STT weights / graphs — see Hugging Face and model card licenses
-  - Supertone / Supertonic TTS assets — see upstream Supertone / st-tts terms
-  - Kokoro TTS (experimental adapter) — see any-tts / model upstream licenses
-  - Hugging Face Hub downloads — subject to model cards and HF terms; optional
-    auth via HF_TOKEN / HUGGING_FACE_HUB_TOKEN
+The Boris Assistant source in this repository is licensed under the Apache
+License, Version 2.0. The complete license text is in `LICENSE`.
 
-This file is a pointer only. It is not a substitute for reading upstream
-LICENSE, NOTICE, or model-card files for each component you ship or run.
+Dependency inventories
+----------------------
+
+The locked, version-specific source dependency inventories for this release are:
+
+* Rust: `Cargo.lock` (including the pinned `livekit-wakeword` git revision).
+* Frontend: `desktop/package-lock.json` and `desktop/bun.lock`.
+
+Those lockfiles, rather than a hand-maintained list, are the authoritative
+inventory for Rust and JavaScript packages included by a release build. Before
+publishing an artifact, the release owner must generate and archive a license
+inventory/SBOM from those exact lockfiles, include every license/NOTICE required
+by the resolved packages, and retain it with the artifact. A lockfile update
+requires regenerating that material.
+
+Native runtime components
+-------------------------
+
+| Component | How it is used or distributed | Upstream provenance | Release requirement |
+|-----------|-------------------------------|---------------------|---------------------|
+| ONNX Runtime | `onnxruntime.dll` is staged beside the Windows executable for wake-word inference. | Microsoft ONNX Runtime: <https://github.com/microsoft/onnxruntime> | Record the DLL version and SHA-256 from the final installer; include its applicable license and notices. |
+| DirectML | `DirectML.dll` is staged with the Windows ONNX Runtime execution provider. | Microsoft DirectML: <https://github.com/microsoft/DirectML> | Record the DLL version and SHA-256 from the final installer; include the applicable Microsoft distribution terms and notices. |
+| `livekit-wakeword` | Rust wake-word implementation; its mel and embedding graphs are linked through the pinned git dependency. | `blocksdevpro/rust-sdks` revision `9cf2528fe649e8846d96a3ec1aedb97ec8b4cfda`: <https://github.com/blocksdevpro/rust-sdks> | Include its license/NOTICE as resolved at that exact revision. |
+
+Model assets
+------------
+
+Model weights are not covered by Boris's Apache-2.0 license. Their terms come
+from their upstream model cards and repositories. Do not redistribute a model
+unless its license, notices, and any attribution or acceptable-use obligations
+have been reviewed for that exact revision.
+
+| Model/component | Product handling | Upstream provenance |
+|-----------------|------------------|---------------------|
+| LiveKit wake classifier (`boris-large.onnx`) | Versioned in the source release and embedded in the desktop executable at build time. SHA-256: `cf786dbfc65508b6adc1168855cf42a694c76cccb450533ced9cf9322e980d1a`. | The source URL/revision and license must be recorded in the release manifest before distributing the binary. |
+| Parakeet TDT 0.6B v2 int8 | Downloaded at runtime into the user's Boris model directory. | <https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx> |
+| Supertonic 3 | Downloaded at runtime into the user's Boris model directory. | <https://huggingface.co/Supertone/supertonic-3> |
+| Kokoro-82M (experimental adapter) | Not automatically downloaded or bundled by the product. | <https://huggingface.co/hexgrad/Kokoro-82M> |
+
+Release-record requirements
+---------------------------
+
+For every published installer, retain an artifact-specific release manifest
+containing the final installer filename, SHA-256, source tag/commit, signing
+identity, the staged native-DLL versions and hashes, every bundled model's
+source/revision/hash/license, and the generated SBOM/license inventory. If a
+required provenance or license item is unavailable, do not publish that
+artifact.
+
+This notice is factual release documentation, not legal advice. Distribution
+owners remain responsible for verifying upstream terms and satisfying all
+applicable license obligations.

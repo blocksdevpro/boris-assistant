@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Boris",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.boris.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bun run build",
+    "beforeBundleCommand": "bun run verify:bundle-runtime",
     "frontendDist": "../dist"
   },
   "app": {

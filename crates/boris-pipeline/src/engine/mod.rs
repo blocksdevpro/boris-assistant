@@ -66,8 +66,8 @@ use crate::status::{EngineState, Phase, StatusPicture};
 use activity::activity_label;
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
-    join_stt_load, join_tts_load, lost_stt, reclaim_stt_slot, release_voice_models,
-    spawn_stt_load, spawn_tts_load, unload_stt, unload_tts, SttBox,
+    join_stt_load, join_tts_load, lost_stt, reclaim_stt_slot, release_voice_models, spawn_stt_load,
+    spawn_tts_load, unload_stt, unload_tts, SttBox,
 };
 use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve};
 use playback::{poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait};
@@ -98,7 +98,10 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn send(&self, cmd: EngineCommand) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+    pub fn send(
+        &self,
+        cmd: EngineCommand,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.cmd_tx.send(cmd)
     }
 
@@ -351,7 +354,9 @@ fn run(
                     rt.picture.set_phase(Phase::Off);
                     return Ok(());
                 }
-                Ok(cmd @ (EngineCommand::SwitchInput { .. } | EngineCommand::SwitchOutput { .. })) => {
+                Ok(
+                    cmd @ (EngineCommand::SwitchInput { .. } | EngineCommand::SwitchOutput { .. }),
+                ) => {
                     apply_device_cmd(&mut rt, cmd);
                 }
             }
@@ -492,8 +497,7 @@ fn run(
             );
             rt.picture.detail = Some("didn't catch that".into());
             // If we were in a follow-up, one soft retry is enough; then re-arm.
-            if matches!(capture_kind, CaptureKind::AwaitReply) && follow_up_depth < MAX_FOLLOW_UPS
-            {
+            if matches!(capture_kind, CaptureKind::AwaitReply) && follow_up_depth < MAX_FOLLOW_UPS {
                 await_reply = true;
             } else {
                 follow_up_depth = 0;
@@ -567,11 +571,7 @@ fn run(
                     }
                 }
             }
-            let tools_snapshot = recent_w
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+            let tools_snapshot = recent_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
             let Some(label) = activity_label(ev, &tools_snapshot) else {
                 return;
             };
@@ -633,8 +633,7 @@ fn run(
             rt.picture.activity = Some(format!("{} tools", report.tools_used.len()));
             rt.picture.publish();
         }
-        rt.picture
-            .update_context_from_chars(report.approx_chars_in);
+        rt.picture.update_context_from_chars(report.approx_chars_in);
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
         let mut confirm = ConfirmCtx {

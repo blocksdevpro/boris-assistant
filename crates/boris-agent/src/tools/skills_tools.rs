@@ -45,7 +45,8 @@ impl Tool for ListSkillsTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe).kind(ToolKind::Skill)
+        ToolMeta::with_risk(ToolRisk::Safe)
+            .kind(ToolKind::Skill)
             .read_only(true)
             .max_concurrency(4)
     }
@@ -54,14 +55,19 @@ impl Tool for ListSkillsTool {
         true // soft-core when progressive listing is on
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let guard = self
             .skills
             .lock()
             .map_err(|_| ToolError::failed("skills lock poisoned"))?;
         if guard.skills.is_empty() {
-            return Ok("No skills installed. User can add SKILL.md under ~/.boris/skills/<name>/."
-                .into());
+            return Ok(
+                "No skills installed. User can add SKILL.md under ~/.boris/skills/<name>/.".into(),
+            );
         }
         let mut out = format!("{} skill(s):\n", guard.skills.len());
         for s in &guard.skills {
@@ -126,7 +132,11 @@ impl Tool for LoadSkillTool {
         true // soft-core when progressive listing is on
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let name = require_string(obj, "name")?;
         let name = name.trim();
@@ -140,15 +150,10 @@ impl Tool for LoadSkillTool {
                 .skills
                 .lock()
                 .map_err(|_| ToolError::failed("skills lock poisoned"))?;
-            guard
-                .get(name)
-                .cloned()
-                .ok_or_else(|| {
-                    let available = guard.names().join(", ");
-                    ToolError::failed(format!(
-                        "unknown skill '{name}'. Available: {available}"
-                    ))
-                })?
+            guard.get(name).cloned().ok_or_else(|| {
+                let available = guard.names().join(", ");
+                ToolError::failed(format!("unknown skill '{name}'. Available: {available}"))
+            })?
         };
 
         let mut body = skills::load_skill_body(&skill).map_err(ToolError::failed)?;

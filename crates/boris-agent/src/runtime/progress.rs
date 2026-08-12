@@ -15,7 +15,9 @@ pub type EmitFn = TypesEmitFn;
 /// Internal progress payload from a tool body.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Chunk {
         delta: String,
         total_bytes: u64,
@@ -96,7 +98,11 @@ impl EventProgressSink {
     fn map_message(event: &ProgressEvent, max: usize) -> (String, Option<u64>) {
         match event {
             ProgressEvent::Text { text } => {
-                let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(text);
+                let line = text
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or(text);
                 (Self::truncate_msg(line.trim(), max), None)
             }
             ProgressEvent::Chunk {
@@ -111,7 +117,7 @@ impl EventProgressSink {
                     .unwrap_or(delta);
                 let mut msg = Self::truncate_msg(line.trim(), max);
                 if *truncated && !msg.is_empty() {
-                    msg.push_str("…");
+                    msg.push('…');
                 }
                 (msg, Some(*total_bytes))
             }

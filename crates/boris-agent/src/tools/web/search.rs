@@ -262,8 +262,8 @@ async fn search_exa(
         )));
     }
 
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|e| ExaError::msg(format!("invalid JSON: {e}")))?;
+    let json: Value =
+        serde_json::from_str(&text).map_err(|e| ExaError::msg(format!("invalid JSON: {e}")))?;
     Ok(parse_exa_results(&json, limit))
 }
 
@@ -292,11 +292,7 @@ pub(crate) fn parse_exa_results(json: &Value, limit: usize) -> Vec<SearchHit> {
         let text = r.get("text").and_then(|t| t.as_str()).unwrap_or("");
         let snippet: String = text.chars().take(EXA_SNIPPET_CHARS).collect();
         hits.push(SearchHit {
-            title: if title.is_empty() {
-                url.clone()
-            } else {
-                title
-            },
+            title: if title.is_empty() { url.clone() } else { title },
             url,
             snippet,
         });

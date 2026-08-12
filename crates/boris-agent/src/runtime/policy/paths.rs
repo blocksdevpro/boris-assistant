@@ -120,9 +120,8 @@ pub(super) fn check_path_allowed(
     };
 
     for root in &roots {
-        let root_n = resolve_path_for_policy(root).unwrap_or_else(|_| {
-            normalize_path(root).unwrap_or_else(|_| root.clone())
-        });
+        let root_n = resolve_path_for_policy(root)
+            .unwrap_or_else(|_| normalize_path(root).unwrap_or_else(|_| root.clone()));
         if path_is_within(&resolved, &root_n) {
             return Ok(());
         }
@@ -214,9 +213,7 @@ pub fn resolve_path_for_policy(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn try_canonicalize(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path)
-        .ok()
-        .map(strip_windows_verbatim)
+    std::fs::canonicalize(path).ok().map(strip_windows_verbatim)
 }
 
 /// Strip Windows `\\?\` / `\\?\UNC\` prefixes so component compares work with
@@ -264,11 +261,7 @@ fn os_str_eq_path(a: &OsStr, b: &OsStr) -> bool {
 }
 
 /// Public helper for future file tools: resolve `raw` under write/read roots.
-pub fn resolve_in_roots(
-    config: &SandboxConfig,
-    raw: &str,
-    write: bool,
-) -> Result<PathBuf, String> {
+pub fn resolve_in_roots(config: &SandboxConfig, raw: &str, write: bool) -> Result<PathBuf, String> {
     let access = if write {
         PathAccess::Write
     } else {
@@ -382,10 +375,7 @@ mod tests {
 
     #[test]
     fn canonicalize_keeps_in_root_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "boris-path-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("boris-path-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("note.txt");
@@ -404,10 +394,7 @@ mod tests {
     fn symlink_escape_denied_when_supported() {
         // Create dir with a symlink pointing outside; policy should reject if
         // Windows allows symlink creation for this user.
-        let base = std::env::temp_dir().join(format!(
-            "boris-symlink-test-{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("boris-symlink-test-{}", std::process::id()));
         let sandbox = base.join("sandbox");
         let outside = base.join("outside");
         let _ = fs::remove_dir_all(&base);

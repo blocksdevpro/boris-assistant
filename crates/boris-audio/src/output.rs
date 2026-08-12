@@ -211,7 +211,9 @@ impl OutputPipeline {
     }
 }
 
-fn lock_output_state(state: &Mutex<OutputStreamState>) -> std::sync::MutexGuard<'_, OutputStreamState> {
+fn lock_output_state(
+    state: &Mutex<OutputStreamState>,
+) -> std::sync::MutexGuard<'_, OutputStreamState> {
     match state.lock() {
         Ok(g) => g,
         Err(poisoned) => {

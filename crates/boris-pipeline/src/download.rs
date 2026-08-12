@@ -11,12 +11,12 @@
 //!
 //! # Source URLs
 //!
-//! Default remote sources (verified Hugging Face repos):
+//! Default remote sources are immutable Hugging Face revisions:
 //!
 //! | Component  | Default base (per-file absolute URLs below) |
 //! |------------|-----------------------------------------------|
-//! | Parakeet   | `https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main` |
-//! | Supertone  | `https://huggingface.co/Supertone/supertonic-3/resolve/main` |
+//! | Parakeet   | `istupakov/parakeet-tdt-0.6b-v2-onnx` @ `0bbb45a3365852604aef28b538a8f066f4ccaa85` |
+//! | Supertone  | `Supertone/supertonic-3` @ `724fb5abbf5502583fb520898d45929e62f02c0b` |
 //!
 //! Override everything with env `BORIS_MODEL_BASE_URL`. When set, each file is
 //! fetched from `{BORIS_MODEL_BASE_URL}/{local_rel}` where `local_rel` matches
@@ -29,19 +29,16 @@
 //!
 //! # Integrity verification
 //!
-//! Each [`CatalogEntry`] has a `min_bytes` floor (always enforced) and an
-//! optional pinned `sha256` digest. When `sha256` is `Some`, the downloaded
-//! file is hashed after the size check and before it replaces any existing
-//! file; a mismatch deletes the temp file and fails that entry. All current
-//! catalog entries ship with `sha256: None` — we have not independently
-//! verified digests for the real upstream artifacts, so nothing is
-//! (falsely) pinned yet. `min_bytes` alone does **not** protect against a
-//! compromised/MITM mirror serving an oversized malicious payload; wiring
-//! real verified hashes into the catalog closes that gap for a given entry.
+//! Each [`CatalogEntry`] has a `min_bytes` floor and a required pinned SHA-256
+//! digest. Downloads are hashed after the size check and before they replace
+//! an existing file; a mismatch deletes the temp file and fails that entry.
+//! Existing files are also checked before they are reported as ready or
+//! skipped, so a corrupted or replaced local model is reinstalled rather than
+//! silently loaded. The pins correspond to the immutable revisions above.
 //!
-//! `BORIS_MODEL_BASE_URL` may be `http://` or `https://`; a plain-http
-//! mirror is allowed (some legitimate local/offline setups use it) but logs
-//! a loud `tracing::warn!` because it has no transport integrity of its own.
+//! `BORIS_MODEL_BASE_URL` must use `https://`. The SHA-256 verification is
+//! still required for mirrors, so a TLS-valid but malicious or stale mirror
+//! cannot substitute a model payload.
 //!
 //! LiveKit wake is **not** downloaded here — it is embedded in the desktop binary.
 //!
@@ -72,13 +69,19 @@ use crate::paths::{
 /// Env: override base URL; relative paths are appended (see module docs).
 pub const BORIS_MODEL_BASE_URL_ENV: &str = "BORIS_MODEL_BASE_URL";
 
-/// Hugging Face resolve base for Parakeet TDT 0.6b v2 int8 (onnx-asr layout).
-pub const DEFAULT_PARAKEET_HF_BASE: &str =
-    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main";
+/// Immutable Hugging Face revision for Parakeet TDT 0.6b v2 int8.
+pub const PARAKEET_HF_REVISION: &str = "0bbb45a3365852604aef28b538a8f066f4ccaa85";
 
-/// Hugging Face resolve base for Supertonic 3.
+/// Hugging Face resolve base for the pinned Parakeet TDT 0.6b v2 int8 revision.
+pub const DEFAULT_PARAKEET_HF_BASE: &str =
+    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85";
+
+/// Immutable Hugging Face revision for Supertonic 3.
+pub const SUPERTONE_HF_REVISION: &str = "724fb5abbf5502583fb520898d45929e62f02c0b";
+
+/// Hugging Face resolve base for the pinned Supertonic 3 revision.
 pub const DEFAULT_SUPERTONE_HF_BASE: &str =
-    "https://huggingface.co/Supertone/supertonic-3/resolve/main";
+    "https://huggingface.co/Supertone/supertonic-3/resolve/724fb5abbf5502583fb520898d45929e62f02c0b";
 
 /// TCP connect budget for each model HTTP request.
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -170,13 +173,10 @@ struct CatalogEntry {
     /// Minimum acceptable on-disk size (bytes) to treat as present.
     min_bytes: u64,
     default_base: &'static str,
-    /// Expected SHA-256 hex digest of the downloaded file, if known/pinned.
-    ///
-    /// `None` for entries we have not been able to independently verify against
-    /// the real upstream artifact yet (all current entries). When `Some`, a
-    /// mismatch after download is a hard failure — the partial/mismatched file
-    /// is deleted rather than left on disk to be picked up by a later run.
-    sha256: Option<&'static str>,
+    /// Expected SHA-256 hex digest of the downloaded file. A mismatch is a
+    /// hard failure: the partial/mismatched file is deleted rather than left
+    /// on disk to be picked up by a later run.
+    sha256: &'static str,
 }
 
 /// Required product files + conservative min sizes (skip re-download if met).
@@ -188,7 +188,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "encoder-model.int8.onnx",
         min_bytes: 100_000_000, // ~652 MB
         default_base: DEFAULT_PARAKEET_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at PARAKEET_HF_REVISION.
+        sha256: "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155",
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -196,7 +197,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "decoder_joint-model.int8.onnx",
         min_bytes: 1_000_000, // ~9 MB
         default_base: DEFAULT_PARAKEET_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at PARAKEET_HF_REVISION.
+        sha256: "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3",
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -204,7 +206,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "config.json",
         min_bytes: 20,
         default_base: DEFAULT_PARAKEET_HF_BASE,
-        sha256: None,
+        sha256: "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466",
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -212,7 +214,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "vocab.txt",
         min_bytes: 100,
         default_base: DEFAULT_PARAKEET_HF_BASE,
-        sha256: None,
+        sha256: "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d",
     },
     CatalogEntry {
         component: ModelComponent::Parakeet,
@@ -220,7 +222,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "nemo128.onnx",
         min_bytes: 10_000, // ~140 KB
         default_base: DEFAULT_PARAKEET_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at PARAKEET_HF_REVISION.
+        sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f",
     },
     // Supertone graphs
     CatalogEntry {
@@ -229,7 +232,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/tts.json",
         min_bytes: 100,
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        sha256: "42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09",
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -237,7 +240,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/unicode_indexer.json",
         min_bytes: 1_000,
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        sha256: "9bf7346e43883a81f8645c81224f786d43c5b57f3641f6e7671a7d6c493cb24f",
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -245,7 +248,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/duration_predictor.onnx",
         min_bytes: 100_000, // ~3.7 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at SUPERTONE_HF_REVISION.
+        sha256: "c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db",
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -253,7 +257,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/text_encoder.onnx",
         min_bytes: 1_000_000, // ~36 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at SUPERTONE_HF_REVISION.
+        sha256: "c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff",
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -261,7 +266,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/vector_estimator.onnx",
         min_bytes: 10_000_000, // ~256 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at SUPERTONE_HF_REVISION.
+        sha256: "883ac868ea0275ef0e991524dc64f16b3c0376efd7c320af6b53f5b780d7c61c",
     },
     CatalogEntry {
         component: ModelComponent::Supertone,
@@ -269,7 +275,8 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "onnx/vocoder.onnx",
         min_bytes: 10_000_000, // ~101 MB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        // Git-LFS SHA-256 at SUPERTONE_HF_REVISION.
+        sha256: "085de76dd8e8d5836d6ca66826601f615939218f90e519f70ee8a36ed2a4c4ba",
     },
     // Voice (upstream dir is voice_styles/)
     CatalogEntry {
@@ -278,7 +285,7 @@ const CATALOG: &[CatalogEntry] = &[
         default_remote_rel: "voice_styles/M4.json",
         min_bytes: 1_000, // ~290 KB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
-        sha256: None,
+        sha256: "ca8eefad4fcd989c9379032ff3e50738adc547eeb5e221b82593a6d7b3bac303",
     },
 ];
 
@@ -289,9 +296,26 @@ fn file_name_of(rel: &str) -> String {
         .unwrap_or_else(|| rel.to_string())
 }
 
-fn file_ok(path: &Path, min_bytes: u64) -> bool {
+/// A model is usable only when both its minimum size and catalog hash match.
+///
+/// This intentionally re-hashes existing files before reporting them ready or
+/// skipping them. Model files execute inside ONNX Runtime, so treating a
+/// size-only file as trusted would make the first successful install the only
+/// integrity check and allow later local corruption or replacement.
+fn file_ok(path: &Path, entry: &CatalogEntry) -> bool {
     match fs::metadata(path) {
-        Ok(m) if m.is_file() && m.len() >= min_bytes => true,
+        Ok(m) if m.is_file() && m.len() >= entry.min_bytes => {
+            if let Err(error) = verify_sha256(path, entry.sha256) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "installed model failed integrity validation"
+                );
+                false
+            } else {
+                true
+            }
+        }
         _ => false,
     }
 }
@@ -313,7 +337,9 @@ fn purge_supertone_install(models_root: &Path) {
         if path.is_file() {
             match fs::remove_file(&path) {
                 Ok(()) => tracing::info!(path = %path.display(), "removed outdated Supertone file"),
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "failed to remove outdated Supertone file"),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to remove outdated Supertone file")
+                }
             }
         }
     }
@@ -328,31 +354,19 @@ fn resolve_url(entry: &CatalogEntry, base_override: Option<&str>) -> String {
     format!("{base}/{}", entry.default_remote_rel)
 }
 
-/// `BORIS_MODEL_BASE_URL` must be an absolute http(s) URL when set.
+/// `BORIS_MODEL_BASE_URL` must be an absolute HTTPS URL when set.
 ///
-/// Plain `http://` mirrors remain allowed (rejecting them outright would break
-/// legitimate local/offline mirror setups such as `http://localhost:8080/...`
-/// used in dev/test), but using one for a live install is a MITM risk — a
-/// tampered response could serve an oversized malicious payload that still
-/// passes the per-file `min_bytes` check and gets loaded as an ONNX graph. We
-/// emit a loud warning so the risk is visible instead of silent.
+/// Model hashes protect the payload, but HTTPS also authenticates the source
+/// and keeps model requests private. Local/offline mirrors must terminate TLS;
+/// HTTP is deliberately unsupported in release builds.
 fn validate_model_base_url(base: &str) -> Result<(), String> {
     let base = base.trim();
     if base.starts_with("https://") {
         return Ok(());
     }
-    if base.starts_with("http://") {
-        tracing::warn!(
-            base = %base,
-            "{BORIS_MODEL_BASE_URL_ENV} is using plain http:// — model downloads are \
-             unencrypted and vulnerable to MITM tampering; size checks alone cannot detect a \
-             malicious payload. Prefer an https:// mirror."
-        );
-        return Ok(());
-    }
     let preview: String = base.chars().take(80).collect();
     Err(format!(
-        "{BORIS_MODEL_BASE_URL_ENV} must be an http(s) URL, got '{preview}'"
+        "{BORIS_MODEL_BASE_URL_ENV} must be an https:// URL, got '{preview}'"
     ))
 }
 
@@ -388,7 +402,7 @@ pub fn models_status() -> ModelsStatus {
     for e in CATALOG {
         let path = base.join(e.local_rel);
         let wrong_gen = force_supertone && e.component == ModelComponent::Supertone;
-        if wrong_gen || !file_ok(&path, e.min_bytes) {
+        if wrong_gen || !file_ok(&path, e) {
             missing.push(e.local_rel.to_string());
         }
     }
@@ -441,8 +455,8 @@ pub fn install_models(
     let root = models_dir();
     let onnx_dir = supertone_onnx_dir();
     // Old Supertonic 1 English-only graphs must be replaced (size checks pass).
-    let reinstall_supertone = onnx_dir.join("tts.json").is_file()
-        && !supertone_onnx_is_multilingual(&onnx_dir);
+    let reinstall_supertone =
+        onnx_dir.join("tts.json").is_file() && !supertone_onnx_is_multilingual(&onnx_dir);
     if reinstall_supertone {
         if let Some(problem) = supertone_version_problem(&onnx_dir) {
             tracing::warn!(%problem, "reinstalling Supertone models from Hugging Face");
@@ -469,7 +483,7 @@ pub fn install_models(
         let file_name = file_name_of(entry.local_rel);
         let rel = entry.local_rel.to_string();
 
-        if file_ok(&dest, entry.min_bytes) {
+        if file_ok(&dest, entry) {
             skipped += 1;
             on_progress(DownloadProgress {
                 component: entry.component,
@@ -637,14 +651,9 @@ fn download_one(
         ));
     }
 
-    if let Some(expected) = entry.sha256 {
-        match verify_sha256(&tmp, expected) {
-            Ok(()) => {}
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(e);
-            }
-        }
+    if let Err(error) = verify_sha256(&tmp, entry.sha256) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
 
     // Replace destination atomically where possible.
@@ -736,9 +745,9 @@ mod tests {
     }
 
     #[test]
-    fn base_url_must_be_http_or_https() {
+    fn base_url_must_be_https() {
         assert!(validate_model_base_url("https://cdn.example/models").is_ok());
-        assert!(validate_model_base_url("http://localhost:8080/m").is_ok());
+        assert!(validate_model_base_url("http://localhost:8080/m").is_err());
         assert!(validate_model_base_url("ftp://bad").is_err());
         assert!(validate_model_base_url("file:///tmp").is_err());
         assert!(validate_model_base_url("not-a-url").is_err());
@@ -746,7 +755,8 @@ mod tests {
 
     #[test]
     fn timeout_errors_are_labeled_for_install_report() {
-        let msg = format_download_error("request failed", "error sending request for url: timed out");
+        let msg =
+            format_download_error("request failed", "error sending request for url: timed out");
         assert!(msg.contains("timed out"), "{msg}");
         assert!(msg.contains("stalled"), "{msg}");
     }

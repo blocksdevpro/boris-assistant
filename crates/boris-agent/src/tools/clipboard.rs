@@ -48,10 +48,14 @@ impl Tool for ClipboardGetTool {
             .max_concurrency(8)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, _args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: Value,
+    ) -> Result<String, ToolError> {
         let text = tokio::task::spawn_blocking(|| {
-            let mut clip = arboard::Clipboard::new()
-                .map_err(|e| format!("clipboard unavailable: {e}"))?;
+            let mut clip =
+                arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
             clip.get_text()
                 .map_err(|e| format!("clipboard get failed: {e}"))
         })
@@ -68,7 +72,9 @@ impl Tool for ClipboardGetTool {
         } else {
             text
         };
-        Ok(truncate_tool_result(format!("Clipboard text:\n{truncated}")))
+        Ok(truncate_tool_result(format!(
+            "Clipboard text:\n{truncated}"
+        )))
     }
 }
 
@@ -107,7 +113,11 @@ impl Tool for ClipboardSetTool {
             .max_concurrency(1)
     }
 
-    async fn execute(&self, _ctx: &crate::tool_context::ToolCallContext, args: Value) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let text = require_string(obj, "text")?;
         if text.chars().count() > 20_000 {
@@ -115,8 +125,8 @@ impl Tool for ClipboardSetTool {
         }
         let text_clone = text.clone();
         tokio::task::spawn_blocking(move || {
-            let mut clip = arboard::Clipboard::new()
-                .map_err(|e| format!("clipboard unavailable: {e}"))?;
+            let mut clip =
+                arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
             clip.set_text(text_clone)
                 .map_err(|e| format!("clipboard set failed: {e}"))
         })

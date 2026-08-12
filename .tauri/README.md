@@ -23,23 +23,37 @@ until users install a full rebuild that embeds a new public key.**
 
 ## Signing a release build
 
+`tauri build` only reads **`TAURI_SIGNING_PRIVATE_KEY`** (not
+`TAURI_SIGNING_PRIVATE_KEY_PATH`). The value may be either the key file
+**contents** or a filesystem **path** that exists.
+
 PowerShell:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = (Resolve-Path .\.tauri\boris.key).Path
-# If the key has a password:
+# Path form (preferred locally) — use a Windows path, not a Git Bash /c/... path
+$env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path .\.tauri\boris.key).Path
+# If the key was generated with a password:
 # $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
+# Empty password (common for local keys):
+# $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 
 cd desktop
 bun run tauri build
 ```
 
-bash:
+bash (Git Bash / MSYS — convert to a Windows path so Rust can open the file):
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/.tauri/boris.key"
-# export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="..."
+export TAURI_SIGNING_PRIVATE_KEY="$(cygpath -w "$PWD/.tauri/boris.key")"
+# export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="..."   # if set when generating
+# export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""      # empty password
 cd desktop && bun run tauri build
+```
+
+Or paste the key contents directly:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/boris.key)"
 ```
 
 Tauri writes updater artifacts next to the normal installers (e.g.
@@ -74,6 +88,7 @@ The app polls:
 
 Store the private key as a GitHub Actions secret (never commit it):
 
-- `TAURI_SIGNING_PRIVATE_KEY` — full file contents, or
-- upload via `TAURI_SIGNING_PRIVATE_KEY_PATH` after writing the secret to a temp file
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — if the key is password-protected
+- `TAURI_SIGNING_PRIVATE_KEY` — full file contents (or write the secret to a temp file and set this var to that path)
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — if the key is password-protected (use `""` for empty password in CI so the CLI does not prompt)
+
+Note: `TAURI_SIGNING_PRIVATE_KEY_PATH` is only used by `tauri signer sign`, not by `tauri build`.

@@ -38,7 +38,9 @@ Signing and publishing steps: [`.tauri/README.md`](../.tauri/README.md).
 
 ```powershell
 # Sign a release build (PowerShell)
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = (Resolve-Path ..\.tauri\boris.key).Path
+# tauri build reads TAURI_SIGNING_PRIVATE_KEY (path or key contents), not _PATH
+$env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path ..\.tauri\boris.key).Path
+# $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""   # if key has empty/no password prompt issues
 bun run tauri build
 ```
 

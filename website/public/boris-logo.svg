@@ -1,11 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <!-- Classic Boris waveform mark on dark plate.
+       Bars mapped from the 24×24 mark (x, y0, y1) into a padded square
+       so the full six-bar group is centered at (256, 256). -->
   <rect width="512" height="512" rx="112" fill="#0C0D10"/>
   <g stroke="#FAFAFA" stroke-width="28" stroke-linecap="round">
-    <line x1="155" y1="256" x2="155" y2="294"/>
-    <line x1="206" y1="205" x2="206" y2="346"/>
-    <line x1="256" y1="166" x2="256" y2="397"/>
-    <line x1="307" y1="230" x2="307" y2="320"/>
-    <line x1="358" y1="192" x2="358" y2="358"/>
-    <line x1="408" y1="256" x2="408" y2="294"/>
+    <line x1="137" y1="232" x2="137" y2="268"/>
+    <line x1="184" y1="184" x2="184" y2="316"/>
+    <line x1="232" y1="148" x2="232" y2="364"/>
+    <line x1="280" y1="208" x2="280" y2="292"/>
+    <line x1="328" y1="172" x2="328" y2="328"/>
+    <line x1="375" y1="232" x2="375" y2="268"/>
   </g>
 </svg>

@@ -64,7 +64,7 @@ pub(super) fn rust_grep(
                     continue;
                 }
             }
-            grep_file(&path, &pat_lower, ignore_case, limit - out.len(), &mut out);
+            grep_file(&path, &pat_lower, ignore_case, limit, &mut out);
         }
     }
     Ok(out)
@@ -74,11 +74,18 @@ fn grep_file(
     path: &std::path::Path,
     pattern: &str,
     ignore_case: bool,
-    remaining: usize,
+    limit: usize,
     out: &mut Vec<String>,
 ) {
-    if remaining == 0 {
+    if out.len() >= limit {
         return;
+    }
+    // Voice-sized: skip huge / binary blobs instead of slurping them.
+    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_FILE_BYTES {
+            return;
+        }
     }
     let Ok(bytes) = std::fs::read(path) else {
         return;
@@ -90,16 +97,16 @@ fn grep_file(
         return;
     };
     for (i, line) in text.lines().enumerate() {
-        if out.len() >= remaining {
+        if out.len() >= limit {
             break;
         }
-        let hay = if ignore_case {
-            line.to_ascii_lowercase()
+        let hit = if ignore_case {
+            // Only allocate the lowered line when we actually need it.
+            line.to_ascii_lowercase().contains(pattern)
         } else {
-            line.to_string()
+            line.contains(pattern)
         };
-        // Substring search (not full regex) for fallback.
-        if hay.contains(pattern) {
+        if hit {
             out.push(format!("{}:{}:{}", path.display(), i + 1, line));
         }
     }
@@ -169,6 +176,21 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "x\nx\nx\nx\n").unwrap();
         let hits = rust_grep("x", &dir, false, None, 2).unwrap();
         assert_eq!(hits.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_is_total_across_files() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("boris-grep-lim2-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x\nx\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "x\nx\n").unwrap();
+        let hits = rust_grep("x", &dir, false, None, 3).unwrap();
+        assert_eq!(hits.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

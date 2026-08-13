@@ -10,6 +10,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `web_search` no longer needs an Exa account. Downloads search via DuckDuckGo
   (Instant Answer + HTML) and Wikipedia with no API key. A configured Exa key
   is still used first as an optional upgrade.
+- `grep` stays in-process for keyword / single-file searches. Ripgrep is only
+  spawned when the pattern looks like a regex (a lone `.` in `file.rs` is not
+  treated as regex). Avoids a ~30–60ms process tax on every voice-turn search.
+- `bash` uses `bash -c` instead of a login shell (`-lc`), prefers Git Bash by
+  absolute path, and never launches WSL/`WindowsApps` `bash.exe`. Login-profile
+  sourcing was ~10× the spawn cost of `echo`.
 
 ### Added
 

@@ -1,7 +1,8 @@
 //! Bash tool type, process spawn, and execute path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -40,28 +41,24 @@ impl BashTool {
         }
     }
 
-    fn build_command(command: &str, cwd: &std::path::Path) -> Command {
-        // Prefer bash (Git Bash on Windows, real bash on Unix). Fallbacks below
-        // are chosen only at spawn time if bash is missing.
-        let mut cmd = Command::new("bash");
-        cmd.arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        scrub_child_env(&mut cmd);
-        cmd
+    fn build_command(command: &str, cwd: &Path) -> Command {
+        match resolved_shell() {
+            ResolvedShell::Bash(path) => build_bash(path, command, cwd),
+            #[cfg(windows)]
+            ResolvedShell::PowerShell => Self::build_fallback(command, cwd),
+            #[cfg(not(windows))]
+            ResolvedShell::Sh => Self::build_fallback(command, cwd),
+        }
     }
 
     #[cfg(windows)]
-    fn build_fallback(command: &str, cwd: &std::path::Path) -> Command {
+    fn build_fallback(command: &str, cwd: &Path) -> Command {
         // PowerShell when Git Bash is missing. `-ExecutionPolicy Bypass` is
         // intentional for desktop usability — not a security boundary. HITL
         // confirmation + ShellPolicy remain authoritative (see bash/policy.rs).
         let mut cmd = Command::new("powershell.exe");
         cmd.args([
+            "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
@@ -74,12 +71,13 @@ impl BashTool {
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .kill_on_drop(true);
+        apply_no_window(&mut cmd);
         scrub_child_env(&mut cmd);
         cmd
     }
 
     #[cfg(not(windows))]
-    fn build_fallback(command: &str, cwd: &std::path::Path) -> Command {
+    fn build_fallback(command: &str, cwd: &Path) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(command)
@@ -91,6 +89,131 @@ impl BashTool {
         scrub_child_env(&mut cmd);
         cmd
     }
+}
+
+/// Which launcher to use. Resolved once — never probe WSL `bash.exe` per call.
+#[derive(Debug, Clone)]
+enum ResolvedShell {
+    Bash(PathBuf),
+    #[cfg(windows)]
+    PowerShell,
+    #[cfg(not(windows))]
+    Sh,
+}
+
+fn resolved_shell() -> &'static ResolvedShell {
+    static SHELL: OnceLock<ResolvedShell> = OnceLock::new();
+    SHELL.get_or_init(detect_shell)
+}
+
+fn detect_shell() -> ResolvedShell {
+    if let Some(path) = find_real_bash() {
+        return ResolvedShell::Bash(path);
+    }
+    #[cfg(windows)]
+    {
+        ResolvedShell::PowerShell
+    }
+    #[cfg(not(windows))]
+    {
+        ResolvedShell::Sh
+    }
+}
+
+/// Prefer a real bash binary. On Windows, skip WSL / Store stubs so a voice
+/// turn never boots a Linux VM just to run `echo`.
+fn find_real_bash() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        for candidate in git_bash_candidates() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("bash.exe");
+            if candidate.is_file() && !is_wsl_or_store_bash(&candidate) {
+                return Some(candidate);
+            }
+        }
+        return None;
+    }
+    #[cfg(not(windows))]
+    {
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("bash");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(windows)]
+fn git_bash_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    const REL: &[&str] = &[
+        // usr\bin is the real MSYS bash; Git\bin\bash.exe is a slower wrapper.
+        r"Git\usr\bin\bash.exe",
+        r"Git\bin\bash.exe",
+    ];
+    for root in [
+        std::env::var_os("ProgramFiles"),
+        std::env::var_os("ProgramFiles(x86)"),
+        std::env::var_os("LOCALAPPDATA").map(|p| {
+            let mut b = PathBuf::from(p);
+            b.push("Programs");
+            b.into_os_string()
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let root = PathBuf::from(root);
+        for rel in REL {
+            out.push(root.join(rel));
+        }
+    }
+    out
+}
+
+/// WSL (`System32\bash.exe`) and the Microsoft Store stub. Hitting either
+/// from a voice tool is a multi-second (or hanging) disaster.
+pub(super) fn is_wsl_or_store_bash(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    let lower = lower.replace('/', r"\");
+    lower.contains(r"\windows\system32\bash.exe")
+        || lower.contains(r"\windows\sysnative\bash.exe")
+        || lower.contains(r"\windowsapps\")
+        || lower.ends_with(r"\system32\bash.exe")
+}
+
+fn build_bash(bash: &Path, command: &str, cwd: &Path) -> Command {
+    // `-c` not `-lc`: a login shell sources profile and was ~10× slower
+    // (measured ~230ms vs ~24ms for Git Bash `echo` on Windows).
+    let mut cmd = Command::new(bash);
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    apply_no_window(&mut cmd);
+    scrub_child_env(&mut cmd);
+    cmd
+}
+
+fn apply_no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
 }
 
 /// Drop common API / cloud secret env vars from the child process.
@@ -275,10 +398,14 @@ impl Tool for BashTool {
         let mut child = match Self::build_command(command, &cwd).spawn() {
             Ok(c) => c,
             Err(e) => {
-                tracing::debug!(error = %e, "bash spawn failed; trying platform fallback");
-                Self::build_fallback(command, &cwd)
-                    .spawn()
-                    .map_err(|e2| ToolError::failed(format!("spawn failed: {e2} (bash: {e})")))?
+                if matches!(resolved_shell(), ResolvedShell::Bash(_)) {
+                    tracing::debug!(error = %e, "bash spawn failed; trying platform fallback");
+                    Self::build_fallback(command, &cwd).spawn().map_err(|e2| {
+                        ToolError::failed(format!("spawn failed: {e2} (bash: {e})"))
+                    })?
+                } else {
+                    return Err(ToolError::failed(format!("spawn failed: {e}")));
+                }
             }
         };
 
@@ -376,6 +503,25 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn skips_wsl_and_store_bash() {
+        assert!(is_wsl_or_store_bash(Path::new(
+            r"C:\Windows\System32\bash.exe"
+        )));
+        assert!(is_wsl_or_store_bash(Path::new(
+            r"C:\WINDOWS\system32\bash.exe"
+        )));
+        assert!(is_wsl_or_store_bash(Path::new(
+            r"C:\Program Files\WindowsApps\CanonicalGroupLimited.Ubuntu_bash.exe"
+        )));
+        assert!(!is_wsl_or_store_bash(Path::new(
+            r"C:\Program Files\Git\usr\bin\bash.exe"
+        )));
+        assert!(!is_wsl_or_store_bash(Path::new(
+            r"C:\Program Files\Git\bin\bash.exe"
+        )));
+    }
 
     #[test]
     fn tool_name_stable() {

@@ -5,6 +5,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0-beta.2] - 2026-08-13
+
+### Added
+
+- Branded launch splash from first HTML paint through React mount so the
+  main window does not flash an empty shell.
+
+### Fixed
+
+- Settings save and engine Start no longer freeze the Windows UI thread.
+  `get_settings` / `save_app_settings` (and device switch) run off the
+  message pump; boot `load_settings` is deferred until after first paint.
+
 ## [1.1.0-beta.1] - 2026-08-13
 
 ### Changed
@@ -57,5 +70,6 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.1.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.2
 [1.1.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.1
 [1.0.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0

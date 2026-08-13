@@ -1,0 +1,299 @@
+:root {
+  --startup-background: #0b0b0c;
+  --startup-foreground: #f5f5f5;
+  --startup-accent: oklch(0.78 0.06 250);
+}
+
+html:not(.overlay-mode),
+html:not(.overlay-mode) body,
+html:not(.overlay-mode) #root {
+  background: var(--startup-background);
+}
+
+body {
+  margin: 0;
+}
+
+.overlay-mode .startup-splash {
+  display: none !important;
+}
+
+.startup-app-shell {
+  height: 100%;
+  opacity: 0;
+  filter: blur(2px);
+  transform: scale(0.994);
+  transform-origin: center;
+  pointer-events: none;
+  will-change: opacity, filter, transform;
+}
+
+.startup-app-shell[data-revealed="true"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+  pointer-events: auto;
+  transition:
+    opacity 520ms ease-out,
+    filter 520ms ease-out,
+    transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.startup-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--startup-background);
+  color: var(--startup-foreground);
+  pointer-events: none;
+  user-select: none;
+  isolation: isolate;
+}
+
+.startup-splash__glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9.5rem;
+  height: 9.5rem;
+  border-radius: 999px;
+  background: rgba(112, 157, 211, 0.13);
+  filter: blur(34px);
+  opacity: 0.72;
+  transform: translate(-50%, -64%);
+  animation: startup-glow-breathe 2.2s ease-in-out infinite;
+}
+
+.startup-splash__lockup {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translateY(-2vh);
+  animation: startup-lockup-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.startup-splash__mark {
+  position: relative;
+  width: 4.5rem;
+  height: 4.5rem;
+  display: grid;
+  place-items: center;
+}
+
+.startup-splash__mark svg {
+  width: 4rem;
+  height: 4rem;
+  overflow: visible;
+}
+
+.startup-splash__bar {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: startup-signal 1.4s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.startup-splash__bar:nth-child(1) {
+  --signal-min: 0.7;
+  --collapse-x: 22px;
+  animation-delay: -0.18s;
+}
+
+.startup-splash__bar:nth-child(2) {
+  --signal-min: 0.76;
+  --collapse-x: 12px;
+  animation-delay: -0.48s;
+}
+
+.startup-splash__bar:nth-child(3) {
+  --signal-min: 0.66;
+  --collapse-x: 4px;
+  animation-delay: -0.72s;
+}
+
+.startup-splash__bar:nth-child(4) {
+  --signal-min: 0.72;
+  --collapse-x: -4px;
+  animation-delay: -0.34s;
+}
+
+.startup-splash__bar:nth-child(5) {
+  --signal-min: 0.68;
+  --collapse-x: -12px;
+  animation-delay: -0.6s;
+}
+
+.startup-splash__bar:nth-child(6) {
+  --signal-min: 0.76;
+  --collapse-x: -22px;
+  animation-delay: -0.08s;
+}
+
+.startup-splash__presence {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 999px;
+  background: var(--startup-accent);
+  box-shadow: 0 0 16px rgba(112, 157, 211, 0.45);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.35);
+}
+
+.startup-splash__copy {
+  margin-top: 0.35rem;
+  text-align: center;
+  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+}
+
+.startup-splash__name,
+.startup-splash__message {
+  margin: 0;
+}
+
+.startup-splash__name {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.startup-splash__message {
+  margin-top: 0.35rem;
+  color: rgba(245, 245, 245, 0.42);
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  letter-spacing: 0.01em;
+  opacity: 0;
+  animation: startup-message-in 360ms 420ms ease-out forwards;
+}
+
+.startup-splash:is([data-stage="presence"], [data-stage="reveal"])
+  .startup-splash__glow {
+  animation: none;
+  opacity: 0.35;
+  transform: translate(-50%, -64%) scale(0.72);
+  transition:
+    opacity 260ms ease-out,
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.startup-splash:is([data-stage="presence"], [data-stage="reveal"])
+  .startup-splash__bar {
+  animation: none;
+  opacity: 0;
+  transform: translateX(var(--collapse-x)) scaleY(0.06);
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 150ms 110ms ease-out;
+}
+
+.startup-splash:is([data-stage="presence"], [data-stage="reveal"])
+  .startup-splash__presence {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  transition:
+    opacity 140ms 90ms ease-out,
+    transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.startup-splash:is([data-stage="presence"], [data-stage="reveal"])
+  .startup-splash__copy {
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity 150ms ease-out,
+    transform 220ms ease-out;
+}
+
+.startup-splash[data-stage="reveal"] {
+  animation: startup-splash-reveal 560ms cubic-bezier(0.22, 1, 0.36, 1)
+    forwards;
+}
+
+.startup-splash[data-stage="reveal"] .startup-splash__glow {
+  opacity: 0;
+  transform: translate(-50%, -64%) scale(1.45);
+  transition:
+    opacity 460ms ease-out,
+    transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.startup-splash[data-stage="reveal"] .startup-splash__presence {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(1.35);
+  transition:
+    opacity 360ms 80ms ease-out,
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes startup-lockup-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-2vh + 5px)) scale(0.97);
+  }
+}
+
+@keyframes startup-message-in {
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes startup-signal {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scaleY(var(--signal-min, 0.7));
+  }
+  50% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+@keyframes startup-glow-breathe {
+  0%,
+  100% {
+    opacity: 0.52;
+    transform: translate(-50%, -64%) scale(0.92);
+  }
+  50% {
+    opacity: 0.78;
+    transform: translate(-50%, -64%) scale(1.06);
+  }
+}
+
+@keyframes startup-splash-reveal {
+  0%,
+  10% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-splash,
+  .startup-splash *,
+  .startup-splash *::before,
+  .startup-splash *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .startup-splash__message {
+    opacity: 1;
+  }
+
+  .startup-app-shell[data-revealed="true"] {
+    transition-duration: 140ms !important;
+  }
+}

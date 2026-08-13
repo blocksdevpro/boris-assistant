@@ -5,11 +5,43 @@
     <link rel="icon" type="image/svg+xml" href="/icons/boris-mark.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <link rel="stylesheet" href="/src/startup.css" />
     <title>Boris</title>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- First paint before the application bundle mounts. React replaces this
+           with the matching component and completes the transition. -->
+      <div
+        class="startup-splash"
+        data-stage="signal"
+        role="status"
+        aria-live="polite"
+        aria-label="Boris is starting"
+      >
+        <div class="startup-splash__glow" aria-hidden="true"></div>
+        <div class="startup-splash__lockup">
+          <div class="startup-splash__mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none">
+              <g stroke="currentColor" stroke-width="4" stroke-linecap="round">
+                <line class="startup-splash__bar" x1="10" y1="28" x2="10" y2="36"></line>
+                <line class="startup-splash__bar" x1="20" y1="20" x2="20" y2="44"></line>
+                <line class="startup-splash__bar" x1="28" y1="13" x2="28" y2="51"></line>
+                <line class="startup-splash__bar" x1="36" y1="24" x2="36" y2="40"></line>
+                <line class="startup-splash__bar" x1="44" y1="18" x2="44" y2="46"></line>
+                <line class="startup-splash__bar" x1="54" y1="28" x2="54" y2="36"></line>
+              </g>
+            </svg>
+            <span class="startup-splash__presence"></span>
+          </div>
+          <div class="startup-splash__copy">
+            <p class="startup-splash__name">Boris</p>
+            <p class="startup-splash__message">Starting quietly…</p>
+          </div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

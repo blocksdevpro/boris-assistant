@@ -1,8 +1,9 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StatusPreviewProvider } from "@/bridge/useStatus";
 import { OFF_STATUS, type StatusPicture } from "@/bridge";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
+import { StartupScreen } from "@/components/StartupScreen";
 import { logger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
 import { MainWindow } from "@/windows/main/MainWindow";
@@ -27,12 +28,19 @@ function devFixtureName(): string | null {
   return new URLSearchParams(window.location.search).get("fixture");
 }
 
+function isStartupPreview(): boolean {
+  if (!import.meta.env.DEV || isTauriRuntime()) return false;
+  return (
+    new URLSearchParams(window.location.search).get("preview") === "startup"
+  );
+}
+
 /**
  * One SPA, two surfaces.
  * Tauri loads the same frontend for every window; we pick the tree
  * from the window label (and a ?window= query for plain Vite).
  */
-async function resolveSurface(): Promise<Surface> {
+function resolveSurface(): Surface {
   try {
     const label = getCurrentWindow().label;
     if (label === "overlay") return "overlay";
@@ -47,10 +55,16 @@ async function resolveSurface(): Promise<Surface> {
 }
 
 function App() {
-  const [surface, setSurface] = useState<Surface | null>(null);
+  const [surface] = useState<Surface>(resolveSurface);
   const fixtureMatrix = isOverlayFixtureMatrix();
+  const startupPreview = isStartupPreview();
   const fixtureName = devFixtureName();
   const [fixtureStatus, setFixtureStatus] = useState<StatusPicture | null>(null);
+  const [startupRevealed, setStartupRevealed] = useState(false);
+  const [startupComplete, setStartupComplete] = useState(false);
+
+  const revealStartup = useCallback(() => setStartupRevealed(true), []);
+  const completeStartup = useCallback(() => setStartupComplete(true), []);
 
   useEffect(() => {
     let active = true;
@@ -70,12 +84,10 @@ function App() {
   }, [fixtureName]);
 
   useEffect(() => {
-    if (fixtureMatrix) return;
-    void resolveSurface().then((s) => {
-      logger.info("surface resolved", { surface: s });
-      setSurface(s);
-    });
-  }, [fixtureMatrix]);
+    if (!fixtureMatrix && !startupPreview) {
+      logger.info("surface resolved", { surface });
+    }
+  }, [fixtureMatrix, startupPreview, surface]);
 
   // Overlay paints pure-black chrome (Windows color-key); main keeps dark theme.
   useEffect(() => {
@@ -111,11 +123,11 @@ function App() {
     );
   }
 
-  if (surface === null) {
+  if (startupPreview) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-        Loading…
-      </div>
+      <AppErrorBoundary>
+        <StartupScreen preview />
+      </AppErrorBoundary>
     );
   }
 
@@ -130,14 +142,35 @@ function App() {
   const surfaceView =
     surface === "overlay" ? <OverlayWindow /> : <MainWindow />;
 
+  const surfaceContent = fixtureStatus ? (
+    <StatusPreviewProvider status={fixtureStatus}>
+      {surfaceView}
+    </StatusPreviewProvider>
+  ) : (
+    surfaceView
+  );
+
+  const showStartup = surface === "main" && !fixtureName;
+
   return (
     <AppErrorBoundary>
-      {fixtureStatus ? (
-        <StatusPreviewProvider status={fixtureStatus}>
-          {surfaceView}
-        </StatusPreviewProvider>
+      {showStartup ? (
+        <>
+          <div
+            className="startup-app-shell"
+            data-revealed={startupRevealed || startupComplete}
+          >
+            {surfaceContent}
+          </div>
+          {!startupComplete ? (
+            <StartupScreen
+              onReveal={revealStartup}
+              onComplete={completeStartup}
+            />
+          ) : null}
+        </>
       ) : (
-        surfaceView
+        surfaceContent
       )}
     </AppErrorBoundary>
   );

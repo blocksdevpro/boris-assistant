@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "boris-assistant"
-version = "1.1.0-beta.2"
+version = "1.1.0-beta.3"
 
 [[package]]
 name = "boris-audio"
@@ -525,10 +525,11 @@ dependencies = [
 
 [[package]]
 name = "boris-desktop"
-version = "1.1.0-beta.2"
+version = "1.1.0-beta.3"
 dependencies = [
  "boris-pipeline",
  "boris-tts-supertone",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tauri",

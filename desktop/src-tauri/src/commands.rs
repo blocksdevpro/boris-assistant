@@ -368,23 +368,23 @@ pub async fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<
     );
     // Win any in-flight boot settings load so stale disk prefs cannot overwrite.
     overlay_win::mark_overlay_prefs_dirty();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        save_settings(&settings).map_err(|e| e.to_string())?;
-        // apply_preferences also refreshes the overlay-prefs cache used by status.
-        overlay_win::apply_preferences(&app, &settings);
-        let picture = app.state::<AppState>().status();
-        overlay_win::sync_visibility(&app, &picture);
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| {
-        let msg = format!("save_app_settings task failed: {e}");
-        tracing::error!(error = %msg, "save_app_settings join failed");
-        msg
-    })?;
+    let to_disk = settings.clone();
+    tauri::async_runtime::spawn_blocking(move || save_settings(&to_disk).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| {
+            let msg = format!("save_app_settings task failed: {e}");
+            tracing::error!(error = %msg, "save_app_settings join failed");
+            msg
+        })?
+        .map_err(|e| {
+            tracing::error!(error = %e, "save_app_settings failed");
+            e
+        })?;
 
-    result.map_err(|e| {
-        tracing::error!(error = %e, "save_app_settings failed");
-        e
-    })
+    // Window chrome stays off the blocking pool — resize/move of a hidden
+    // overlay from a worker thread flashed a blank pane on Windows.
+    overlay_win::apply_preferences(&app, &settings);
+    let picture = app.state::<AppState>().status();
+    overlay_win::sync_visibility(&app, &picture);
+    Ok(())
 }

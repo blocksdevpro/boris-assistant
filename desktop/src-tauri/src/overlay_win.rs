@@ -220,22 +220,30 @@ pub fn remember_overlay_prefs(settings: &AppSettings) {
     OVERLAY_POSITION.store(pos, Ordering::Relaxed);
 }
 
-/// Apply geometry and notify the React surface without exposing API keys.
+/// Cache prefs, notify the React surface, and resize only if the island is up.
+///
+/// `set_size` / `set_position` on a **hidden** WebView2 window flashes a blank
+/// always-on-top pane for a frame on Windows — that is the empty window that
+/// popped on every Settings save. Hidden overlays just keep the cache; the
+/// next [`sync_visibility`] show applies geometry.
 pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) {
     remember_overlay_prefs(settings);
-
-    let Some(overlay) = app.get_webview_window("overlay") else {
-        return;
-    };
-
-    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
-    apply_overlay_size(&overlay, scale, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
-    place_overlay(&overlay, cached_position());
 
     let _ = app.emit(
         EVENT_OVERLAY_PREFERENCES,
         OverlayPreferences::from(settings),
     );
+
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    if !overlay.is_visible().unwrap_or(false) {
+        return;
+    }
+
+    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    apply_overlay_size(&overlay, scale, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
+    place_overlay(&overlay, cached_position());
 }
 
 /// Show only during a wake/turn. Ready captions linger briefly; Off and a
@@ -270,10 +278,6 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     let card = wants_card_layout(status);
     let layout_changed = OVERLAY_CARD_LAYOUT.swap(card, Ordering::Relaxed) != card;
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
-    apply_overlay_size(&overlay, scale, card);
-    if layout_changed {
-        place_overlay(&overlay, cached_position());
-    }
 
     let active = matches!(
         status.phase,
@@ -286,13 +290,22 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     );
 
     if active {
+        apply_overlay_size(&overlay, scale, card);
+        if layout_changed {
+            place_overlay(&overlay, cached_position());
+        }
         show_without_focus(&overlay);
         return;
     }
 
     // Armed/Quiet after a completed turn: do not resurrect an already-hidden
     // overlay at startup, but let the current response remain readable.
+    // Skip set_size on a hidden window — that flashes a blank pane on Windows.
     if overlay.is_visible().unwrap_or(false) {
+        apply_overlay_size(&overlay, scale, card);
+        if layout_changed {
+            place_overlay(&overlay, cached_position());
+        }
         let linger = if status.artifact.is_some() {
             CARD_LINGER
         } else {

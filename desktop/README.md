@@ -34,9 +34,12 @@ Release builds can self-update from GitHub Releases using signed installers.
 |-------|----------|
 | Plugin (Rust) | `tauri-plugin-updater` + `tauri-plugin-process` in `src-tauri` |
 | Plugin (JS) | `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-process` |
-| Endpoint | Stable: `/releases/latest/download/latest.json`. Beta: `/releases/download/beta/latest.json`. Chosen in Settings → General → Channel |
+| Version peek | GitHub Releases API (`/releases?per_page=20`). Stable = newest non-prerelease tag; Beta = newest `v*-beta.N` tag (skips the rolling `beta` tag) |
+| Installer feed | Stable: `/releases/latest/download/latest.json`. Beta: `/releases/download/beta/latest.json`. Used only when the peek says a newer version exists |
 | Public key | `plugins.updater.pubkey` (matches `.tauri/boris.key.pub`) |
 | Private key | `.tauri/boris.key` — **gitignored**, required to sign builds |
+
+The same `latest.json` URL is instant in a browser and used to hang in-process: a fresh `reqwest` client on Windows asks WinHTTP for the system proxy (WPAD/PAC) on every host, then does a cold TLS handshake and follows the asset-CDN redirect. The browser already has that PAC result and an HTTP/2 socket. The updater skips WinHTTP WPAD, caps connect at 3s, and never hits the CDN just to learn it is already current.
 
 Signing and publishing steps: [`.tauri/README.md`](../.tauri/README.md).
 

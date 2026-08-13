@@ -5,6 +5,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0-beta.3] - 2026-08-13
+
+### Fixed
+
+- Settings → Updates no longer appends a second `beta` onto versions that
+  already include a pre-release label (`v1.1.0-beta.2 · beta`).
+- Update checks peek the GitHub Releases API (no asset download) and only
+  hit `/releases/download` when a newer version is listed. On Windows the
+  HTTP client skips WinHTTP WPAD so a URL that is instant in the browser
+  is not a 10–20s Rust hang. CDN send failures show as a short
+  "could not reach GitHub" message.
+- Saving settings no longer flashes a blank always-on-top window. Overlay
+  resize/move is skipped while the island is hidden.
+
 ## [1.1.0-beta.2] - 2026-08-13
 
 ### Added
@@ -70,6 +84,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.1.0-beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.3
 [1.1.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.2
 [1.1.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.1
 [1.0.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0

@@ -81,6 +81,19 @@ static SHOW_OVERLAY_ON_WAKE: AtomicBool = AtomicBool::new(false);
 /// apply stale overlay geometry over a newer save.
 static OVERLAY_PREFS_DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// First [`apply_preferences`] only seeds the cache. Treating that as
+/// "show_overlay_on_wake flipped on" made launch/`onStart` save call
+/// [`sync_visibility`] → `hide()` and flash a decorated pane in release.
+static PREFS_SEEDED: AtomicBool = AtomicBool::new(false);
+
+/// `hide()` / `is_visible()` on a never-shown WebView2 HWND restyles it on
+/// Windows packaged builds and pops the empty title-bar window.
+static OVERLAY_EVER_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Create the HWND far off-screen so a first-frame style flash cannot appear.
+const OVERLAY_OFFSCREEN_X: f64 = -32_000.0;
+const OVERLAY_OFFSCREEN_Y: f64 = -32_000.0;
+
 /// Mark overlay prefs as newer than whatever is still being loaded at boot.
 pub fn mark_overlay_prefs_dirty() {
     OVERLAY_PREFS_DIRTY.store(true, Ordering::Release);
@@ -140,43 +153,33 @@ const OVERLAY_INIT_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Create the overlay window if it was declared with `"create": false` in config.
+/// Create the overlay HWND. Idempotent. Built off-screen and never shown here.
+///
+/// Do **not** create this at process start. Packaged WebView2 on Windows
+/// briefly realizes a decorated transparent frame during `build()` — that is
+/// the flash on open. Call only when the island must actually appear.
+///
+/// Avoid [`WebviewWindowBuilder::from_config`]: the JSON template applies
+/// min/max size (SetWindowPos) during create and flashes even worse.
 pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    if app.get_webview_window("overlay").is_some() {
+        return Ok(());
+    }
+
     tracing::info!("building overlay window");
-    // Prefer config entry (size, alwaysOnTop, etc.) then force transparency bits.
-    let template = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|w| w.label == "overlay")
-        .cloned();
-
-    let builder = if let Some(conf) = template {
-        tracing::debug!("overlay: using tauri.conf window template");
-        WebviewWindowBuilder::from_config(app, &conf)?
-    } else {
-        tracing::warn!("overlay: no config entry — using hardcoded defaults");
-        WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
-            .title("Boris")
-            .inner_size(OVERLAY_BASE_WIDTH, OVERLAY_BASE_HEIGHT)
-            .max_inner_size(OVERLAY_MAX_WIDTH, OVERLAY_MAX_HEIGHT)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .visible(false)
-    };
-
-    let overlay = builder
-        // Override older config templates whose maximum omitted the shadow
-        // gutter at the 125% accessibility scale.
+    let overlay = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
+        .title("")
+        .inner_size(OVERLAY_BASE_WIDTH, OVERLAY_BASE_HEIGHT)
         .max_inner_size(OVERLAY_MAX_WIDTH, OVERLAY_MAX_HEIGHT)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
         .visible(false)
         .transparent(true)
         .shadow(false)
         .focused(false)
-        // Webview + window bg: alpha 0 is required on Win8+ for clear pixels.
+        .position(OVERLAY_OFFSCREEN_X, OVERLAY_OFFSCREEN_Y)
         .background_color(tauri::window::Color(0, 0, 0, 0))
         .initialization_script(OVERLAY_INIT_SCRIPT)
         .build()
@@ -185,21 +188,49 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
             e
         })?;
 
-    // Belt-and-suspenders: re-assert webview clear after create.
     let webview: &tauri::Webview<R> = overlay.as_ref();
     if let Err(e) = webview.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
         tracing::warn!(error = %e, "overlay webview clear color");
     }
-
-    // Critical for gaming: never steal mouse from the focused game.
     if let Err(e) = overlay.set_ignore_cursor_events(true) {
         tracing::error!(error = %e, "overlay set_ignore_cursor_events(true) failed");
-    } else {
-        tracing::info!("overlay click-through enabled (ignore cursor events)");
     }
 
-    tracing::info!("overlay window ready hidden (transparent + a=0 + click-through)");
+    OVERLAY_EVER_SHOWN.store(false, Ordering::Relaxed);
+    tracing::info!("overlay window ready off-screen (not shown)");
     Ok(())
+}
+
+fn ensure_overlay<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(existing) = app.get_webview_window("overlay") {
+        return Some(existing);
+    }
+    if let Err(e) = spawn_overlay_window(app) {
+        tracing::error!(error = %e, "ensure_overlay spawn failed");
+        return None;
+    }
+    app.get_webview_window("overlay")
+}
+
+fn hide_if_present<R: Runtime>(app: &AppHandle<R>) {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    hide_overlay(&overlay);
+}
+
+fn hide_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    if !OVERLAY_EVER_SHOWN.load(Ordering::Relaxed) {
+        return;
+    }
+    if !overlay.is_visible().unwrap_or(false) {
+        return;
+    }
+    let _ = overlay.hide();
+}
+
+fn overlay_is_visible<R: Runtime>(overlay: &tauri::WebviewWindow<R>) -> bool {
+    OVERLAY_EVER_SHOWN.load(Ordering::Relaxed) && overlay.is_visible().unwrap_or(false)
 }
 
 /// Cache overlay-related prefs for the hot status path.
@@ -220,13 +251,23 @@ pub fn remember_overlay_prefs(settings: &AppSettings) {
     OVERLAY_POSITION.store(pos, Ordering::Relaxed);
 }
 
-/// Cache prefs, notify the React surface, and resize only if the island is up.
+/// Cache prefs and notify the React surface. Touch HWND chrome only when
+/// overlay geometry actually changed, or when the user just turned the island off.
 ///
-/// `set_size` / `set_position` on a **hidden** WebView2 window flashes a blank
-/// always-on-top pane for a frame on Windows — that is the empty window that
-/// popped on every Settings save. Hidden overlays just keep the cache; the
-/// next [`sync_visibility`] show applies geometry.
-pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) {
+/// Returns `true` if `show_overlay_on_wake` flipped on — the caller should then
+/// [`sync_visibility`] so a live Ready/turn can appear immediately.
+///
+/// Windows 11 + WebView2: `set_size` / `set_max_size` / `set_position` restyle
+/// the HWND and flash a **decorated** transparent pane (title bar, wallpaper
+/// showing through) even when the island is already visible. That is the
+/// random window on every Settings save. Unrelated toggles must not poke
+/// window chrome; visibility stays status-driven.
+pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> bool {
+    let seeded = PREFS_SEEDED.swap(true, Ordering::AcqRel);
+    let prev_show = SHOW_OVERLAY_ON_WAKE.load(Ordering::Relaxed);
+    let prev_scale = OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed);
+    let prev_pos = OVERLAY_POSITION.load(Ordering::Relaxed);
+
     remember_overlay_prefs(settings);
 
     let _ = app.emit(
@@ -234,16 +275,38 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
         OverlayPreferences::from(settings),
     );
 
-    let Some(overlay) = app.get_webview_window("overlay") else {
-        return;
-    };
-    if !overlay.is_visible().unwrap_or(false) {
-        return;
+    let show = SHOW_OVERLAY_ON_WAKE.load(Ordering::Relaxed);
+    let scale = OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed);
+    let pos = OVERLAY_POSITION.load(Ordering::Relaxed);
+    let show_changed = show != prev_show;
+    let scale_changed = scale != prev_scale;
+    let pos_changed = pos != prev_pos;
+
+    // First call only fills the cache. Launch always saves (Start on open)
+    // and used to look like the overlay pref flipped on.
+    if !seeded {
+        return false;
     }
 
-    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
-    apply_overlay_size(&overlay, scale, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
-    place_overlay(&overlay, cached_position());
+    if !show && show_changed {
+        hide_if_present(app);
+        return false;
+    }
+
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        if overlay_is_visible(&overlay) && (scale_changed || pos_changed) {
+            apply_overlay_size(
+                &overlay,
+                f64::from(scale) / 100.0,
+                OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed),
+            );
+            if pos_changed {
+                place_overlay(&overlay, cached_position());
+            }
+        }
+    }
+
+    show && show_changed
 }
 
 /// Show only during a wake/turn. Ready captions linger briefly; Off and a
@@ -253,25 +316,24 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
 /// Uses the cached wake-overlay preference (see [`remember_overlay_prefs`]) —
 /// do not re-load settings here; status updates can fire many times per second.
 pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
-    let Some(overlay) = app.get_webview_window("overlay") else {
-        return;
-    };
     let epoch = VISIBILITY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     let show_on_wake = SHOW_OVERLAY_ON_WAKE.load(Ordering::Relaxed);
 
     if !show_on_wake || status.engine == EngineState::Off {
-        let _ = overlay.hide();
+        hide_if_present(app);
         return;
     }
 
     if status.engine == EngineState::Fault {
-        show_without_focus(&overlay);
-        schedule_hide(app.clone(), epoch, FAULT_LINGER);
+        if let Some(overlay) = ensure_overlay(app) {
+            reveal_overlay(&overlay, false);
+            schedule_hide(app.clone(), epoch, FAULT_LINGER);
+        }
         return;
     }
 
     if status.phase == Phase::Off {
-        let _ = overlay.hide();
+        hide_if_present(app);
         return;
     }
 
@@ -289,29 +351,39 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
             | Phase::AwaitingConfirm
     );
 
-    if active {
-        apply_overlay_size(&overlay, scale, card);
-        if layout_changed {
-            place_overlay(&overlay, cached_position());
+    if !active {
+        // Armed/Quiet: never create or resurrect the island at startup.
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            if overlay_is_visible(&overlay) {
+                if layout_changed {
+                    apply_overlay_size(&overlay, scale, card);
+                    place_overlay(&overlay, cached_position());
+                }
+                let linger = if status.artifact.is_some() {
+                    CARD_LINGER
+                } else {
+                    READY_LINGER
+                };
+                schedule_hide(app.clone(), epoch, linger);
+            }
         }
-        show_without_focus(&overlay);
         return;
     }
 
-    // Armed/Quiet after a completed turn: do not resurrect an already-hidden
-    // overlay at startup, but let the current response remain readable.
-    // Skip set_size on a hidden window — that flashes a blank pane on Windows.
-    if overlay.is_visible().unwrap_or(false) {
+    let Some(overlay) = ensure_overlay(app) else {
+        return;
+    };
+    let visible = overlay_is_visible(&overlay);
+    if !visible {
+        // Size while still off-screen, show there, then park. Showing or
+        // SetWindowPos at the on-screen slot is what packaged WebView2
+        // flashes as a decorated frame.
         apply_overlay_size(&overlay, scale, card);
-        if layout_changed {
-            place_overlay(&overlay, cached_position());
-        }
-        let linger = if status.artifact.is_some() {
-            CARD_LINGER
-        } else {
-            READY_LINGER
-        };
-        schedule_hide(app.clone(), epoch, linger);
+        show_without_focus(&overlay);
+        place_overlay(&overlay, cached_position());
+    } else if layout_changed {
+        apply_overlay_size(&overlay, scale, card);
+        place_overlay(&overlay, cached_position());
     }
 }
 
@@ -330,13 +402,33 @@ fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64,
     } else {
         (OVERLAY_BASE_WIDTH * scale, OVERLAY_BASE_HEIGHT * scale)
     };
-    let _ = overlay.set_max_size(Some(tauri::Size::Logical(LogicalSize::new(
-        OVERLAY_MAX_WIDTH,
-        OVERLAY_MAX_HEIGHT,
-    ))));
+    // Max size is set once at spawn. Re-applying set_max_size on Windows
+    // restyles the HWND and flashes a decorated transparent frame.
+    if overlay_size_matches(overlay, w, h) {
+        return;
+    }
     if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(w, h))) {
         tracing::warn!(error = %e, card, "overlay resize failed");
     }
+}
+
+fn overlay_size_matches<R: Runtime>(
+    overlay: &tauri::WebviewWindow<R>,
+    logical_w: f64,
+    logical_h: f64,
+) -> bool {
+    let Ok(current) = overlay.inner_size() else {
+        return false;
+    };
+    let Ok(factor) = overlay.scale_factor() else {
+        return false;
+    };
+    if factor <= 0.0 {
+        return false;
+    }
+    let cw = f64::from(current.width) / factor;
+    let ch = f64::from(current.height) / factor;
+    (cw - logical_w).abs() < 1.0 && (ch - logical_h).abs() < 1.0
 }
 
 fn cached_position() -> &'static str {
@@ -347,7 +439,19 @@ fn cached_position() -> &'static str {
     }
 }
 
+fn reveal_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, card: bool) {
+    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    apply_overlay_size(overlay, scale, card);
+    if !overlay_is_visible(overlay) {
+        show_without_focus(overlay);
+        place_overlay(overlay, cached_position());
+    } else {
+        place_overlay(overlay, cached_position());
+    }
+}
+
 fn show_without_focus<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    OVERLAY_EVER_SHOWN.store(true, Ordering::Relaxed);
     if let Err(e) = overlay.show() {
         tracing::warn!(error = %e, "overlay show failed");
     }
@@ -364,7 +468,7 @@ fn schedule_hide<R: Runtime>(app: AppHandle<R>, epoch: u64, delay: Duration) {
             return;
         }
         if let Some(overlay) = app.get_webview_window("overlay") {
-            let _ = overlay.hide();
+            hide_overlay(&overlay);
         }
     });
 }
@@ -396,6 +500,12 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
     };
     let y = pos.y + (screen.height as f64 * OVERLAY_TOP_MARGIN_FRAC) as i32;
 
+    if let Ok(current) = overlay.outer_position() {
+        if current.x == x && current.y == y {
+            return;
+        }
+    }
+
     if let Err(e) = overlay.set_position(tauri::Position::Physical(PhysicalPosition::new(x, y))) {
         tracing::warn!(error = %e, "overlay set_position failed");
     } else {
@@ -406,7 +516,7 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
 /// When `locked` is true, mouse passes through to the game (default).
 /// When false, the user can click/drag the island to reposition it.
 pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) -> tauri::Result<()> {
-    let Some(overlay) = app.get_webview_window("overlay") else {
+    let Some(overlay) = ensure_overlay(app) else {
         tracing::warn!("set_overlay_input_locked: overlay window missing");
         return Ok(());
     };
@@ -414,7 +524,7 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
     if !locked {
         // Unlocking is an explicit request to position the overlay. Make the
         // otherwise wake-only window visible without focusing it.
-        overlay.show()?;
+        reveal_overlay(&overlay, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
     }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())

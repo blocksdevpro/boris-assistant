@@ -5,6 +5,21 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Saving Settings while the overlay is already up (Ready / mid-turn) no
+  longer flashes a large decorated transparent window. Unrelated toggles
+  only update the prefs cache; `set_size` / `set_max_size` / `set_position`
+  run when overlay scale or position actually change.
+- Packaged Windows builds no longer pop that decorated transparent frame
+  on launch (or on the automatic Start-on-open save). The overlay HWND is
+  created only when the island must appear; `hide()` is skipped until it
+  has actually been shown.
+- The empty window that flashed on every Settings save in the packaged
+  app was a console for `icacls` (ACL lock on `auth.json`), not the
+  overlay. `CREATE_NO_WINDOW` is set so the GUI exe does not allocate a
+  terminal. Same as tauri-apps/discussions#11446.
+
 ## [1.1.0-beta.3] - 2026-08-13
 
 ### Fixed

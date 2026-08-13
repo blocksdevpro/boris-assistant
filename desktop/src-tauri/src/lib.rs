@@ -71,19 +71,11 @@ pub fn run() {
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("app setup begin");
 
-    // Overlay is `"create": false` in config — build with explicit transparent API.
-    match overlay_win::spawn_overlay_window(app.handle()) {
-        Ok(()) => tracing::info!("overlay window spawned"),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to spawn overlay window");
-            return Err(e.into());
-        }
-    }
-
-    // The overlay starts hidden. Seed persisted geometry off the UI thread so
-    // first-run migration / disk reads cannot freeze the window at launch.
-    // apply_preferences also seeds the in-memory overlay-prefs cache so later
-    // status snapshots never re-read config from disk.
+    // Do not create the overlay HWND here. Packaged WebView2 on Windows
+    // flashes a decorated transparent frame during window build — that is
+    // the empty window on launch. The island is spawned on first show.
+    // Seed persisted overlay prefs off the UI thread so first-run migration
+    // cannot freeze launch. Cache only — no hide/show/resize.
     let handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
         let settings =
@@ -102,10 +94,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::debug!("boot settings load skipped — newer prefs already applied");
             return;
         }
-        overlay_win::apply_preferences(&handle, &settings);
-        if let Some(state) = handle.try_state::<AppState>() {
-            overlay_win::sync_visibility(&handle, &state.status());
-        }
+        let _ = overlay_win::apply_preferences(&handle, &settings);
     });
 
     // Tray keeps control after the main console is closed/hidden.

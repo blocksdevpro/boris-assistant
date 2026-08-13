@@ -842,8 +842,10 @@ fn set_owner_secret_mode(path: &std::path::Path) -> io::Result<()> {
 /// has no POSIX mode bits, so this shells out to `icacls` to strip inherited
 /// ACEs and grant Full Control to the current user exclusively:
 /// `icacls <path> /inheritance:r /grant:r "<user>":F`.
+/// Spawned with `CREATE_NO_WINDOW` so the packaged GUI does not flash a
+/// console (tauri-apps/discussions#11446).
 ///
-/// Never fails the settings save: on any error (missing `icacls`, no
+/// Never fails the settings save: on any error (missing `icacls`, no)
 /// permission, etc.) this just logs a warning and leaves the file's default
 /// ACL in place. Only call this for files that actually hold secrets — not
 /// every settings file.
@@ -858,12 +860,21 @@ fn restrict_to_current_user_windows(path: &std::path::Path) {
         return;
     }
     let grant = format!("{user}:F");
-    let result = std::process::Command::new("icacls")
-        .arg(path)
+    let mut cmd = std::process::Command::new("icacls");
+    cmd.arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")
-        .arg(&grant)
-        .output();
+        .arg(&grant);
+    // GUI / packaged exe: `icacls` is a console app. Without CREATE_NO_WINDOW
+    // Windows allocates a console for the child and you get the empty
+    // title-bar flash on every settings save and on first-run auth write.
+    // Same fix as tauri-apps/discussions#11446 / #9719.
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let result = cmd.output();
     match result {
         Ok(out) if out.status.success() => {
             tracing::debug!(path = %path.display(), "restricted secrets file ACL to current user");

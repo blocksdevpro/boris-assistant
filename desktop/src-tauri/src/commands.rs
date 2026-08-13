@@ -381,10 +381,14 @@ pub async fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<
             e
         })?;
 
-    // Window chrome stays off the blocking pool — resize/move of a hidden
-    // overlay from a worker thread flashed a blank pane on Windows.
-    overlay_win::apply_preferences(&app, &settings);
-    let picture = app.state::<AppState>().status();
-    overlay_win::sync_visibility(&app, &picture);
+    // Cache + notify only. Do not resize/move/sync the overlay on every
+    // save — SetWindowPos on a visible transparent WebView2 flashes a
+    // decorated empty pane on Windows 11. Geometry applies when scale or
+    // position actually change; visibility syncs only if the user just
+    // turned the island on.
+    if overlay_win::apply_preferences(&app, &settings) {
+        let picture = app.state::<AppState>().status();
+        overlay_win::sync_visibility(&app, &picture);
+    }
     Ok(())
 }

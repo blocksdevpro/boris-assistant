@@ -194,9 +194,20 @@ export type AppSettings = {
   overlay_scale_percent: number;
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
+  /** App-update feed: GitHub latest (`stable`) or the `beta` pre-release. */
+  update_channel: UpdateChannel;
   /** Optional log filter (`info`, `boris=debug`, …). */
   logging_filter: string;
 };
+
+/** Which GitHub Releases feed the desktop updater polls. */
+export type UpdateChannel = "stable" | "beta";
+
+export function normalizeUpdateChannel(
+  raw: string | null | undefined,
+): UpdateChannel {
+  return raw?.trim().toLowerCase() === "beta" ? "beta" : "stable";
+}
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
@@ -218,6 +229,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   overlay_position: "top_center",
   overlay_scale_percent: 100,
   start_engine_on_launch: false,
+  update_channel: "stable",
   logging_filter: "",
 };
 
@@ -326,6 +338,7 @@ export function normalizeSettings(
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    update_channel: normalizeUpdateChannel(raw?.update_channel),
     logging_filter: raw?.logging_filter ?? "",
   };
 }

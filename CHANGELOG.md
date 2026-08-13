@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0-beta.1] - 2026-08-13
+
 ### Changed
 
 - `web_search` no longer needs an Exa account. Downloads search via DuckDuckGo
@@ -26,6 +28,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Overlay glance + main-window session desk for those cards (no extra window).
   The island expands to a clipped preview; Home lists and renders the full
   session catalog.
+- Settings → General update channel (Stable / Beta). Beta polls a long-lived
+  GitHub pre-release tagged `beta`; Stable still uses `/releases/latest`.
 
 ## [1.0.0] - 2026-08-12
 
@@ -48,4 +52,5 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.1.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.1
 [1.0.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0

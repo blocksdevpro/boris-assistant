@@ -79,3 +79,8 @@ commands.allow = ["list_session_artifacts"]
 identifier = "allow-get-session-artifact"
 description = "Read one session visual card (meta + body)"
 commands.allow = ["get_session_artifact"]
+
+[[permission]]
+identifier = "allow-check-app-update"
+description = "Check GitHub Releases for a signed app update on the selected channel"
+commands.allow = ["check_app_update"]

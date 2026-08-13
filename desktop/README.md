@@ -30,7 +30,7 @@ Release builds can self-update from GitHub Releases using signed installers.
 |-------|----------|
 | Plugin (Rust) | `tauri-plugin-updater` + `tauri-plugin-process` in `src-tauri` |
 | Plugin (JS) | `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-process` |
-| Endpoint | `plugins.updater.endpoints` in `src-tauri/tauri.conf.json` → `latest.json` on GitHub Releases |
+| Endpoint | Stable: `/releases/latest/download/latest.json`. Beta: `/releases/download/beta/latest.json`. Chosen in Settings → General → Channel |
 | Public key | `plugins.updater.pubkey` (matches `.tauri/boris.key.pub`) |
 | Private key | `.tauri/boris.key` — **gitignored**, required to sign builds |
 
@@ -44,7 +44,7 @@ $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path ..\.tauri\boris.key).Path
 bun run tauri build
 ```
 
-In the UI: **Settings → General → Updates**, plus a home banner when a newer version is published.
+In the UI: **Settings → General → Updates**. Default channel is **Stable**. **Beta** opts into the long-lived `beta` GitHub pre-release (see [`.tauri/README.md`](../.tauri/README.md)). A home banner appears when a newer version is published on the selected channel.
 
 ## Logs (debug packaged / release builds)
 

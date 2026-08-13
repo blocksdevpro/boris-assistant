@@ -55,6 +55,17 @@ fn default_overlay_scale_percent() -> u16 {
     100
 }
 
+fn default_update_channel() -> String {
+    "stable".into()
+}
+
+fn normalize_update_channel(raw: String) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "beta" => "beta".into(),
+        _ => default_update_channel(),
+    }
+}
+
 /// Desktop prefs restored into the main window on launch.
 ///
 /// **Model vs model-provider**
@@ -116,6 +127,9 @@ pub struct AppSettings {
     /// Auto-start the engine when the desktop app opens.
     #[serde(default)]
     pub start_engine_on_launch: bool,
+    /// App-update feed: `stable` (GitHub latest) or `beta` (pre-release tag `beta`).
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
     /// Optional log filter hint (`info`, `boris=debug`, …). Host may apply on restart.
     #[serde(default)]
     pub logging_filter: String,
@@ -143,6 +157,7 @@ impl Default for AppSettings {
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             start_engine_on_launch: false,
+            update_channel: default_update_channel(),
             logging_filter: String::new(),
         }
     }
@@ -184,6 +199,7 @@ impl std::fmt::Debug for AppSettings {
             .field("overlay_position", &self.overlay_position)
             .field("overlay_scale_percent", &self.overlay_scale_percent)
             .field("start_engine_on_launch", &self.start_engine_on_launch)
+            .field("update_channel", &self.update_channel)
             .field("logging_filter", &self.logging_filter)
             .finish()
     }
@@ -284,6 +300,8 @@ struct UiSection {
     overlay_scale_percent: u16,
     #[serde(default)]
     start_engine_on_launch: bool,
+    #[serde(default = "default_update_channel")]
+    update_channel: String,
 }
 
 impl Default for UiSection {
@@ -294,6 +312,7 @@ impl Default for UiSection {
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             start_engine_on_launch: false,
+            update_channel: default_update_channel(),
         }
     }
 }
@@ -327,6 +346,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
     out.overlay_scale_percent = cfg.ui.overlay_scale_percent.clamp(75, 125);
     out.start_engine_on_launch = cfg.ui.start_engine_on_launch;
+    out.update_channel = normalize_update_channel(cfg.ui.update_channel);
     out.logging_filter = cfg.logging.filter;
 }
 
@@ -465,6 +485,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         overlay_position: normalize_overlay_position(settings.overlay_position.clone()),
         overlay_scale_percent: settings.overlay_scale_percent.clamp(75, 125),
         start_engine_on_launch: settings.start_engine_on_launch,
+        update_channel: normalize_update_channel(settings.update_channel.clone()),
     };
     let logging = LoggingSection {
         filter: settings.logging_filter.clone(),
@@ -887,6 +908,16 @@ mod tests {
     fn default_deserializes_empty_object() {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, AppSettings::default());
+        assert_eq!(s.update_channel, "stable");
+    }
+
+    #[test]
+    fn update_channel_normalizes_to_stable_or_beta() {
+        assert_eq!(normalize_update_channel("beta".into()), "beta");
+        assert_eq!(normalize_update_channel("BETA".into()), "beta");
+        assert_eq!(normalize_update_channel(" stable ".into()), "stable");
+        assert_eq!(normalize_update_channel("nightly".into()), "stable");
+        assert_eq!(normalize_update_channel(String::new()), "stable");
     }
 
     #[test]
@@ -923,6 +954,7 @@ mod tests {
             overlay_position: "top_right".into(),
             overlay_scale_percent: 115,
             start_engine_on_launch: true,
+            update_channel: "beta".into(),
             logging_filter: "info".into(),
         };
         save_settings(&s).expect("save");
@@ -968,7 +1000,9 @@ mod tests {
         assert_eq!(loaded.overlay_position, "top_right");
         assert_eq!(loaded.overlay_scale_percent, 115);
         assert!(loaded.start_engine_on_launch);
+        assert_eq!(loaded.update_channel, "beta");
         assert_eq!(loaded.logging_filter, "info");
+        assert!(raw_cfg.contains("update_channel"));
 
         // Unknown root tables must survive a subsequent save.
         let mut raw_cfg = fs::read_to_string(config_path()).unwrap();

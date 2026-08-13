@@ -1,15 +1,48 @@
 /**
  * App auto-update helpers (Tauri updater plugin).
  *
- * Checks GitHub Releases (`latest.json`), downloads signed installers, then
- * relaunches. No-ops cleanly outside the Tauri webview (browser fixtures).
+ * Checks GitHub Releases (`latest.json` on the selected channel), downloads
+ * signed installers, then relaunches. No-ops cleanly outside the Tauri
+ * webview (browser fixtures).
  */
 
-import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { COMMANDS } from "@/bridge/ipc";
+import {
+  normalizeUpdateChannel,
+  type UpdateChannel,
+} from "@/bridge/types";
 import { isTauriRuntime } from "@/lib/runtime";
 import { logger } from "@/lib/logger";
+
+/** GitHub `/releases/latest` — never includes pre-releases. */
+export const STABLE_UPDATE_ENDPOINT =
+  "https://github.com/blocksdevpro/boris-assistant/releases/latest/download/latest.json";
+
+/** Long-lived pre-release tag `beta` (overwrite `latest.json` on each beta). */
+export const BETA_UPDATE_ENDPOINT =
+  "https://github.com/blocksdevpro/boris-assistant/releases/download/beta/latest.json";
+
+export function endpointForChannel(
+  channel: string | null | undefined,
+): string {
+  return normalizeUpdateChannel(channel) === "beta"
+    ? BETA_UPDATE_ENDPOINT
+    : STABLE_UPDATE_ENDPOINT;
+}
+
+/** Shape returned by `check_app_update` — matches the plugin `Update` constructor. */
+type PluginUpdateMeta = {
+  rid: number;
+  currentVersion: string;
+  version: string;
+  date?: string | null;
+  body?: string | null;
+  rawJson: Record<string, unknown>;
+};
 
 export type UpdateProgress = {
   /** Bytes received so far for the current download. */
@@ -56,21 +89,35 @@ export async function appVersion(): Promise<string | null> {
 }
 
 /**
- * Poll the configured updater endpoint.
+ * Poll the GitHub Releases feed for `channel`.
  * Returns `unavailable` when not running under Tauri (dev browser preview).
  */
-export async function checkForUpdate(): Promise<CheckResult> {
+export async function checkForUpdate(
+  channel: string | null | undefined = "stable",
+): Promise<CheckResult> {
   if (!isTauriRuntime()) {
     return { status: "unavailable" };
   }
 
+  const selected: UpdateChannel = normalizeUpdateChannel(channel);
   try {
     const currentVersion = (await getVersion().catch(() => "unknown")) ?? "unknown";
-    const update = await check();
-    if (!update) {
-      logger.info("updater: already on latest", { currentVersion });
+    const metadata = await invoke<PluginUpdateMeta | null>(COMMANDS.checkAppUpdate, {
+      channel: selected,
+    });
+    if (!metadata) {
+      logger.info("updater: already on latest", { currentVersion, channel: selected });
       return { status: "up_to_date", currentVersion };
     }
+
+    const update = new Update({
+      rid: metadata.rid,
+      currentVersion: metadata.currentVersion,
+      version: metadata.version,
+      date: metadata.date ?? undefined,
+      body: metadata.body ?? undefined,
+      rawJson: metadata.rawJson ?? {},
+    });
 
     const available: AvailableUpdate = {
       version: update.version,
@@ -78,7 +125,7 @@ export async function checkForUpdate(): Promise<CheckResult> {
       body: update.body ?? null,
       date: update.date ?? null,
     };
-    logger.info("updater: update available", available);
+    logger.info("updater: update available", { ...available, channel: selected });
     return { status: "available", update: available, raw: update };
   } catch (e) {
     const message = invokeErrorMessage(e);

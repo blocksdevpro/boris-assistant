@@ -31,6 +31,7 @@
     "allow-get-log-path",
     "allow-frontend-log",
     "allow-list-session-artifacts",
-    "allow-get-session-artifact"
+    "allow-get-session-artifact",
+    "allow-check-app-update"
   ]
 }

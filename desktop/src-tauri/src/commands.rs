@@ -341,6 +341,7 @@ pub fn save_app_settings(
         model_provider = %settings.openrouter_model_provider,
         fast_provider = %settings.openrouter_fast_provider,
         pin_provider = settings.openrouter_pin_provider,
+        update_channel = %settings.update_channel,
         "save_app_settings"
     );
     save_settings(&settings).map_err(|e| {

@@ -31,6 +31,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Settings → General update channel (Stable / Beta). Beta polls a long-lived
   GitHub pre-release tagged `beta`; Stable still uses `/releases/latest`.
 
+### Packaging
+
+- Windows beta bundles NSIS only. WiX/MSI rejects non-numeric pre-release
+  labels such as `1.1.0-beta.1`.
+
 ## [1.0.0] - 2026-08-12
 
 ### Added

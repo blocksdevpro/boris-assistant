@@ -1,7 +1,10 @@
 //! Bash / shell execution — tau-style `bash` tool, adapted for Boris.
 //!
-//! Runs via `bash -lc` when available (Git Bash / WSL / Unix), otherwise falls
-//! back to platform shell. **HITL confirmation is authoritative**; the deny list
+//! Runs via `bash -c` when a real bash is available (Git Bash on Windows, bash
+//! on Unix). Login shells (`-lc`) are intentionally **not** used — sourcing
+//! `/etc/profile` was ~10× the spawn cost. WSL's `System32\bash.exe` is skipped
+//! so a voice turn never boots a Linux VM. If no bash is found, falls back to
+//! the platform shell. **HITL confirmation is authoritative**; the deny list
 //! in [`policy`] is best-effort only. Host [`ShellPolicy`](crate::runtime::ShellPolicy)
 //! (Denied / Allowlist / OpenConfirm) gates registration-time capability.
 //!
@@ -28,7 +31,8 @@
 //!   confirm=true, and output caps stable for the model contract.
 //! - **Semantics**: deny needles, timeout default/clamp (1–300s, default 120),
 //!   truncation (last 2000 lines / 30KB), and fallback shells must not change
-//!   without an intentional product decision.
+//!   without an intentional product decision. `bash -c` (not `-lc`) is
+//!   intentional: login-profile sourcing was a measured latency cliff.
 //! - Prefer pure helpers (`policy`, `output`, timeout parsing) with unit tests
 //!   over growing the execute path.
 //! - Host must grant shell policy; registration is via [`crate::tools::bash_tools`].

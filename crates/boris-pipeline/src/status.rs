@@ -34,6 +34,19 @@ pub struct DeviceHealth {
     pub ok: bool,
 }
 
+/// Compact pointer to the session's current visual card (no body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPeek {
+    pub id: String,
+    pub title: String,
+    /// `markdown` or `code`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Filename under the session `artifacts/` dir.
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusPicture {
     pub engine: EngineState,
@@ -58,6 +71,9 @@ pub struct StatusPicture {
     /// Soft context window for the meter (tokens).
     #[serde(default)]
     pub context_limit: Option<u32>,
+    /// Current session card, if any (body is fetched separately).
+    #[serde(default)]
+    pub artifact: Option<ArtifactPeek>,
 }
 
 /// Default soft context window for the overlay meter (token estimate).
@@ -83,6 +99,7 @@ impl StatusPicture {
             activity: None,
             context_used: None,
             context_limit: None,
+            artifact: None,
         }
     }
 }

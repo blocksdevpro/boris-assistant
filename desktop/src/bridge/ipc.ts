@@ -24,6 +24,9 @@ export const COMMANDS = {
   saveAppSettings: "save_app_settings",
   getLogPath: "get_log_path",
   frontendLog: "frontend_log",
+  listSessionArtifacts: "list_session_artifacts",
+  getSessionArtifact: "get_session_artifact",
+  checkAppUpdate: "check_app_update",
 } as const;
 
 /** Event names emitted by the host (`app.emit`). */

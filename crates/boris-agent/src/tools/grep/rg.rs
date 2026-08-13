@@ -1,6 +1,8 @@
 //! Ripgrep (`rg`) invocation for the grep tool.
 
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -8,14 +10,54 @@ use tokio::process::Command;
 
 use crate::tool::{truncate_tool_result, ToolError};
 
+/// Cached "is `rg` on PATH?" probe. Never spawns — just looks for the binary.
+pub(super) fn rg_available() -> bool {
+    cached_rg().is_some()
+}
+
+fn cached_rg() -> Option<&'static Path> {
+    static RG: OnceLock<Option<PathBuf>> = OnceLock::new();
+    RG.get_or_init(find_rg).as_deref()
+}
+
+fn find_rg() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(rg_exe_name());
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn rg_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "rg.exe"
+    } else {
+        "rg"
+    }
+}
+
+fn apply_no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
 /// Run `rg` and return a truncated match listing, or an error to trigger fallback.
 pub(super) async fn run_rg(
     pattern: &str,
-    search_path: &std::path::Path,
+    search_path: &Path,
     ignore_case: bool,
     glob: Option<&str>,
     limit: usize,
 ) -> Result<String, ToolError> {
+    let exe = cached_rg().ok_or_else(|| ToolError::failed("rg not on PATH"))?;
+
     let mut args: Vec<String> = vec![
         "-n".into(),
         "--color=never".into(),
@@ -32,11 +74,14 @@ pub(super) async fn run_rg(
     args.push(pattern.to_string());
     args.push(search_path.to_string_lossy().into_owned());
 
-    let mut child = Command::new("rg")
-        .args(&args)
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    apply_no_window(&mut cmd);
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| ToolError::failed(format!("rg spawn: {e}")))?;
 

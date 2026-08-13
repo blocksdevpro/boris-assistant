@@ -1,7 +1,9 @@
-//! `web_search` tool — Exa API primary, DuckDuckGo HTML scrape as fallback.
+//! `web_search` tool — no-key public backends by default, optional Exa upgrade.
 //!
-//! Prefer Exa when `EXA_API_KEY` / `BORIS_EXA_API_KEY` or `~/.boris/auth.json`
-//! `exa_api_key` is set. DDG is best-effort only (CAPTCHA / markup changes).
+//! Default path (no account, no config): DuckDuckGo Instant Answer + DDG HTML
+//! (browser-compatible headers) + Wikipedia. Exa is used first when
+//! `EXA_API_KEY` / `BORIS_EXA_API_KEY` or `~/.boris/auth.json` `exa_api_key`
+//! is set; Exa failures fall through to the public backends.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,10 +12,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::encode::{extract_uddg, urlencoding_encode};
-use super::html::strip_tags;
-use super::http_client;
-use super::MAX_SEARCH;
+use super::search_api_client;
+use super::search_public::search_public;
+use super::{browser_search_client, MAX_SEARCH};
 use crate::tool::{
     require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
     ToolMeta, ToolRisk,
@@ -22,10 +23,13 @@ use crate::tool::{
 /// Max characters of Exa page text kept per hit (voice agents stay short).
 const EXA_SNIPPET_CHARS: usize = 600;
 
-/// Best-effort web search: Exa when keyed, else DuckDuckGo HTML scrape.
+/// Live web search: public backends always; Exa first when a key is present.
 #[derive(Debug, Clone)]
 pub struct WebSearchTool {
-    client: Client,
+    /// Wikipedia, DDG Instant Answer, optional Exa.
+    official: Client,
+    /// DDG HTML/lite (blocked unless the UA looks like a browser).
+    browser: Client,
     /// Optional explicit key (tests / hosts). Empty → resolve at execute time.
     exa_api_key: Option<String>,
 }
@@ -33,7 +37,8 @@ pub struct WebSearchTool {
 impl WebSearchTool {
     pub fn new() -> Result<Self, ToolError> {
         Ok(Self {
-            client: http_client()?,
+            official: search_api_client()?,
+            browser: browser_search_client()?,
             exa_api_key: None,
         })
     }
@@ -42,7 +47,8 @@ impl WebSearchTool {
     pub fn with_exa_api_key(key: impl Into<String>) -> Result<Self, ToolError> {
         let key = key.into().trim().to_string();
         Ok(Self {
-            client: http_client()?,
+            official: search_api_client()?,
+            browser: browser_search_client()?,
             exa_api_key: if key.is_empty() { None } else { Some(key) },
         })
     }
@@ -62,10 +68,10 @@ impl Tool for WebSearchTool {
 
     fn description(&self) -> &str {
         "Search the live web for a query. Returns numbered titles, URLs, and short snippets. \
-         Uses Exa when configured, otherwise a best-effort DuckDuckGo scrape. For hard lookups \
-         (people, LinkedIn, profiles), call this multiple times in one message with different \
-         query angles — do not rely on a single obvious phrase. Prefer this over guessing URLs. \
-         Summarize for speech; do not read every result aloud."
+         Works with no API key. For hard lookups (people, LinkedIn, profiles), call this \
+         multiple times in one message with different query angles — do not rely on a single \
+         obvious phrase. Prefer this over guessing URLs. Summarize for speech; do not read \
+         every result aloud."
     }
 
     fn parameters(&self) -> Value {
@@ -106,32 +112,28 @@ impl Tool for WebSearchTool {
         let limit = parse_search_limit(obj.get("limit"));
         let query = query.trim();
 
-        // 1) Exa (primary) when a key is available.
+        // Optional Exa upgrade. Failures (including bad keys) fall through so a
+        // downloaded build never depends on an Exa account.
         if let Some(api_key) = self.resolve_exa_key() {
-            match search_exa(&self.client, &api_key, query, limit).await {
+            match search_exa(&self.official, &api_key, query, limit).await {
                 Ok(results) if !results.is_empty() => {
                     return Ok(truncate_tool_result(format_results(query, &results)));
                 }
                 Ok(_) => {
-                    tracing::debug!(%query, "Exa returned zero hits; trying DDG fallback");
+                    tracing::debug!(%query, "Exa returned zero hits; trying public search");
                 }
                 Err(e) => {
-                    // Auth/config errors: fail loudly so the host can fix the key.
-                    if e.looks_like_auth() {
-                        return Ok(truncate_tool_result(format!(
-                            "Exa search failed (auth/config): {}. Check EXA_API_KEY / ~/.boris/auth.json exa_api_key.",
-                            e.message
-                        )));
-                    }
-                    tracing::warn!(error = %e.message, %query, "Exa search failed; trying DDG fallback");
+                    tracing::warn!(
+                        error = %e.message,
+                        auth = e.looks_like_auth(),
+                        %query,
+                        "Exa search failed; trying public search"
+                    );
                 }
             }
-        } else {
-            tracing::debug!("no Exa API key; using DuckDuckGo scrape only");
         }
 
-        // 2) DuckDuckGo HTML lite / HTML (fallback).
-        let results = search_ddg(&self.client, query, limit).await;
+        let results = search_public(&self.official, &self.browser, query, limit).await;
         if results.is_empty() {
             return Ok(truncate_tool_result(format!(
                 "No search results for: {query} (search backends returned empty — try a simpler query)"
@@ -305,44 +307,6 @@ fn truncate_err_body(s: &str) -> String {
     t.chars().take(240).collect()
 }
 
-// ── DuckDuckGo fallback ──────────────────────────────────────────────────────
-
-async fn search_ddg(client: &Client, query: &str, limit: usize) -> Vec<SearchHit> {
-    let q = urlencoding_encode(query);
-    let mut results = Vec::new();
-    for endpoint in [
-        format!("https://lite.duckduckgo.com/lite/?q={q}"),
-        format!("https://html.duckduckgo.com/html/?q={q}"),
-    ] {
-        let resp = match client.get(&endpoint).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(error = %e, %endpoint, "search request failed");
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            tracing::debug!(status = %resp.status(), %endpoint, "search HTTP non-success");
-            continue;
-        }
-        let html = match resp.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::debug!(error = %e, "search body read failed");
-                continue;
-            }
-        };
-        results = parse_ddg_html(&html, limit);
-        if results.is_empty() {
-            results = parse_ddg_lite(&html, limit);
-        }
-        if !results.is_empty() {
-            break;
-        }
-    }
-    results
-}
-
 fn format_results(query: &str, results: &[SearchHit]) -> String {
     let mut out = format!("Search results for: {query}\n");
     for (i, r) in results.iter().enumerate() {
@@ -373,155 +337,10 @@ pub(crate) struct SearchHit {
     pub snippet: String,
 }
 
-/// DuckDuckGo lite result table scraper.
-pub(crate) fn parse_ddg_lite(html: &str, limit: usize) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    let mut rest = html;
-    while hits.len() < limit {
-        // lite uses class="result-link" or plain result__a sometimes
-        let idx = rest
-            .find("class=\"result-link\"")
-            .or_else(|| rest.find("class='result-link'"))
-            .or_else(|| rest.find("result-link"));
-        let Some(idx) = idx else {
-            break;
-        };
-        rest = &rest[idx..];
-        let Some(href_i) = rest.find("href=\"") else {
-            rest = &rest[1..];
-            continue;
-        };
-        let after_href = &rest[href_i + 6..];
-        let Some(end_h) = after_href.find('"') else {
-            break;
-        };
-        let mut url = after_href[..end_h].to_string();
-        if let Some(uddg) = extract_uddg(&url) {
-            url = uddg;
-        }
-        let after_a = after_href.get(end_h..).unwrap_or("");
-        let Some(gt) = after_a.find('>') else {
-            rest = &rest[1..];
-            continue;
-        };
-        let title_start = &after_a[gt + 1..];
-        let Some(end_title) = title_start.find("</a>") else {
-            rest = &rest[1..];
-            continue;
-        };
-        let title = strip_tags(&title_start[..end_title]);
-        if !title.is_empty() && (url.starts_with("http") || url.starts_with("//")) {
-            if url.starts_with("//") {
-                url = format!("https:{url}");
-            }
-            hits.push(SearchHit {
-                title,
-                url,
-                snippet: String::new(),
-            });
-        }
-        // Advance past this match to avoid infinite loop.
-        rest = rest.get(10..).unwrap_or("");
-    }
-    hits
-}
-
-/// Very small HTML scraper for DDG result blocks.
-pub(crate) fn parse_ddg_html(html: &str, limit: usize) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    // Look for result links: class="result__a" href="..."
-    let mut rest = html;
-    while hits.len() < limit {
-        let Some(idx) = rest.find("result__a") else {
-            break;
-        };
-        rest = &rest[idx..];
-        let Some(href_i) = rest.find("href=\"") else {
-            break;
-        };
-        let after_href = &rest[href_i + 6..];
-        let Some(end_h) = after_href.find('"') else {
-            break;
-        };
-        let mut url = after_href[..end_h].to_string();
-        // DDG sometimes wraps redirects.
-        if let Some(uddg) = extract_uddg(&url) {
-            url = uddg;
-        }
-
-        let after_a = after_href.get(end_h..).unwrap_or("");
-        let Some(gt) = after_a.find('>') else {
-            rest = &rest[1..];
-            continue;
-        };
-        let title_start = &after_a[gt + 1..];
-        let Some(end_title) = title_start.find("</a>") else {
-            rest = &rest[1..];
-            continue;
-        };
-        let title = strip_tags(&title_start[..end_title]);
-
-        // Snippet: result__snippet
-        let snippet = if let Some(s_i) = rest.find("result__snippet") {
-            let s_rest = &rest[s_i..];
-            if let Some(gt2) = s_rest.find('>') {
-                let body = &s_rest[gt2 + 1..];
-                if let Some(end_s) = body.find("</") {
-                    strip_tags(&body[..end_s])
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        if !title.is_empty() && !url.is_empty() {
-            hits.push(SearchHit {
-                title,
-                url,
-                snippet: snippet.chars().take(200).collect(),
-            });
-        }
-        // Advance past the current match (rest already starts at idx).
-        rest = rest.get(10..).unwrap_or("");
-    }
-    hits
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn parse_ddg_sample() {
-        // Parser looks for result__snippet after result__a in the same rest window.
-        let html = r#"
-        <div class="result">
-          <a class="result__a" href="https://example.com/a">Example Title</a>
-          <td class="result__snippet">A short snippet here.</td>
-        </div>
-        "#;
-        let hits = parse_ddg_html(html, 5);
-        assert!(!hits.is_empty(), "hits empty");
-        assert_eq!(hits[0].title, "Example Title");
-        assert!(hits[0].url.contains("example.com"));
-        assert!(hits[0].snippet.contains("short snippet"));
-    }
-
-    #[test]
-    fn parse_ddg_lite_sample() {
-        let html = r#"
-        <a class="result-link" href="https://example.com/lite">Lite Title</a>
-        "#;
-        let hits = parse_ddg_lite(html, 3);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].title, "Lite Title");
-        assert_eq!(hits[0].url, "https://example.com/lite");
-    }
 
     #[test]
     fn parse_search_limit_defaults_and_clamps() {

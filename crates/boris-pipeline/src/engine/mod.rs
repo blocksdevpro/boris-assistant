@@ -7,6 +7,7 @@
 //! | [`setup`] | One-time audio / wake / agent init |
 //! | [`models`] | STT/TTS preload helpers (load-ahead threads) |
 //! | [`activity`] | Pure string formatting for the UI activity chip |
+//! | [`artifact`] | Session card → `StatusPicture` peek |
 //! | [`confirm`] | Pure yes/no STT interpretation |
 //! | [`outcome`] | HITL confirm path (speak → yes/no → resume) |
 //! | [`session`] | Session begin/end + `go_off` |
@@ -39,6 +40,7 @@
 //!    (disconnected engine thread): send errors are ignored.
 
 mod activity;
+mod artifact;
 mod confirm;
 mod device_switch;
 mod llm;
@@ -64,6 +66,7 @@ use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::{EngineState, Phase, StatusPicture};
 
 use activity::activity_label;
+use artifact::peek_current;
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
     join_stt_load, join_tts_load, lost_stt, reclaim_stt_slot, release_voice_models, spawn_stt_load,
@@ -325,6 +328,7 @@ fn run(
                     rt.picture.turn = None;
                     rt.picture.detail = None;
                     rt.picture.activity = None;
+                    rt.picture.artifact = None;
 
                     // STT/TTS stay unloaded until a turn needs them (preloaded one
                     // step ahead during capture / agent — never kept for Armed idle).
@@ -551,12 +555,15 @@ fn run(
             activity: None,
             context_used: rt.picture.context_used,
             context_limit: rt.picture.context_limit,
+            artifact: rt.picture.artifact.clone(),
         }));
         let activity_tx = rt.picture.status_tx.clone();
         let base_w = activity_base.clone();
         // Recent tool names (for "thinking · after web_search" style labels).
         let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let recent_w = recent_tools.clone();
+        let art_store = rt.store.clone();
+        let art_sid = (*sess.active_session).clone();
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
@@ -568,6 +575,22 @@ fn run(
                     }
                     while g.len() > 4 {
                         g.remove(0);
+                    }
+                }
+            }
+            if let AgentEvent::ToolExecutionEnd {
+                tool_name,
+                ok: true,
+                ..
+            } = ev
+            {
+                if tool_name == "present_artifact" {
+                    if let Some(sid) = art_sid.as_ref() {
+                        if let Some(peek) = peek_current(&art_store, sid) {
+                            if let Ok(mut base) = base_w.lock() {
+                                base.artifact = Some(peek);
+                            }
+                        }
                     }
                 }
             }
@@ -631,6 +654,13 @@ fn run(
         // Live tool labels already mirrored; keep a soft chip until speech/confirm.
         if !report.tools_used.is_empty() {
             rt.picture.activity = Some(format!("{} tools", report.tools_used.len()));
+        }
+        if report.tools_used.iter().any(|n| n == "present_artifact") {
+            if let Some(sid) = sess.active_session.as_ref() {
+                rt.picture.artifact = peek_current(&rt.store, sid);
+            }
+        }
+        if !report.tools_used.is_empty() || rt.picture.artifact.is_some() {
             rt.picture.publish();
         }
         rt.picture.update_context_from_chars(report.approx_chars_in);

@@ -11,7 +11,8 @@ export type StatusFixtureName =
   | "talking"
   | "fault"
   | "long-caption"
-  | "device-faults";
+  | "device-faults"
+  | "artifact-card";
 
 export type StatusFixture = {
   name: StatusFixtureName;
@@ -105,6 +106,20 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     phase: "Armed",
     mic: { label: "USB microphone disconnected", ok: false },
     speaker: { label: "Headphones disconnected", ok: false },
+  }),
+  fixture("artifact-card", "Artifact card", {
+    engine: "On",
+    phase: "Talking",
+    heard: "Write a script to rename photos.",
+    said: "Script's on screen.",
+    artifact: {
+      id: "a1f3c9",
+      title: "Rename photos",
+      kind: "code",
+      language: "powershell",
+      path: "rename-photos-a1f3c9.ps1",
+    },
+    turn: "preview-artifact",
   }),
 ] as const;
 

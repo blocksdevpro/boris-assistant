@@ -1,4 +1,6 @@
 /target
+# Local-only scratch (tool bench, experiments). Never commit.
+/local/
 /assets/*
 !/assets/models/
 /assets/models/*

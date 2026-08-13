@@ -78,6 +78,8 @@ pub struct Agent {
     sandbox_snapshot: SandboxConfig,
     /// Session-bound todos file (`{session_dir}/todos.json`). None when unbound.
     todos_path: Option<PathBuf>,
+    /// Session-bound cards dir (`{session_dir}/artifacts`). None when unbound.
+    artifacts_dir: Option<PathBuf>,
     /// Session root for subagent artifacts (shared so tools can observe rebinds).
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
 }
@@ -137,6 +139,7 @@ impl Agent {
             finish_gate_remaining: 3,
             sandbox_snapshot,
             todos_path: None,
+            artifacts_dir: None,
             subagent_session_root: Arc::new(Mutex::new(None)),
         }
     }
@@ -361,12 +364,29 @@ impl Agent {
         self.todos_path.as_deref()
     }
 
+    /// Bind or clear the session-local artifacts directory.
+    ///
+    /// When `Some`, re-registers present/list/get against that dir (name-dedupe).
+    /// When `None`, clears the field only — tools keep the last path until next bind.
+    pub fn set_artifacts_dir(&mut self, dir: Option<PathBuf>) {
+        self.artifacts_dir = dir.clone();
+        if let Some(p) = dir {
+            self.register_tools(crate::tools::artifact_tools_at(&p));
+        }
+    }
+
+    /// Session-bound artifacts directory, if any.
+    pub fn artifacts_dir(&self) -> Option<&std::path::Path> {
+        self.artifacts_dir.as_deref()
+    }
+
     /// Bind all session-local paths. Best-effort sequential; no multi-step rollback.
     pub fn bind_session(&mut self, session_dir: &std::path::Path, session_id: &str) {
         self.set_session_id(Some(session_id.to_string()));
         self.clear_activations();
         let todos = session_dir.join("todos.json");
         self.set_todos_path(Some(todos));
+        self.set_artifacts_dir(Some(session_dir.join("artifacts")));
         self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
         self.set_subagent_session_root(Some(session_dir.to_path_buf()));
         if let Some(ltm) = &self.long_term {
@@ -376,13 +396,14 @@ impl Agent {
 
     /// Unbind session-local paths (session end / go_off).
     ///
-    /// Clears session id, activations, todos path field, audit sink, subagent
-    /// root, and session memory log binding. Plan tools keep pointing at the last
-    /// todos path until the next bind (no workspace todos migration).
+    /// Clears session id, activations, todos/artifacts path fields, audit sink,
+    /// subagent root, and session memory log binding. Plan/artifact tools keep
+    /// pointing at the last paths until the next bind.
     pub fn unbind_session(&mut self) {
         self.set_session_id(None);
         self.clear_activations();
         self.set_todos_path(None);
+        self.set_artifacts_dir(None);
         self.set_audit_path(None);
         self.set_subagent_session_root(None);
         if let Some(ltm) = &self.long_term {

@@ -24,6 +24,7 @@ describe("overlay preview fixtures", () => {
       "fault",
       "long-caption",
       "device-faults",
+      "artifact-card",
     ]);
   });
 
@@ -46,5 +47,6 @@ describe("overlay preview fixtures", () => {
     const deviceFaults = getStatusFixture("device-faults")!;
     expect(deviceFaults.mic.ok).toBe(false);
     expect(deviceFaults.speaker.ok).toBe(false);
+    expect(getStatusFixture("artifact-card")!.artifact?.id).toBe("a1f3c9");
   });
 });

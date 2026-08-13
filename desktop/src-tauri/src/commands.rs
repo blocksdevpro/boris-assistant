@@ -45,6 +45,24 @@ pub fn get_log_path() -> String {
     logging::log_path_hint()
 }
 
+/// Catalog of visual cards in the active voice session.
+#[tauri::command]
+pub async fn list_session_artifacts() -> Result<Vec<boris_pipeline::ArtifactListItem>, String> {
+    tauri::async_runtime::spawn_blocking(crate::artifacts::list_current)
+        .await
+        .map_err(|e| format!("list_session_artifacts join: {e}"))?
+}
+
+/// Body + meta for one session card (`id` omitted → current).
+#[tauri::command]
+pub async fn get_session_artifact(
+    id: Option<String>,
+) -> Result<boris_pipeline::ArtifactCard, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::artifacts::get_current(id))
+        .await
+        .map_err(|e| format!("get_session_artifact join: {e}"))?
+}
+
 /// Accept frontend / webview log lines into the same file as Rust.
 ///
 /// Levels: `error` | `warn` | `info` | `debug` (anything else → info).
@@ -323,6 +341,7 @@ pub fn save_app_settings(
         model_provider = %settings.openrouter_model_provider,
         fast_provider = %settings.openrouter_fast_provider,
         pin_provider = settings.openrouter_pin_provider,
+        update_channel = %settings.update_channel,
         "save_app_settings"
     );
     save_settings(&settings).map_err(|e| {

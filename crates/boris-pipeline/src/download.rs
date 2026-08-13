@@ -827,6 +827,10 @@ mod tests {
         assert!(!status.home.is_empty());
         assert!(!status.models_dir.is_empty());
         // Ready flags are independent of catalog hash work.
-        let _ = (status.parakeet_ready, status.supertone_ready, status.missing);
+        let _ = (
+            status.parakeet_ready,
+            status.supertone_ready,
+            status.missing,
+        );
     }
 }

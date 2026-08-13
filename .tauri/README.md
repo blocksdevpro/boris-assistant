@@ -80,9 +80,23 @@ Attach to the **latest** release (same tag users should get):
 }
 ```
 
-The app polls:
+The app polls one of:
 
-`https://github.com/blocksdevpro/boris-assistant/releases/latest/download/latest.json`
+- **Stable** (default): `https://github.com/blocksdevpro/boris-assistant/releases/latest/download/latest.json`
+- **Beta**: `https://github.com/blocksdevpro/boris-assistant/releases/download/beta/latest.json`
+
+`/releases/latest` ignores GitHub pre-releases, so a `v1.1.0-beta.N` release must be marked **pre-release** or every Stable install will be offered it.
+
+## Publishing a beta
+
+1. Version the product `MAJOR.MINOR.PATCH-beta.N` (e.g. `1.1.0-beta.1`).
+   WiX/MSI only accepts numeric pre-release ids (`1.1.0-1`), so betas bundle
+   **NSIS only** (`bundle.targets: ["nsis"]` in `tauri.conf.json`). The updater
+   already uses that `.exe`. Add `"msi"` back on a numeric stable version if you
+   want both installers.
+2. Create tag `v1.1.0-beta.1` as a **pre-release**. Attach the installer, `.sig`, and a `latest.json` whose `url` points at that tag.
+3. Create or update a long-lived pre-release tagged **`beta`** and attach the **same** `latest.json` (and installer if you want the `beta` tag URL to work as a direct download). The in-app Beta channel only reads `releases/download/beta/latest.json`.
+4. Promote by shipping `v1.1.0` as a normal (non-pre-release) release with its own `latest.json`. Do not set a beta as the latest release.
 
 ## CI secrets
 

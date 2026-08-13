@@ -47,7 +47,8 @@ pub(crate) fn urlencoding_decode(s: &str) -> String {
 
 /// Extract the real destination from a DuckDuckGo redirect URL (`uddg=`).
 pub(crate) fn extract_uddg(url: &str) -> Option<String> {
-    // //duckduckgo.com/l/?uddg=https%3A%2F%2F...
+    // //duckduckgo.com/l/?uddg=https%3A%2F%2F...  (HTML may encode `&` as `&amp;`)
+    let url = url.replace("&amp;", "&");
     let key = "uddg=";
     let i = url.find(key)?;
     let enc = &url[i + key.len()..];
@@ -78,6 +79,13 @@ mod tests {
         let wrapped = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath&rut=abc";
         let got = extract_uddg(wrapped).expect("uddg");
         assert_eq!(got, "https://example.com/path");
+    }
+
+    #[test]
+    fn extract_uddg_from_html_entity_amp() {
+        let wrapped = "//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang.org%2F&amp;rut=deadbeef";
+        let got = extract_uddg(wrapped).expect("uddg");
+        assert_eq!(got, "https://rust-lang.org/");
     }
 
     #[test]

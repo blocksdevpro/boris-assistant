@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
+import { OverlayArtifactCard } from "@/components/artifacts";
 import { getSettings, useStatus, type AppSettings, type StatusPicture } from "@/bridge";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
@@ -56,8 +57,13 @@ export function OverlayWindow() {
     liveCaption,
     preferences.overlay_caption_mode,
   );
-  const caption = isReady && readyCaptionHidden ? null : privateCaption;
-  const orbOnly = isReady && readyCaptionHidden;
+  const showCard =
+    Boolean(status.artifact) &&
+    status.phase !== "Hearing" &&
+    status.phase !== "Reading";
+  const caption =
+    isReady && readyCaptionHidden && !showCard ? null : privateCaption;
+  const orbOnly = isReady && readyCaptionHidden && !showCard;
   const confirm = isConfirmContext(status);
   const faultKey = deviceFaultKey(status);
   const scale = Math.min(
@@ -137,6 +143,7 @@ export function OverlayWindow() {
     <div className="overlay-surface relative h-full w-full bg-transparent">
       <div
         className="overlay-stage absolute left-1/2 top-1/2 flex items-center justify-center bg-transparent p-3"
+        data-mode={showCard ? "card" : "presence"}
         style={{
           ["--overlay-scale" as string]: scale,
         } as CSSProperties}
@@ -148,7 +155,9 @@ export function OverlayWindow() {
             "overlay-island relative flex select-none",
             orbOnly
               ? "items-center justify-center p-2.5"
-              : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
+              : showCard
+                ? "w-max min-w-[220px] max-w-[388px] flex-col px-3 py-2"
+                : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
           )}
           initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
           animate={{
@@ -262,7 +271,12 @@ export function OverlayWindow() {
                 </div>
 
                 <AnimatePresence mode="popLayout" initial={false}>
-                  {caption ? (
+                  {showCard && status.artifact ? (
+                    <OverlayArtifactCard
+                      key={status.artifact.id}
+                      peek={status.artifact}
+                    />
+                  ) : caption ? (
                     <motion.div
                       layout={reduceMotion ? false : "size"}
                       key={caption.kind}

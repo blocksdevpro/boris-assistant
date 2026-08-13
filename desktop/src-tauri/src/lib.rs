@@ -19,11 +19,13 @@
 //! - [`overlay_win`] — always-on-top click-through island
 //! - [`logging`] — file + stderr tracing, panic hook, frontend log sink
 
+mod artifacts;
 mod commands;
 mod logging;
 mod orchestrator;
 mod overlay_win;
 mod tray;
+mod updater;
 
 use orchestrator::AppState;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -54,6 +56,9 @@ pub fn run() {
             commands::save_app_settings,
             commands::get_log_path,
             commands::frontend_log,
+            commands::list_session_artifacts,
+            commands::get_session_artifact,
+            updater::check_app_update,
         ])
         .setup(setup_app)
         // Closing the console hides it; only tray "Quit Boris" exits the app.

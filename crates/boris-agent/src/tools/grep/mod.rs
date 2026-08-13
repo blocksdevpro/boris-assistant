@@ -1,4 +1,4 @@
-//! Content search — prefers `rg` (ripgrep) like tau; pure-Rust fallback if missing.
+//! Content search — in-process first; `rg` only when a regex would need it.
 //!
 //! # Tool
 //!
@@ -11,10 +11,14 @@
 //! | Module | Responsibility |
 //! |--------|----------------|
 //! | (this) | Tool surface + execute orchestration |
-//! | [`rg`] | Spawn / parse ripgrep |
+//! | [`rg`] | Spawn / parse ripgrep (regex / large trees) |
 //! | [`fallback`] | Pure-Rust walk + substring search |
 //!
 //! Name filters reuse [`crate::tools::path_pattern`].
+//!
+//! Spawning `rg` on Windows is ~30–60ms even for one file, so literals and
+//! single-file searches stay in-process. `rg` is used only when the pattern
+//! looks like a regex *and* `rg` is on PATH (probed once, cached).
 
 mod fallback;
 mod rg;
@@ -55,7 +59,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex/text under allowed paths. Uses ripgrep when available. \
+        "Search file contents by regex/text under allowed paths. \
          Returns path:line:content matches."
     }
 
@@ -122,23 +126,27 @@ impl Tool for GrepTool {
             .clamp(1, MAX_LIMIT);
         let glob_filter = optional_string(obj, "glob");
 
-        // Try ripgrep first (tau path).
-        match run_rg(
-            &pattern,
-            &search_path,
-            ignore_case,
-            glob_filter.as_deref(),
-            limit,
-        )
-        .await
-        {
-            Ok(out) => return Ok(out),
-            Err(e) => {
-                tracing::debug!(error = %e, "rg unavailable or failed; using Rust fallback");
+        // Process spawn is the expensive part (~30–60ms on Windows). Stay
+        // in-process for literals and single files; only pay `rg` when the
+        // pattern actually needs a regex engine.
+        if should_spawn_rg(&search_path, &pattern) {
+            match run_rg(
+                &pattern,
+                &search_path,
+                ignore_case,
+                glob_filter.as_deref(),
+                limit,
+            )
+            .await
+            {
+                Ok(out) => return Ok(out),
+                Err(e) => {
+                    tracing::debug!(error = %e, "rg failed; using Rust fallback");
+                }
             }
         }
 
-        // Pure Rust fallback
+        // In-process walk (substring). Fast on sandbox-sized trees.
         let pattern_owned = pattern.clone();
         let path_owned = search_path.clone();
         let glob_owned = glob_filter.clone();
@@ -159,6 +167,40 @@ impl Tool for GrepTool {
         }
         Ok(truncate_tool_result(matches.join("\n")))
     }
+}
+
+/// Whether this call should pay for an `rg` process.
+///
+/// Literals and single-file searches are faster in-process. `rg` is worth it
+/// when the pattern uses regex metacharacters *and* ripgrep is installed.
+pub(super) fn should_spawn_rg(search_path: &std::path::Path, pattern: &str) -> bool {
+    if search_path.is_file() {
+        return false;
+    }
+    looks_like_regex(pattern) && rg::rg_available()
+}
+
+/// True when `pattern` looks like a regex, not a plain keyword / `foo.rs` path.
+///
+/// A lone `.` (file extension) is *not* treated as regex — `file.rs` is a
+/// literal. `.` only counts when it starts a quantifier (`.*`, `.+`, `.?`, `.{`).
+pub(super) fn looks_like_regex(pattern: &str) -> bool {
+    let b = pattern.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'*' | b'+' | b'?' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'|' | b'^' | b'$'
+            | b'\\' => return true,
+            b'.' => {
+                if matches!(b.get(i + 1), Some(b'*' | b'+' | b'?' | b'{')) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -207,5 +249,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("empty") || err.message.contains("pattern"));
+    }
+
+    #[test]
+    fn regex_detect_literals_vs_meta() {
+        assert!(!looks_like_regex("TODO"));
+        assert!(!looks_like_regex("needle-small"));
+        assert!(!looks_like_regex("file.rs"));
+        assert!(!looks_like_regex("foo.bar.baz"));
+        assert!(looks_like_regex("foo.*bar"));
+        assert!(looks_like_regex("a.+b"));
+        assert!(looks_like_regex("^fn"));
+        assert!(looks_like_regex("end$"));
+        assert!(looks_like_regex("a|b"));
+        assert!(looks_like_regex(r"\d+"));
+        assert!(looks_like_regex("foo[0-9]"));
+    }
+
+    #[test]
+    fn never_spawn_rg_for_a_single_file() {
+        let dir = std::env::temp_dir().join(format!("boris-grep-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("only.txt");
+        std::fs::write(&file, "needle\n").unwrap();
+        assert!(
+            !should_spawn_rg(&file, "foo.*bar"),
+            "single-file grep must stay in-process even for regex"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

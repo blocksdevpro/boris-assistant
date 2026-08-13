@@ -18,6 +18,7 @@
 //!         tool_calls.jsonl   # primary tool audit (session-scoped)
 //!         todos.json         # session plan list
 //!         memory.md          # session turn log (LTM append)
+//!         artifacts/         # visual cards: index.json + `{slug}-{id}.{ext}`
 //!         subagents/         # child subagent artifacts
 //!   memory/
 //!     MEMORY.md              # single global curated knowledge

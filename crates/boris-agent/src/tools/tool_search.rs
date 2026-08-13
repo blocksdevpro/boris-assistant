@@ -184,6 +184,12 @@ fn score_tool(tool: &dyn Tool, query: &str) -> u32 {
             &["memory_search", "memory_get", "remember", "recall"],
         ),
         ("skill", &["list_skills", "load_skill"]),
+        (
+            "artifact",
+            &["present_artifact", "list_artifacts", "get_artifact"],
+        ),
+        ("card", &["present_artifact", "list_artifacts"]),
+        ("show", &["present_artifact"]),
     ];
     for (key, needles) in aliases {
         if query.contains(key) {

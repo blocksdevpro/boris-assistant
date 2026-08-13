@@ -28,6 +28,39 @@ export type DeviceHealth = {
   ok: boolean;
 };
 
+/** Mirrors `boris_pipeline::ArtifactPeek` — no body. */
+export type ArtifactPeek = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+};
+
+/** Mirrors `boris_pipeline::ArtifactListItem`. */
+export type ArtifactListItem = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+  pinned: boolean;
+  revision: number;
+  current: boolean;
+};
+
+/** Mirrors `boris_pipeline::ArtifactCard`. */
+export type ArtifactCard = {
+  id: string;
+  title: string;
+  kind: string;
+  language?: string | null;
+  path: string;
+  pinned: boolean;
+  revision: number;
+  body: string;
+};
+
 /** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
   engine: EngineState;
@@ -44,6 +77,8 @@ export type StatusPicture = {
   context_used?: number | null;
   /** Soft context window for the meter. */
   context_limit?: number | null;
+  /** Current session card peek (body loaded separately). */
+  artifact?: ArtifactPeek | null;
 };
 
 /** Device list entry from `list_input_devices` / `list_output_devices`. */
@@ -114,7 +149,7 @@ export type ModelsInstallReport = {
  */
 export type AppSettings = {
   openrouter_api_key: string;
-  /** Exa Search API key for live `web_search` (optional; falls back to DDG scrape). */
+  /** Optional Exa key. `web_search` works without it (DuckDuckGo + Wikipedia). */
   exa_api_key: string;
   /** Strong / primary OpenRouter model id. */
   openrouter_model: string;
@@ -159,9 +194,20 @@ export type AppSettings = {
   overlay_scale_percent: number;
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
+  /** App-update feed: GitHub latest (`stable`) or the `beta` pre-release. */
+  update_channel: UpdateChannel;
   /** Optional log filter (`info`, `boris=debug`, …). */
   logging_filter: string;
 };
+
+/** Which GitHub Releases feed the desktop updater polls. */
+export type UpdateChannel = "stable" | "beta";
+
+export function normalizeUpdateChannel(
+  raw: string | null | undefined,
+): UpdateChannel {
+  return raw?.trim().toLowerCase() === "beta" ? "beta" : "stable";
+}
 
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
@@ -183,6 +229,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   overlay_position: "top_center",
   overlay_scale_percent: 100,
   start_engine_on_launch: false,
+  update_channel: "stable",
   logging_filter: "",
 };
 
@@ -236,6 +283,7 @@ export const OFF_STATUS: StatusPicture = {
   activity: null,
   context_used: null,
   context_limit: null,
+  artifact: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -255,6 +303,7 @@ export function normalizeStatus(
     activity: raw.activity ?? null,
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
+    artifact: raw.artifact ?? null,
   };
 }
 
@@ -289,6 +338,7 @@ export function normalizeSettings(
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    update_channel: normalizeUpdateChannel(raw?.update_channel),
     logging_filter: raw?.logging_filter ?? "",
   };
 }

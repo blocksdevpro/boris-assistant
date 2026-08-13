@@ -12,6 +12,7 @@
 //!     todos.json              # session todo list (`[]` when empty)
 //!     tool_calls.jsonl        # may be lazy-created by audit sink
 //!     memory.md               # session turn log (LTM; lazy on first append)
+//!     artifacts/              # visual cards: index.json + `{slug}-{id}.{ext}`
 //!     subagents/              # per-session subagent artifacts
 //!     scratch/                # optional empty dir
 //! ```
@@ -83,6 +84,24 @@ impl SessionStore {
         self.session_dir(id).join("scratch")
     }
 
+    /// Directory for session-local visual cards (`artifacts/`).
+    pub fn artifacts_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("artifacts")
+    }
+
+    /// Catalog file (`artifacts/index.json`).
+    pub fn artifacts_index_path(&self, id: &SessionId) -> PathBuf {
+        self.artifacts_dir(id).join("index.json")
+    }
+
+    /// Load the session artifact catalog. Missing dir/file → empty index.
+    pub fn load_artifact_index(
+        &self,
+        id: &SessionId,
+    ) -> Result<super::artifacts::ArtifactIndex, String> {
+        super::artifacts::ArtifactStore::new(self.artifacts_dir(id)).load_index()
+    }
+
     /// Session-local turn log (`memory.md`) for long-term memory append/search.
     pub fn memory_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("memory.md")
@@ -116,6 +135,7 @@ impl SessionStore {
         fs::create_dir_all(self.subagents_dir(id))
             .map_err(|e| format!("create subagents dir: {e}"))?;
         fs::create_dir_all(self.scratch_dir(id)).map_err(|e| format!("create scratch dir: {e}"))?;
+        super::artifacts::ArtifactStore::new(self.artifacts_dir(id)).ensure()?;
 
         Ok(())
     }
@@ -416,6 +436,17 @@ mod tests {
             store.scratch_dir(&meta.id).is_dir(),
             "scratch/ should exist"
         );
+        assert!(
+            store.artifacts_dir(&meta.id).is_dir(),
+            "artifacts/ should exist"
+        );
+        let art_index = store.artifacts_index_path(&meta.id);
+        assert!(art_index.is_file(), "artifacts/index.json should exist");
+        let art_raw = fs::read_to_string(&art_index).unwrap();
+        assert!(art_raw.contains("\"items\""), "{art_raw}");
+        let loaded = store.load_artifact_index(&meta.id).unwrap();
+        assert!(loaded.items.is_empty());
+        assert!(loaded.current.is_none());
 
         // tool_calls.jsonl is lazy — must not be created empty at session start.
         assert!(

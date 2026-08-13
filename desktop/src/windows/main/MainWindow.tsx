@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { SessionArtifactDesk } from "@/components/artifacts";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -296,7 +297,8 @@ export function MainWindow() {
       setUpdateUi("checking");
       setUpdateError(null);
     }
-    const result = await checkForUpdate();
+    const channel = settingsRef.current?.update_channel ?? "stable";
+    const result = await checkForUpdate(channel);
     // Don't clobber an in-flight install if one started while we were checking.
     if (installingUpdateRef.current) return;
     switch (result.status) {
@@ -325,13 +327,21 @@ export function MainWindow() {
     }
   }, []);
 
-  // Quiet startup check — only surfaces UI when an update exists.
+  // Quiet check once settings are known; re-check when the channel changes.
+  const didStartupUpdateCheck = useRef(false);
+  const updateChannel = settings?.update_channel;
   useEffect(() => {
-    const t = window.setTimeout(() => {
-      void runUpdateCheck({ silent: true });
-    }, 2500);
-    return () => window.clearTimeout(t);
-  }, [runUpdateCheck]);
+    if (!updateChannel) return;
+    if (!didStartupUpdateCheck.current) {
+      didStartupUpdateCheck.current = true;
+      const t = window.setTimeout(() => {
+        void runUpdateCheck({ silent: true });
+      }, 2500);
+      return () => window.clearTimeout(t);
+    }
+    setUpdateBannerDismissed(false);
+    void runUpdateCheck({ silent: true });
+  }, [updateChannel, runUpdateCheck]);
 
   const onInstallUpdate = useCallback(async () => {
     if (!pendingUpdate || installingUpdateRef.current) return;
@@ -791,6 +801,7 @@ function HomeView({
       ) : null}
 
       <ConversationView status={status} />
+      <SessionArtifactDesk peek={status.artifact} engineOn={engineOn} />
     </div>
   );
 }
@@ -1101,7 +1112,9 @@ function GeneralSettings({
       : hasUpdate && availableUpdate
         ? `v${availableUpdate.version} ready`
         : updateUi === "up_to_date"
-          ? "You're on the latest version"
+          ? settings.update_channel === "beta"
+            ? "You're on the latest beta"
+            : "You're on the latest version"
           : updateUi === "error"
             ? "Check failed"
             : "Check for a newer installer";
@@ -1166,8 +1179,32 @@ function GeneralSettings({
 
       <SettingsGroup
         title="Updates"
-        footer="Updates are signed and downloaded from GitHub Releases. The app restarts after install."
+        footer="Updates are signed and downloaded from GitHub Releases. Beta uses a separate pre-release feed. The app restarts after install."
       >
+        <SettingsRow
+          label="Channel"
+          subtitle="Beta gets new builds first. Switch back to Stable anytime."
+          labelFor="update-channel"
+        >
+          <select
+            id="update-channel"
+            className={selectCompactClass}
+            value={settings.update_channel === "beta" ? "beta" : "stable"}
+            disabled={downloading}
+            onChange={(e) =>
+              onPatch({
+                update_channel: e.target.value === "beta" ? "beta" : "stable",
+              })
+            }
+          >
+            <option value="stable" className="bg-[#1c1c1e] text-white">
+              Stable
+            </option>
+            <option value="beta" className="bg-[#1c1c1e] text-white">
+              Beta
+            </option>
+          </select>
+        </SettingsRow>
         <SettingsRow
           label="Version"
           subtitle={statusSubtitle}
@@ -1176,6 +1213,7 @@ function GeneralSettings({
           <div className="flex items-center gap-2">
             <span className="rounded-lg bg-white/[0.06] px-3 py-2 text-[13px] text-white/65">
               {versionLabel}
+              {settings.update_channel === "beta" ? " · beta" : ""}
             </span>
             {hasUpdate ? (
               <button
@@ -1359,7 +1397,7 @@ function ConnectionsSettings({ settings, locked, showOpenRouterKey, showExaKey, 
   return <div className="flex flex-col gap-6">
     <SettingsGroup title="API Keys" footer={locked ? "Stop Boris to change API keys." : "Keys stay in ~/.boris/auth.json on this computer."}>
       <SettingsField label="OpenRouter" subtitle="Required for chat" labelFor="openrouter-key"><SecretField id="openrouter-key" shown={showOpenRouterKey} onToggle={onToggleOpenRouter} value={settings.openrouter_api_key} disabled={locked} placeholder="sk-or-v1-…" onChange={(value) => onPatch({ openrouter_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://openrouter.ai/keys")}>Get an OpenRouter key</HelpLink></SettingsField>
-      <SettingsField label="Exa" subtitle="Optional, for more reliable web search" labelFor="exa-key" last><SecretField id="exa-key" shown={showExaKey} onToggle={onToggleExa} value={settings.exa_api_key} disabled={locked} placeholder="Exa API key" onChange={(value) => onPatch({ exa_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://dashboard.exa.ai")}>Open Exa dashboard</HelpLink></SettingsField>
+      <SettingsField label="Exa" subtitle="Optional upgrade. Web search works without this." labelFor="exa-key" last><SecretField id="exa-key" shown={showExaKey} onToggle={onToggleExa} value={settings.exa_api_key} disabled={locked} placeholder="Exa API key" onChange={(value) => onPatch({ exa_api_key: value })} /><HelpLink onClick={() => onOpenExternal("https://dashboard.exa.ai")}>Open Exa dashboard</HelpLink></SettingsField>
     </SettingsGroup>
     <SettingsGroup title="Chat Models" footer={locked ? "Stop Boris to change models." : "The fast model handles simpler requests."}>
       <ModelField label="Primary model" value={settings.openrouter_model} disabled={locked} onChange={(v) => onPatch({ openrouter_model: v })} />

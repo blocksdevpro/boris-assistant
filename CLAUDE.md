@@ -122,7 +122,7 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
                  #   unknown tables/keys outside those are preserved
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
   models/        # parakeet/, supertone/onnx/, supertone/voices/
-  sessions/      # transcripts
+  sessions/      # transcripts + per-session artifacts/
   memory/        # long-term markdown memory
   skills/        # skill playbooks
   logs/          # boris-desktop.*.log (packaged Windows builds have no console)

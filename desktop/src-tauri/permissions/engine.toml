@@ -69,3 +69,18 @@ commands.allow = ["get_log_path"]
 identifier = "allow-frontend-log"
 description = "Write a frontend log line into the desktop log file"
 commands.allow = ["frontend_log"]
+
+[[permission]]
+identifier = "allow-list-session-artifacts"
+description = "List visual cards in the active voice session"
+commands.allow = ["list_session_artifacts"]
+
+[[permission]]
+identifier = "allow-get-session-artifact"
+description = "Read one session visual card (meta + body)"
+commands.allow = ["get_session_artifact"]
+
+[[permission]]
+identifier = "allow-check-app-update"
+description = "Check GitHub Releases for a signed app update on the selected channel"
+commands.allow = ["check_app_update"]

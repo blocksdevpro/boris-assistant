@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0-beta.4] - 2026-08-13
+
 ### Fixed
 
 - Saving Settings while the overlay is already up (Ready / mid-turn) no
@@ -99,6 +101,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.1.0-beta.4]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.4
 [1.1.0-beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.3
 [1.1.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.2
 [1.1.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.1

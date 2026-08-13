@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.1.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.3) (published) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
-| **This tree** | **1.1.0-beta.3** | Source / `bun run tauri build` |
+| **Beta** | [1.1.0-beta.4](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.4) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
+| **This tree** | **1.1.0-beta.4** | Source / `bun run tauri build` |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -276,4 +276,4 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
 | Current beta line | **1.1.0** — artifacts, keyless web search, Stable/Beta updater channel, fast update checks |
-| This repository | `1.1.0-beta.3` |
+| This repository | `1.1.0-beta.4` |

@@ -16,8 +16,8 @@
 //!
 //! Sync `#[tauri::command]` handlers can run on the UI/main thread on Windows.
 //! Any work that may take more than a few ms (engine join, model status, cpal
-//! device enum, large disk copies) must use `async` + `spawn_blocking` so the
-//! window does not freeze as "Not Responding".
+//! device enum, settings load/save, large disk copies) must use `async` +
+//! `spawn_blocking` so the window does not freeze as "Not Responding".
 
 use boris_pipeline::{
     load_settings, save_settings, AppSettings, DeviceDto, DownloadProgress, ModelsInstallReport,
@@ -41,7 +41,7 @@ pub const EVENT_MODELS_PROGRESS: &str = "models-progress";
 
 /// Path hint for the log directory / active file (for UI debug copy).
 #[tauri::command]
-pub fn get_log_path() -> String {
+pub async fn get_log_path() -> String {
     logging::log_path_hint()
 }
 
@@ -66,8 +66,9 @@ pub async fn get_session_artifact(
 /// Accept frontend / webview log lines into the same file as Rust.
 ///
 /// Levels: `error` | `warn` | `info` | `debug` (anything else → info).
+/// Async so a burst of UI logs cannot stall the Windows message pump.
 #[tauri::command]
-pub fn frontend_log(level: String, message: String, context: Option<String>) {
+pub async fn frontend_log(level: String, message: String, context: Option<String>) {
     logging::write_frontend_log(&level, &message, context.as_deref());
 }
 
@@ -222,18 +223,30 @@ pub async fn list_output_devices() -> Vec<DeviceDto> {
 }
 
 #[tauri::command]
-pub fn switch_input(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+pub async fn switch_input(app: AppHandle, device_id: String) -> Result<(), String> {
     tracing::info!(%device_id, "switch_input command");
-    state.switch_input(device_id).map_err(|e| {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.switch_input(device_id)
+    })
+    .await
+    .map_err(|e| format!("switch_input task failed: {e}"))?
+    .map_err(|e| {
         tracing::error!(error = %e, "switch_input failed");
         e
     })
 }
 
 #[tauri::command]
-pub fn switch_output(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+pub async fn switch_output(app: AppHandle, device_id: String) -> Result<(), String> {
     tracing::info!(%device_id, "switch_output command");
-    state.switch_output(device_id).map_err(|e| {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.switch_output(device_id)
+    })
+    .await
+    .map_err(|e| format!("switch_output task failed: {e}"))?
+    .map_err(|e| {
         tracing::error!(error = %e, "switch_output failed");
         e
     })
@@ -302,9 +315,19 @@ pub async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, Stri
 }
 
 /// Restore API keys + models/providers from `~/.boris/config.toml` + `auth.json`.
+///
+/// Off the UI thread: first-run migration + disk reads must not freeze launch.
 #[tauri::command]
-pub fn get_settings() -> Result<AppSettings, String> {
-    match load_settings() {
+pub async fn get_settings() -> Result<AppSettings, String> {
+    let result = tauri::async_runtime::spawn_blocking(load_settings)
+        .await
+        .map_err(|e| {
+            let msg = format!("get_settings task failed: {e}");
+            tracing::error!(error = %msg, "get_settings join failed");
+            msg
+        })?;
+
+    match result {
         Ok(s) => {
             // Keep status-path overlay cache aligned if setup loaded defaults only.
             overlay_win::remember_overlay_prefs(&s);
@@ -327,12 +350,11 @@ pub fn get_settings() -> Result<AppSettings, String> {
 }
 
 /// Persist prefs to `config.toml` and secrets to `auth.json` (never log key values).
+///
+/// Off the UI thread: config merge + disk write used to freeze the window on
+/// every settings keystroke, and again on Start (which saves first).
 #[tauri::command]
-pub fn save_app_settings(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    settings: AppSettings,
-) -> Result<(), String> {
+pub async fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     tracing::info!(
         has_openrouter_key = !settings.openrouter_api_key.trim().is_empty(),
         has_exa_key = !settings.exa_api_key.trim().is_empty(),
@@ -344,12 +366,25 @@ pub fn save_app_settings(
         update_channel = %settings.update_channel,
         "save_app_settings"
     );
-    save_settings(&settings).map_err(|e| {
-        tracing::error!(error = %e, "save_app_settings failed");
-        e.to_string()
+    // Win any in-flight boot settings load so stale disk prefs cannot overwrite.
+    overlay_win::mark_overlay_prefs_dirty();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        save_settings(&settings).map_err(|e| e.to_string())?;
+        // apply_preferences also refreshes the overlay-prefs cache used by status.
+        overlay_win::apply_preferences(&app, &settings);
+        let picture = app.state::<AppState>().status();
+        overlay_win::sync_visibility(&app, &picture);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| {
+        let msg = format!("save_app_settings task failed: {e}");
+        tracing::error!(error = %msg, "save_app_settings join failed");
+        msg
     })?;
-    // apply_preferences also refreshes the overlay-prefs cache used by status.
-    overlay_win::apply_preferences(&app, &settings);
-    overlay_win::sync_visibility(&app, &state.status());
-    Ok(())
+
+    result.map_err(|e| {
+        tracing::error!(error = %e, "save_app_settings failed");
+        e
+    })
 }

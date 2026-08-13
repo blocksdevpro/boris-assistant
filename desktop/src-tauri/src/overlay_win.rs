@@ -77,6 +77,20 @@ static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// matches [`AppSettings`] (off until prefs are loaded).
 static SHOW_OVERLAY_ON_WAKE: AtomicBool = AtomicBool::new(false);
 
+/// Set when the UI persists prefs so a deferred boot `load_settings` cannot
+/// apply stale overlay geometry over a newer save.
+static OVERLAY_PREFS_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Mark overlay prefs as newer than whatever is still being loaded at boot.
+pub fn mark_overlay_prefs_dirty() {
+    OVERLAY_PREFS_DIRTY.store(true, Ordering::Release);
+}
+
+/// True after a save (or other live prefs write) beat the deferred boot load.
+pub fn overlay_prefs_dirty() -> bool {
+    OVERLAY_PREFS_DIRTY.load(Ordering::Acquire)
+}
+
 /// Last layout the host applied so prefs/scale changes keep a live card sized.
 static OVERLAY_CARD_LAYOUT: AtomicBool = AtomicBool::new(false);
 static OVERLAY_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);

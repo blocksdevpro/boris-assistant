@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.1.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.1) (published) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
-| **This tree** | **1.1.0-beta.2** | Source / `bun run tauri build` |
+| **Beta** | [1.1.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.2) (published) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
+| **This tree** | **1.1.0-beta.3** | Source / `bun run tauri build` |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -53,7 +53,7 @@ Windows 10 or 11, x64, with a working mic and speakers.
 2. Run the installer (you can install a beta over 1.0.0).
 3. On first launch, finish **model install** and set an [OpenRouter](https://openrouter.ai/) API key in Settings.
 
-Signed in-app updates poll GitHub Releases. **Stable** uses `/releases/latest`. **Beta** uses the long-lived [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) pre-release feed. Pick the channel in **Settings → Updates → Channel**.
+Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
 
 Windows **1.1 betas ship NSIS only**. WiX/MSI cannot encode a label like `1.1.0-beta.1`.
 
@@ -276,4 +276,4 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
 | Current beta line | **1.1.0** — artifacts, keyless web search, Stable/Beta updater channel, UI-thread fixes |
-| This repository | `1.1.0-beta.2` |
+| This repository | `1.1.0-beta.3` |

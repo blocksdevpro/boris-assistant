@@ -66,6 +66,7 @@ import {
   checkForUpdate,
   downloadAndInstallUpdate,
   type AvailableUpdate,
+  type CheckResult,
   type UpdateProgress,
 } from "@/lib/updater";
 import { cn } from "@/lib/utils";
@@ -289,6 +290,8 @@ export function MainWindow() {
 
   /** True while download+install is in progress (survives re-renders / checks). */
   const installingUpdateRef = useRef(false);
+  const checkInFlight = useRef<Promise<CheckResult> | null>(null);
+  const checkInFlightChannel = useRef<string | null>(null);
 
   const runUpdateCheck = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent ?? false;
@@ -298,9 +301,22 @@ export function MainWindow() {
       setUpdateError(null);
     }
     const channel = settingsRef.current?.update_channel ?? "stable";
-    const result = await checkForUpdate(channel);
+    let pending = checkInFlight.current;
+    if (!pending || checkInFlightChannel.current !== channel) {
+      pending = checkForUpdate(channel);
+      checkInFlight.current = pending;
+      checkInFlightChannel.current = channel;
+      void pending.finally(() => {
+        if (checkInFlight.current === pending) {
+          checkInFlight.current = null;
+          checkInFlightChannel.current = null;
+        }
+      });
+    }
+    const result = await pending;
     // Don't clobber an in-flight install if one started while we were checking.
     if (installingUpdateRef.current) return;
+    if ((settingsRef.current?.update_channel ?? "stable") !== channel) return;
     switch (result.status) {
       case "unavailable":
         if (!silent) setUpdateUi("idle");
@@ -1213,7 +1229,6 @@ function GeneralSettings({
           <div className="flex items-center gap-2">
             <span className="rounded-lg bg-white/[0.06] px-3 py-2 text-[13px] text-white/65">
               {versionLabel}
-              {settings.update_channel === "beta" ? " · beta" : ""}
             </span>
             {hasUpdate ? (
               <button

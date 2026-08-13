@@ -80,12 +80,12 @@ Attach to the **latest** release (same tag users should get):
 }
 ```
 
-The app polls one of:
+The in-app **Check** peeks `GET /repos/blocksdevpro/boris-assistant/releases` (JSON only) to see whether a newer tag exists. It does **not** download `latest.json` unless that peek says you are behind. Download/install then uses:
 
 - **Stable** (default): `https://github.com/blocksdevpro/boris-assistant/releases/latest/download/latest.json`
 - **Beta**: `https://github.com/blocksdevpro/boris-assistant/releases/download/beta/latest.json`
 
-`/releases/latest` ignores GitHub pre-releases, so a `v1.1.0-beta.N` release must be marked **pre-release** or every Stable install will be offered it.
+So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notices; the rolling `beta` tag is only the installer feed. `/releases/latest` ignores GitHub pre-releases — mark `v1.1.0-beta.N` as **pre-release** or every Stable install will be offered it.
 
 ## Publishing a beta
 

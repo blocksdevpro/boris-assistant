@@ -80,16 +80,33 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The overlay starts hidden. Apply persisted geometry now; visibility is
-    // derived from the current engine status and the wake-only preference.
+    // The overlay starts hidden. Seed persisted geometry off the UI thread so
+    // first-run migration / disk reads cannot freeze the window at launch.
     // apply_preferences also seeds the in-memory overlay-prefs cache so later
     // status snapshots never re-read config from disk.
-    if let Ok(settings) = boris_pipeline::load_settings() {
-        overlay_win::apply_preferences(app.handle(), &settings);
-        if let Some(state) = app.try_state::<AppState>() {
-            overlay_win::sync_visibility(app.handle(), &state.status());
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        let settings =
+            match tauri::async_runtime::spawn_blocking(boris_pipeline::load_settings).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "deferred boot settings load failed");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "deferred boot settings join failed");
+                    return;
+                }
+            };
+        if overlay_win::overlay_prefs_dirty() {
+            tracing::debug!("boot settings load skipped — newer prefs already applied");
+            return;
         }
-    }
+        overlay_win::apply_preferences(&handle, &settings);
+        if let Some(state) = handle.try_state::<AppState>() {
+            overlay_win::sync_visibility(&handle, &state.status());
+        }
+    });
 
     // Tray keeps control after the main console is closed/hidden.
     if let Err(e) = tray::setup_tray(app.handle()) {

@@ -98,6 +98,34 @@ So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notice
 3. Create or update a long-lived pre-release tagged **`beta`** and attach the **same** `latest.json` (and installer if you want the `beta` tag URL to work as a direct download). The in-app Beta channel only reads `releases/download/beta/latest.json`.
 4. Promote by shipping `v1.1.0` as a normal (non-pre-release) release with its own `latest.json`. Do not set a beta as the latest release.
 
+## Promoting to Latest (stable channel)
+
+GitHub **Latest** is the most recently published non-prerelease. The in-app
+**Stable** channel follows `/releases/latest`.
+
+**Do not** uncheck Pre-release on `v1.1.0-beta.3` unless you want every
+Stable 1.0.0 install offered a build whose version string is still
+`1.1.0-beta.3` (NSIS only, no MSI).
+
+The clean promote:
+
+1. Bump the product to a numeric version (`1.1.0`) in `package.json`,
+   `tauri.conf.json`, both `Cargo.toml`s, and `CHANGELOG.md`.
+2. Optionally set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode
+   `1.1.0`).
+3. Sign-build, then create **`v1.1.0` without `--prerelease`** and attach
+   installer(s), `.sig`, and `latest.json` whose `url` points at `v1.1.0`.
+4. Leave the rolling `beta` tag as a pre-release. Do not mark it Latest.
+
+Quick-and-dirty (same binary, still labeled beta.3):
+
+```powershell
+gh release edit v1.1.0-beta.3 --prerelease=false
+```
+
+That makes `/releases/latest` this tag. Stable Check will offer
+`1.1.0-beta.3` to 1.0.0 users.
+
 ## CI secrets
 
 Store the private key as a GitHub Actions secret (never commit it):

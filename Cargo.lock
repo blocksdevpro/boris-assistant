@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "boris-assistant"
-version = "1.1.0"
+version = "1.2.0-beta.1"
 
 [[package]]
 name = "boris-audio"
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "boris-desktop"
-version = "1.1.0"
+version = "1.2.0-beta.1"
 dependencies = [
  "boris-pipeline",
  "boris-tts-supertone",

@@ -5,6 +5,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Start of the **1.2** line on the `next` branch. Stable **1.1.x** stays on
+`main`.
+
 ## [1.1.0] - 2026-08-15
 
 Stable release of the 1.1 line. Product-equivalent to [1.1.0-beta.5];

@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Boris",
   "mainBinaryName": "boris",
-  "version": "1.1.0",
+  "version": "1.2.0-beta.1",
   "identifier": "com.boris.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -61,7 +61,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",

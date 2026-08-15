@@ -27,8 +27,8 @@ Windows **1.1.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
 `1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
-The current release-prep tree on **`main`** is **`1.1.0`**. The **`next`**
-branch is the 1.2 beta line. See [`.tauri/README.md`](../.tauri/README.md).
+This **`next`** tree is **`1.2.0-beta.1`** (NSIS only). Stable **`1.1.0`**
+lives on **`main`**. See [`.tauri/README.md`](../.tauri/README.md).
 
 ## App updates (Tauri updater)
 

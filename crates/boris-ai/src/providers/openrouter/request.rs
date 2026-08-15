@@ -4,21 +4,37 @@ use serde_json::{json, Value};
 
 use super::client::OpenRouterClient;
 
+use crate::request::CompleteOptions;
+
 impl OpenRouterClient {
     /// Build the JSON body for a chat completion request.
     ///
     /// Clones `messages` / `tools` into the body once per call.
+    #[allow(dead_code)]
     pub(super) fn request_body(&self, messages: &Value, tools: &Value, stream: bool) -> Value {
+        self.request_body_with(messages, tools, stream, &CompleteOptions::default())
+    }
+
+    pub(super) fn request_body_with(
+        &self,
+        messages: &Value,
+        tools: &Value,
+        stream: bool,
+        opts: &CompleteOptions,
+    ) -> Value {
         let mut body = base_body(&self.model, messages, tools);
         let obj = body
             .as_object_mut()
             .expect("chat completion body is always a JSON object");
 
+        let max_tokens = opts.resolved_max_tokens(self.max_tokens);
+        let reasoning = opts.resolved_reasoning(self.reasoning.clone());
+
         // Headroom for reasoning + final answer / tool_calls.
-        obj.insert("max_tokens".into(), json!(self.max_tokens));
+        obj.insert("max_tokens".into(), json!(max_tokens));
 
         // Unified OpenRouter reasoning (DeepSeek / Gemini thinking / Claude / o-series).
-        obj.insert("reasoning".into(), self.reasoning.to_request_value());
+        obj.insert("reasoning".into(), reasoning.to_request_value());
 
         if stream {
             obj.insert("stream".into(), json!(true));

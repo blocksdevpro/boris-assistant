@@ -84,6 +84,14 @@ impl ReasoningConfig {
         }
     }
 
+    /// [`ReasoningEffort::Minimal`], reasoning text excluded from the response body.
+    pub fn minimal() -> Self {
+        Self {
+            effort: ReasoningEffort::Minimal,
+            exclude: true,
+        }
+    }
+
     /// JSON object for the OpenRouter `reasoning` field.
     ///
     /// Always returns `Some` — OpenRouter's unified `reasoning` object is

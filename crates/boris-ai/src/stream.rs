@@ -1,11 +1,56 @@
-//! Lightweight in-process event channel (optional helper).
-//!
-//! The production voice path uses [`crate::LlmClient::complete`] (OpenRouter
-//! may stream **internally** and assemble a full message). This module is a
-//! small mpsc wrapper for future UI/partial-token adapters — it is **not**
-//! wired into the agent loop today.
+//! Typed LLM stream events plus a small in-process event channel.
 
+use serde_json::Value;
 use tokio::sync::mpsc;
+
+use crate::usage::TokenUsage;
+
+/// Incremental events from [`crate::LlmClient::complete_stream`].
+///
+/// The existing blocking [`crate::LlmClient::complete`] path stays compatible:
+/// implementations may still assemble internally and return only the final message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmStreamEvent {
+    /// Request is about to be sent.
+    ModelSend {
+        model: String,
+    },
+    /// First content or tool-call delta arrived (time-to-first-byte).
+    FirstDelta {
+        ttfb_ms: u64,
+    },
+    /// Incremental assistant text.
+    ContentDelta {
+        text: String,
+    },
+    /// Incremental tool-call fragment. Never execute until [`Self::ToolCallComplete`].
+    ToolCallDelta {
+        index: u32,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
+    },
+    /// One tool call has a complete `id`, `name`, and arguments string.
+    /// Arguments may still fail JSON / schema validation — do not execute yet.
+    ToolCallComplete {
+        index: u32,
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    Usage(TokenUsage),
+    /// Fully assembled `choices[0].message` (same shape as `complete()`).
+    FinalMessage(Value),
+}
+
+impl LlmStreamEvent {
+    pub fn is_toolish(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolCallDelta { .. } | Self::ToolCallComplete { .. }
+        )
+    }
+}
 
 /// Receiver half of an unbounded event stream.
 ///

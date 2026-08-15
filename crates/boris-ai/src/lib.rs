@@ -27,7 +27,7 @@ pub mod error;
 mod message;
 mod model_pref;
 mod providers;
-/// Optional mpsc event helper (not re-exported at crate root; unused by the agent loop).
+mod request;
 pub mod stream;
 mod usage;
 
@@ -35,6 +35,8 @@ pub use client::LlmClient;
 pub use error::{LlmError, LlmErrorKind};
 pub use model_pref::{parse_provider_list, split_model_and_provider};
 pub use providers::OpenRouterClient;
+pub use request::{CompleteOptions, RequestStage};
+pub use stream::LlmStreamEvent;
 pub use usage::TokenUsage;
 
 // OpenRouter timeout / base-url / reasoning (hosts may tune with builders).

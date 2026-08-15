@@ -27,22 +27,55 @@ struct ToolCallAcc {
     arguments: String,
 }
 
+/// Incremental fragments produced by one SSE event (for typed stream callers).
+#[derive(Debug, Clone, Default)]
+pub(super) struct StreamDelta {
+    pub content: String,
+    pub tool_deltas: Vec<ToolDelta>,
+    pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(super) struct ToolDelta {
+    pub index: u32,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_delta: String,
+}
+
 impl ToolCallAcc {
-    fn apply_delta(&mut self, tc: &Value) {
+    fn apply_delta(&mut self, tc: &Value) -> ToolDelta {
+        let mut id_out = None;
+        let mut name_out = None;
+        let mut arguments_delta = String::new();
         if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
             if !id.is_empty() {
                 self.id = id.to_string();
+                id_out = Some(id.to_string());
             }
         }
         if let Some(func) = tc.get("function") {
             if let Some(n) = func.get("name").and_then(|n| n.as_str()) {
                 if !n.is_empty() {
+                    let before = self.name.clone();
                     apply_name_delta(&mut self.name, n);
+                    if self.name != before {
+                        name_out = Some(self.name.clone());
+                    }
                 }
             }
             if let Some(a) = func.get("arguments").and_then(|a| a.as_str()) {
                 self.arguments.push_str(a);
+                arguments_delta = a.to_string();
             }
+        }
+        let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+        ToolDelta {
+            index: idx,
+            id: id_out,
+            name: name_out,
+            arguments_delta,
         }
     }
 
@@ -116,27 +149,36 @@ impl StreamAssembler {
     }
 
     /// Ingest one parsed SSE `data:` JSON payload.
+    #[allow(dead_code)]
     pub(super) fn ingest_event(&mut self, event: &Value) {
+        let _ = self.ingest_event_delta(event);
+    }
+
+    /// Same as [`Self::ingest_event`] but returns newly appended fragments.
+    pub(super) fn ingest_event_delta(&mut self, event: &Value) -> StreamDelta {
+        let mut delta = StreamDelta::default();
         // A well-formed SSE payload can carry a top-level `error` object
         // instead of `choices` (e.g. `data: {"error":{"message":"..."}}`).
         // Surface it instead of silently dropping the event, which used to
         // leave the stream to "succeed" with an empty assembled message.
         if let Some(err) = event.get("error") {
             self.error = Some(err.clone());
-            return;
+            return delta;
         }
 
         if let Some(usage) = event.get("usage") {
-            self.last_usage = Some(TokenUsage::from_usage_value(usage));
+            let u = TokenUsage::from_usage_value(usage);
+            self.last_usage = Some(u.clone());
+            delta.usage = Some(u);
         }
 
         let Some(choice) = event.get("choices").and_then(|c| c.get(0)) else {
-            return;
+            return delta;
         };
 
         // Prefer incremental delta; some providers also emit a full `message`.
         let Some(piece) = choice.get("delta").or_else(|| choice.get("message")) else {
-            return;
+            return delta;
         };
 
         if let Some(r) = piece.get("role").and_then(|r| r.as_str()) {
@@ -144,6 +186,7 @@ impl StreamAssembler {
         }
 
         if let Some(c) = piece.get("content") {
+            let before = self.content.len();
             // Full `message` objects sometimes carry trimmed-friendly content;
             // streaming `delta` strings must preserve raw spaces.
             if choice.get("delta").is_some() {
@@ -161,14 +204,36 @@ impl StreamAssembler {
                     self.content.push_str(&text);
                 }
             }
+            if self.content.len() > before {
+                delta.content = self.content[before..].to_string();
+            }
         }
 
         if let Some(tcs) = piece.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
                 let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-                self.tools.entry(idx).or_default().apply_delta(tc);
+                let mut td = self.tools.entry(idx).or_default().apply_delta(tc);
+                td.index = idx;
+                delta.tool_deltas.push(td);
             }
         }
+        delta
+    }
+
+    /// Snapshot completed tool calls (id + name + full arguments string).
+    #[allow(dead_code)]
+    pub(super) fn completed_tools(&self) -> Vec<(u32, String, String, String)> {
+        self.tools
+            .iter()
+            .map(|(idx, acc)| {
+                let id = if acc.id.is_empty() {
+                    format!("call_{idx}")
+                } else {
+                    acc.id.clone()
+                };
+                (*idx, id, acc.name.clone(), acc.arguments.clone())
+            })
+            .collect()
     }
 
     /// Finish assembly into a single assistant message object.

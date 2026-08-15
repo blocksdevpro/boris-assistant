@@ -25,6 +25,7 @@ use boris_pipeline::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::autostart;
 use crate::logging;
 use crate::orchestrator::AppState;
 use crate::overlay_win;
@@ -170,6 +171,67 @@ pub async fn start_engine(
     })?;
     tracing::info!("start_engine ok");
     Ok(())
+}
+
+/// Start from saved prefs (Windows silent logon). Applies device prefs first.
+pub(crate) fn start_engine_with_settings(
+    app: &AppHandle,
+    settings: &AppSettings,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if !settings.input_device.trim().is_empty() {
+        if let Err(e) = state.switch_input(settings.input_device.clone()) {
+            tracing::warn!(error = %e, "silent start: switch_input failed");
+        }
+    }
+    if !settings.output_device.trim().is_empty() {
+        if let Err(e) = state.switch_output(settings.output_device.clone()) {
+            tracing::warn!(error = %e, "silent start: switch_output failed");
+        }
+    }
+
+    let key_from_env = settings.openrouter_api_key.trim().is_empty();
+    let key = if key_from_env {
+        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+    } else {
+        settings.openrouter_api_key.clone()
+    };
+    let model =
+        nonempty_opt(&settings.openrouter_model).or_else(|| std::env::var("OPENROUTER_MODEL").ok());
+    let fast_model = nonempty_opt(&settings.openrouter_fast_model);
+    let model_provider = nonempty_opt(&settings.openrouter_model_provider);
+    let fast_provider = nonempty_opt(&settings.openrouter_fast_provider);
+    let pin_provider = Some(settings.openrouter_pin_provider);
+
+    tracing::info!(
+        key_source = if key_from_env { "env" } else { "settings" },
+        key_present = !key.trim().is_empty(),
+        model = ?model.as_deref(),
+        "silent start_engine"
+    );
+
+    let app_for_status = app.clone();
+    state.start(
+        key,
+        model,
+        fast_model,
+        model_provider,
+        fast_provider,
+        pin_provider,
+        move |picture| {
+            overlay_win::sync_visibility(&app_for_status, &picture);
+            let _ = app_for_status.emit(EVENT_STATUS, picture);
+        },
+    )
+}
+
+fn nonempty_opt(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 /// Stop and join the engine thread (may take a moment while audio shuts down).
@@ -363,21 +425,33 @@ pub async fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<
         model_provider = %settings.openrouter_model_provider,
         fast_provider = %settings.openrouter_fast_provider,
         pin_provider = settings.openrouter_pin_provider,
+        start_with_windows = settings.start_with_windows,
         update_channel = %settings.update_channel,
         "save_app_settings"
     );
     // Win any in-flight boot settings load so stale disk prefs cannot overwrite.
     overlay_win::mark_overlay_prefs_dirty();
     let to_disk = settings.clone();
-    tauri::async_runtime::spawn_blocking(move || save_settings(&to_disk).map_err(|e| e.to_string()))
+    tauri::async_runtime::spawn_blocking(move || {
+        save_settings(&to_disk).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| {
+        let msg = format!("save_app_settings task failed: {e}");
+        tracing::error!(error = %msg, "save_app_settings join failed");
+        msg
+    })?
+    .map_err(|e| {
+        tracing::error!(error = %e, "save_app_settings failed");
+        e
+    })?;
+
+    let want_autostart = settings.start_with_windows;
+    tauri::async_runtime::spawn_blocking(move || autostart::apply(want_autostart))
         .await
+        .map_err(|e| format!("start-with-windows task failed: {e}"))?
         .map_err(|e| {
-            let msg = format!("save_app_settings task failed: {e}");
-            tracing::error!(error = %msg, "save_app_settings join failed");
-            msg
-        })?
-        .map_err(|e| {
-            tracing::error!(error = %e, "save_app_settings failed");
+            tracing::error!(error = %e, "start-with-windows apply failed");
             e
         })?;
 

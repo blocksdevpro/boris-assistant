@@ -127,6 +127,9 @@ pub struct AppSettings {
     /// Auto-start the engine when the desktop app opens.
     #[serde(default)]
     pub start_engine_on_launch: bool,
+    /// Launch Boris at Windows sign-in (host writes the HKCU Run key).
+    #[serde(default)]
+    pub start_with_windows: bool,
     /// App-update feed: `stable` (GitHub latest) or `beta` (pre-release tag `beta`).
     #[serde(default = "default_update_channel")]
     pub update_channel: String,
@@ -157,6 +160,7 @@ impl Default for AppSettings {
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             start_engine_on_launch: false,
+            start_with_windows: false,
             update_channel: default_update_channel(),
             logging_filter: String::new(),
         }
@@ -199,6 +203,7 @@ impl std::fmt::Debug for AppSettings {
             .field("overlay_position", &self.overlay_position)
             .field("overlay_scale_percent", &self.overlay_scale_percent)
             .field("start_engine_on_launch", &self.start_engine_on_launch)
+            .field("start_with_windows", &self.start_with_windows)
             .field("update_channel", &self.update_channel)
             .field("logging_filter", &self.logging_filter)
             .finish()
@@ -300,6 +305,8 @@ struct UiSection {
     overlay_scale_percent: u16,
     #[serde(default)]
     start_engine_on_launch: bool,
+    #[serde(default)]
+    start_with_windows: bool,
     #[serde(default = "default_update_channel")]
     update_channel: String,
 }
@@ -312,6 +319,7 @@ impl Default for UiSection {
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             start_engine_on_launch: false,
+            start_with_windows: false,
             update_channel: default_update_channel(),
         }
     }
@@ -346,6 +354,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
     out.overlay_scale_percent = cfg.ui.overlay_scale_percent.clamp(75, 125);
     out.start_engine_on_launch = cfg.ui.start_engine_on_launch;
+    out.start_with_windows = cfg.ui.start_with_windows;
     out.update_channel = normalize_update_channel(cfg.ui.update_channel);
     out.logging_filter = cfg.logging.filter;
 }
@@ -485,6 +494,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         overlay_position: normalize_overlay_position(settings.overlay_position.clone()),
         overlay_scale_percent: settings.overlay_scale_percent.clamp(75, 125),
         start_engine_on_launch: settings.start_engine_on_launch,
+        start_with_windows: settings.start_with_windows,
         update_channel: normalize_update_channel(settings.update_channel.clone()),
     };
     let logging = LoggingSection {
@@ -965,6 +975,7 @@ mod tests {
             overlay_position: "top_right".into(),
             overlay_scale_percent: 115,
             start_engine_on_launch: true,
+            start_with_windows: true,
             update_channel: "beta".into(),
             logging_filter: "info".into(),
         };
@@ -1011,6 +1022,7 @@ mod tests {
         assert_eq!(loaded.overlay_position, "top_right");
         assert_eq!(loaded.overlay_scale_percent, 115);
         assert!(loaded.start_engine_on_launch);
+        assert!(loaded.start_with_windows);
         assert_eq!(loaded.update_channel, "beta");
         assert_eq!(loaded.logging_filter, "info");
         assert!(raw_cfg.contains("update_channel"));

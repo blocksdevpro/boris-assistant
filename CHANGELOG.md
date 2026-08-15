@@ -5,8 +5,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Settings → General: **Start with Windows**. Registers a current-user Run
+  key so Boris launches at sign-in. That launch stays in the tray (no main
+  window) and turns the engine on.
+
 ### Changed
 
+- Desktop process and log files are named `boris` (not `boris-desktop`).
+  The taskbar, installer binary, and `~/.boris/logs` all use `boris`.
 - Completion logs now include wall-clock `ms` for the thing that just finished:
   each tool call, LLM complete (stream / blocking), memory search / get /
   personal extract, status phase transitions, wake wait, capture, session

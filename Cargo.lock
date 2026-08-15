@@ -541,6 +541,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "url",
+ "winreg",
 ]
 
 [[package]]

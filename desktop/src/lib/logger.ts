@@ -3,7 +3,7 @@
  *
  * Always mirrors to the browser console. When running under Tauri, also
  * forwards lines to Rust (`frontend_log`) so they land in
- * `~/.boris/logs/boris-desktop*.log` next to the native pipeline logs.
+ * `~/.boris/logs/boris*.log` next to the native pipeline logs.
  */
 
 import { invoke } from "@tauri-apps/api/core";

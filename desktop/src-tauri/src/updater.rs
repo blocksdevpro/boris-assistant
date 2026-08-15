@@ -45,6 +45,7 @@ pub fn endpoint_for_channel(channel: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub fn github_release_api(channel: &str) -> String {
     if channel.eq_ignore_ascii_case("beta") {
         format!("{GITHUB_API_REPO}/releases/tags/beta")
@@ -179,7 +180,7 @@ pub async fn check_app_update(
 /// which is the whole "browser is instant, Rust is stuck" gap.
 fn tune_github_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     let builder = builder
-        .user_agent("boris-desktop")
+        .user_agent("boris")
         .connect_timeout(Duration::from_secs(3))
         .tcp_nodelay(true);
     // Public GitHub HTTPS. WPAD on Windows is the slow part, not the URL.
@@ -278,7 +279,9 @@ mod tests {
 
     #[test]
     fn missing_feed_detects_github_404() {
-        assert!(looks_like_missing_feed("failed to check for updates: 404 Not Found"));
+        assert!(looks_like_missing_feed(
+            "failed to check for updates: 404 Not Found"
+        ));
         assert!(!looks_like_missing_feed("signature verification failed"));
         assert!(looks_like_timeout("error sending request: timed out"));
         assert!(!looks_like_timeout("signature verification failed"));

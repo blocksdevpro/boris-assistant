@@ -3,7 +3,7 @@
  *
  * # Host vs pipeline
  *
- * - **Host** (`boris-desktop`): owns these invoke/event names, mirrors status,
+ * - **Host** (`boris`): owns these invoke/event names, mirrors status,
  *   starts/stops the engine process, lists devices, loads settings.
  * - **Pipeline** (`boris_pipeline`): owns voice policy, model install, real
  *   `StatusPicture` production, and `~/.boris` persistence internals.

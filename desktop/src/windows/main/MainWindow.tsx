@@ -1154,6 +1154,16 @@ function GeneralSettings({
             : capability.footer
         }
       >
+        <SettingsRow
+          label="Start with Windows"
+          subtitle="At sign-in, stay in the tray and turn Boris on"
+        >
+          <Toggle
+            checked={settings.start_with_windows}
+            onChange={(v) => onPatch({ start_with_windows: v })}
+            aria-label="Start with Windows"
+          />
+        </SettingsRow>
         <SettingsRow label="Start Boris when the app opens">
           <Toggle
             checked={settings.start_engine_on_launch}

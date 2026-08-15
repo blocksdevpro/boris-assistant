@@ -76,11 +76,11 @@ pub fn init_tracing() {
     let log_dir = logs_dir();
 
     // Best-effort path hint (rolling names include date; point at the directory).
-    let _ = LOG_FILE_PATH.set(log_dir.join("boris-desktop.log"));
+    let _ = LOG_FILE_PATH.set(log_dir.join("boris.log"));
 
     let primary = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("boris-desktop")
+        .filename_prefix("boris")
         .filename_suffix("log")
         .build(&log_dir);
 
@@ -93,7 +93,7 @@ pub fn init_tracing() {
         eprintln!("log file appender failed ({e}); falling back to cwd");
         tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix("boris-desktop")
+            .filename_prefix("boris")
             .filename_suffix("log")
             .build(".")
             .inspect_err(|e2| {
@@ -190,7 +190,7 @@ pub fn init_tracing() {
         });
 }
 
-/// Delete old `boris-desktop.*.log` files past a retention window or count
+/// Delete old `boris.*.log` files past a retention window or count
 /// cap so a long-running install doesn't accumulate one file per day forever.
 ///
 /// Best-effort: never called before a fallback diagnostic path exists, and
@@ -215,7 +215,10 @@ fn prune_old_logs(log_dir: &std::path::Path) -> usize {
             entry
                 .file_name()
                 .to_str()
-                .is_some_and(|n| n.starts_with("boris-desktop.") && n.ends_with(".log"))
+                .is_some_and(|n| {
+                    n.ends_with(".log")
+                        && (n.starts_with("boris.") || n.starts_with("boris-desktop."))
+                })
         })
         .filter_map(|entry| {
             let modified = entry.metadata().ok()?.modified().ok()?;
@@ -310,7 +313,7 @@ pub fn log_path_hint() -> String {
     LOG_FILE_PATH
         .get()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| logs_dir().join("boris-desktop.log").display().to_string())
+        .unwrap_or_else(|| logs_dir().join("boris.log").display().to_string())
 }
 
 /// Max characters kept per `frontend_log` field before truncation. Any JS

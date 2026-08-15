@@ -20,6 +20,7 @@
 //! - [`logging`] — file + stderr tracing, panic hook, frontend log sink
 
 mod artifacts;
+mod autostart;
 mod commands;
 mod logging;
 mod orchestrator;
@@ -71,6 +72,27 @@ pub fn run() {
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("app setup begin");
 
+    // `--autostart` (Windows logon): stay in the tray. Hide before the first
+    // paint so the console never flashes. Normal launches show immediately
+    // (tauri.conf keeps main `visible: false` to make this race-free).
+    let silent = autostart::launched_from_windows_startup();
+    if let Some(main) = app.get_webview_window("main") {
+        if silent {
+            let _ = main.hide();
+            let _ = main.set_skip_taskbar(true);
+            tracing::info!("windows startup launch — main window hidden");
+        } else {
+            let _ = main.show();
+        }
+        tracing::info!(
+            silent,
+            visible = main.is_visible().unwrap_or(false),
+            "main window present"
+        );
+    } else {
+        tracing::warn!("main window missing at setup");
+    }
+
     // Do not create the overlay HWND here. Packaged WebView2 on Windows
     // flashes a decorated transparent frame during window build — that is
     // the empty window on launch. The island is spawned on first show.
@@ -90,11 +112,42 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
+
+        // Refresh the Run-key path after updates; drop a stale entry if unset.
+        if let Err(e) = autostart::apply(settings.start_with_windows) {
+            tracing::warn!(error = %e, "apply start-with-windows at boot");
+        }
+
         if overlay_win::overlay_prefs_dirty() {
             tracing::debug!("boot settings load skipped — newer prefs already applied");
+        } else {
+            let _ = overlay_win::apply_preferences(&handle, &settings);
+        }
+
+        if !silent {
             return;
         }
-        let _ = overlay_win::apply_preferences(&handle, &settings);
+        if !settings.start_with_windows {
+            // Leftover Run key — do not stay silent; show the console.
+            tracing::info!("--autostart but start_with_windows is off — showing main window");
+            if let Some(main) = handle.get_webview_window("main") {
+                let _ = main.set_skip_taskbar(false);
+                let _ = main.show();
+            }
+            return;
+        }
+
+        let boot = handle.clone();
+        let saved = settings.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            commands::start_engine_with_settings(&boot, &saved)
+        })
+        .await
+        {
+            Ok(Ok(())) => tracing::info!("silent start: engine on"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "silent start: engine failed"),
+            Err(e) => tracing::warn!(error = %e, "silent start: engine join failed"),
+        }
     });
 
     // Tray keeps control after the main console is closed/hidden.
@@ -104,15 +157,6 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(state) = app.try_state::<AppState>() {
         let _ = app.emit(commands::EVENT_STATUS, state.status());
-    }
-
-    if let Some(main) = app.get_webview_window("main") {
-        tracing::info!(
-            visible = main.is_visible().unwrap_or(false),
-            "main window present"
-        );
-    } else {
-        tracing::warn!("main window missing at setup");
     }
 
     tracing::info!(

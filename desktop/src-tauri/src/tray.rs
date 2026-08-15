@@ -107,6 +107,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         tracing::info!("tray: showing main window");
         let _ = window.unminimize();
+        let _ = window.set_skip_taskbar(false);
         let _ = window.show();
         let _ = window.set_focus();
     } else {

@@ -27,5 +27,9 @@ describe("update channel", () => {
     expect(normalizeSettings({ update_channel: "beta" }).update_channel).toBe(
       "beta",
     );
+    expect(normalizeSettings({}).start_with_windows).toBe(false);
+    expect(normalizeSettings({ start_with_windows: true }).start_with_windows).toBe(
+      true,
+    );
   });
 });

@@ -59,7 +59,7 @@ Release Windows builds have **no console window**, so **all** pipeline diagnosti
 go to disk. On another PC after install:
 
 ```text
-%USERPROFILE%\.boris\logs\boris-desktop.YYYY-MM-DD.log
+%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log
 ```
 
 What gets logged by default (**DEBUG** for all `boris_*` crates):

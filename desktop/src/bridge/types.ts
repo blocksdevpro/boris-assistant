@@ -194,6 +194,8 @@ export type AppSettings = {
   overlay_scale_percent: number;
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
+  /** Launch at Windows sign-in (silent, engine on, no main window). */
+  start_with_windows: boolean;
   /** App-update feed: GitHub latest (`stable`) or the `beta` pre-release. */
   update_channel: UpdateChannel;
   /** Optional log filter (`info`, `boris=debug`, …). */
@@ -229,6 +231,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   overlay_position: "top_center",
   overlay_scale_percent: 100,
   start_engine_on_launch: false,
+  start_with_windows: false,
   update_channel: "stable",
   logging_filter: "",
 };
@@ -338,6 +341,7 @@ export function normalizeSettings(
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    start_with_windows: raw?.start_with_windows ?? false,
     update_channel: normalizeUpdateChannel(raw?.update_channel),
     logging_filter: raw?.logging_filter ?? "",
   };

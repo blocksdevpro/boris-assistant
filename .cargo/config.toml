@@ -5,3 +5,6 @@
 # causing LNK2038 "RuntimeLibrary mismatch" on Windows.
 CXXFLAGS = "/MD"
 CFLAGS   = "/MD"
+
+[alias]
+xtask = "run --package xtask --"

@@ -62,6 +62,21 @@ impl Context {
             .sum()
     }
 
+    /// Request-size estimate including serialized tool schemas / system content.
+    pub fn estimate_request_chars(&self, tools: &Value) -> usize {
+        let msg: usize = self.messages.iter().map(estimate_message_chars).sum();
+        let tools_chars = if tools.is_null() {
+            0
+        } else {
+            tools.to_string().len()
+        };
+        msg.saturating_add(tools_chars)
+    }
+
+    pub fn estimate_request_tokens(&self, tools: &Value) -> usize {
+        self.estimate_request_chars(tools) / 4
+    }
+
     /// Soft token budget: mild truncation of *older* tools only; LLM compact may run.
     /// Raised so multi-step research + web results are not crushed mid-session.
     pub const COMPACT_TOKEN_SOFT: usize = 64_000;
@@ -77,7 +92,13 @@ impl Context {
     /// 1. Truncate large tool observations (recent turns keep a high cap)
     /// 2. Only at **hard** budget: collapse tool chains older than keep turns
     pub fn compact_mechanical(&mut self) {
-        let tokens = self.estimate_tokens();
+        self.compact_mechanical_for_request(&Value::Null);
+    }
+
+    /// Apply mechanical reduction using the size of the complete provider
+    /// request, including serialized tool definitions.
+    pub fn compact_mechanical_for_request(&mut self, tools: &Value) {
+        let tokens = self.estimate_request_tokens(tools);
         let (recent_cap, older_cap) = if tokens > Self::COMPACT_TOKEN_HARD {
             (12_000, 3_000)
         } else if tokens > Self::COMPACT_TOKEN_SOFT {
@@ -150,8 +171,15 @@ impl Context {
 
     /// True when the host should run an LLM summary compact pass.
     pub fn needs_llm_compact(&self) -> bool {
+        self.needs_llm_compact_for_request(&Value::Null)
+    }
+
+    /// Summary-compaction decision for the complete provider request,
+    /// including serialized tool definitions.
+    pub fn needs_llm_compact_for_request(&self, tools: &Value) -> bool {
         // Need real multi-turn history AND soft budget pressure.
-        self.estimate_tokens() > Self::COMPACT_TOKEN_SOFT && self.user_turn_count() >= 5
+        self.estimate_request_tokens(tools) > Self::COMPACT_TOKEN_SOFT
+            && self.user_turn_count() >= 5
     }
 
     /// Replace middle history with a single summary user/assistant pair.
@@ -561,5 +589,47 @@ mod tests {
         let s = tool.content["content"].as_str().unwrap();
         assert!(s.contains("…[compacted]…"));
         assert!(s.chars().count() < 80_000);
+    }
+
+    #[test]
+    fn serialized_tool_schemas_trigger_request_budget_compaction() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+        ctx.push(Role::User, "current task");
+        let body = "z".repeat(25_000);
+        ctx.push(
+            Role::Tool,
+            json!({ "tool_call_id": "c1", "content": body.clone() }),
+        );
+        assert!(ctx.estimate_tokens() < Context::COMPACT_TOKEN_SOFT);
+
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "large_schema",
+                "description": "d".repeat(Context::COMPACT_TOKEN_SOFT * 4),
+                "parameters": {"type":"object"}
+            }
+        }]);
+        assert!(ctx.estimate_request_tokens(&tools) > Context::COMPACT_TOKEN_SOFT);
+        let mut summary_ctx = Context::new(20);
+        for i in 0..5 {
+            summary_ctx.push(Role::User, format!("turn {i}"));
+            summary_ctx.push(Role::Assistant, "ok");
+        }
+        assert!(!summary_ctx.needs_llm_compact());
+        assert!(summary_ctx.needs_llm_compact_for_request(&tools));
+        ctx.compact_mechanical_for_request(&tools);
+
+        let content = ctx
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .unwrap()
+            .content["content"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("…[compacted]…"));
+        assert!(content.chars().count() < body.len());
     }
 }

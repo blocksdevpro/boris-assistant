@@ -33,6 +33,8 @@ pub struct AgentLoopConfig {
     pub features: crate::runtime::ToolRuntimeFeatures,
     /// When true (subagent children), always dump full child tool list.
     pub force_list_all: bool,
+    /// Latest user-task traits for routing / listing / finish gates.
+    pub task: Option<crate::task::TaskTraits>,
 }
 
 impl Default for AgentLoopConfig {
@@ -43,6 +45,7 @@ impl Default for AgentLoopConfig {
             turn_id: None,
             features: crate::runtime::ToolRuntimeFeatures::default(),
             force_list_all: false,
+            task: None,
         }
     }
 }

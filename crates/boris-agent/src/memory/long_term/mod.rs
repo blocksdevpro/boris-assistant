@@ -32,6 +32,7 @@ use std::time::Instant;
 
 use chrono::Local;
 
+use super::index::MemoryIndex;
 use score::{is_safe_rel_path, score_file, score_file_as};
 
 /// Workspace subdirectory for desktop voice (no project cwd).
@@ -52,6 +53,26 @@ pub struct MemoryHit {
     pub snippet: String,
 }
 
+/// Immutable destination for one session-memory append.
+///
+/// Capture this while a session is bound, then carry it with deferred work. A
+/// later unbind/rebind cannot redirect the append to another conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMemoryTarget {
+    path: PathBuf,
+    session_id: String,
+}
+
+impl SessionMemoryTarget {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 /// File-backed markdown memory under a host-supplied root (`~/.boris/memory`).
 #[derive(Debug)]
 pub struct LongTermMemory {
@@ -61,6 +82,8 @@ pub struct LongTermMemory {
     /// Active session log file (`{session_dir}/memory.md`).
     session_file: Mutex<Option<PathBuf>>,
     session_id: Mutex<Option<String>>,
+    /// Optional incrementally maintained FTS index.
+    index: Option<std::sync::Arc<MemoryIndex>>,
 }
 
 impl LongTermMemory {
@@ -70,7 +93,79 @@ impl LongTermMemory {
             sessions_root: None,
             session_file: Mutex::new(None),
             session_id: Mutex::new(None),
+            index: None,
         }
+    }
+
+    /// Attach a search index (created by the host / maintenance worker).
+    pub fn with_index(mut self, index: std::sync::Arc<MemoryIndex>) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    pub fn index(&self) -> Option<std::sync::Arc<MemoryIndex>> {
+        self.index.clone()
+    }
+
+    /// Rebuild the FTS index from current markdown files (migration / repair).
+    pub fn rebuild_index(&self) -> Result<(), String> {
+        let Some(idx) = &self.index else {
+            return Ok(());
+        };
+        idx.rebuild()?;
+        self.refresh_curated_index()?;
+        if let Some(sessions_root) = &self.sessions_root {
+            if sessions_root.is_dir() {
+                let entries = fs::read_dir(sessions_root)
+                    .map_err(|e| format!("read sessions for memory reindex: {e}"))?;
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|e| format!("read session for memory reindex: {e}"))?;
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(id) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                        continue;
+                    };
+                    let log = Self::session_memory_path(&path);
+                    if log.is_file() {
+                        let display = format!("{SESSION_PATH_PREFIX}{id}/{SESSION_MEMORY_FILE}");
+                        self.reindex_file(&log, &display, "session", 1)?;
+                    }
+                }
+            }
+        }
+        // Publish readiness only after every source was scanned successfully.
+        idx.mark_rebuilt()
+    }
+
+    /// Refresh the small curated files without clearing/re-scanning sessions.
+    pub fn refresh_curated_index(&self) -> Result<(), String> {
+        self.reindex_file(&self.memory_md_path(), "MEMORY.md", "global", 5)?;
+        self.reindex_file(
+            &self.workspace_memory_md_path(),
+            "desktop/MEMORY.md",
+            "workspace",
+            3,
+        )
+    }
+
+    fn reindex_file(
+        &self,
+        path: &Path,
+        virtual_path: &str,
+        source: &str,
+        salience: u32,
+    ) -> Result<(), String> {
+        let Some(idx) = &self.index else {
+            return Ok(());
+        };
+        if !path.is_file() {
+            return Ok(());
+        }
+        let body = fs::read_to_string(path).map_err(|e| format!("reindex read: {e}"))?;
+        idx.upsert(virtual_path, &body, source, salience)
     }
 
     /// Point search at a sessions workspace (e.g. `~/.boris/sessions/desktop`).
@@ -181,10 +276,45 @@ impl LongTermMemory {
         }
     }
 
+    /// Snapshot the currently bound session append destination.
+    ///
+    /// The returned value owns both the path and id, so it remains valid after
+    /// this memory instance is unbound or rebound by the host.
+    pub fn capture_session_target(&self) -> Result<Option<SessionMemoryTarget>, String> {
+        let path = self
+            .session_file
+            .lock()
+            .map_err(|_| "memory session lock poisoned".to_string())?
+            .clone();
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let session_id = self
+            .session_id
+            .lock()
+            .map_err(|_| "memory session id lock poisoned".to_string())?
+            .clone()
+            .unwrap_or_else(|| "session".into());
+        Ok(Some(SessionMemoryTarget { path, session_id }))
+    }
+
     /// Append one user/assistant exchange to the **bound session** `memory.md`.
     ///
     /// No-ops (Ok) when no session dir is bound — avoids writing under global memory.
     pub fn append_turn(&self, user: &str, assistant: &str) -> Result<(), String> {
+        let Some(target) = self.capture_session_target()? else {
+            return Ok(());
+        };
+        self.append_turn_to(&target, user, assistant)
+    }
+
+    /// Append to a destination captured by [`Self::capture_session_target`].
+    pub fn append_turn_to(
+        &self,
+        target: &SessionMemoryTarget,
+        user: &str,
+        assistant: &str,
+    ) -> Result<(), String> {
         let started = Instant::now();
         let user = user.trim();
         let assistant = assistant.trim();
@@ -192,16 +322,7 @@ impl LongTermMemory {
             return Ok(());
         }
 
-        let path = {
-            let slot = self
-                .session_file
-                .lock()
-                .map_err(|_| "memory session lock poisoned".to_string())?;
-            match slot.as_ref() {
-                Some(p) => p.clone(),
-                None => return Ok(()), // unbound — clean break, no global fallback
-            }
-        };
+        let path = &target.path;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create session dir: {e}"))?;
@@ -219,21 +340,23 @@ impl LongTermMemory {
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .map_err(|e| format!("open session log {}: {e}", path.display()))?;
         if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
-            let sid = self
-                .session_id
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-                .unwrap_or_else(|| "session".into());
-            let header = format!("# Session memory — {sid}\n\n");
+            let header = format!("# Session memory — {}\n\n", target.session_id);
             f.write_all(header.as_bytes())
                 .map_err(|e| format!("write header: {e}"))?;
         }
         f.write_all(block.as_bytes())
             .map_err(|e| format!("append session: {e}"))?;
+        if let Some(idx) = &self.index {
+            let display = format!(
+                "{SESSION_PATH_PREFIX}{}/{SESSION_MEMORY_FILE}",
+                target.session_id
+            );
+            let body = fs::read_to_string(path).unwrap_or_default();
+            let _ = idx.upsert(&display, &body, "session", 1);
+        }
         tracing::debug!(
             ms = started.elapsed().as_millis() as u64,
             path = %path.display(),
@@ -250,6 +373,31 @@ impl LongTermMemory {
             return Err("query is empty".into());
         }
         let max_results = max_results.clamp(1, 20);
+        if let Some(idx) = &self.index {
+            if idx.is_empty().unwrap_or(true) {
+                let _ = self.rebuild_index();
+            }
+            if let Ok(found) = idx.search(query, max_results) {
+                if !found.is_empty() {
+                    let hits = found
+                        .into_iter()
+                        .map(|h| MemoryHit {
+                            path: h.path,
+                            score: h.score,
+                            snippet: h.snippet,
+                        })
+                        .collect();
+                    tracing::info!(
+                        query = %query.trim(),
+                        hits = max_results,
+                        ms = started.elapsed().as_millis() as u64,
+                        via = "fts",
+                        "memory search"
+                    );
+                    return Ok(hits);
+                }
+            }
+        }
         let mut hits: Vec<MemoryHit> = Vec::new();
 
         // Curated memory first (global + workspace).
@@ -475,6 +623,50 @@ mod tests {
         // No session file anywhere under memory root
         assert!(!mem_root.join("desktop").join("sessions").exists());
         let _ = fs::remove_dir_all(&mem_root);
+    }
+
+    #[test]
+    fn completed_index_reopen_refreshes_curated_without_full_rebuild() {
+        let mem_root = tmp_root("index-reopen-mem");
+        let sessions = tmp_root("index-reopen-sessions");
+        let session_id = "persisted-session";
+        let session_dir = sessions.join(session_id);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join(SESSION_MEMORY_FILE),
+            "# Session\n\nsessionneedle survives reopen\n",
+        )
+        .unwrap();
+
+        let base = LongTermMemory::new(&mem_root).with_sessions_root(&sessions);
+        base.ensure_dirs().unwrap();
+        let first_index = std::sync::Arc::new(MemoryIndex::open(&mem_root).unwrap());
+        let memory = base.with_index(first_index.clone());
+        assert!(first_index.needs_rebuild().unwrap());
+        memory.rebuild_index().unwrap();
+        assert!(!first_index.needs_rebuild().unwrap());
+        drop(memory);
+        drop(first_index);
+
+        fs::write(
+            mem_root.join("MEMORY.md"),
+            "# Global Memory\n\ncuratedneedle changed after rebuild\n",
+        )
+        .unwrap();
+        let reopened = std::sync::Arc::new(MemoryIndex::open(&mem_root).unwrap());
+        assert!(!reopened.needs_rebuild().unwrap());
+        let memory = LongTermMemory::new(&mem_root)
+            .with_sessions_root(&sessions)
+            .with_index(reopened.clone());
+        memory.refresh_curated_index().unwrap();
+
+        assert!(!reopened.search("sessionneedle", 5).unwrap().is_empty());
+        assert!(!reopened.search("curatedneedle", 5).unwrap().is_empty());
+
+        drop(memory);
+        drop(reopened);
+        let _ = fs::remove_dir_all(&mem_root);
+        let _ = fs::remove_dir_all(&sessions);
     }
 
     #[test]

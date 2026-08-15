@@ -11,7 +11,9 @@
 mod args;
 mod error;
 mod meta;
+mod observation;
 mod output;
+mod schema;
 mod trait_;
 
 pub use args::{
@@ -19,8 +21,11 @@ pub use args::{
 };
 pub use error::{ToolError, ToolErrorKind};
 pub use meta::{Permission, ToolKind, ToolMeta, ToolRisk};
+pub use observation::{ObservationError, ToolObservation};
 pub use output::{
-    soft_wrap_line, soft_wrap_text, truncate_tool_result, truncate_tool_result_to,
-    DEFAULT_SOFT_WRAP_WIDTH, MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS,
+    soft_wrap_line, soft_wrap_text, truncate_tool_result, truncate_tool_result_detailed,
+    truncate_tool_result_to, TruncateOutcome, DEFAULT_SOFT_WRAP_WIDTH, MAX_SKILL_RESULT_CHARS,
+    MAX_TOOL_RESULT_CHARS,
 };
+pub use schema::{validate_args, InvalidArgs};
 pub use trait_::Tool;

@@ -10,7 +10,7 @@ use crate::context::{Context, Role};
 use crate::error::AgentError;
 use crate::runtime::{
     args_summary, filter_listed_tools, ActivationSet, EventProgressSink, InvokeResult,
-    ListToolsContext, RawToolCall, ToolInvocation,
+    ListToolsContext, RawToolCall, ToolInvocation, MAX_TOOL_SCHEMA_CHARS,
 };
 use crate::tool::Tool;
 use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
@@ -52,13 +52,14 @@ pub(super) fn build_list_ctx(
         features.force_list_all = true;
     }
     let activated_snap: HashSet<String> = activated
-        .and_then(|a| a.lock().ok().map(|g| g.clone()))
+        .and_then(|a| a.lock().ok().map(|mut g| g.snapshot()))
         .unwrap_or_default();
     ListToolsContext {
         session_id: config.session_id.clone(),
         turn_id: config.turn_id.clone(),
         activated: Arc::new(activated_snap),
         features,
+        task: config.task,
     }
 }
 
@@ -68,20 +69,104 @@ pub(super) fn tools_json_for_llm(tools: &[Arc<dyn Tool>], list_ctx: &ListToolsCo
     if listed.is_empty() {
         return Value::Null;
     }
-    let list: Vec<Value> = listed
+    let mut list: Vec<(&Arc<dyn Tool>, Value, usize, i32)> = listed
         .iter()
         .map(|t| {
-            json!({
+            let definition = json!({
                 "type": "function",
                 "function": {
                     "name":        t.name(),
                     "description": t.description(),
                     "parameters":  t.parameters(),
                 }
-            })
+            });
+            let serialized_len = definition.to_string().len();
+            let priority = crate::runtime::listing::schema_retention_priority(t.as_ref(), list_ctx);
+            (*t, definition, serialized_len, priority)
         })
         .collect();
-    json!(list)
+
+    let listed_before = list.len();
+    let mut pruned_core = 0usize;
+    while serialized_definitions_len(&list) > MAX_TOOL_SCHEMA_CHARS {
+        // Prefer removing the lowest-value non-core definition. Within an
+        // equal priority tier, removing the largest schema recovers the most
+        // budget while disturbing the fewest capabilities.
+        let non_core = list
+            .iter()
+            .enumerate()
+            .filter(|(_, (tool, _, _, _))| {
+                !crate::runtime::is_core_name(tool.name(), &list_ctx.features)
+                    && tool.name() != "tool_search"
+            })
+            .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
+            .map(|(index, _)| (index, false));
+        // The cap is unconditional. If retained/core schemas alone exceed it,
+        // remove the lowest-value core definition next, keeping tool_search as
+        // the last discovery escape hatch whenever it fits.
+        let core = list
+            .iter()
+            .enumerate()
+            .filter(|(_, (tool, _, _, _))| tool.name() != "tool_search")
+            .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
+            .map(|(index, _)| (index, true));
+        let last_resort = list
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
+            .map(|(index, _)| (index, true));
+        let Some((index, protected)) = non_core.or(core).or(last_resort) else {
+            break;
+        };
+        pruned_core += usize::from(protected);
+        list.remove(index);
+    }
+
+    if list.len() < listed_before {
+        tracing::debug!(
+            listed_before,
+            listed_after = list.len(),
+            pruned_core,
+            schema_chars = serialized_definitions_len(&list),
+            schema_budget_chars = MAX_TOOL_SCHEMA_CHARS,
+            "pruned tool definitions to request schema budget"
+        );
+    }
+    if pruned_core > 0 {
+        tracing::warn!(
+            pruned_core,
+            schema_budget_chars = MAX_TOOL_SCHEMA_CHARS,
+            "core tool definitions exceeded request schema budget"
+        );
+    }
+    if list.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(
+        list.into_iter()
+            .map(|(_, definition, _, _)| definition)
+            .collect(),
+    )
+}
+
+fn schema_removal_order(
+    a: &(&Arc<dyn Tool>, Value, usize, i32),
+    b: &(&Arc<dyn Tool>, Value, usize, i32),
+) -> std::cmp::Ordering {
+    a.3.cmp(&b.3)
+        // `min_by` should choose the larger definition on a priority tie.
+        .then_with(|| b.2.cmp(&a.2))
+}
+
+fn serialized_definitions_len(definitions: &[(&Arc<dyn Tool>, Value, usize, i32)]) -> usize {
+    // JSON array brackets + commas plus the already-built definition values.
+    2usize.saturating_add(
+        definitions
+            .iter()
+            .map(|(_, _, serialized_len, _)| serialized_len.saturating_add(1))
+            .sum::<usize>()
+            .saturating_sub(usize::from(!definitions.is_empty())),
+    )
 }
 
 /// Build a [`ToolInvocation`] from a raw model call + loop config.
@@ -113,7 +198,79 @@ pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -
 
 /// Observation text is treated as failure when it starts with the conventional prefix.
 pub(super) fn observation_looks_ok(content: &str) -> bool {
-    !content.starts_with("Error:")
+    !(content.starts_with("Error:") || content.starts_with("Error ["))
+}
+
+/// Count useful web-search/fetch observations in the current user turn.
+///
+/// Tool names live on assistant `tool_calls` while results carry only call ids,
+/// so join the two here instead of treating raw call counts as evidence. Old
+/// turns and harness-injected reminder messages cannot satisfy the gate.
+pub(super) fn useful_research_observation_count(context: &Context) -> u32 {
+    let messages = context.messages();
+    let turn_start = messages
+        .iter()
+        .rposition(|m| {
+            matches!(m.role, Role::User)
+                && m.content
+                    .as_str()
+                    .is_some_and(|s| !is_control_user_message(s))
+        })
+        .map_or(0, |i| i.saturating_add(1));
+
+    let mut research_calls = HashSet::new();
+    for message in &messages[turn_start..] {
+        if !matches!(message.role, Role::Assistant) {
+            continue;
+        }
+        let Some(calls) = message.content.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            let name = call
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str);
+            if !matches!(name, Some("web_search" | "web_fetch")) {
+                continue;
+            }
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                research_calls.insert(id.to_string());
+            }
+        }
+    }
+
+    let mut counted = HashSet::new();
+    messages[turn_start..]
+        .iter()
+        .filter(|m| matches!(m.role, Role::Tool))
+        .filter_map(|m| {
+            let id = m.content.get("tool_call_id")?.as_str()?;
+            let content = m.content.get("content")?.as_str()?;
+            (research_calls.contains(id)
+                && counted.insert(id.to_string())
+                && observation_has_useful_evidence(content))
+            .then_some(())
+        })
+        .count() as u32
+}
+
+fn is_control_user_message(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<system-reminder>") || text.starts_with("<conversation_summary>")
+}
+
+fn observation_has_useful_evidence(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || !observation_looks_ok(trimmed) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    !lower.starts_with("no search results")
+        && !lower.starts_with("no results")
+        && !lower.starts_with("search returned empty")
+        && !lower.starts_with("not found")
+        && !lower.contains("search backends returned empty")
 }
 
 /// Emit `ToolExecutionStart` for a raw call (uses standard args summary).
@@ -182,7 +339,115 @@ pub(super) fn parallel_batch_observation(result: InvokeResult) -> (String, bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::InvokeResult;
+    use crate::runtime::{InvokeResult, MAX_TOOL_SCHEMA_CHARS};
+    use crate::tool::{ToolError, ToolMeta};
+    use async_trait::async_trait;
+
+    struct LargeDefinitionTool {
+        name: String,
+        description: String,
+    }
+
+    #[async_trait]
+    impl Tool for LargeDefinitionTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{}})
+        }
+
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::safe_default()
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: Value,
+        ) -> Result<String, ToolError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn tool_payload_prunes_low_priority_definitions_to_hard_budget() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(LargeDefinitionTool {
+                name: "get_time".into(),
+                description: "core".into(),
+            }),
+            Arc::new(LargeDefinitionTool {
+                name: "activated_tool".into(),
+                description: "a".repeat(40_000),
+            }),
+            Arc::new(LargeDefinitionTool {
+                name: "low_priority_tool".into(),
+                description: "z".repeat(40_000),
+            }),
+        ];
+        let mut activated = HashSet::new();
+        activated.insert("activated_tool".to_string());
+        let ctx = ListToolsContext {
+            activated: Arc::new(activated),
+            ..Default::default()
+        };
+
+        let payload = tools_json_for_llm(&tools, &ctx);
+        let names = payload
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+        assert!(names.contains(&"get_time"), "core tool must be retained");
+        assert!(
+            names.contains(&"activated_tool"),
+            "actual-use activation must outrank an unselected tool"
+        );
+        assert!(!names.contains(&"low_priority_tool"));
+    }
+
+    #[test]
+    fn tool_payload_prunes_core_when_core_alone_exceeds_hard_budget() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(LargeDefinitionTool {
+                name: "get_time".into(),
+                description: "t".repeat(40_000),
+            }),
+            Arc::new(LargeDefinitionTool {
+                name: "get_date".into(),
+                description: "d".repeat(40_000),
+            }),
+        ];
+
+        let payload = tools_json_for_llm(&tools, &ListToolsContext::default());
+        assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+        assert_eq!(
+            payload.as_array().map(Vec::len),
+            Some(1),
+            "retain as many core definitions as fit"
+        );
+    }
+
+    #[test]
+    fn individually_oversized_tool_search_is_omitted() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
+            name: "tool_search".into(),
+            description: "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1),
+        })];
+
+        let payload = tools_json_for_llm(&tools, &ListToolsContext::default());
+        assert!(payload.is_null());
+        assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+    }
 
     #[test]
     fn tool_observation_json_shape() {
@@ -195,6 +460,55 @@ mod tests {
     fn observation_looks_ok_checks_error_prefix() {
         assert!(observation_looks_ok("ok result"));
         assert!(!observation_looks_ok("Error: denied"));
+    }
+
+    #[test]
+    fn research_evidence_counts_only_useful_current_turn_results() {
+        let mut context = Context::new(20);
+        context.push(Role::User, "old research");
+        context.push(
+            Role::Assistant,
+            json!({"tool_calls":[{
+                "id":"old", "function":{"name":"web_search","arguments":"{}"}
+            }]}),
+        );
+        context.push(
+            Role::Tool,
+            tool_observation_json("old", "Search results for: old\n1. stale"),
+        );
+
+        context.push(Role::User, "research current topic");
+        context.push(
+            Role::Assistant,
+            json!({"tool_calls":[
+                {"id":"empty", "function":{"name":"web_search","arguments":"{}"}},
+                {"id":"failed", "function":{"name":"web_fetch","arguments":"{}"}},
+                {"id":"hit", "function":{"name":"web_search","arguments":"{}"}},
+                {"id":"local", "function":{"name":"file_read","arguments":"{}"}}
+            ]}),
+        );
+        context.push(
+            Role::Tool,
+            tool_observation_json("empty", "No search results for: current"),
+        );
+        context.push(
+            Role::Tool,
+            tool_observation_json("failed", "Error: fetch HTTP 500"),
+        );
+        context.push(
+            Role::Tool,
+            tool_observation_json("hit", "Search results for: current\n1. useful"),
+        );
+        context.push(
+            Role::Tool,
+            tool_observation_json("local", "local file content"),
+        );
+        context.push(
+            Role::User,
+            "<system-reminder>\nkeep researching\n</system-reminder>",
+        );
+
+        assert_eq!(useful_research_observation_count(&context), 1);
     }
 
     #[test]

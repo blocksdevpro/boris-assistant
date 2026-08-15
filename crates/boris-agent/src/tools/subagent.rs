@@ -21,15 +21,18 @@
 //! Clean break: no resume of incomplete children. Child audits go to the
 //! child's `tool_calls.jsonl` via [`JsonlAuditSink`] (never [`NullAuditSink`]).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use boris_ai::LlmClient;
 use serde_json::{json, Value};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::context::{Context, Role};
@@ -61,6 +64,14 @@ pub type SharedTools = Arc<Mutex<Vec<Arc<dyn Tool>>>>;
 /// can rebind after session create/resume without reconstructing the tool.
 pub type SharedSessionRoot = Arc<Mutex<Option<PathBuf>>>;
 
+#[derive(Clone)]
+struct RunningChild {
+    cancel: CancellationToken,
+    completed: watch::Receiver<bool>,
+}
+
+type ChildRegistry = Arc<Mutex<HashMap<String, RunningChild>>>;
+
 pub struct SpawnSubagentTool {
     client: SharedLlm,
     /// Tools available to children (filtered to read-ish kinds at execute time).
@@ -68,6 +79,9 @@ pub struct SpawnSubagentTool {
     sandbox: SandboxConfig,
     /// Parent session root: sessions/desktop/{uuid}. Shared so Agent can rebind.
     session_root: SharedSessionRoot,
+    /// Live children owned by this process. Disk metadata remains the durable
+    /// status record; this table supplies real join/cancel semantics.
+    children: ChildRegistry,
 }
 
 impl SpawnSubagentTool {
@@ -83,6 +97,7 @@ impl SpawnSubagentTool {
             tools,
             sandbox,
             session_root,
+            children: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -96,6 +111,16 @@ impl SpawnSubagentTool {
     }
 }
 
+impl Drop for SpawnSubagentTool {
+    fn drop(&mut self) {
+        if let Ok(children) = self.children.lock() {
+            for child in children.values() {
+                child.cancel.cancel();
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for SpawnSubagentTool {
     fn name(&self) -> &str {
@@ -103,10 +128,11 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Run a thorough research subagent with read-only tools and return a compact summary. \
+        "Start a thorough research subagent with read-only tools and return a handle immediately. \
          Use for deep multi-query digs — person/profile research, multi-source web investigation, \
          or broad codebase exploration — while you stay on the main plan. \
          The child is expected to fan out searches, fetch sources, and reformulate before giving up. \
+         Use action=poll for status, action=join for its result, or action=cancel to stop it. \
          Args: goal (required), max_rounds (optional, default 8, max 16)."
     }
 
@@ -121,9 +147,16 @@ impl Tool for SpawnSubagentTool {
                 "max_rounds": {
                     "type": "integer",
                     "description": "Tool rounds budget (default 8, max 16)"
+                },
+                "action": {
+                    "type": "string",
+                    "description": "spawn (default), poll, join, or cancel"
+                },
+                "handle": {
+                    "type": "string",
+                    "description": "Child id for poll/join/cancel"
                 }
-            },
-            "required": ["goal"]
+            }
         })
     }
 
@@ -137,6 +170,11 @@ impl Tool for SpawnSubagentTool {
 
     async fn execute(&self, ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
+        if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
+            if action != "spawn" {
+                return handle_child_action(action, obj, &self.session_root, &self.children).await;
+            }
+        }
         let goal = require_string(obj, "goal")?;
         let max_rounds = obj
             .get("max_rounds")
@@ -210,7 +248,7 @@ impl Tool for SpawnSubagentTool {
         write_meta(
             &child_dir,
             &json!({
-                "child_id": child_id,
+                "child_id": child_id.clone(),
                 "parent_session_id": parent_session_id,
                 "parent_tool_call_id": ctx.call_id,
                 "goal": goal,
@@ -219,16 +257,9 @@ impl Tool for SpawnSubagentTool {
             }),
         );
 
-        // 5. Child ToolRuntime audits to child tool_calls.jsonl (not NullAuditSink).
-        let mut context = Context::new(SUBAGENT_CONTEXT_MAX_TURNS);
-        context.push(Role::System, CHILD_SYSTEM_PROMPT);
-        context.push(Role::User, goal.as_str());
-
-        let audit_path = child_dir.join("tool_calls.jsonl");
-        let runtime = ToolRuntime::new(
-            self.sandbox.clone(),
-            Box::new(JsonlAuditSink::new(audit_path)),
-        );
+        // 5. Start the child independently. The tool call returns its handle
+        // immediately; poll/join/cancel use the live registry and durable files.
+        let goal = goal.to_string();
         let features = ToolRuntimeFeatures {
             wave_scheduling: true,
             progress_events: true,
@@ -242,79 +273,266 @@ impl Tool for SpawnSubagentTool {
             features,
             // Child registries are small; always list all child tools.
             force_list_all: true,
+            // Give routing the actual child task instead of mutable global state.
+            task: Some(crate::task::classify_task(&goal)),
         };
-
-        let state = LoopState {
-            context: &mut context,
-            tools: &child_tools,
-            runtime: &runtime,
-            client: self.client.as_ref(),
-            activated: None,
-        };
-
-        // Bubble child lifecycle into parent tool progress → host overlay.
         let emit = child_progress_emit(ctx);
-        let cancel = ctx.cancel.clone();
+        let cancel = ctx
+            .cancel
+            .as_ref()
+            .map(CancellationToken::child_token)
+            .unwrap_or_default();
+        let (completed_tx, completed_rx) = watch::channel(false);
+        self.children
+            .lock()
+            .map_err(|_| ToolError::failed("subagent registry lock"))?
+            .insert(
+                child_id.clone(),
+                RunningChild {
+                    cancel: cancel.clone(),
+                    completed: completed_rx,
+                },
+            );
 
-        let result = agent_loop(
+        let client = Arc::clone(&self.client);
+        let sandbox = self.sandbox.clone();
+        let registry = Arc::clone(&self.children);
+        let session_binding = Arc::clone(&self.session_root);
+        let bound_session_root = session_root.clone();
+        let spawned_id = child_id.clone();
+        tokio::spawn(async move {
+            run_child(
+                client,
+                child_tools,
+                sandbox,
+                session_binding,
+                bound_session_root,
+                child_dir,
+                spawned_id,
+                goal,
+                config,
+                started_ms,
+                cancel,
+                emit,
+                completed_tx,
+                registry,
+            )
+            .await;
+        });
+
+        ctx.report_text("Research running in background");
+        Ok(json!({
+            "handle": child_id,
+            "status": "running",
+            "next": "use action=poll or action=join with this handle"
+        })
+        .to_string())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_child(
+    client: SharedLlm,
+    child_tools: Vec<Arc<dyn Tool>>,
+    sandbox: SandboxConfig,
+    session_binding: SharedSessionRoot,
+    bound_session_root: PathBuf,
+    child_dir: PathBuf,
+    child_id: String,
+    goal: String,
+    config: AgentLoopConfig,
+    started_ms: u64,
+    cancel: CancellationToken,
+    emit: EmitFn,
+    completed_tx: watch::Sender<bool>,
+    registry: ChildRegistry,
+) {
+    let mut context = Context::new(SUBAGENT_CONTEXT_MAX_TURNS);
+    context.push(Role::System, CHILD_SYSTEM_PROMPT);
+    context.push(Role::User, goal.as_str());
+
+    let audit_path = child_dir.join("tool_calls.jsonl");
+    let runtime = ToolRuntime::new(sandbox, Box::new(JsonlAuditSink::new(audit_path)));
+    let state = LoopState {
+        context: &mut context,
+        tools: &child_tools,
+        runtime: &runtime,
+        client: client.as_ref(),
+        activated: None,
+    };
+
+    let result: Result<crate::types::LoopResult, (&'static str, String)> = tokio::select! {
+        _ = cancel.cancelled() => Err(("cancelled", "subagent cancelled".into())),
+        _ = session_binding_changed(session_binding, bound_session_root) => {
+            Err(("cancelled", "subagent cancelled because its parent session ended".into()))
+        }
+        _ = tokio::time::sleep(Duration::from_secs(SUBAGENT_TIMEOUT_SECS)) => {
+            Err(("timed_out", format!("subagent timed out after {SUBAGENT_TIMEOUT_SECS}s")))
+        }
+        result = agent_loop(
             state,
             &goal,
             &config,
             vec![],
             0,
             0,
-            cancel,
+            Some(cancel.clone()),
             Some(emit),
             None,
             0,
-        )
-        .await;
+        ) => match result {
+            Err(_) if cancel.is_cancelled() => {
+                Err(("cancelled", "subagent cancelled".into()))
+            }
+            other => other.map_err(|e| ("failed", format!("subagent failed: {e}"))),
+        },
+    };
 
-        // 6–7. Always finalize meta + summary (success or error).
-        match result {
-            Ok(result) => {
-                ctx.report_text("Research complete");
-
-                let summary = match result.outcome {
-                    crate::outcome::AgentOutcome::Speak { text, .. } => text,
-                    crate::outcome::AgentOutcome::Silent => {
-                        "(subagent finished with no text)".into()
-                    }
-                    crate::outcome::AgentOutcome::NeedsConfirmation { text, .. } => {
-                        format!("(subagent paused for confirm: {text})")
-                    }
-                };
-                let tools = if result.tools_used.is_empty() {
-                    "none".into()
-                } else {
-                    result.tools_used.join(", ")
-                };
-
-                let low_effort = research_effort_low(&result.tools_used, &summary);
-                let mut body = summary;
-                let effort_attr = if low_effort {
-                    body.push_str(
-                        "\nParent: re-run with more queries or research yourself; child under-tooled.",
-                    );
-                    r#" effort="low""#
-                } else {
-                    ""
-                };
-
-                let tool_result = format!(
-                    "<subagent_result tools=\"{tools}\" rounds={}{effort_attr}>\n{body}\n</subagent_result>",
-                    result.tool_rounds
+    match result {
+        Ok(result) => {
+            let summary = match result.outcome {
+                crate::outcome::AgentOutcome::Speak { text, .. } => text,
+                crate::outcome::AgentOutcome::Silent => "(subagent finished with no text)".into(),
+                crate::outcome::AgentOutcome::NeedsConfirmation { text, .. } => {
+                    format!("(subagent paused for confirm: {text})")
+                }
+            };
+            let tools = if result.tools_used.is_empty() {
+                "none".into()
+            } else {
+                result.tools_used.join(", ")
+            };
+            let low_effort = research_effort_low(&result.tools_used, &summary);
+            let mut body = summary;
+            let effort_attr = if low_effort {
+                body.push_str(
+                    "\nParent: re-run with more queries or research yourself; child under-tooled.",
                 );
-                finalize_child(&child_dir, "completed", &body, started_ms);
-                Ok(truncate_tool_result_to_summary(tool_result))
-            }
-            Err(e) => {
-                let msg = format!("subagent failed: {e}");
-                finalize_child(&child_dir, "failed", &msg, started_ms);
-                Err(ToolError::failed(msg))
-            }
+                r#" effort="low""#
+            } else {
+                ""
+            };
+            let tool_result = format!(
+                "<subagent_result tools=\"{tools}\" rounds={}{effort_attr}>\n{body}\n</subagent_result>",
+                result.tool_rounds
+            );
+            finalize_child(
+                &child_dir,
+                "completed",
+                &truncate_tool_result_to_summary(tool_result),
+                started_ms,
+            );
+        }
+        Err((status, message)) => finalize_child(&child_dir, status, &message, started_ms),
+    }
+
+    let _ = completed_tx.send(true);
+    if let Ok(mut children) = registry.lock() {
+        children.remove(&child_id);
+    }
+}
+
+/// Resolve the lifecycle hole left after the parent turn token is dropped:
+/// session end/rebind must also cancel children that are still running.
+async fn session_binding_changed(binding: SharedSessionRoot, expected: PathBuf) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let still_bound = binding
+            .lock()
+            .ok()
+            .and_then(|root| root.clone())
+            .is_some_and(|root| root == expected);
+        if !still_bound {
+            return;
         }
     }
+}
+
+async fn handle_child_action(
+    action: &str,
+    obj: &serde_json::Map<String, Value>,
+    session_root: &SharedSessionRoot,
+    registry: &ChildRegistry,
+) -> Result<String, ToolError> {
+    let handle = require_string(obj, "handle")?;
+    let root = session_root
+        .lock()
+        .map_err(|_| ToolError::failed("subagent session_root lock"))?
+        .clone()
+        .ok_or_else(|| ToolError::failed("session not bound"))?;
+    let child_dir = resolve_child_dir(&root, &handle)?;
+    let meta_path = child_dir.join("meta.json");
+    let mut meta = read_meta(&meta_path).unwrap_or_else(|| json!({}));
+    match action {
+        "poll" | "status" => Ok(meta.to_string()),
+        "join" => {
+            let mut completed = registry
+                .lock()
+                .map_err(|_| ToolError::failed("subagent registry lock"))?
+                .get(&handle)
+                .map(|child| child.completed.clone());
+            if let Some(receiver) = completed.as_mut() {
+                while !*receiver.borrow() {
+                    if receiver.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+            meta = read_meta(&meta_path).unwrap_or(meta);
+            let summary = fs::read_to_string(child_dir.join("summary.md")).unwrap_or_default();
+            Ok(if summary.is_empty() {
+                meta.to_string()
+            } else {
+                summary
+            })
+        }
+        "cancel" => {
+            let cancel = registry
+                .lock()
+                .map_err(|_| ToolError::failed("subagent registry lock"))?
+                .get(&handle)
+                .map(|child| child.cancel.clone());
+            let Some(cancel) = cancel else {
+                return Ok(meta.to_string());
+            };
+            cancel.cancel();
+            // `run_child` is the sole post-spawn metadata writer. Writing a
+            // transient `cancelling` snapshot here can race finalization and
+            // overwrite a terminal status after the child already completed.
+            Ok(format!("cancelling {handle}"))
+        }
+        other => Err(ToolError::invalid_args(format!("unknown action `{other}`"))),
+    }
+}
+
+/// Resolve a model-provided child handle without allowing absolute paths,
+/// traversal components, or symlink/junction escapes from `subagents/`.
+fn resolve_child_dir(session_root: &Path, handle: &str) -> Result<PathBuf, ToolError> {
+    let valid_name = !handle.is_empty()
+        && handle.len() <= 128
+        && handle
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    if !valid_name {
+        return Err(ToolError::invalid_args("invalid child handle"));
+    }
+
+    let children_root = session_root.join("subagents");
+    let child_dir = children_root.join(handle);
+    if !child_dir.is_dir() {
+        return Err(ToolError::failed(format!(
+            "unknown child handle `{handle}`"
+        )));
+    }
+
+    let canonical_root = fs::canonicalize(&children_root)
+        .map_err(|e| ToolError::failed(format!("subagent root resolve failed: {e}")))?;
+    let canonical_child = fs::canonicalize(&child_dir)
+        .map_err(|e| ToolError::failed(format!("child handle resolve failed: {e}")))?;
+    if canonical_child.parent() != Some(canonical_root.as_path()) {
+        return Err(ToolError::invalid_args("invalid child handle"));
+    }
+    Ok(canonical_child)
 }
 
 /// Write meta.json + summary.md and stamp ended_ms / final status.
@@ -324,10 +542,7 @@ fn finalize_child(child_dir: &Path, status: &str, summary: &str, started_ms: u64
 
     // Re-read existing meta so we keep identity fields; fall back if missing.
     let meta_path = child_dir.join("meta.json");
-    let mut meta: Value = fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut meta = read_meta(&meta_path).unwrap_or_else(|| json!({}));
     if let Some(obj) = meta.as_object_mut() {
         obj.insert("status".into(), json!(status));
         obj.insert("started_ms".into(), json!(started_ms));
@@ -346,14 +561,45 @@ fn write_meta(child_dir: &Path, meta: &Value) {
     let path = child_dir.join("meta.json");
     match serde_json::to_string_pretty(meta) {
         Ok(s) => {
-            if let Err(e) = fs::write(&path, s) {
-                warn!(error = %e, path = %path.display(), "subagent meta write failed");
+            static META_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = META_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let tmp = child_dir.join(format!(".meta-{}-{n}.tmp", std::process::id()));
+            if let Err(e) = fs::write(&tmp, s) {
+                warn!(error = %e, path = %tmp.display(), "subagent meta temp write failed");
+                return;
+            }
+            let mut replaced = fs::rename(&tmp, &path);
+            if replaced.is_err() && path.exists() {
+                // Windows does not replace an existing destination with
+                // `rename`; the reader retries across this very short gap.
+                let _ = fs::remove_file(&path);
+                replaced = fs::rename(&tmp, &path);
+            }
+            if let Err(e) = replaced {
+                let _ = fs::remove_file(&tmp);
+                warn!(error = %e, path = %path.display(), "subagent meta replace failed");
             }
         }
         Err(e) => {
             warn!(error = %e, "subagent meta serialize failed");
         }
     }
+}
+
+/// Read a complete metadata snapshot. Temp+rename prevents partial JSON; the
+/// short retry covers Windows' remove+rename replacement gap.
+fn read_meta(path: &Path) -> Option<Value> {
+    for attempt in 0..10 {
+        if let Ok(raw) = fs::read_to_string(path) {
+            if let Ok(value) = serde_json::from_str(&raw) {
+                return Some(value);
+            }
+        }
+        if attempt < 9 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    None
 }
 
 fn write_summary(child_dir: &Path, summary: &str) {
@@ -632,6 +878,52 @@ mod tests {
         assert!(a.contains('-'));
     }
 
+    #[test]
+    fn child_handle_rejects_path_escape_and_accepts_owned_child() {
+        let root = std::env::temp_dir().join(format!("boris-subagent-handle-{}", now_ms()));
+        let child = root.join("subagents").join("child-abc_123");
+        fs::create_dir_all(&child).unwrap();
+
+        for invalid in ["", ".", "..", "../outside", "a/b", r"a\b", r"C:\Windows"] {
+            let err = resolve_child_dir(&root, invalid).expect_err(invalid);
+            assert!(
+                err.message.contains("invalid child handle"),
+                "{invalid}: {}",
+                err.message
+            );
+        }
+
+        let resolved = resolve_child_dir(&root, "child-abc_123").unwrap();
+        assert_eq!(resolved, fs::canonicalize(&child).unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_meta_reads_never_observe_partial_json() {
+        let root = std::env::temp_dir().join(format!(
+            "boris-subagent-meta-{}-{}",
+            now_ms(),
+            generate_child_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        write_meta(&root, &json!({ "status": "running", "seq": 0 }));
+
+        let writer_root = root.clone();
+        let writer = std::thread::spawn(move || {
+            for seq in 1..=200u64 {
+                write_meta(&writer_root, &json!({ "status": "running", "seq": seq }));
+            }
+        });
+        for _ in 0..400 {
+            let value = read_meta(&root.join("meta.json")).expect("complete metadata snapshot");
+            assert_eq!(value["status"], "running");
+            assert!(value["seq"].is_u64());
+        }
+        writer.join().unwrap();
+        assert_eq!(read_meta(&root.join("meta.json")).unwrap()["seq"], 200);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     struct NoopClient;
     #[async_trait]
     impl LlmClient for NoopClient {
@@ -644,6 +936,22 @@ mod tests {
         }
         fn model(&self) -> &str {
             "test"
+        }
+    }
+
+    struct SlowClient;
+    #[async_trait]
+    impl LlmClient for SlowClient {
+        async fn complete(
+            &self,
+            _messages: serde_json::Value,
+            _tools: serde_json::Value,
+        ) -> Result<serde_json::Value, LlmError> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Err(LlmError::new("slow"))
+        }
+        fn model(&self) -> &str {
+            "test-slow"
         }
     }
 
@@ -668,7 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_session_writes_failed_child_on_llm_error() {
+    async fn spawn_returns_handle_and_join_observes_child_failure() {
         let root = std::env::temp_dir().join(format!("boris-subagent-test-{}", now_ms()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -709,11 +1017,19 @@ mod tests {
         );
         let ctx = ToolCallContext::new("call-bound")
             .with_session(Some("sess-abc".into()), Some("turn-1".into()));
-        let err = tool
+        let spawned = tool
             .execute(&ctx, json!({ "goal": "find Bob" }))
             .await
-            .expect_err("noop LLM should fail the child loop");
-        assert!(err.message.contains("subagent failed"));
+            .expect("spawn itself should not block on the child loop");
+        let spawned: Value = serde_json::from_str(&spawned).unwrap();
+        assert_eq!(spawned["status"], "running");
+        let handle = spawned["handle"].as_str().unwrap().to_string();
+
+        let joined = tool
+            .execute(&ctx, json!({ "action": "join", "handle": handle }))
+            .await
+            .unwrap();
+        assert!(joined.contains("subagent failed"));
 
         let subagents = root.join("subagents");
         assert!(subagents.is_dir(), "subagents/ should exist");
@@ -738,6 +1054,103 @@ mod tests {
 
         // tool_calls.jsonl is created on first audit write; empty loop may leave it
         // missing — presence of meta + summary is the finalize contract.
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn spawn_is_nonblocking_and_cancel_stops_live_child() {
+        struct RoTool;
+        #[async_trait]
+        impl Tool for RoTool {
+            fn name(&self) -> &str {
+                "list_dir"
+            }
+            fn description(&self) -> &str {
+                "list"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type": "object", "properties": {}})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::with_risk(ToolRisk::Safe)
+                    .kind(ToolKind::Read)
+                    .read_only(true)
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("ok".into())
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "boris-subagent-cancel-{}-{}",
+            now_ms(),
+            generate_child_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let session_binding = Arc::new(Mutex::new(Some(root.clone())));
+        let tool = SpawnSubagentTool::new(
+            Arc::new(SlowClient),
+            Arc::new(Mutex::new(vec![Arc::new(RoTool) as Arc<dyn Tool>])),
+            SandboxConfig::default(),
+            Arc::clone(&session_binding),
+        );
+        let ctx = ToolCallContext::new("call-cancel");
+
+        let started = std::time::Instant::now();
+        let spawned = tool
+            .execute(&ctx, json!({ "goal": "research a slow topic" }))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "spawn waited for the child"
+        );
+        let spawned: Value = serde_json::from_str(&spawned).unwrap();
+        let handle = spawned["handle"].as_str().unwrap();
+
+        let cancel = tool
+            .execute(&ctx, json!({ "action": "cancel", "handle": handle }))
+            .await
+            .unwrap();
+        assert!(cancel.contains("cancelling"));
+        let joined = tool
+            .execute(&ctx, json!({ "action": "join", "handle": handle }))
+            .await
+            .unwrap();
+        assert!(joined.contains("subagent cancelled"));
+
+        let child = resolve_child_dir(&root, handle).unwrap();
+        let meta: Value =
+            serde_json::from_str(&fs::read_to_string(child.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["status"], "cancelled");
+
+        let spawned = tool
+            .execute(&ctx, json!({ "goal": "another slow topic" }))
+            .await
+            .unwrap();
+        let spawned: Value = serde_json::from_str(&spawned).unwrap();
+        let handle = spawned["handle"].as_str().unwrap();
+        let child = resolve_child_dir(&root, handle).unwrap();
+        *session_binding.lock().unwrap() = None;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let meta = fs::read_to_string(child.join("meta.json")).unwrap();
+                let meta: Value = serde_json::from_str(&meta).unwrap();
+                if meta["status"] == "cancelled" {
+                    assert!(fs::read_to_string(child.join("summary.md"))
+                        .unwrap()
+                        .contains("parent session ended"));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session unbind should cancel its live child");
         let _ = fs::remove_dir_all(&root);
     }
 }

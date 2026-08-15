@@ -82,6 +82,8 @@ pub struct Agent {
     artifacts_dir: Option<PathBuf>,
     /// Session root for subagent artifacts (shared so tools can observe rebinds).
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Background LTM / extract / index (owned by host or tests).
+    maintenance: Option<crate::maintenance::MaintenanceHandle>,
 }
 
 impl Agent {
@@ -141,7 +143,17 @@ impl Agent {
             todos_path: None,
             artifacts_dir: None,
             subagent_session_root: Arc::new(Mutex::new(None)),
+            maintenance: None,
         }
+    }
+
+    /// Attach a background maintenance worker (LTM, extract, index).
+    pub fn set_maintenance(&mut self, handle: crate::maintenance::MaintenanceHandle) {
+        self.maintenance = Some(handle);
+    }
+
+    pub fn maintenance(&self) -> Option<&crate::maintenance::MaintenanceHandle> {
+        self.maintenance.as_ref()
     }
 
     /// Sync `shared_tools` mutex from the authoritative `tools` vec.
@@ -230,6 +242,18 @@ impl Agent {
             ltm = ltm.with_sessions_root(sr);
         }
         ltm.ensure_dirs().map_err(|e| format!("memory dirs: {e}"))?;
+        if let Ok(idx) = crate::memory::MemoryIndex::open(ltm.root()) {
+            let idx = std::sync::Arc::new(idx);
+            ltm = ltm.with_index(idx.clone());
+            let refresh = match idx.needs_rebuild() {
+                Ok(true) => ltm.rebuild_index(),
+                Ok(false) => ltm.refresh_curated_index(),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = refresh {
+                warn!(error = %e, "long-term memory index refresh failed");
+            }
+        }
         ltm.set_session_id(self.session_id.clone());
         let shared: SharedLongTermMemory = Arc::new(ltm);
         let already = self.tools.iter().any(|t| t.name() == "memory_search");

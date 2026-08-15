@@ -40,7 +40,7 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult};
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
-    tool_observation_json, unknown_tool_observation,
+    tool_observation_json, unknown_tool_observation, useful_research_observation_count,
 };
 use message_parse::{extract_reply_text, parse_raw_tool_calls};
 use round::{
@@ -57,6 +57,16 @@ pub struct LoopState<'a> {
     pub client: &'a dyn LlmClient,
     /// Session activation set (tool_search). Optional when progressive is off.
     pub activated: Option<&'a ActivationSet>,
+}
+
+/// Exact progressive tool payload used for a request and its context budget.
+pub(crate) fn listed_tools_json(
+    tools: &[std::sync::Arc<dyn Tool>],
+    config: &AgentLoopConfig,
+    activated: Option<&ActivationSet>,
+) -> serde_json::Value {
+    let list_ctx = helpers::build_list_ctx(config, activated);
+    helpers::tools_json_for_llm(tools, &list_ctx)
 }
 
 /// Run the ReAct loop until a final reply, HITL pause, cancel, or error.
@@ -101,12 +111,9 @@ pub async fn agent_loop(
             round: round as u32,
         });
 
-        // Mechanical compaction before each LLM call.
-        state.context.compact_mechanical();
-
         // On the final allowed round, withhold tools so the model must speak.
         let at_cap = round >= max_rounds;
-        let response = complete_round(&state, config, at_cap).await?;
+        let response = complete_round(&mut state, user_text, config, at_cap).await?;
 
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
             // One round before cap: run tools, then inject a finish nudge and
@@ -122,7 +129,8 @@ pub async fn agent_loop(
 
             let raw_calls = parse_raw_tool_calls(batch);
 
-            match process_tool_calls(
+            let activation_start = tools_used.len();
+            let batch_result = process_tool_calls(
                 &mut LoopState {
                     context: state.context,
                     tools: state.tools,
@@ -139,8 +147,18 @@ pub async fn agent_loop(
                 &emit,
                 cancel.clone(),
             )
-            .await?
-            {
+            .await?;
+            if let Some(activated) = state.activated {
+                crate::runtime::activate_tools(
+                    activated,
+                    tools_used[activation_start..]
+                        .iter()
+                        .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
+                        .cloned(),
+                );
+            }
+
+            match batch_result {
                 ToolBatchResult::Continue => {
                     if force_finish_next {
                         state.context.push(Role::User, json!(NUDGE_NEAR_TOOL_CAP));
@@ -194,7 +212,7 @@ pub async fn agent_loop(
             reply = cleaned;
         }
 
-        reply = ensure_spoken_reply_at_cap(&mut state, at_cap, reply).await?;
+        reply = ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply).await?;
 
         if !reply.is_empty() {
             last_speakable = Some(reply.clone());
@@ -203,31 +221,37 @@ pub async fn agent_loop(
         // Finish gate: research may re-enter with zero tools; open todos only
         // when this turn already used tools (stale todos must not silence casual
         // replies).
+        let useful_research_results = useful_research_observation_count(state.context);
         if should_reenter_finish_gate(
             at_cap,
             finish_gate_left,
             &reply,
             &tools_used,
+            useful_research_results,
             &todos_file,
             user_text,
         ) {
             finish_gate_left = finish_gate_left.saturating_sub(1);
-            let reminder =
-                if crate::finish_gate::should_research_gate(user_text, &reply, &tools_used) {
-                    tracing::info!(
-                        left = finish_gate_left,
-                        "finish gate: weak research — continue tooling"
-                    );
-                    crate::finish_gate::research_gate_reminder()
-                } else {
-                    let pending = crate::finish_gate::pending_todo_count(&todos_file);
-                    tracing::info!(
-                        pending,
-                        left = finish_gate_left,
-                        "finish gate: open todos — continue tooling"
-                    );
-                    crate::finish_gate::todo_gate_reminder(pending)
-                };
+            let reminder = if crate::finish_gate::should_research_gate_with(
+                user_text,
+                &reply,
+                &tools_used,
+                useful_research_results,
+            ) {
+                tracing::info!(
+                    left = finish_gate_left,
+                    "finish gate: weak research — continue tooling"
+                );
+                crate::finish_gate::research_gate_reminder()
+            } else {
+                let pending = crate::finish_gate::pending_todo_count(&todos_file);
+                tracing::info!(
+                    pending,
+                    left = finish_gate_left,
+                    "finish gate: open todos — continue tooling"
+                );
+                crate::finish_gate::todo_gate_reminder(pending)
+            };
             state.context.push(Role::User, reminder);
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
@@ -266,6 +290,7 @@ pub async fn resume_pending_tool(
 ) -> Result<LoopResult, AgentError> {
     let emit = emit.unwrap_or_else(noop_emit);
     let mut tools_used = pending_turn.tools_used;
+    let activation_start = tools_used.len();
     let tool_rounds = pending_turn.tool_rounds;
     let mut confirms_used = pending_turn.confirms_used;
     let batch_with = pending_turn.batch_with;
@@ -411,7 +436,7 @@ pub async fn resume_pending_tool(
         );
     }
 
-    match process_tool_calls(
+    let batch_result = process_tool_calls(
         &mut state,
         remaining,
         &mut tools_used,
@@ -422,8 +447,18 @@ pub async fn resume_pending_tool(
         &emit,
         cancel.clone(),
     )
-    .await?
-    {
+    .await?;
+    if let Some(activated) = state.activated {
+        crate::runtime::activate_tools(
+            activated,
+            tools_used[activation_start..]
+                .iter()
+                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
+                .cloned(),
+        );
+    }
+
+    match batch_result {
         ToolBatchResult::Continue => {}
         ToolBatchResult::Paused {
             outcome,
@@ -574,19 +609,29 @@ mod tests {
         let runtime = ToolRuntime::null();
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Echo)];
         let config = AgentLoopConfig::default();
+        let activated = crate::runtime::new_activation_set();
+        crate::runtime::activate_tools(&activated, std::iter::once("echo".to_string()));
+        crate::runtime::activate_tools(
+            &activated,
+            (0..crate::runtime::MAX_ACTIVATED - 1).map(|i| format!("filler-{i}")),
+        );
 
         let state = LoopState {
             context: &mut context,
             tools: &tools,
             runtime: &runtime,
             client: &client,
-            activated: None,
+            activated: Some(&activated),
         };
         let result = agent_loop(state, "ping", &config, vec![], 0, 0, None, None, None, 0)
             .await
             .unwrap();
         assert_eq!(result.tools_used, vec!["echo".to_string()]);
         assert_eq!(result.tool_rounds, 1);
+        // A real invocation refreshes LRU recency: one more activation evicts a
+        // filler, not the previously-oldest `echo` entry.
+        crate::runtime::activate_tools(&activated, std::iter::once("overflow".to_string()));
+        assert!(activated.lock().unwrap().contains("echo"));
         match result.outcome {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Done."),
             other => panic!("unexpected {other:?}"),

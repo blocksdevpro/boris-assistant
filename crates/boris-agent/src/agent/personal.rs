@@ -50,7 +50,35 @@ impl Agent {
         self.personal.as_ref().map(|p| p.store.path().to_path_buf())
     }
 
+    /// Synchronous, local-only learning fallback for hosts without a
+    /// maintenance worker. This intentionally never performs an LLM call.
+    pub(super) fn learn_personal_heuristic(&mut self, user_text: &str) {
+        let Some(mem) = &self.personal else {
+            return;
+        };
+        let delta = extract_heuristic(user_text);
+        let changed = !delta.is_empty();
+        let result = (|| -> Result<(), String> {
+            let mut profile = mem
+                .profile
+                .lock()
+                .map_err(|_| "personal profile lock poisoned".to_string())?;
+            profile.turns_seen = profile.turns_seen.saturating_add(1);
+            if changed {
+                delta.apply(&mut profile);
+            }
+            mem.store.save(&profile)
+        })();
+        match result {
+            Ok(()) if changed => info!("personal heuristic fallback updated profile"),
+            Ok(()) => debug!("personal heuristic fallback recorded turn"),
+            Err(e) => warn!(error = %e, "personal heuristic fallback save failed"),
+        }
+        self.refresh_system_prompt();
+    }
+
     /// Heuristic + optional LLM personal-memory extract after a completed turn.
+    #[allow(dead_code)]
     pub(super) async fn after_turn_learn(
         &mut self,
         user_text: &str,
@@ -177,5 +205,46 @@ impl Agent {
         {
             self.refresh_system_prompt();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use boris_ai::{LlmClient, LlmError};
+    use serde_json::{json, Value};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct NoopClient;
+
+    #[async_trait]
+    impl LlmClient for NoopClient {
+        async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            Ok(json!({"role":"assistant","content":"ok"}))
+        }
+    }
+
+    #[test]
+    fn heuristic_fallback_updates_and_persists_without_worker() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("boris-personal-fallback-{unique}"));
+        let path = dir.join("profile.json");
+        let mut agent = Agent::new(Box::new(NoopClient), "sys");
+        let profile = agent.enable_personal_context(&path, true).unwrap();
+
+        agent.learn_personal_heuristic("My name is Ada");
+
+        let current = profile.lock().unwrap().clone();
+        assert_eq!(current.preferred_name.as_deref(), Some("Ada"));
+        assert_eq!(current.turns_seen, 1);
+        let stored = ProfileStore::new(&path).load().unwrap();
+        assert_eq!(stored.preferred_name.as_deref(), Some("Ada"));
+        assert_eq!(stored.turns_seen, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

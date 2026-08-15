@@ -1,5 +1,6 @@
 //! Turn execution: prompt, resume HITL, finish/report.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -15,13 +16,16 @@ use crate::types::{AgentEvent, AgentLoopConfig, LoopResult};
 use super::{log_preview, Agent, LOG_PREVIEW_CHARS};
 
 impl Agent {
-    fn loop_config(&self) -> AgentLoopConfig {
+    fn loop_config(&self, user_text: &str) -> AgentLoopConfig {
         AgentLoopConfig {
             max_tool_rounds: self.max_tool_rounds,
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             features: self.features.clone(),
             force_list_all: false,
+            // Use the host's original utterance, never an injected user-role
+            // research/finish reminder appended later in the same turn.
+            task: Some(crate::task::classify_task(user_text)),
         }
     }
 
@@ -158,13 +162,20 @@ impl Agent {
             self.refresh_system_prompt();
         }
 
+        let config = self.loop_config(user_text);
+        let tools_for_request =
+            loop_::listed_tools_json(&self.tools, &config, Some(&self.activated));
         // LLM summary compact when context is large (P0).
-        if self.context.needs_llm_compact() {
+        if self
+            .context
+            .needs_llm_compact_for_request(&tools_for_request)
+        {
             if let Err(e) = self.maybe_llm_compact().await {
                 warn!(error = %e, "llm compact skipped");
             }
         }
-        self.context.compact_mechanical();
+        self.context
+            .compact_mechanical_for_request(&tools_for_request);
         // Todo + research re-entry budget (each re-enter costs one).
         self.finish_gate_remaining = 3;
 
@@ -190,7 +201,6 @@ impl Agent {
 
         let ct = CancellationToken::new();
         self.cancel = Some(ct.clone());
-        let config = self.loop_config();
         let emit = self.make_emit();
         // Finish gate reads the session-bound todos *file* (not sandbox root).
         let todos_for_gate = self
@@ -279,7 +289,7 @@ impl Agent {
         let user_text = pending_turn.user_text.clone();
         let ct = CancellationToken::new();
         self.cancel = Some(ct.clone());
-        let config = self.loop_config();
+        let config = self.loop_config(&user_text);
         let emit = self.make_emit();
 
         let loop_out = {
@@ -329,7 +339,9 @@ impl Agent {
             AgentOutcome::Silent => "silent",
             AgentOutcome::NeedsConfirmation { .. } => "needs_confirm",
         };
-        let approx_chars_in = self.context.as_json().to_string().len();
+        let approx_chars_in = self
+            .context
+            .estimate_request_chars(&serde_json::Value::Null);
         let report = TurnReport {
             duration,
             tool_rounds: loop_out.tool_rounds,
@@ -351,21 +363,67 @@ impl Agent {
             "agent turn end"
         );
 
+        // Duration is captured *before* maintenance so TTS is not billed for it.
         if !matches!(loop_out.outcome, AgentOutcome::NeedsConfirmation { .. }) {
             let assistant_text = match &loop_out.outcome {
                 AgentOutcome::Speak { text, .. } => text.as_str(),
                 AgentOutcome::Silent => "",
                 AgentOutcome::NeedsConfirmation { .. } => "",
             };
-            if let Some(ltm) = &self.long_term {
-                if let Err(e) = ltm.append_turn(user_text, assistant_text) {
-                    warn!(error = %e, "long-term memory append failed");
-                }
-            }
-            self.after_turn_learn(user_text, assistant_text, &loop_out.tools_used)
-                .await;
+            self.enqueue_post_turn(user_text, assistant_text, &loop_out.tools_used);
         }
 
         Ok((loop_out.outcome, report))
+    }
+
+    fn enqueue_post_turn(&mut self, user_text: &str, assistant_text: &str, tools_used: &[String]) {
+        if let Some(h) = &self.maintenance {
+            let mut personal_enqueued = self.personal.is_none();
+            if let Some(ltm) = &self.long_term {
+                match ltm.capture_session_target() {
+                    Ok(Some(target)) => {
+                        if let Err(e) = h.submit(crate::maintenance::MaintenanceJob::AppendTurn {
+                            ltm: ltm.clone(),
+                            target,
+                            user: user_text.to_string(),
+                            assistant: assistant_text.to_string(),
+                        }) {
+                            warn!(error = %e, "maintenance enqueue append failed");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!(error = %e, "memory session target capture failed"),
+                }
+            }
+            if let Some(mem) = &self.personal {
+                if let Err(e) = h.submit(crate::maintenance::MaintenanceJob::ExtractPersonal {
+                    store: mem.store.clone(),
+                    profile: mem.profile.clone(),
+                    llm_extract: mem.llm_extract,
+                    user: user_text.to_string(),
+                    assistant: assistant_text.to_string(),
+                    tools_used: tools_used.to_vec(),
+                    client: Arc::clone(&self.client),
+                }) {
+                    warn!(error = %e, "maintenance enqueue extract failed");
+                } else {
+                    personal_enqueued = true;
+                }
+            }
+            if !personal_enqueued {
+                // Preserve cheap deterministic learning even when the optional
+                // background lane is saturated or shutting down.
+                self.learn_personal_heuristic(user_text);
+            }
+            return;
+        }
+        // Tests / hosts without a worker: preserve durable/local behavior, but
+        // never put an awaited LLM extraction back on the response path.
+        if let Some(ltm) = &self.long_term {
+            if let Err(e) = ltm.append_turn(user_text, assistant_text) {
+                warn!(error = %e, "long-term memory append failed");
+            }
+        }
+        self.learn_personal_heuristic(user_text);
     }
 }

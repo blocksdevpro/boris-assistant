@@ -6,7 +6,9 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::reminder::with_reminder;
-use crate::tool::{truncate_tool_result_to, Permission, Tool, ToolMeta};
+use crate::tool::{
+    truncate_tool_result_detailed, validate_args, Permission, Tool, ToolMeta, ToolObservation,
+};
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
 use super::pending::PendingToolCall;
@@ -24,6 +26,7 @@ pub struct ToolRuntime {
     /// After the user approves any shell tool this turn, further shell HITL is
     /// skipped (hard gates still apply). Reset at each new user turn / abort.
     shell_granted_this_turn: AtomicBool,
+    gate: super::ConcurrencyGate,
 }
 
 impl ToolRuntime {
@@ -34,6 +37,7 @@ impl ToolRuntime {
             audit,
             pending_seq: AtomicU64::new(1),
             shell_granted_this_turn: AtomicBool::new(false),
+            gate: super::ConcurrencyGate::new(16),
         }
     }
 
@@ -101,7 +105,12 @@ impl ToolRuntime {
         opts: InvokeOptions,
     ) -> PolicyDecision {
         let meta = tool.meta();
-        let args = normalize_args(args);
+        if !args.is_object() {
+            return PolicyDecision::Deny {
+                reason: "tool args must be a JSON object".into(),
+            };
+        }
+        let args = args.clone();
         apply_skip_confirmation(
             decide(&self.policy, &meta, &args, opts.confirms_used),
             self.effective_skip_confirmation(&meta, opts),
@@ -116,7 +125,10 @@ impl ToolRuntime {
         opts: InvokeOptions,
     ) -> InvokeResult {
         let meta = tool.meta();
-        let args = normalize_args(&inv.args);
+        if let Some(obs) = reject_invalid_args(tool, &inv.args) {
+            return InvokeResult::Observation(obs.to_provider_text());
+        }
+        let args = inv.args.clone();
 
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
         let decision = apply_skip_confirmation(
@@ -170,6 +182,10 @@ impl ToolRuntime {
             "allow"
         };
         let ctx = inv.call_context();
+        let _permits = self
+            .gate
+            .acquire(tool.name(), meta.effective_max_concurrency())
+            .await;
         let started = Instant::now();
         let result = run_with_timeout(tool, &ctx, args, meta.default_timeout).await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -177,7 +193,10 @@ impl ToolRuntime {
         let budget = meta.result_char_budget();
         match result {
             Ok(output) => {
-                let obs = with_reminder(&inv.name, truncate_tool_result_to(output, budget));
+                let cut = truncate_tool_result_detailed(output, budget);
+                let structured =
+                    ToolObservation::from_text(cut.text, duration_ms, cut.truncated, cut.cursor);
+                let obs = with_reminder(&inv.name, structured.to_provider_text());
                 self.audit_event(
                     &inv,
                     &meta,
@@ -200,10 +219,11 @@ impl ToolRuntime {
                     Some(false),
                     Some(kind),
                 );
-                let obs = with_reminder(
-                    &inv.name,
-                    truncate_tool_result_to(format!("Error: {}", e.message), budget),
+                let structured = ToolObservation::err(
+                    crate::tool::ObservationError::new(kind, timed_out, e.message.clone()),
+                    duration_ms,
                 );
+                let obs = with_reminder(&inv.name, structured.to_provider_text());
                 InvokeResult::Observation(obs)
             }
         }
@@ -254,11 +274,11 @@ impl ToolRuntime {
     }
 }
 
-fn normalize_args(args: &Value) -> Value {
-    if args.is_object() {
-        args.clone()
-    } else {
-        Value::Object(Default::default())
+fn reject_invalid_args(tool: &dyn Tool, args: &Value) -> Option<ToolObservation> {
+    let raw = args.to_string();
+    match validate_args(&tool.parameters(), args, &raw) {
+        Ok(()) => None,
+        Err(inv) => Some(ToolObservation::invalid_args(inv)),
     }
 }
 
@@ -364,7 +384,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
-                assert!(s.contains("[truncated]"));
+                assert!(s.contains("[truncated"));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -567,6 +587,59 @@ mod tests {
                 assert!(reason.contains("outside") || reason.contains("path"));
             }
             other => panic!("expected Denied after grant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_args_are_not_coerced() {
+        struct NeedName;
+        #[async_trait]
+        impl Tool for NeedName {
+            fn name(&self) -> &str {
+                "need"
+            }
+            fn description(&self) -> &str {
+                "n"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolCallContext,
+                _args: Value,
+            ) -> Result<String, ToolError> {
+                Ok("should-not-run".into())
+            }
+        }
+        let rt = ToolRuntime::null();
+        match rt
+            .invoke(
+                &NeedName,
+                ToolInvocation::new("1", "need", json!("not-an-object")),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::Observation(s) => {
+                assert!(s.contains("Error ["), "{s}");
+                assert!(s.contains("not_object") || s.contains("object"), "{s}");
+                assert!(!s.contains("should-not-run"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match rt
+            .invoke(
+                &NeedName,
+                ToolInvocation::new("2", "need", json!({"n": 1})),
+                InvokeOptions::default(),
+            )
+            .await
+        {
+            InvokeResult::Observation(s) => {
+                assert!(s.contains("missing_required") || s.contains("name"), "{s}");
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 

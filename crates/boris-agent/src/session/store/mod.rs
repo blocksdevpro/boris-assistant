@@ -27,8 +27,11 @@
 mod atomic;
 mod summary;
 
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -40,15 +43,39 @@ use super::types::{generate_session_id, SessionId, SessionMeta, SessionStatus};
 use atomic::write_atomic;
 use summary::{CurrentFile, SummaryFile};
 
+/// Cursor used by [`SessionStore::sync_messages_with_cursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyncCursor {
+    pub count: usize,
+    pub fingerprint: u64,
+}
+
+/// Stable fingerprint of a message snapshot (role + content).
+pub fn messages_fingerprint(messages: &[(String, Value)]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (role, content) in messages {
+        role.hash(&mut hasher);
+        content.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Filesystem session store rooted at `sessions_root`.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
+    /// In-memory message counts (avoid re-parsing JSONL on every touch).
+    counts: Arc<Mutex<HashMap<String, u64>>>,
+    fingerprints: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl SessionStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            counts: Arc::new(Mutex::new(HashMap::new())),
+            fingerprints: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn ensure_root(&self) -> Result<(), String> {
@@ -281,6 +308,10 @@ impl SessionStore {
                 "count": records.len(),
             }),
         );
+        if let Ok(mut g) = self.counts.lock() {
+            let e = g.entry(id.as_str().to_string()).or_insert(0);
+            *e = e.saturating_add(records.len() as u64);
+        }
         self.touch(id)?;
         Ok(())
     }
@@ -304,11 +335,13 @@ impl SessionStore {
                 "count": records.len(),
             }),
         );
+        self.remember(id, records.len(), messages_fingerprint(messages));
         self.touch(id)?;
         Ok(())
     }
 
-    /// Sync agent context to disk: append when growing, rewrite when pruned.
+    /// Sync agent context to disk: append when growing, rewrite when pruned
+    /// **or** when the equal-length snapshot has different content.
     ///
     /// `already_persisted` is the number of messages previously written from this
     /// live context. Returns the new persisted count (`messages.len()`).
@@ -318,14 +351,130 @@ impl SessionStore {
         messages: &[(String, Value)],
         already_persisted: usize,
     ) -> Result<usize, String> {
+        // A caller-side count cannot prove that the corresponding prefix is
+        // still what is on disk (compaction may replace old rows while the
+        // total grows). Prefer the store's cached/disk cursor and use the
+        // legacy count only if the transcript itself cannot be inspected.
+        let cursor = self.persisted_cursor(id).unwrap_or(SyncCursor {
+            count: already_persisted,
+            fingerprint: 0,
+        });
+        Ok(self.sync_messages_with_cursor(id, messages, cursor)?.count)
+    }
+
+    /// Same as [`Self::sync_messages`] with an explicit fingerprint cursor.
+    pub fn sync_messages_with_cursor(
+        &self,
+        id: &SessionId,
+        messages: &[(String, Value)],
+        already: SyncCursor,
+    ) -> Result<SyncCursor, String> {
         let n = messages.len();
-        if n < already_persisted {
-            // Context pruned/compacted â€” rewrite full snapshot.
+        let incoming_fp = messages_fingerprint(messages);
+        let stored_fp = self.stored_fingerprint(id).unwrap_or(already.fingerprint);
+        if n < already.count {
             self.write_messages(id, messages)?;
-        } else if n > already_persisted {
-            self.append_messages(id, &messages[already_persisted..])?;
+        } else if n > already.count {
+            // Length growth is not sufficient evidence that this is a pure
+            // append: context compaction can replace the persisted prefix and
+            // still leave a net-longer snapshot. Append only when the prefix
+            // fingerprint matches the complete snapshot currently on disk.
+            let prefix_matches = already.count == 0
+                || (stored_fp != 0
+                    && messages_fingerprint(&messages[..already.count]) == stored_fp);
+            if prefix_matches {
+                self.append_messages(id, &messages[already.count..])?;
+                self.remember(id, n, incoming_fp);
+            } else {
+                self.write_messages(id, messages)?;
+            }
+        } else if n > 0 && stored_fp != incoming_fp && stored_fp != 0 {
+            // Equal length but different content (turn pruning / replacement).
+            self.write_messages(id, messages)?;
+        } else {
+            self.remember(id, n, incoming_fp);
         }
-        Ok(n)
+        Ok(SyncCursor {
+            count: n,
+            fingerprint: incoming_fp,
+        })
+    }
+
+    /// Sync a deferred snapshot against the store's actual persisted cursor.
+    ///
+    /// Background callers may enqueue several snapshots before the first has
+    /// finished, so an engine-side optimistic count is not authoritative. This
+    /// method reconstructs missing cache state from JSONL and invalidates it on
+    /// failure, allowing the next ordered job to retry from disk safely.
+    pub fn sync_messages_from_persisted(
+        &self,
+        id: &SessionId,
+        messages: &[(String, Value)],
+    ) -> Result<SyncCursor, String> {
+        let cursor = self.persisted_cursor(id)?;
+        match self.sync_messages_with_cursor(id, messages, cursor) {
+            Ok(cursor) => Ok(cursor),
+            Err(e) => {
+                self.forget_cursor(id);
+                Err(e)
+            }
+        }
+    }
+
+    fn persisted_cursor(&self, id: &SessionId) -> Result<SyncCursor, String> {
+        let count = self
+            .counts
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id.as_str()).copied());
+        let fingerprint = self
+            .fingerprints
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id.as_str()).copied());
+        if let (Some(count), Some(fingerprint)) = (count, fingerprint) {
+            return Ok(SyncCursor {
+                count: count as usize,
+                fingerprint,
+            });
+        }
+
+        let records = self.load_transcript(id)?;
+        let pairs: Vec<(String, Value)> = records
+            .into_iter()
+            .map(|record| (record.role, record.content))
+            .collect();
+        let cursor = SyncCursor {
+            count: pairs.len(),
+            fingerprint: messages_fingerprint(&pairs),
+        };
+        self.remember(id, cursor.count, cursor.fingerprint);
+        Ok(cursor)
+    }
+
+    fn forget_cursor(&self, id: &SessionId) {
+        if let Ok(mut counts) = self.counts.lock() {
+            counts.remove(id.as_str());
+        }
+        if let Ok(mut fingerprints) = self.fingerprints.lock() {
+            fingerprints.remove(id.as_str());
+        }
+    }
+
+    fn remember(&self, id: &SessionId, count: usize, fingerprint: u64) {
+        if let Ok(mut g) = self.counts.lock() {
+            g.insert(id.as_str().to_string(), count as u64);
+        }
+        if let Ok(mut g) = self.fingerprints.lock() {
+            g.insert(id.as_str().to_string(), fingerprint);
+        }
+    }
+
+    fn stored_fingerprint(&self, id: &SessionId) -> Option<u64> {
+        self.fingerprints
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id.as_str()).copied())
     }
 
     /// Load `chat_history.jsonl`. Missing file yields an empty transcript.
@@ -348,9 +497,19 @@ impl SessionStore {
     }
 
     fn count_messages(&self, id: &SessionId) -> u64 {
-        self.load_transcript(id)
+        if let Ok(g) = self.counts.lock() {
+            if let Some(n) = g.get(id.as_str()) {
+                return *n;
+            }
+        }
+        let n = self
+            .load_transcript(id)
             .map(|r| r.len() as u64)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if let Ok(mut g) = self.counts.lock() {
+            g.insert(id.as_str().to_string(), n);
+        }
+        n
     }
 
     fn write_summary(&self, meta: &SessionMeta, num_messages: u64) -> Result<(), String> {
@@ -579,7 +738,7 @@ mod tests {
         assert_eq!(n2, 7);
         assert_eq!(store.load_transcript(&meta.id).unwrap().len(), 7);
 
-        // Shrink (prune) â†’ rewrite
+        // Shrink (prune) -> rewrite.
         let shrunk = vec![
             ("system".into(), json!("sys")),
             ("user".into(), json!("u2")),
@@ -588,6 +747,109 @@ mod tests {
         let n3 = store.sync_messages(&meta.id, &shrunk, n2).unwrap();
         assert_eq!(n3, 3);
         assert_eq!(store.load_transcript(&meta.id).unwrap().len(), 3);
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn sync_messages_rewrites_equal_length_replacement() {
+        let root = temp_store_root("sync-equal-replace");
+        let store = SessionStore::new(&root);
+        let meta = store.create().expect("create");
+
+        let first = vec![
+            ("system".into(), json!("sys")),
+            ("user".into(), json!("old question")),
+            ("assistant".into(), json!("old answer")),
+        ];
+        let n = store.sync_messages(&meta.id, &first, 0).unwrap();
+        assert_eq!(n, 3);
+
+        // Same count, different content (compaction / turn prune).
+        let replaced = vec![
+            ("system".into(), json!("sys")),
+            (
+                "user".into(),
+                json!("<conversation_summary>old</conversation_summary>"),
+            ),
+            ("assistant".into(), json!("new answer after prune")),
+        ];
+        let n2 = store.sync_messages(&meta.id, &replaced, n).unwrap();
+        assert_eq!(n2, 3);
+        let records = store.load_transcript(&meta.id).unwrap();
+        assert_eq!(records.len(), 3);
+        let raw = fs::read_to_string(store.transcript_path(&meta.id)).unwrap();
+        assert!(
+            raw.contains("new answer after prune"),
+            "equal-length replacement must rewrite disk, got: {raw}"
+        );
+        assert!(!raw.contains("old answer"));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn sync_messages_rewrites_changed_prefix_even_when_snapshot_grows() {
+        let root = temp_store_root("sync-growing-replace");
+        let store = SessionStore::new(&root);
+        let meta = store.create().expect("create");
+
+        let first = vec![
+            ("system".into(), json!("old system")),
+            ("user".into(), json!("old question")),
+            ("assistant".into(), json!("old answer")),
+        ];
+        let n = store.sync_messages(&meta.id, &first, 0).unwrap();
+
+        // Mechanical/LLM compaction replaced the old prefix, while a new turn
+        // made the final snapshot longer than the persisted one.
+        let replaced_and_grown = vec![
+            ("system".into(), json!("new system")),
+            (
+                "user".into(),
+                json!("<conversation_summary>compacted history</conversation_summary>"),
+            ),
+            ("user".into(), json!("new question")),
+            ("assistant".into(), json!("new answer")),
+        ];
+        let next = store
+            .sync_messages(&meta.id, &replaced_and_grown, n)
+            .unwrap();
+        assert_eq!(next, 4);
+
+        let records = store.load_transcript(&meta.id).unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].content, json!("new system"));
+        let raw = fs::read_to_string(store.transcript_path(&meta.id)).unwrap();
+        assert!(!raw.contains("old answer"));
+        assert!(raw.contains("compacted history"));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn deferred_sync_rebuilds_cursor_after_store_reopen() {
+        let root = temp_store_root("sync-reopen");
+        let store = SessionStore::new(&root);
+        let meta = store.create().expect("create");
+        let first = vec![
+            ("system".into(), json!("old system")),
+            ("user".into(), json!("question")),
+        ];
+        store.write_messages(&meta.id, &first).unwrap();
+        drop(store);
+
+        let reopened = SessionStore::new(&root);
+        let replaced = vec![
+            ("system".into(), json!("new system")),
+            ("user".into(), json!("question")),
+        ];
+        let cursor = reopened
+            .sync_messages_from_persisted(&meta.id, &replaced)
+            .unwrap();
+        assert_eq!(cursor.count, 2);
+        let records = reopened.load_transcript(&meta.id).unwrap();
+        assert_eq!(records[0].content, json!("new system"));
 
         cleanup(&root);
     }

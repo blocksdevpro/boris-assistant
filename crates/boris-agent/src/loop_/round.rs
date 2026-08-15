@@ -7,9 +7,8 @@ use crate::context::Role;
 use crate::error::AgentError;
 use crate::types::AgentLoopConfig;
 
-use super::helpers::{build_list_ctx, tools_json_for_llm};
 use super::message_parse::extract_reply_text;
-use super::LoopState;
+use super::{listed_tools_json, LoopState};
 
 /// Injected when the next round will be the hard tool-round cap (tools still available this round).
 pub(super) const NUDGE_NEAR_TOOL_CAP: &str = "\
@@ -31,19 +30,36 @@ pub(super) fn cancelled(cancel: &Option<CancellationToken>) -> bool {
 
 /// One LLM completion for this round (tools withheld at cap).
 pub(super) async fn complete_round(
-    state: &LoopState<'_>,
+    state: &mut LoopState<'_>,
+    user_text: &str,
     config: &AgentLoopConfig,
     at_cap: bool,
 ) -> Result<Value, AgentError> {
-    let list_ctx = build_list_ctx(config, state.activated);
     let tools_json = if at_cap {
         Value::Null
     } else {
-        tools_json_for_llm(state.tools, &list_ctx)
+        listed_tools_json(state.tools, config, state.activated)
     };
+    // Tool definitions are part of the provider request and must participate
+    // in the same soft/hard compaction thresholds as message content.
+    state.context.compact_mechanical_for_request(&tools_json);
+    let request_chars = state.context.estimate_request_chars(&tools_json);
+    tracing::debug!(
+        request_chars,
+        request_tokens_est = request_chars / 4,
+        tools = tools_json.as_array().map(|a| a.len()).unwrap_or(0),
+        "llm request token accounting"
+    );
+    let task = config
+        .task
+        .unwrap_or_else(|| crate::task::classify_task(user_text));
+    let messages = state.context.as_json();
+    let round = crate::routing::round_traits_for_task(&messages, task);
+    let stage = crate::routing::request_stage_for(task, round);
+    let opts = boris_ai::CompleteOptions::for_stage(stage);
     state
         .client
-        .complete(state.context.as_json(), tools_json)
+        .complete_with_options(messages, tools_json, opts)
         .await
         .map_err(Into::into)
 }
@@ -64,15 +80,14 @@ pub(super) fn tool_calls_if_runnable(response: &Value, at_cap: bool) -> Option<&
 /// At cap with empty content: force one more speak attempt (no tools).
 pub(super) async fn ensure_spoken_reply_at_cap(
     state: &mut LoopState<'_>,
+    user_text: &str,
+    config: &AgentLoopConfig,
     at_cap: bool,
     mut reply: String,
 ) -> Result<String, AgentError> {
     if reply.is_empty() && at_cap {
         state.context.push(Role::User, json!(NUDGE_SPEAK_AT_CAP));
-        let forced = state
-            .client
-            .complete(state.context.as_json(), Value::Null)
-            .await?;
+        let forced = complete_round(state, user_text, config, true).await?;
         reply = extract_reply_text(&forced);
         if !reply.is_empty() {
             state.context.push(Role::Assistant, reply.clone());
@@ -90,6 +105,7 @@ pub(super) fn should_reenter_finish_gate(
     finish_gate_left: u32,
     reply: &str,
     tools_used: &[String],
+    useful_research_results: u32,
     todos_file: &std::path::Path,
     user_text: &str,
 ) -> bool {
@@ -97,7 +113,12 @@ pub(super) fn should_reenter_finish_gate(
         return false;
     }
     // Research gate may fire with zero tools (freestyle LinkedIn/find-person).
-    if crate::finish_gate::should_research_gate(user_text, reply, tools_used) {
+    if crate::finish_gate::should_research_gate_with(
+        user_text,
+        reply,
+        tools_used,
+        useful_research_results,
+    ) {
         return true;
     }
     // Open todos only re-enter when this turn already used tools (avoid stale

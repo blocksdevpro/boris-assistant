@@ -100,8 +100,41 @@ pub(super) async fn process_tool_calls(
         }
         tracing::debug!(
             batch = calls.len(),
-            "tool batch: sequential (HITL or confirm risk in batch)"
+            "tool batch: sequential after optional read-only prefix (HITL in batch)"
         );
+        let (prefix, rest) = split_auto_readonly_prefix(state, calls, *confirms_used);
+        if !prefix.is_empty() {
+            tracing::debug!(
+                prefix = prefix.len(),
+                rest = rest.len(),
+                "running auto-approved read-only calls before confirm boundary"
+            );
+            run_tool_batch_parallel(
+                state,
+                prefix,
+                tools_used,
+                *confirms_used,
+                config,
+                emit,
+                cancel.clone(),
+            )
+            .await?;
+        }
+        if rest.is_empty() {
+            return Ok(ToolBatchResult::Continue);
+        }
+        return run_tool_batch_sequential(
+            state,
+            rest,
+            tools_used,
+            tool_rounds,
+            confirms_used,
+            user_text,
+            config,
+            emit,
+            cancel,
+        )
+        .await;
     }
 
     run_tool_batch_sequential(
@@ -141,6 +174,40 @@ fn batch_needs_confirmation(
         }
     }
     Ok(false)
+}
+
+/// Independent auto-approved read-only calls that sit *before* the first
+/// confirmation (or write) boundary. Later dependents / side-effects stay put.
+fn split_auto_readonly_prefix(
+    state: &LoopState<'_>,
+    calls: Vec<RawToolCall>,
+    confirms_used: u32,
+) -> (Vec<RawToolCall>, Vec<RawToolCall>) {
+    let opts = InvokeOptions {
+        skip_confirmation: false,
+        confirms_used,
+    };
+    let mut prefix = Vec::new();
+    let mut iter = calls.into_iter();
+    while let Some(call) = iter.next() {
+        let Some(tool) = find_tool_opt(state.tools, &call.name) else {
+            let mut rest = vec![call];
+            rest.extend(iter);
+            return (prefix, rest);
+        };
+        let confirm = matches!(
+            state.runtime.decide_only(tool, &call.args, opts),
+            PolicyDecision::NeedsConfirmation { .. }
+        );
+        if tool.meta().is_read_only() && !confirm {
+            prefix.push(call);
+        } else {
+            let mut rest = vec![call];
+            rest.extend(iter);
+            return (prefix, rest);
+        }
+    }
+    (prefix, Vec::new())
 }
 
 /// Sequential path — HITL-safe; can pause mid-batch with remaining siblings.

@@ -44,9 +44,11 @@ pub mod capability;
 pub mod client;
 pub mod context;
 pub mod error;
+pub mod eval;
 pub mod finish_gate;
 /// Pure ReAct loop (`loop` is a keyword → `loop_`).
 pub mod loop_;
+pub mod maintenance;
 pub mod memory;
 pub mod observe;
 pub mod outcome;
@@ -58,15 +60,18 @@ pub mod session;
 pub mod skills;
 pub mod speech_sanitize;
 pub mod stats;
+pub mod task;
 pub mod tool;
 pub mod tool_context;
 pub mod tools;
+pub mod trace;
 pub mod types;
 
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
 pub use boris_ai::{
-    parse_provider_list, split_model_and_provider, LlmClient, LlmError, LlmErrorKind,
-    OpenRouterClient, ReasoningConfig, ReasoningEffort, TokenUsage, DEFAULT_MAX_TOKENS,
+    parse_provider_list, split_model_and_provider, CompleteOptions, LlmClient, LlmError,
+    LlmErrorKind, LlmStreamEvent, OpenRouterClient, ReasoningConfig, ReasoningEffort, RequestStage,
+    TokenUsage, DEFAULT_MAX_TOKENS,
 };
 
 pub use agent::{Agent, AgentOptions};
@@ -74,22 +79,24 @@ pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{Context, Message, Role};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_tool, LoopState};
+pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};
 pub use memory::{
-    FactCategory, LongTermMemory, MemoryHit, ProfileStore, UserFact, UserProfile,
+    FactCategory, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact, UserProfile,
     PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
 pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
-pub use routing::{classify_route, RouteMode, RoutingClient};
+pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};
 pub use runtime::{
     default_user_read_roots, ActivationSet, JsonlAuditSink, ListToolsContext, NetworkPolicy,
     NullAuditSink, PendingToolCall, ProgressEvent, SandboxConfig, ShellPolicy, ToolRuntime,
     ToolRuntimeFeatures,
 };
 pub use session::{
-    generate_session_id, ArtifactIndex, ArtifactKind, ArtifactMeta, ArtifactStore, PresentRequest,
-    PresentedArtifact, SessionId, SessionMeta, SessionStatus, SessionStore,
+    generate_session_id, messages_fingerprint, ArtifactIndex, ArtifactKind, ArtifactMeta,
+    ArtifactStore, PresentRequest, PresentedArtifact, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SyncCursor,
 };
 pub use skills::{
     ensure_default_skills, format_skills_catalog, load_skill_body, load_skills, user_skills_dir,
@@ -99,9 +106,10 @@ pub use speech_sanitize::{
     contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
 pub use stats::AgentStats;
+pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
-    Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk, MAX_SKILL_RESULT_CHARS,
-    MAX_TOOL_RESULT_CHARS,
+    InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolRisk,
+    MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS,
 };
 pub use tool_context::ToolCallContext;
 pub use tools::{
@@ -109,6 +117,7 @@ pub use tools::{
     register_builtin_tools, register_builtin_tools_with_options,
     register_builtin_tools_with_preset, web_tools, BuiltinToolPaths,
 };
+pub use trace::{percentile_ms, summarize_traces, TraceSummary, TurnTrace};
 
 /// Deprecated alias for [`bash_tools`].
 #[allow(deprecated)]

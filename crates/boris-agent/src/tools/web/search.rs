@@ -24,7 +24,6 @@ use crate::tool::{
 const EXA_SNIPPET_CHARS: usize = 600;
 
 /// Live web search: public backends always; Exa first when a key is present.
-#[derive(Debug, Clone)]
 pub struct WebSearchTool {
     /// Wikipedia, DDG Instant Answer, optional Exa.
     official: Client,
@@ -32,6 +31,8 @@ pub struct WebSearchTool {
     browser: Client,
     /// Optional explicit key (tests / hosts). Empty → resolve at execute time.
     exa_api_key: Option<String>,
+    /// Cached env/auth key; refreshed via [`Self::reload_credentials`].
+    cached_exa_key: std::sync::Mutex<Option<String>>,
 }
 
 impl WebSearchTool {
@@ -40,6 +41,7 @@ impl WebSearchTool {
             official: search_api_client()?,
             browser: browser_search_client()?,
             exa_api_key: None,
+            cached_exa_key: std::sync::Mutex::new(None),
         })
     }
 
@@ -50,7 +52,15 @@ impl WebSearchTool {
             official: search_api_client()?,
             browser: browser_search_client()?,
             exa_api_key: if key.is_empty() { None } else { Some(key) },
+            cached_exa_key: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Drop the cached env/auth key (call when settings/auth change).
+    pub fn reload_credentials(&self) {
+        if let Ok(mut g) = self.cached_exa_key.lock() {
+            *g = None;
+        }
     }
 }
 
@@ -151,7 +161,16 @@ impl WebSearchTool {
                 return Some(t.to_string());
             }
         }
-        resolve_exa_api_key_from_env_or_auth()
+        if let Ok(g) = self.cached_exa_key.lock() {
+            if let Some(k) = g.as_ref() {
+                return Some(k.clone());
+            }
+        }
+        let resolved = resolve_exa_api_key_from_env_or_auth();
+        if let Ok(mut g) = self.cached_exa_key.lock() {
+            *g = resolved.clone();
+        }
+        resolved
     }
 }
 

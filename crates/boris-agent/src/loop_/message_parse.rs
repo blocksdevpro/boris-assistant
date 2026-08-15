@@ -2,14 +2,14 @@
 //!
 //! Keeps OpenAI-style JSON shape handling out of the ReAct control flow.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::runtime::RawToolCall;
 
 /// Parse OpenAI-style `tool_calls` array entries into [`RawToolCall`]s.
 ///
-/// Missing fields become empty strings / empty objects; malformed `arguments`
-/// JSON falls back to `{}` (same as the historical loop behaviour).
+/// Malformed `arguments` JSON is **not** coerced to `{}`. The raw string is
+/// kept so the runtime can return a typed invalid-arguments observation.
 pub(super) fn parse_raw_tool_calls(calls: &[Value]) -> Vec<RawToolCall> {
     calls.iter().map(parse_one_tool_call).collect()
 }
@@ -17,8 +17,18 @@ pub(super) fn parse_raw_tool_calls(calls: &[Value]) -> Vec<RawToolCall> {
 fn parse_one_tool_call(call: &Value) -> RawToolCall {
     let call_id = call["id"].as_str().unwrap_or("").to_string();
     let name = call["function"]["name"].as_str().unwrap_or("").to_string();
-    let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))
-        .unwrap_or_else(|_| json!({}));
+    let raw = call["function"]["arguments"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let args = match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => v,
+        // Preserve every parse failure, including a missing/empty arguments
+        // field, as a non-object value. Central validation then returns a
+        // typed, model-repairable invalid-arguments observation without ever
+        // entering Tool::execute.
+        Err(_) => Value::String(raw),
+    };
     RawToolCall {
         call_id,
         name,
@@ -76,9 +86,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_calls_defaults_missing_and_bad_args() {
+    fn parse_tool_calls_preserves_missing_empty_and_bad_args_as_invalid() {
         let calls = vec![
             json!({}),
+            json!({
+                "id": "c-empty",
+                "function": { "name": "x", "arguments": "" }
+            }),
             json!({
                 "id": "c2",
                 "function": { "name": "x", "arguments": "not-json" }
@@ -87,8 +101,13 @@ mod tests {
         let parsed = parse_raw_tool_calls(&calls);
         assert_eq!(parsed[0].call_id, "");
         assert_eq!(parsed[0].name, "");
-        assert_eq!(parsed[0].args, json!({}));
-        assert_eq!(parsed[1].args, json!({}));
+        assert_eq!(parsed[0].args.as_str(), Some(""));
+        assert_eq!(parsed[1].args.as_str(), Some(""));
+        assert!(
+            parsed[2].args.is_string(),
+            "malformed args must not coerce to {{}}"
+        );
+        assert_eq!(parsed[2].args.as_str(), Some("not-json"));
     }
 
     #[test]

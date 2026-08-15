@@ -142,18 +142,28 @@ pub fn looks_like_gave_up_research(reply: &str) -> bool {
     GAVE_UP_NEEDLES.iter().any(|n| lower.contains(n))
 }
 
-/// Whether the research finish-gate should fire for this speak.
+/// Conservative research finish-gate when observation quality is unavailable.
 ///
-/// Fires when research intent + weak effort. Includes **zero tools** freestyle
-/// (e.g. asking for more LinkedIn hints without searching). Person/profile
-/// asks use a higher effort bar.
+/// Production loop callers should use [`should_research_gate_with`] and pass
+/// the number of useful observations. Raw calls alone never count as evidence.
 pub fn should_research_gate(user_text: &str, reply: &str, tools_used: &[String]) -> bool {
-    let _ = reply; // reserved for future gave-up nuance; weak effort is enough
-    if !looks_like_research_request(user_text) {
+    should_research_gate_with(user_text, reply, tools_used, 0)
+}
+
+/// Same as [`should_research_gate`] with a count of useful (non-error) observations.
+pub fn should_research_gate_with(
+    user_text: &str,
+    reply: &str,
+    tools_used: &[String],
+    useful_results: u32,
+) -> bool {
+    let _ = reply;
+    let traits = crate::task::classify_task(user_text);
+    if traits.research_depth == crate::task::ResearchDepth::None {
         return false;
     }
-    let person = looks_like_person_find(user_text);
-    research_effort_weak_for(tools_used, person)
+    let coverage = crate::task::EvidenceCoverage::from_tools(tools_used, useful_results);
+    !coverage.meets(traits.research_depth)
 }
 
 /// System-reminder when research was under-tooled after a content-only reply.
@@ -382,16 +392,18 @@ mod tests {
     #[test]
     fn should_research_gate_adequate_effort_skips() {
         let tools = vec![s("web_search"), s("web_search")];
-        assert!(!should_research_gate(
+        assert!(!should_research_gate_with(
             "search for rust async runtimes",
             "I couldn't find her.",
-            &tools
+            &tools,
+            2,
         ));
         let tools2 = vec![s("web_search"), s("web_fetch")];
-        assert!(!should_research_gate(
+        assert!(!should_research_gate_with(
             "research the latest tokio release",
             "Not found.",
-            &tools2
+            &tools2,
+            2,
         ));
     }
 
@@ -406,10 +418,22 @@ mod tests {
         ));
         // 2 search + 1 fetch is adequate for person-find.
         let tools_ok = vec![s("web_search"), s("web_search"), s("web_fetch")];
-        assert!(!should_research_gate(
+        assert!(!should_research_gate_with(
             "find Jane Doe on LinkedIn",
             "Here is the profile.",
-            &tools_ok
+            &tools_ok,
+            2,
+        ));
+    }
+
+    #[test]
+    fn failed_search_calls_do_not_count_as_evidence() {
+        let tools = vec![s("web_search"), s("web_search"), s("web_fetch")];
+        assert!(should_research_gate_with(
+            "find Jane Doe on LinkedIn",
+            "I couldn't find her.",
+            &tools,
+            0,
         ));
     }
 
@@ -454,5 +478,24 @@ mod tests {
 
     fn s(name: &str) -> String {
         name.to_string()
+    }
+
+    #[test]
+    fn finish_gate_false_positive_local_find() {
+        // "find" in a local-file ask must not trip the research gate.
+        assert!(!should_research_gate(
+            "find the function in src/main.rs",
+            "It's in main.",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn finish_gate_false_negative_zero_tools_person() {
+        assert!(should_research_gate(
+            "find Jane Doe on LinkedIn",
+            "Need more hints.",
+            &[]
+        ));
     }
 }

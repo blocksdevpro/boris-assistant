@@ -14,12 +14,14 @@
 //! | [`long_term`] | global `MEMORY.md` + session `memory.md` + search |
 
 pub mod extract;
+pub mod index;
 pub mod long_term;
 pub mod profile;
 pub mod store;
 
 pub use extract::{extract_heuristic, extract_with_llm, should_llm_extract, ProfileDelta};
-pub use long_term::{LongTermMemory, MemoryHit};
+pub use index::{IndexHit, MemoryIndex};
+pub use long_term::{LongTermMemory, MemoryHit, SessionMemoryTarget};
 pub use profile::{FactCategory, UserFact, UserProfile};
 pub use store::ProfileStore;
 

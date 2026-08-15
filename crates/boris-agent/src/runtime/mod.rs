@@ -16,12 +16,13 @@ pub use audit::{
     args_digest, args_summary, now_ms, AuditEvent, AuditSink, JsonlAuditSink, MemoryAuditSink,
     NullAuditSink,
 };
-pub use concurrency::{clamp_parallel, partition_read_write};
+pub use concurrency::{clamp_parallel, partition_read_write, ConcurrencyGate};
 pub use invocation::{InvokeOptions, InvokeResult, ToolInvocation};
 pub use invoke::ToolRuntime;
 pub use listing::{
     activate_tools, filter_listed_tools, is_core_name, new_activation_set, ActivationSet,
     ListToolsContext, ToolRuntimeFeatures, DEFAULT_CORE_TOOL_NAMES, MAX_ACTIVATED,
+    MAX_TOOL_SCHEMA_CHARS,
 };
 pub use pending::{PendingToolCall, PendingTurn, RawToolCall};
 pub use policy::{

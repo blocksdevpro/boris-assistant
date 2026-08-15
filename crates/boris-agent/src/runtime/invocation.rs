@@ -14,7 +14,8 @@ pub struct ToolInvocation {
     pub call_id: String,
     /// Registered tool name.
     pub name: String,
-    /// JSON arguments object (non-objects coerced to `{}`).
+    /// Parsed JSON arguments. Malformed/non-object values are preserved so
+    /// centralized schema validation can return a repairable observation.
     pub args: Value,
     /// Optional session id for audit / ctx.
     pub session_id: Option<String>,

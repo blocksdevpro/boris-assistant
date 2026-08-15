@@ -16,5 +16,5 @@ pub mod types;
 pub use artifacts::{
     ArtifactIndex, ArtifactKind, ArtifactMeta, ArtifactStore, PresentRequest, PresentedArtifact,
 };
-pub use store::SessionStore;
+pub use store::{messages_fingerprint, SessionStore, SyncCursor};
 pub use types::{generate_session_id, now_unix_ms, SessionId, SessionMeta, SessionStatus};

@@ -92,7 +92,11 @@ impl Tool for ToolSearchTool {
             .map_err(|_| ToolError::failed("tool registry lock poisoned"))?
             .clone();
 
-        let already: HashSet<String> = self.activated.lock().map(|g| g.clone()).unwrap_or_default();
+        let already: HashSet<String> = self
+            .activated
+            .lock()
+            .map(|mut g| g.snapshot())
+            .unwrap_or_default();
 
         let mut scored: Vec<(u32, Arc<dyn Tool>)> = Vec::new();
         for tool in snapshot {

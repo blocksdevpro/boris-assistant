@@ -32,11 +32,29 @@ pub fn append_record(path: &Path, record: &TranscriptRecord) -> Result<(), Strin
     Ok(())
 }
 
-/// Append many records (one JSONL line each).
+/// Append many records with one open/flush (not one open per record).
 pub fn append_records(path: &Path, records: &[TranscriptRecord]) -> Result<(), String> {
-    for r in records {
-        append_record(path, r)?;
+    if records.is_empty() {
+        return Ok(());
     }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create transcript parent dir {}: {e}", parent.display()))?;
+        }
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open chat_history {}: {e}", path.display()))?;
+    for r in records {
+        let line = r.to_json_line()?;
+        writeln!(file, "{line}")
+            .map_err(|e| format!("write chat_history {}: {e}", path.display()))?;
+    }
+    file.flush()
+        .map_err(|e| format!("flush chat_history {}: {e}", path.display()))?;
     Ok(())
 }
 

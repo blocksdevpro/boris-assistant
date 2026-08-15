@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 
 const repo = "https://github.com/blocksdevpro/boris-assistant";
 const releases = `${repo}/releases`;
+const windowsInstaller = "/download";
 
 function BorisMark({ className }: { className?: string }) {
   return (
@@ -67,8 +68,8 @@ export default function Home() {
         <FloatingTile className="tile-search" icon={Search} />
 
         <div className="relative z-10 mx-auto flex max-w-4xl flex-col items-center text-center">
-          <a href={releases} target="_blank" rel="noreferrer" className="launch-note hero-enter" style={{ "--delay": "0ms" } as React.CSSProperties}>
-            <span /> Boris 1.0 is out for Windows <ArrowRight className="size-3.5" />
+          <a href={`${releases}/tag/v1.1.0`} target="_blank" rel="noreferrer" className="launch-note hero-enter" style={{ "--delay": "0ms" } as React.CSSProperties}>
+            <span /> Boris 1.1 is out for Windows <ArrowRight className="size-3.5" />
           </a>
 
           <h1 className="hero-title hero-enter" style={{ "--delay": "80ms" } as React.CSSProperties}>
@@ -82,7 +83,7 @@ export default function Home() {
           </p>
 
           <div className="hero-actions hero-enter" style={{ "--delay": "220ms" } as React.CSSProperties}>
-            <a href={releases} target="_blank" rel="noreferrer" className={cn(buttonVariants({ size: "lg" }), "primary-download")}>
+            <a href={windowsInstaller} download="Boris_1.1.0_x64-setup.exe" className={cn(buttonVariants({ size: "lg" }), "primary-download")}>
               <Monitor data-icon="inline-start" /> Download for Windows
             </a>
             <a href={repo} target="_blank" rel="noreferrer" className="source-link">
@@ -216,8 +217,8 @@ export default function Home() {
           <span className="final-mark"><BorisMark className="h-8 w-10" /></span>
           <h2>Talk to your computer.<br />Not around it.</h2>
           <p>Free, open source, and ready for Windows.</p>
-          <span className="release-meta">Version 1.0 · Windows 10 and 11</span>
-          <a href={releases} target="_blank" rel="noreferrer" className={cn(buttonVariants({ size: "lg" }), "primary-download mt-8")}><Download /> Download Boris</a>
+          <span className="release-meta">Version 1.1.0 · Windows 10 and 11</span>
+          <a href={windowsInstaller} download="Boris_1.1.0_x64-setup.exe" className={cn(buttonVariants({ size: "lg" }), "primary-download mt-8")}><Download /> Download Boris</a>
         </div>
       </section>
 

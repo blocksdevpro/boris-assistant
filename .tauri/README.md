@@ -68,13 +68,13 @@ Attach to the **latest** release (same tag users should get):
 
 ```json
 {
-  "version": "1.0.1",
-  "notes": "Bug fixes and improvements.",
-  "pub_date": "2026-08-12T00:00:00Z",
+  "version": "1.1.0",
+  "notes": "Boris 1.1.0 — Silero VAD, streamed speech, async research, and faster tools.",
+  "pub_date": "2026-08-15T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<entire contents of the .sig file>",
-      "url": "https://github.com/blocksdevpro/boris-assistant/releases/download/v1.0.1/Boris_1.0.1_x64-setup.exe"
+      "url": "https://github.com/blocksdevpro/boris-assistant/releases/download/v1.1.0/Boris_1.1.0_x64-setup.exe"
     }
   }
 }
@@ -89,38 +89,39 @@ So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notice
 
 ## Publishing a beta
 
-For the current tree, use version/tag **`1.1.0-beta.5`** /
-**`v1.1.0-beta.5`** and put the same version in `latest.json`.
+Future 1.2+ pre-releases use version/tag **`MAJOR.MINOR.PATCH-beta.N`**
+(e.g. `1.2.0-beta.1` / `v1.2.0-beta.1`) and put the same version in
+`latest.json`.
 
-1. Version the product `MAJOR.MINOR.PATCH-beta.N` (e.g. `1.1.0-beta.1`).
-   WiX/MSI only accepts numeric pre-release ids (`1.1.0-1`), so betas bundle
+1. Version the product `MAJOR.MINOR.PATCH-beta.N` (e.g. `1.2.0-beta.1`).
+   WiX/MSI only accepts numeric pre-release ids (`1.2.0-1`), so betas bundle
    **NSIS only** (`bundle.targets: ["nsis"]` in `tauri.conf.json`). The updater
    already uses that `.exe`. Add `"msi"` back on a numeric stable version if you
    want both installers.
-2. Create tag `v1.1.0-beta.1` as a **pre-release**. Attach the installer, `.sig`, and a `latest.json` whose `url` points at that tag.
+2. Create tag `v1.2.0-beta.1` as a **pre-release**. Attach the installer, `.sig`, and a `latest.json` whose `url` points at that tag.
 3. Create or update a long-lived pre-release tagged **`beta`** and attach the **same** `latest.json` (and installer if you want the `beta` tag URL to work as a direct download). The in-app Beta channel only reads `releases/download/beta/latest.json`.
-4. Promote by shipping `v1.1.0` as a normal (non-pre-release) release with its own `latest.json`. Do not set a beta as the latest release.
+4. Promote by shipping `v1.2.0` as a normal (non-pre-release) release with its own `latest.json`. Do not set a beta as the latest release.
 
 ## Promoting to Latest (stable channel)
 
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-**Do not** uncheck Pre-release on `v1.1.0-beta.5` unless you want every
-Stable 1.0.0 install offered a build whose version string is still
-`1.1.0-beta.5` (NSIS only, no MSI).
+The current tree is the **`1.1.0`** clean promote (numeric version, NSIS +
+MSI). Do **not** uncheck Pre-release on `v1.1.0-beta.5` — that would offer
+Stable 1.0.0 installs a build still labeled `1.1.0-beta.5` (NSIS only, no
+MSI).
 
-The clean promote:
+The clean promote (this is what `1.1.0` is):
 
 1. Bump the product to a numeric version (`1.1.0`) in `package.json`,
    `tauri.conf.json`, both `Cargo.toml`s, and `CHANGELOG.md`.
-2. Optionally set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode
-   `1.1.0`).
+2. Set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode `1.1.0`).
 3. Sign-build, then create **`v1.1.0` without `--prerelease`** and attach
    installer(s), `.sig`, and `latest.json` whose `url` points at `v1.1.0`.
 4. Leave the rolling `beta` tag as a pre-release. Do not mark it Latest.
 
-Quick-and-dirty (same binary, still labeled beta.5):
+Quick-and-dirty (same binary, still labeled beta.5) — **do not use for 1.1.0**:
 
 ```powershell
 gh release edit v1.1.0-beta.5 --prerelease=false

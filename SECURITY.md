@@ -69,6 +69,7 @@ actions and keep capability presets appropriate to the user’s trust level.
 
 | Version | Supported |
 |---------|-----------|
+| 1.1.x   | Yes |
 | 1.0.x   | Yes |
 
 Security fixes target the currently supported 1.x release on `main`. There is

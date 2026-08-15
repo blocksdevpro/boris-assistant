@@ -22,11 +22,12 @@ bun run tauri dev
 bun run tauri build
 ```
 
-Windows betas ship **NSIS only** (`Boris_*_x64-setup.exe`). MSI/WiX cannot encode
+Windows **1.1.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
+`Boris_*_x64_en-US.msi`). Betas stay NSIS-only because MSI/WiX cannot encode
 `1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
-The current release-prep tree is **`1.1.0-beta.5`**.
+The current release-prep tree is **`1.1.0`**.
 
 ## App updates (Tauri updater)
 

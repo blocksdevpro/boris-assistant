@@ -61,33 +61,44 @@ fn u64_field(obj: &Value, key: &str) -> u64 {
     obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
-/// Log usage at info (cache hit) or debug (miss / cold).
+/// Log one finished LLM completion, always including wall time.
 ///
-/// Provider-agnostic wording — hosts may use any OpenAI-compatible backend.
-pub fn log_usage(model: &str, usage: &TokenUsage, path: &str) {
-    if !usage.is_worth_logging() {
-        return;
+/// Token fields are included when the provider reported usage. Cache hits stay
+/// labeled so hosts can spot prompt-cache savings without a second line.
+pub fn log_complete(model: &str, path: &str, ms: u64, usage: Option<&TokenUsage>) {
+    match usage {
+        Some(usage) if usage.cache_hit() => {
+            tracing::info!(
+                model = %model,
+                path,
+                ms,
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                cached_tokens = usage.cached_tokens,
+                cache_write_tokens = usage.cache_write_tokens,
+                "LLM complete (cache hit)"
+            );
+        }
+        Some(usage) if usage.is_worth_logging() => {
+            tracing::info!(
+                model = %model,
+                path,
+                ms,
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                cache_write_tokens = usage.cache_write_tokens,
+                "LLM complete"
+            );
+        }
+        _ => {
+            tracing::info!(model = %model, path, ms, "LLM complete");
+        }
     }
-    if usage.cache_hit() {
-        tracing::info!(
-            model = %model,
-            path,
-            prompt_tokens = usage.prompt_tokens,
-            completion_tokens = usage.completion_tokens,
-            cached_tokens = usage.cached_tokens,
-            cache_write_tokens = usage.cache_write_tokens,
-            "LLM usage (cache hit)"
-        );
-    } else {
-        tracing::debug!(
-            model = %model,
-            path,
-            prompt_tokens = usage.prompt_tokens,
-            completion_tokens = usage.completion_tokens,
-            cache_write_tokens = usage.cache_write_tokens,
-            "LLM usage"
-        );
-    }
+}
+
+/// Log a failed LLM completion with the time spent before the error.
+pub fn log_complete_failed(model: &str, path: &str, ms: u64, error: &dyn std::fmt::Display) {
+    tracing::warn!(model = %model, path, ms, error = %error, "LLM complete failed");
 }
 
 #[cfg(test)]

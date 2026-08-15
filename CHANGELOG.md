@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Completion logs now include wall-clock `ms` for the thing that just finished:
+  each tool call, LLM complete (stream / blocking), memory search / get /
+  personal extract, status phase transitions, wake wait, capture, session
+  begin/end, and engine init steps. STT / TTS / agent-turn timings were
+  already present.
+
 ### Fixed
 
 - First overlay show no longer flashes a solid rectangle. The island stays

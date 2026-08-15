@@ -1,6 +1,7 @@
 //! Live status publisher for the UI (`StatusPicture` snapshots).
 
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use boris_core::TurnId;
 
@@ -23,6 +24,8 @@ pub(super) struct Picture {
     pub context_limit: Option<u32>,
     pub artifact: Option<ArtifactPeek>,
     pub status_tx: Sender<StatusPicture>,
+    /// When the current [`Phase`] began — used to log how long each status lasted.
+    pub phase_started: Instant,
 }
 
 impl Picture {
@@ -44,7 +47,12 @@ impl Picture {
     }
 
     pub fn set_phase(&mut self, phase: Phase) {
-        self.phase = phase;
+        if self.phase != phase {
+            let ms = self.phase_started.elapsed().as_millis() as u64;
+            tracing::info!(from = ?self.phase, to = ?phase, ms, "status phase");
+            self.phase = phase;
+            self.phase_started = Instant::now();
+        }
         self.publish();
     }
 

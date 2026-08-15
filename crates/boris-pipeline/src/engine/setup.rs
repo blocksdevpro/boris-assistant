@@ -48,6 +48,7 @@ pub(super) fn init_runtime(
     config: PipelineConfig,
     status_tx: std::sync::mpsc::Sender<StatusPicture>,
 ) -> Result<EngineRuntime> {
+    let init_started = std::time::Instant::now();
     tracing::info!("engine thread entered run()");
     publish_starting(&status_tx, &config);
 
@@ -57,6 +58,7 @@ pub(super) fn init_runtime(
     crate::diagnostics::log_writable_check("logs", paths::logs_dir());
 
     tracing::info!("init_onnx_runtime…");
+    let onnx_t = std::time::Instant::now();
     init_onnx_runtime().map_err(|e| {
         fault(
             &status_tx,
@@ -65,7 +67,10 @@ pub(super) fn init_runtime(
         );
         PipelineError::init(format!("onnx runtime: {e}"))
     })?;
-    tracing::info!("init_onnx_runtime done");
+    tracing::info!(
+        ms = onnx_t.elapsed().as_millis() as u64,
+        "init_onnx_runtime done"
+    );
 
     tracing::info!(
         play_source_rate = config.play_source_rate,
@@ -142,9 +147,13 @@ pub(super) fn init_runtime(
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
         artifact: None,
         status_tx,
+        phase_started: std::time::Instant::now(),
     };
     picture.publish();
-    tracing::info!("engine idle (Off) — waiting for Start command");
+    tracing::info!(
+        ms = init_started.elapsed().as_millis() as u64,
+        "engine idle (Off) — waiting for Start command"
+    );
 
     Ok(EngineRuntime {
         audio,
@@ -216,9 +225,13 @@ fn open_audio(
         play_source_rate,
         "opening AudioService (default mic + speaker)…"
     );
+    let started = std::time::Instant::now();
     match AudioService::with_source_rate(play_source_rate) {
         Ok(audio) => {
-            tracing::info!("AudioService ready");
+            tracing::info!(
+                ms = started.elapsed().as_millis() as u64,
+                "AudioService ready"
+            );
             Ok(audio)
         }
         Err(e) => {
@@ -240,13 +253,17 @@ fn load_wakeword(
         sample_rate = boris_audio::AUDIO_TARGET_RATE,
         "loading LivekitWakeWord (ORT sessions)…"
     );
+    let started = std::time::Instant::now();
     match LivekitWakeWord::try_new(
         "boris",
         &config.wakeword_model,
         boris_audio::AUDIO_TARGET_RATE,
     ) {
         Ok(w) => {
-            tracing::info!("LivekitWakeWord loaded");
+            tracing::info!(
+                ms = started.elapsed().as_millis() as u64,
+                "LivekitWakeWord loaded"
+            );
             Ok(w)
         }
         Err(e) => {
@@ -291,6 +308,7 @@ fn fault(
 }
 
 fn build_agent(config: &PipelineConfig) -> Agent {
+    let started = std::time::Instant::now();
     tracing::info!("building OpenRouter client + Agent…");
     // P1 model routing: fast for simple facts, strong for multi-step work.
     // Supports OpenRouter **model-provider** prefs (CoreWeave, Baseten, …) and
@@ -474,6 +492,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         wave_scheduling = features.wave_scheduling,
         max_parallel_tools = features.max_parallel_tools,
         progress_events = features.progress_events,
+        ms = started.elapsed().as_millis() as u64,
         "builtin tools + skills + memory + subagent + tool runtime registered"
     );
 

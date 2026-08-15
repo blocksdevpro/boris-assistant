@@ -1,5 +1,7 @@
 //! `complete` paths: stream-first with non-stream fallback.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -7,7 +9,7 @@ use serde_json::Value;
 use crate::client::LlmClient;
 use crate::error::{truncate_error_body, LlmError};
 use crate::message::{message_has_usable_payload, normalize_assistant_message};
-use crate::usage::{log_usage, TokenUsage};
+use crate::usage::{log_complete, log_complete_failed, TokenUsage};
 
 use super::client::OpenRouterClient;
 use super::sse::{flush_sse_buffer, push_sse_bytes, StreamAssembler};
@@ -22,18 +24,32 @@ impl LlmClient for OpenRouterClient {
         // so the agent does not go Silent with nothing to say.
         //
         // Clone messages/tools only when falling back — streaming takes references.
+        let stream_t = Instant::now();
         match self.complete_streaming(&messages, &tools).await {
-            Ok(msg) if message_has_usable_payload(&msg) => Ok(msg),
-            Ok(msg) => {
+            Ok((msg, usage)) if message_has_usable_payload(&msg) => {
+                log_complete(
+                    &self.model,
+                    "stream",
+                    stream_t.elapsed().as_millis() as u64,
+                    usage.as_ref(),
+                );
+                Ok(msg)
+            }
+            Ok((msg, _)) => {
                 tracing::warn!(
                     content_preview = %msg.get("content").map(|c| c.to_string()).unwrap_or_default(),
                     has_tools = crate::message::has_tool_calls(&msg),
+                    ms = stream_t.elapsed().as_millis() as u64,
                     "stream complete returned empty payload; falling back to non-stream"
                 );
                 self.complete_blocking(&messages, &tools).await
             }
             Err(e) => {
-                tracing::debug!(error = %e, "stream complete failed; falling back to non-stream");
+                tracing::debug!(
+                    error = %e,
+                    ms = stream_t.elapsed().as_millis() as u64,
+                    "stream complete failed; falling back to non-stream"
+                );
                 self.complete_blocking(&messages, &tools).await
             }
         }
@@ -51,6 +67,34 @@ impl OpenRouterClient {
         messages: &Value,
         tools: &Value,
     ) -> Result<Value, LlmError> {
+        let started = Instant::now();
+        match self.complete_blocking_inner(messages, tools).await {
+            Ok((message, usage)) => {
+                log_complete(
+                    &self.model,
+                    "blocking",
+                    started.elapsed().as_millis() as u64,
+                    usage.as_ref(),
+                );
+                Ok(message)
+            }
+            Err(e) => {
+                log_complete_failed(
+                    &self.model,
+                    "blocking",
+                    started.elapsed().as_millis() as u64,
+                    &e,
+                );
+                Err(e)
+            }
+        }
+    }
+
+    async fn complete_blocking_inner(
+        &self,
+        messages: &Value,
+        tools: &Value,
+    ) -> Result<(Value, Option<TokenUsage>), LlmError> {
         let body = self.request_body(messages, tools, false);
 
         let req = self.http.post(self.chat_completions_url()).json(&body);
@@ -75,13 +119,7 @@ impl OpenRouterClient {
             return Err(LlmError::from_provider_error_value(err));
         }
 
-        if let Some(usage) = json.get("usage") {
-            log_usage(
-                &self.model,
-                &TokenUsage::from_usage_value(usage),
-                "blocking",
-            );
-        }
+        let usage = json.get("usage").map(TokenUsage::from_usage_value);
 
         let message = json
             .get("choices")
@@ -95,15 +133,18 @@ impl OpenRouterClient {
                 ))
             })?;
 
-        Ok(normalize_assistant_message(message))
+        Ok((normalize_assistant_message(message), usage))
     }
 
     /// SSE chat completions — assemble full assistant message from deltas.
+    ///
+    /// Returns the message plus optional usage so the caller can log duration
+    /// only after deciding the payload is usable (empty streams fall back).
     pub(super) async fn complete_streaming(
         &self,
         messages: &Value,
         tools: &Value,
-    ) -> Result<Value, LlmError> {
+    ) -> Result<(Value, Option<TokenUsage>), LlmError> {
         let body = self.request_body(messages, tools, true);
 
         let req = self
@@ -150,11 +191,8 @@ impl OpenRouterClient {
             return Err(LlmError::from_provider_error_value(&err));
         }
 
-        if let Some(usage) = assembler.last_usage() {
-            log_usage(&self.model, usage, "stream");
-        }
-
-        Ok(assembler.finish())
+        let usage = assembler.last_usage().cloned();
+        Ok((assembler.finish(), usage))
     }
 }
 

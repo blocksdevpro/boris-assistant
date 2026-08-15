@@ -135,6 +135,7 @@ pub(super) fn commit_tool_observation(
     tools_used: &mut Vec<String>,
     emit: &EmitFn,
 ) {
+    log_tool_done(&call.name, ok, duration_ms);
     emit(AgentEvent::ToolExecutionEnd {
         call_id: call.call_id.clone(),
         tool_name: call.name.clone(),
@@ -143,6 +144,11 @@ pub(super) fn commit_tool_observation(
     });
     tools_used.push(call.name.clone());
     context.push(Role::Tool, tool_observation_json(&call.call_id, content));
+}
+
+/// Structured completion line so each tool call has a wall-clock in the log.
+pub(super) fn log_tool_done(tool: &str, ok: bool, ms: u64) {
+    tracing::info!(tool = %tool, ok, ms, "tool done");
 }
 
 /// Map a non-HITL invoke result to observation text.

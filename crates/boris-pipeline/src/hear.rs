@@ -112,6 +112,7 @@ pub fn wait_for_wake(
         window = WAKEWORD_WINDOW_SIZE,
         "wait_for_wake: listening (heartbeat every ~5s with max score)"
     );
+    let wait_started = std::time::Instant::now();
     let mut window = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
     let score_every = duration_to_samples(WAKEWORD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
     let mut samples_since_score: usize = 0;
@@ -148,7 +149,13 @@ pub fn wait_for_wake(
 
         match wake.predict(&window.read()) {
             Ok(score) if score >= WAKEWORD_THRESHOLD => {
-                tracing::info!(score, frames, scores, "wake hit");
+                tracing::info!(
+                    score,
+                    frames,
+                    scores,
+                    ms = wait_started.elapsed().as_millis() as u64,
+                    "wake hit"
+                );
                 return Ok(());
             }
             Ok(score) => {
@@ -228,6 +235,7 @@ pub fn capture_utterance(
         _ => 30,
     };
     tracing::info!(?kind, max_secs, "capture_utterance begin");
+    let wall = std::time::Instant::now();
     let mut record = RecordingBuffer::new(
         AUDIO_TARGET_RATE as usize * 2,
         AUDIO_TARGET_RATE as usize * max_secs as usize,
@@ -267,6 +275,7 @@ pub fn capture_utterance(
             tracing::warn!(
                 samples = clip.len(),
                 has_spoken,
+                ms = wall.elapsed().as_millis() as u64,
                 "utterance hit max length — cutting clip"
             );
             return Ok(clip);
@@ -303,7 +312,8 @@ pub fn capture_utterance(
                         record.set_recording(false);
                         tracing::info!(
                             samples = clip.len(),
-                            ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
+                            clip_ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
+                            ms = wall.elapsed().as_millis() as u64,
                             has_spoken,
                             ?kind,
                             "capture_utterance end (silence endpoint)"

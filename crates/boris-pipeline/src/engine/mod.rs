@@ -332,6 +332,7 @@ fn run(
 
                     // STT/TTS stay unloaded until a turn needs them (preloaded one
                     // step ahead during capture / agent — never kept for Armed idle).
+                    let start_t = std::time::Instant::now();
                     begin_session(
                         &rt.store,
                         sess.active_session,
@@ -342,6 +343,7 @@ fn run(
                     rt.picture.engine = EngineState::On;
                     rt.picture.set_phase(Phase::Armed);
                     tracing::info!(
+                        ms = start_t.elapsed().as_millis() as u64,
                         "engine started — Armed, listening for wake (STT/TTS on-demand)"
                     );
                 }
@@ -428,6 +430,9 @@ fn run(
         let turn = TurnId::new(next_turn);
         next_turn = next_turn.saturating_add(1);
         rt.picture.turn = Some(turn);
+        // Overlay glance is this-turn only. The session catalog / Home desk
+        // still keep the last card; a new utterance must not resurrect it.
+        rt.picture.artifact = None;
         // Hearing only while the mic is actually recording (not during STT).
         // Preload STT in parallel — should be ready by the time capture ends.
         rt.picture.set_phase(Phase::Hearing);
@@ -733,13 +738,24 @@ fn run(
         if let Some(ref sid) = *sess.active_session {
             // Full Grok-like transcript: system / user / assistant+tool_calls / tool_result.
             let pairs = agent_message_pairs(&rt.agent);
+            let sync_t = std::time::Instant::now();
             match rt.store.sync_messages(sid, &pairs, *sess.transcript_len) {
-                Ok(n) => *sess.transcript_len = n,
+                Ok(n) => {
+                    tracing::debug!(
+                        session_id = %sid,
+                        %turn,
+                        messages = n,
+                        ms = sync_t.elapsed().as_millis() as u64,
+                        "session sync_messages"
+                    );
+                    *sess.transcript_len = n;
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         session_id = %sid,
                         %turn,
+                        ms = sync_t.elapsed().as_millis() as u64,
                         "session sync_messages failed"
                     );
                 }

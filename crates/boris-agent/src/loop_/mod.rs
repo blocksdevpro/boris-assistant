@@ -39,8 +39,8 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult};
 
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
-    build_tool_invocation, find_tool, find_tool_opt, observation_looks_ok, tool_observation_json,
-    unknown_tool_observation,
+    build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
+    tool_observation_json, unknown_tool_observation,
 };
 use message_parse::{extract_reply_text, parse_raw_tool_calls};
 use round::{
@@ -323,10 +323,12 @@ pub async fn resume_pending_tool(
     };
 
     let duration_ms = started.elapsed().as_millis() as u64;
+    let ok = approved && observation_looks_ok(&observation);
+    log_tool_done(&pending.name, ok, duration_ms);
     emit(AgentEvent::ToolExecutionEnd {
         call_id: pending.call_id.clone(),
         tool_name: pending.name.clone(),
-        ok: approved && observation_looks_ok(&observation),
+        ok,
         duration_ms,
     });
 
@@ -348,6 +350,7 @@ pub async fn resume_pending_tool(
         let Some(tool) = find_tool_opt(state.tools, &call.name) else {
             let observation = unknown_tool_observation(&call.name);
             let duration_ms = started.elapsed().as_millis() as u64;
+            log_tool_done(&call.name, false, duration_ms);
             emit(AgentEvent::ToolExecutionEnd {
                 call_id: call.call_id.clone(),
                 tool_name: call.name.clone(),
@@ -393,10 +396,12 @@ pub async fn resume_pending_tool(
             "Error: user declined this action".to_string()
         };
         let duration_ms = started.elapsed().as_millis() as u64;
+        let ok = approved && observation_looks_ok(&observation);
+        log_tool_done(&call.name, ok, duration_ms);
         emit(AgentEvent::ToolExecutionEnd {
             call_id: call.call_id.clone(),
             tool_name: call.name.clone(),
-            ok: approved && observation_looks_ok(&observation),
+            ok,
             duration_ms,
         });
         tools_used.push(call.name.clone());

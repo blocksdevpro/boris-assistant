@@ -81,6 +81,7 @@ impl Agent {
         // Keep more recent turns intact so ongoing research/tool work is not
         // summarized away mid-session.
         const KEEP_RECENT: usize = 4;
+        let started = Instant::now();
         let digest = self.context.older_turns_digest(KEEP_RECENT);
         if digest.trim().is_empty() {
             return Ok(());
@@ -112,7 +113,11 @@ impl Agent {
             return Ok(());
         }
         self.context.apply_summary_compact(&summary, KEEP_RECENT);
-        info!(chars = summary.len(), "context llm-compact applied");
+        info!(
+            chars = summary.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "context llm-compact applied"
+        );
         Ok(())
     }
 
@@ -298,7 +303,11 @@ impl Agent {
                 self.finish_loop(started, &user_text, loop_out).await
             }
             Err(e) => {
-                error!(error = %e, "agent resume failed");
+                error!(
+                    error = %e,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "agent resume failed"
+                );
                 self.emit(&AgentEvent::Error {
                     message: e.to_string(),
                 });

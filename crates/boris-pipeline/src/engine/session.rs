@@ -36,6 +36,7 @@ pub(super) fn begin_session(
 ) {
     *active_session = None;
     *transcript_len = 0;
+    let started = std::time::Instant::now();
     let previous = match store.current_id() {
         Ok(id) => id,
         Err(e) => {
@@ -57,7 +58,6 @@ pub(super) fn begin_session(
 
             let resumed = previous.as_ref() == Some(&meta.id);
             if resumed {
-                tracing::info!(session_id = %meta.id, "session resumed");
                 match store.load_transcript(&meta.id) {
                     Ok(records) => {
                         let wire: Vec<(String, serde_json::Value)> =
@@ -86,7 +86,6 @@ pub(super) fn begin_session(
                     }
                 }
             } else {
-                tracing::info!(session_id = %meta.id, "session created");
                 agent.reset(system_prompt);
                 // Grok writes the system row at session start.
                 seed_transcript(store, &meta.id, transcript_len, agent);
@@ -94,6 +93,12 @@ pub(super) fn begin_session(
 
             // Bind session-local paths (todos, audit, subagent root, sid, activations).
             agent.bind_session(&store.session_dir(&meta.id), meta.id.as_str());
+            tracing::info!(
+                session_id = %meta.id,
+                ms = started.elapsed().as_millis() as u64,
+                resumed,
+                "session ready"
+            );
             *active_session = Some(meta.id);
         }
         Err(e) => {
@@ -131,11 +136,16 @@ pub(super) fn end_session(
     transcript_len: &mut usize,
     agent: &mut Agent,
 ) {
+    let started = std::time::Instant::now();
     agent.abort();
     agent.unbind_session();
     match store.end_current() {
         Ok(Some(meta)) => {
-            tracing::info!(session_id = %meta.id, "session ended");
+            tracing::info!(
+                session_id = %meta.id,
+                ms = started.elapsed().as_millis() as u64,
+                "session ended"
+            );
         }
         Ok(None) => {
             if let Some(ref sid) = active_session {

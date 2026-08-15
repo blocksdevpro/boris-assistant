@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
@@ -59,6 +60,7 @@ impl Agent {
         let Some(mem) = &self.personal else {
             return;
         };
+        let started = Instant::now();
         let llm_extract_enabled = mem.llm_extract;
 
         let mut delta = extract_heuristic(user_text);
@@ -90,7 +92,11 @@ impl Agent {
             .await
             {
                 Ok(llm_delta) if !llm_delta.is_empty() => {
-                    debug!(turns_seen, "personal llm extract produced updates");
+                    debug!(
+                        turns_seen,
+                        ms = started.elapsed().as_millis() as u64,
+                        "personal llm extract produced updates"
+                    );
                     if let Some(n) = llm_delta.preferred_name.clone() {
                         delta.preferred_name = Some(n);
                     }
@@ -108,10 +114,18 @@ impl Agent {
                     }
                 }
                 Ok(_) => {
-                    debug!(turns_seen, "personal llm extract empty");
+                    debug!(
+                        turns_seen,
+                        ms = started.elapsed().as_millis() as u64,
+                        "personal llm extract empty"
+                    );
                 }
                 Err(e) => {
-                    warn!(error = %e, "personal llm extract failed");
+                    warn!(
+                        error = %e,
+                        ms = started.elapsed().as_millis() as u64,
+                        "personal llm extract failed"
+                    );
                 }
             }
         }
@@ -122,6 +136,10 @@ impl Agent {
                     let _ = mem.store.save(&p);
                 }
             }
+            debug!(
+                ms = started.elapsed().as_millis() as u64,
+                "personal learn skipped"
+            );
             return;
         }
 
@@ -130,13 +148,18 @@ impl Agent {
                 let before_empty = p.is_empty();
                 delta.apply(&mut p);
                 if let Err(e) = mem.store.save(&p) {
-                    warn!(error = %e, "failed to save personal profile");
+                    warn!(
+                        error = %e,
+                        ms = started.elapsed().as_millis() as u64,
+                        "failed to save personal profile"
+                    );
                 } else {
                     info!(
                         was_empty = before_empty,
                         name = ?p.preferred_name,
                         facts = p.facts.len(),
                         prefs = p.preferences.len(),
+                        ms = started.elapsed().as_millis() as u64,
                         "personal context updated"
                     );
                 }

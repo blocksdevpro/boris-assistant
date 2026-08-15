@@ -13,6 +13,7 @@
 //! detection) are unit-tested without network.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -184,8 +185,17 @@ impl LlmClient for RoutingClient {
         let primary = self.active();
         tracing::debug!(route = mode.as_str(), model = %primary.model(), "llm route");
 
+        let started = Instant::now();
         match primary.complete(messages.clone(), tools.clone()).await {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                tracing::debug!(
+                    route = mode.as_str(),
+                    model = %primary.model(),
+                    ms = started.elapsed().as_millis() as u64,
+                    "llm route done"
+                );
+                Ok(v)
+            }
             Err(e) if tools_requested(&tools) && is_tool_unsupported_error(&e) => {
                 // e.g. morph/morph-v3-fast is a code-apply model — no tool endpoints.
                 // Fall back to the other tier so voice+tools keep working.
@@ -200,11 +210,29 @@ impl LlmClient for RoutingClient {
                     failed_model = %primary.model(),
                     fallback_model = %fallback.model(),
                     error = %e,
+                    ms = started.elapsed().as_millis() as u64,
                     "model does not support tools; retrying with other route"
                 );
-                fallback.complete(messages, tools).await
+                let retry_t = Instant::now();
+                let result = fallback.complete(messages, tools).await;
+                tracing::debug!(
+                    model = %fallback.model(),
+                    ms = retry_t.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "llm route fallback done"
+                );
+                result
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                tracing::debug!(
+                    route = mode.as_str(),
+                    model = %primary.model(),
+                    ms = started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "llm route failed"
+                );
+                Err(e)
+            }
         }
     }
 

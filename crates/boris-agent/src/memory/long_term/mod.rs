@@ -28,6 +28,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use chrono::Local;
 
@@ -184,6 +185,7 @@ impl LongTermMemory {
     ///
     /// No-ops (Ok) when no session dir is bound — avoids writing under global memory.
     pub fn append_turn(&self, user: &str, assistant: &str) -> Result<(), String> {
+        let started = Instant::now();
         let user = user.trim();
         let assistant = assistant.trim();
         if user.is_empty() && assistant.is_empty() {
@@ -232,11 +234,17 @@ impl LongTermMemory {
         }
         f.write_all(block.as_bytes())
             .map_err(|e| format!("append session: {e}"))?;
+        tracing::debug!(
+            ms = started.elapsed().as_millis() as u64,
+            path = %path.display(),
+            "memory append_turn"
+        );
         Ok(())
     }
 
     /// Keyword search over global MEMORY + workspace MEMORY + session `memory.md` files.
     pub fn search(&self, query: &str, max_results: usize) -> Result<Vec<MemoryHit>, String> {
+        let started = Instant::now();
         let q = query.trim().to_ascii_lowercase();
         if q.is_empty() {
             return Err("query is empty".into());
@@ -285,6 +293,12 @@ impl LongTermMemory {
 
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
         hits.truncate(max_results);
+        tracing::info!(
+            query = %query.trim(),
+            hits = hits.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "memory search"
+        );
         Ok(hits)
     }
 
@@ -293,6 +307,7 @@ impl LongTermMemory {
     /// - Global: `MEMORY.md`, `desktop/MEMORY.md`, …
     /// - Session: `session/{uuid}/memory.md`
     pub fn get(&self, rel_path: &str, max_chars: usize) -> Result<String, String> {
+        let started = Instant::now();
         let rel = rel_path.trim().trim_start_matches(['/', '\\']);
         if rel.is_empty() {
             return Err("path is empty".into());
@@ -323,11 +338,19 @@ impl LongTermMemory {
             .and_then(|mut f| f.read_to_string(&mut raw))
             .map_err(|e| format!("read {rel}: {e}"))?;
         let max_chars = max_chars.clamp(200, 40_000);
-        if raw.chars().count() <= max_chars {
-            return Ok(raw);
-        }
-        let head: String = raw.chars().take(max_chars).collect();
-        Ok(format!("{head}\n…[truncated]"))
+        let text = if raw.chars().count() <= max_chars {
+            raw
+        } else {
+            let head: String = raw.chars().take(max_chars).collect();
+            format!("{head}\n…[truncated]")
+        };
+        tracing::info!(
+            path = %rel,
+            chars = text.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "memory get"
+        );
+        Ok(text)
     }
 
     /// Resolve `session/{uuid}/memory.md` → absolute path under `sessions_root`.

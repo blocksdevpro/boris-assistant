@@ -18,11 +18,6 @@ pub(crate) fn env_truthy(key: &str) -> Option<bool> {
     }
 }
 
-/// Env is one of `1` / `true` / `yes` / `on` (case-insensitive).
-pub(crate) fn env_flag_true(key: &str) -> bool {
-    env_truthy(key) == Some(true)
-}
-
 /// Env is one of `0` / `false` / `no` / `off` (case-insensitive).
 pub(crate) fn env_flag_false(key: &str) -> bool {
     env_truthy(key) == Some(false)

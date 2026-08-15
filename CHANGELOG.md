@@ -13,6 +13,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Hearing now uses **Silero VAD** (official streaming ONNX) instead of the
+  deprecated WebRTC/libfvad GMM. Every 32 ms hop is scored so LSTM state
+  stays aligned. Threshold override: `BORIS_VAD_THRESHOLD`.
+- Silero endpointing: freeform trailing silence is **550 ms** (LiveKit Agents
+  Silero default) and yes/no confirm silence is **250 ms**. The old 900 / 420
+  ms windows were hangover for WebRTC flicker.
 - Default chat model is `deepseek/deepseek-v4-flash-0731` via DigitalOcean
   (`digitalocean`). Existing saved model/provider choices are unchanged.
 - Desktop process and log files are named `boris` (not `boris-desktop`).

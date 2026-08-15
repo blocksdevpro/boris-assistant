@@ -32,7 +32,7 @@
 //!     audit/                 # legacy global audit (unused by engine)
 //!       tool_calls.jsonl
 //!   models/
-//!     parakeet/ | supertone/ | livekit/
+//!     parakeet/ | supertone/ | livekit/ | silero/
 //!   state/
 //!     workspace/             # default agent write root (was top-level sandbox/)
 //! ```
@@ -121,6 +121,10 @@ pub fn livekit_dir() -> PathBuf {
     models_dir().join("livekit")
 }
 
+pub fn silero_dir() -> PathBuf {
+    models_dir().join("silero")
+}
+
 // ── Sessions (Grok: sessions/{cwd-encoded}/) ─────────────────────────────────
 
 /// Root of all sessions (`~/.boris/sessions`).
@@ -145,6 +149,16 @@ pub fn ensure_logs_dir() -> std::io::Result<()> {
 
 pub fn ensure_sessions_dir() -> std::io::Result<()> {
     fs::create_dir_all(sessions_dir())
+}
+
+/// Structured per-turn performance traces (`~/.boris/traces`).
+pub fn traces_dir() -> PathBuf {
+    boris_home().join("traces")
+}
+
+/// Append-only engine trace stream consumed by `cargo xtask trace-report`.
+pub fn turn_traces_path() -> PathBuf {
+    traces_dir().join("turns.jsonl")
 }
 
 /// Legacy global tool audit directory (`~/.boris/logs/audit`).
@@ -221,6 +235,7 @@ pub fn ensure_agent_dirs() -> std::io::Result<()> {
     fs::create_dir_all(skills_dir())?;
     fs::create_dir_all(memory_dir())?;
     fs::create_dir_all(memory_workspace_dir())?;
+    fs::create_dir_all(traces_dir())?;
     // Session turn logs live under sessions/{id}/memory.md — do not create
     // the legacy memory/desktop/sessions tree.
     fs::create_dir_all(memory_workspace_dir())?;
@@ -233,6 +248,7 @@ pub fn ensure_model_dirs() -> std::io::Result<()> {
         supertone_onnx_dir(),
         supertone_voices_dir(),
         livekit_dir(),
+        silero_dir(),
     ] {
         fs::create_dir_all(&d)?;
     }
@@ -581,6 +597,15 @@ pub fn bootstrap_models_if_needed() -> Result<(), String> {
         if from.is_dir() {
             tracing::info!(from = %from.display(), to = %live.display(), "seeding livekit wake into ~/.boris");
             copy_dir_recursive(&from, &live).map_err(|e| format!("copy livekit: {e}"))?;
+        }
+    }
+
+    let silero = silero_dir();
+    if !silero.join("silero_vad.onnx").is_file() {
+        let from = src_root.join("silero");
+        if from.is_dir() {
+            tracing::info!(from = %from.display(), to = %silero.display(), "seeding silero vad into ~/.boris");
+            copy_dir_recursive(&from, &silero).map_err(|e| format!("copy silero: {e}"))?;
         }
     }
 

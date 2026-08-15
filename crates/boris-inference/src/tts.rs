@@ -72,6 +72,17 @@ pub trait TextToSpeech: Send {
         0
     }
 
+    /// Number of native-rate silent samples the host should place between
+    /// separately synthesized speakable units.
+    ///
+    /// Most adapters do not split replies and therefore return zero. Adapters
+    /// that own sentence pacing (such as Supertone) override this so a host can
+    /// stream units without losing the same pause that a one-shot synthesis
+    /// would have inserted.
+    fn inter_unit_silence_samples(&self) -> usize {
+        0
+    }
+
     /// Synthesize `text` to a mono PCM buffer.
     ///
     /// Empty or whitespace-only input should return an empty buffer.
@@ -150,6 +161,7 @@ mod tests {
         assert!(!bare.is_loaded());
         assert_eq!(bare.backend_id(), "unknown");
         assert_eq!(bare.sample_rate(), 0);
+        assert_eq!(bare.inter_unit_silence_samples(), 0);
     }
 
     #[test]

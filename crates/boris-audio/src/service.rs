@@ -29,6 +29,16 @@ const OUTPUT_COMMAND_CAPACITY: usize = 16;
 const DEFAULT_INPUT_SUBSCRIBER_QUEUE: usize = 64;
 /// Default play source rate when unspecified (Supertone native).
 const DEFAULT_SOURCE_RATE_HZ: u32 = 44_100;
+/// Maximum time a lifecycle control command may take to reach and be applied
+/// by the output worker. This is intentionally bounded so a dead worker cannot
+/// strand the engine in Talking forever.
+const OUTPUT_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Small bounded enqueue wait for streamed PCM. The engine produces at most a
+/// sentence at a time; a short wait absorbs worker resampling jitter without
+/// making Stop handling feel unresponsive.
+const OUTPUT_APPEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Stop must remain responsive if a failed worker stops consuming commands.
+const OUTPUT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Full-duplex audio: mic capture fan-out + TTS playback.
 ///
@@ -225,11 +235,85 @@ impl AudioService {
     /// Uses non-blocking `try_send`. Returns `Err` when the command queue is full
     /// (backpressure — caller may retry) or the output worker is gone.
     pub fn play(&self, audio: AudioBuffer) -> Result<()> {
+        self.send_play_cmd(OutputCommand::Play(audio))
+    }
+
+    /// Append PCM to the current play job (streaming units). Starts a job if idle.
+    /// Waits briefly for queue capacity so a sentence is not silently dropped.
+    pub fn append(&self, audio: AudioBuffer) -> Result<()> {
         match self
             .output_command_channel
             .0
-            .try_send(OutputCommand::Play(audio))
+            .send_timeout(OutputCommand::Append(audio), OUTPUT_APPEND_TIMEOUT)
         {
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => Err(Error::audio(
+                "output command queue stayed full while appending streamed audio",
+            )),
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => Err(Error::audio(
+                "output worker gone while appending streamed audio",
+            )),
+        }
+    }
+
+    /// Close a streaming play job so [`OutputEvent::Drained`] can fire.
+    ///
+    /// Unlike PCM enqueueing, this lifecycle transition is acknowledged by the
+    /// output worker. Success therefore means `job_open` is definitely false;
+    /// failures are bounded by a timeout and must be handled by stopping the job.
+    pub fn finish_job(&self) -> Result<()> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        match self
+            .output_command_channel
+            .0
+            .send_timeout(OutputCommand::FinishJob(ack_tx), OUTPUT_CONTROL_TIMEOUT)
+        {
+            Ok(()) => {}
+            Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => {
+                return Err(Error::audio(
+                    "output worker did not accept FinishJob before timeout",
+                ));
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                return Err(Error::audio("output worker gone while finishing play job"));
+            }
+        }
+
+        match ack_rx.recv_timeout(OUTPUT_CONTROL_TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Err(Error::audio(
+                "output worker did not acknowledge FinishJob before timeout",
+            )),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(Error::audio(
+                "output worker dropped FinishJob acknowledgement",
+            )),
+        }
+    }
+
+    /// Try to enqueue an acknowledged streaming-job close without blocking.
+    ///
+    /// The returned receiver resolves only after the output worker has applied
+    /// the close. Event-loop hosts can retry a queue-full error while continuing
+    /// to process Stop/device-switch commands, then poll the acknowledgement.
+    pub fn request_finish_job(&self) -> Result<crossbeam_channel::Receiver<()>> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        match self
+            .output_command_channel
+            .0
+            .try_send(OutputCommand::FinishJob(ack_tx))
+        {
+            Ok(()) => Ok(ack_rx),
+            Err(crossbeam_channel::TrySendError::Full(_)) => Err(Error::audio(
+                "output command queue full while requesting FinishJob",
+            )),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => Err(Error::audio(
+                "output worker gone while requesting FinishJob",
+            )),
+        }
+    }
+
+    fn send_play_cmd(&self, cmd: OutputCommand) -> Result<()> {
+        match self.output_command_channel.0.try_send(cmd) {
             Ok(()) => Ok(()),
             Err(crossbeam_channel::TrySendError::Full(_)) => Err(Error::audio(
                 "output command queue full — play dropped (backpressure)",
@@ -243,30 +327,40 @@ impl AudioService {
 
     /// Stop / clear current playback as soon as possible.
     ///
-    /// Prefer `try_send`; fall back to a blocking `send` if the queue is full so
-    /// a Flush is not lost behind pending Play buffers.
+    /// Prefer `try_send`; briefly wait for capacity if the queue is full. The
+    /// fallback is bounded so a failed output worker cannot hang shutdown.
     pub fn stop(&self) {
-        match self.output_command_channel.0.try_send(OutputCommand::Flush) {
-            Ok(()) => {}
-            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                if self
-                    .output_command_channel
-                    .0
-                    .send(OutputCommand::Flush)
-                    .is_err()
-                {
-                    tracing::error!("AudioService::stop — output worker gone");
-                }
-            }
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                tracing::error!("AudioService::stop — output worker gone");
-            }
+        if let Err(error) = enqueue_flush(&self.output_command_channel.0, OUTPUT_STOP_TIMEOUT) {
+            tracing::error!(%error, "AudioService::stop failed");
         }
     }
 
     /// Clone the output event receiver (Started / Drained / Cleared).
     pub fn subscribe_output(&self) -> crossbeam_channel::Receiver<OutputEvent> {
         self.output_event_channel.1.clone()
+    }
+}
+
+fn enqueue_flush(
+    tx: &crossbeam_channel::Sender<OutputCommand>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    match tx.try_send(OutputCommand::Flush) {
+        Ok(()) => Ok(()),
+        Err(crossbeam_channel::TrySendError::Full(command)) => {
+            match tx.send_timeout(command, timeout) {
+                Ok(()) => Ok(()),
+                Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => Err(Error::audio(
+                    "output command queue stayed full while stopping playback",
+                )),
+                Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                    Err(Error::audio("output worker gone while stopping playback"))
+                }
+            }
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            Err(Error::audio("output worker gone while stopping playback"))
+        }
     }
 }
 
@@ -288,4 +382,27 @@ fn open_output_pipeline(
         output_command_channel,
         output_pipeline,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_enqueue_has_a_hard_capacity_deadline() {
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        tx.send(OutputCommand::Flush).unwrap();
+        let started = std::time::Instant::now();
+        let error = enqueue_flush(&tx, std::time::Duration::from_millis(30)).unwrap_err();
+        assert!(error.to_string().contains("stayed full"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn flush_enqueue_reports_disconnected_worker() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+        let error = enqueue_flush(&tx, std::time::Duration::from_millis(30)).unwrap_err();
+        assert!(error.to_string().contains("worker gone"));
+    }
 }

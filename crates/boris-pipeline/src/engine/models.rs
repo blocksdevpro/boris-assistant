@@ -12,14 +12,147 @@ use boris_inference::{SpeechToText, TextToSpeech};
 pub(super) type SttBox = Box<dyn SpeechToText>;
 pub(super) type TtsBox = Box<dyn TextToSpeech>;
 
-/// Background model load that never panics the engine thread on spawn failure.
-///
-/// Call sites treat the joined `Result` as a fault-friendly load error (same as
-/// a failed `load()`), so spawn OS errors surface cleanly instead of aborting.
+/// How long voice models stay resident after a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModelResidency {
+    /// Eager eviction (original behavior).
+    LowMemory,
+    /// Keep models through an active turn/follow-up chain, then release both
+    /// when Boris returns to idle. This avoids reload churn during a dialogue
+    /// without retaining weights for the whole powered-on session.
+    Balanced,
+    /// Keep models loaded while the engine/session is active.
+    LowLatency,
+}
+
+impl ModelResidency {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low_memory" | "low-memory" => Self::LowMemory,
+            "low_latency" | "low-latency" => Self::LowLatency,
+            _ => Self::Balanced,
+        }
+    }
+
+    pub fn should_evict_at_handoff(self) -> bool {
+        matches!(self, Self::LowMemory)
+    }
+
+    pub fn should_evict_idle(self) -> bool {
+        !matches!(self, Self::LowLatency)
+    }
+}
+
+/// Result lane for one request sent to a reusable model-loader thread.
 pub(super) enum ModelLoadJob<T> {
-    Thread(JoinHandle<(T, Result<(), String>)>),
-    /// Spawn failed (or sync recovery); `T` is still owned for the engine.
+    Pending(std::sync::mpsc::Receiver<(T, Result<(), String>)>),
+    /// Worker startup/send failed; `T` remains owned by the engine.
     Ready(T, Result<(), String>),
+}
+
+type LoadFn<T> = fn(&mut T) -> Result<(), String>;
+
+enum LoaderCommand<T> {
+    Load {
+        model: T,
+        result: std::sync::mpsc::SyncSender<(T, Result<(), String>)>,
+    },
+}
+
+/// One reusable OS thread per model kind. Requests still transfer exclusive
+/// model ownership, but turns no longer create and tear down loader threads.
+pub(super) struct ModelLoader<T: Send + 'static> {
+    tx: Option<std::sync::mpsc::SyncSender<LoaderCommand<T>>>,
+    worker: Option<JoinHandle<()>>,
+    load_inline: LoadFn<T>,
+    label: &'static str,
+}
+
+impl<T: Send + 'static> ModelLoader<T> {
+    fn new(thread_name: &'static str, label: &'static str, load: LoadFn<T>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<LoaderCommand<T>>(1);
+        match thread::Builder::new()
+            .name(thread_name.into())
+            .spawn(move || {
+                while let Ok(LoaderCommand::Load { mut model, result }) = rx.recv() {
+                    let started = std::time::Instant::now();
+                    let loaded = load(&mut model);
+                    if loaded.is_ok() {
+                        tracing::info!(
+                            model = label,
+                            ms = started.elapsed().as_millis() as u64,
+                            "model preload ready"
+                        );
+                    }
+                    if result.send((model, loaded)).is_err() {
+                        tracing::warn!(model = label, "model load result receiver dropped");
+                    }
+                }
+            }) {
+            Ok(worker) => Self {
+                tx: Some(tx),
+                worker: Some(worker),
+                load_inline: load,
+                label,
+            },
+            Err(error) => {
+                tracing::error!(%error, model = label, "failed to spawn reusable model loader");
+                Self {
+                    tx: None,
+                    worker: None,
+                    load_inline: load,
+                    label,
+                }
+            }
+        }
+    }
+
+    pub fn load(&self, mut model: T) -> ModelLoadJob<T> {
+        let Some(tx) = self.tx.as_ref() else {
+            let result = (self.load_inline)(&mut model);
+            return ModelLoadJob::Ready(model, result);
+        };
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        match tx.send(LoaderCommand::Load {
+            model,
+            result: result_tx,
+        }) {
+            Ok(()) => ModelLoadJob::Pending(result_rx),
+            Err(std::sync::mpsc::SendError(LoaderCommand::Load { mut model, .. })) => {
+                tracing::error!(model = self.label, "reusable model loader disconnected");
+                let result = (self.load_inline)(&mut model);
+                ModelLoadJob::Ready(model, result)
+            }
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for ModelLoader<T> {
+    fn drop(&mut self) {
+        // Disconnect wakes an idle worker. The engine joins only during runtime
+        // teardown; any active load is allowed to return its model first.
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!(
+                    model = self.label,
+                    "model loader thread panicked on shutdown"
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn create_stt_loader() -> ModelLoader<SttBox> {
+    ModelLoader::new("boris-stt-loader", "stt", |stt| {
+        stt.load().map_err(|error| error.to_string())
+    })
+}
+
+pub(super) fn create_tts_loader() -> ModelLoader<TtsBox> {
+    ModelLoader::new("boris-tts-loader", "tts", |tts| {
+        tts.load().map_err(|error| error.to_string())
+    })
 }
 
 /// Drop STT + TTS weights from RAM. Safe if already unloaded.
@@ -37,122 +170,21 @@ pub(super) fn release_voice_models(
     tracing::info!(%reason, "STT/TTS released (idle RAM)");
 }
 
-/// Load STT on a helper thread (overlaps with mic capture / playback).
-pub(super) fn spawn_stt_load(stt: SttBox) -> ModelLoadJob<SttBox> {
-    // Deliver the model after a successful spawn so a failed spawn keeps ownership
-    // (moving into the closure would drop STT when the OS rejects the thread).
-    let (tx, rx) = std::sync::mpsc::sync_channel::<SttBox>(1);
-    match thread::Builder::new()
-        .name("boris-stt-load".into())
-        .spawn(move || {
-            let mut stt = match rx.recv() {
-                Ok(s) => s,
-                Err(_) => {
-                    return (
-                        Box::new(LostStt) as SttBox,
-                        Err("stt load channel closed".into()),
-                    );
-                }
-            };
-            let t = std::time::Instant::now();
-            let r = stt.load().map_err(|e| e.to_string());
-            if r.is_ok() {
-                tracing::info!(ms = t.elapsed().as_millis() as u64, "stt preload ready");
-            }
-            (stt, r)
-        }) {
-        Ok(h) => match tx.send(stt) {
-            Ok(()) => ModelLoadJob::Thread(h),
-            Err(std::sync::mpsc::SendError(stt)) => {
-                let _ = h.join();
-                ModelLoadJob::Ready(
-                    stt,
-                    Err("stt load thread exited before receiving model".into()),
-                )
-            }
-        },
-        Err(e) => {
-            tracing::error!(error = %e, "failed to spawn stt load thread");
-            ModelLoadJob::Ready(stt, Err(format!("spawn stt load thread: {e}")))
-        }
-    }
-}
-
 pub(super) fn join_stt_load(job: ModelLoadJob<SttBox>) -> (SttBox, Result<(), String>) {
     match job {
-        ModelLoadJob::Thread(h) => h.join().unwrap_or_else(|_| {
-            tracing::error!("stt load thread panicked");
-            // Recover with a no-op stub so the engine can still stop cleanly.
-            (Box::new(LostStt), Err("stt load thread panicked".into()))
+        ModelLoadJob::Pending(rx) => rx.recv().unwrap_or_else(|_| {
+            tracing::error!("stt loader disconnected before returning model");
+            (Box::new(LostStt), Err("stt loader disconnected".into()))
         }),
         ModelLoadJob::Ready(stt, r) => (stt, r),
     }
 }
 
-/// Reclaim STT after an optional follow-up preload job (or the idle slot).
-pub(super) fn reclaim_stt_slot(
-    slot: &mut Option<SttBox>,
-    job: &mut Option<ModelLoadJob<SttBox>>,
-) -> SttBox {
-    if let Some(j) = job.take() {
-        let (stt, load_r) = join_stt_load(j);
-        if let Err(e) = load_r {
-            tracing::warn!(error = %e, "stt follow-up preload failed (will retry on next turn)");
-        }
-        return stt;
-    }
-    if let Some(stt) = slot.take() {
-        return stt;
-    }
-    // Invariant broken (should never happen). Recover so the engine loop continues.
-    tracing::error!("stt slot empty (invariant broken); recovering with placeholder STT");
-    Box::new(LostStt)
-}
-
-/// Load TTS on a helper thread (overlaps with agent thinking).
-pub(super) fn spawn_tts_load(tts: TtsBox) -> ModelLoadJob<TtsBox> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<TtsBox>(1);
-    match thread::Builder::new()
-        .name("boris-tts-load".into())
-        .spawn(move || {
-            let mut tts = match rx.recv() {
-                Ok(s) => s,
-                Err(_) => {
-                    return (
-                        Box::new(LostTts) as TtsBox,
-                        Err("tts load channel closed".into()),
-                    );
-                }
-            };
-            let t = std::time::Instant::now();
-            let r = tts.load().map_err(|e| e.to_string());
-            if r.is_ok() {
-                tracing::info!(ms = t.elapsed().as_millis() as u64, "tts preload ready");
-            }
-            (tts, r)
-        }) {
-        Ok(h) => match tx.send(tts) {
-            Ok(()) => ModelLoadJob::Thread(h),
-            Err(std::sync::mpsc::SendError(tts)) => {
-                let _ = h.join();
-                ModelLoadJob::Ready(
-                    tts,
-                    Err("tts load thread exited before receiving model".into()),
-                )
-            }
-        },
-        Err(e) => {
-            tracing::error!(error = %e, "failed to spawn tts load thread");
-            ModelLoadJob::Ready(tts, Err(format!("spawn tts load thread: {e}")))
-        }
-    }
-}
-
 pub(super) fn join_tts_load(job: ModelLoadJob<TtsBox>) -> (TtsBox, Result<(), String>) {
     match job {
-        ModelLoadJob::Thread(h) => h.join().unwrap_or_else(|_| {
-            tracing::error!("tts load thread panicked");
-            (Box::new(LostTts), Err("tts load thread panicked".into()))
+        ModelLoadJob::Pending(rx) => rx.recv().unwrap_or_else(|_| {
+            tracing::error!("tts loader disconnected before returning model");
+            (Box::new(LostTts), Err("tts loader disconnected".into()))
         }),
         ModelLoadJob::Ready(tts, r) => (tts, r),
     }
@@ -171,6 +203,38 @@ pub(super) fn unload_tts(tts: &mut dyn TextToSpeech, turn: TurnId) {
         tracing::warn!(error = %e, %turn, "tts unload failed");
     } else {
         tracing::debug!(%turn, "tts unloaded");
+    }
+}
+
+pub(super) fn maybe_unload_stt(
+    stt: &mut dyn SpeechToText,
+    turn: TurnId,
+    residency: ModelResidency,
+) {
+    if residency.should_evict_at_handoff() {
+        unload_stt(stt, turn);
+    }
+}
+
+pub(super) fn maybe_unload_tts(
+    tts: &mut dyn TextToSpeech,
+    turn: TurnId,
+    residency: ModelResidency,
+) {
+    if residency.should_evict_at_handoff() {
+        unload_tts(tts, turn);
+    }
+}
+
+pub(super) fn maybe_unload_idle(
+    stt: &mut dyn SpeechToText,
+    tts: &mut dyn TextToSpeech,
+    turn: TurnId,
+    residency: ModelResidency,
+) {
+    if residency.should_evict_idle() {
+        unload_stt(stt, turn);
+        unload_tts(tts, turn);
     }
 }
 
@@ -206,14 +270,6 @@ pub(super) fn create_tts(
     }
 }
 
-/// Build a placeholder STT so a caller can recover from a broken invariant
-/// (e.g. an `Option<SttBox>` slot unexpectedly empty) without panicking the
-/// engine thread. Every call transcribes to an error; the next real load
-/// replaces it as usual.
-pub(super) fn lost_stt() -> SttBox {
-    Box::new(LostStt)
-}
-
 /// Placeholder if the STT handle was lost (load-thread panic or empty slot recovery).
 struct LostStt;
 impl SpeechToText for LostStt {
@@ -226,6 +282,12 @@ impl SpeechToText for LostStt {
 
 struct LostTts;
 impl TextToSpeech for LostTts {
+    fn load(&mut self) -> boris_core::Result<()> {
+        Err(boris_core::Error::other(
+            "TTS model unavailable (worker detached or panicked)",
+        ))
+    }
+
     fn backend_id(&self) -> &str {
         "lost"
     }
@@ -235,6 +297,10 @@ impl TextToSpeech for LostTts {
             "TTS model unavailable (load-thread panic)",
         ))
     }
+}
+
+pub(super) fn lost_tts() -> TtsBox {
+    Box::new(LostTts)
 }
 
 // ── Optional null backends when features are off ─────────────────────────────
@@ -260,5 +326,51 @@ impl TextToSpeech for NullTts {
 
     fn synthesize(&mut self, _: &str) -> boris_core::Result<boris_core::AudioBuffer> {
         Err(boris_core::Error::other("tts-supertone feature disabled"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelLoadJob, ModelLoader, ModelResidency};
+
+    #[test]
+    fn residency_handoff_and_idle_policy_is_explicit() {
+        assert!(ModelResidency::LowMemory.should_evict_at_handoff());
+        assert!(!ModelResidency::Balanced.should_evict_at_handoff());
+        assert!(!ModelResidency::LowLatency.should_evict_at_handoff());
+
+        assert!(ModelResidency::LowMemory.should_evict_idle());
+        assert!(ModelResidency::Balanced.should_evict_idle());
+        assert!(!ModelResidency::LowLatency.should_evict_idle());
+    }
+
+    #[test]
+    fn reusable_loader_handles_multiple_requests_on_one_thread() {
+        #[derive(Default)]
+        struct Probe {
+            loaded_on: Vec<std::thread::ThreadId>,
+        }
+
+        fn load(probe: &mut Probe) -> Result<(), String> {
+            probe.loaded_on.push(std::thread::current().id());
+            Ok(())
+        }
+
+        fn join(job: ModelLoadJob<Probe>) -> Probe {
+            match job {
+                ModelLoadJob::Pending(rx) => rx.recv().expect("loader result").0,
+                ModelLoadJob::Ready(model, result) => {
+                    result.expect("inline fallback load");
+                    model
+                }
+            }
+        }
+
+        let loader = ModelLoader::new("boris-test-loader", "probe", load);
+        let probe = join(loader.load(Probe::default()));
+        let probe = join(loader.load(probe));
+        assert_eq!(probe.loaded_on.len(), 2);
+        assert_eq!(probe.loaded_on[0], probe.loaded_on[1]);
+        assert_ne!(probe.loaded_on[0], std::thread::current().id());
     }
 }

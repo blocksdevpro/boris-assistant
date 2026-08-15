@@ -44,6 +44,22 @@ fn default_tts_voice() -> String {
     "M4".into()
 }
 
+fn default_model_residency() -> String {
+    "balanced".into()
+}
+
+fn default_barge_in() -> bool {
+    false
+}
+
+fn normalize_model_residency(raw: String) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "low_memory" | "low-memory" => "low_memory".into(),
+        "low_latency" | "low-latency" => "low_latency".into(),
+        _ => default_model_residency(),
+    }
+}
+
 /// Default HITL confirm budget per user turn (multi-tool friendly).
 fn default_max_confirms_per_turn() -> u32 {
     12
@@ -108,6 +124,12 @@ pub struct AppSettings {
     /// Supertone voice stem (e.g. `M4`).
     #[serde(default = "default_tts_voice")]
     pub tts_voice_id: String,
+    /// STT/TTS RAM policy: `low_memory` | `balanced` | `low_latency`.
+    #[serde(default = "default_model_residency")]
+    pub model_residency: String,
+    /// Reserved compatibility flag; ignored until echo-safe barge-in exists.
+    #[serde(default = "default_barge_in")]
+    pub voice_barge_in: bool,
     /// Markdown long-term memory tools + session logs.
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
@@ -158,6 +180,8 @@ impl Default for AppSettings {
             input_device: String::new(),
             output_device: String::new(),
             tts_voice_id: default_tts_voice(),
+            model_residency: default_model_residency(),
+            voice_barge_in: default_barge_in(),
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
@@ -269,12 +293,18 @@ struct AudioSection {
 struct SpeechSection {
     #[serde(default = "default_tts_voice")]
     tts_voice_id: String,
+    #[serde(default = "default_model_residency")]
+    model_residency: String,
+    #[serde(default = "default_barge_in")]
+    voice_barge_in: bool,
 }
 
 impl Default for SpeechSection {
     fn default() -> Self {
         Self {
             tts_voice_id: default_tts_voice(),
+            model_residency: default_model_residency(),
+            voice_barge_in: default_barge_in(),
         }
     }
 }
@@ -352,6 +382,8 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     } else {
         cfg.speech.tts_voice_id
     };
+    out.model_residency = normalize_model_residency(cfg.speech.model_residency);
+    out.voice_barge_in = cfg.speech.voice_barge_in;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
@@ -488,6 +520,8 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         } else {
             settings.tts_voice_id.trim().to_string()
         },
+        model_residency: normalize_model_residency(settings.model_residency.clone()),
+        voice_barge_in: settings.voice_barge_in,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
@@ -973,6 +1007,8 @@ mod tests {
             input_device: "mic-1".into(),
             output_device: "spk-1".into(),
             tts_voice_id: "M4".into(),
+            model_residency: "balanced".into(),
+            voice_barge_in: false,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,

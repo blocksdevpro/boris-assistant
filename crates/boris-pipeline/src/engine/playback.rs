@@ -12,6 +12,10 @@ use super::device_switch::{apply_input_switch, apply_output_switch};
 use super::picture::Picture;
 use super::EngineCommand;
 
+/// One-shot prompts are short. This is a fault-recovery ceiling, not expected
+/// speech duration; it prevents a lost RT lifecycle event from sticking the UI.
+const MAX_ONE_SHOT_PLAYBACK: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Result of draining host commands once.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PollOutcome {
@@ -103,12 +107,9 @@ pub(super) fn wait_playback_started(
             return PlaybackWait::Aborted;
         }
         if std::time::Instant::now() > deadline {
-            tracing::warn!("playback Started timeout — flipping UI anyway");
-            return if *running {
-                PlaybackWait::Finished
-            } else {
-                PlaybackWait::Stopped
-            };
+            tracing::warn!("playback Started timeout — aborting silent job");
+            audio.stop();
+            return PlaybackWait::Aborted;
         }
         match output_events.recv_timeout(std::time::Duration::from_millis(20)) {
             Ok(OutputEvent::Started) => return PlaybackWait::Finished,
@@ -129,24 +130,32 @@ pub(super) fn wait_playback_or_stop(
     running: &mut bool,
     audio: &mut AudioService,
     picture: &mut Picture,
-) {
+) -> PlaybackWait {
+    let deadline = std::time::Instant::now() + MAX_ONE_SHOT_PLAYBACK;
     loop {
         let poll = poll_running(cmd_rx, running, audio, output_events, picture);
         if !poll.running {
             audio.stop();
-            return;
+            return PlaybackWait::Stopped;
         }
         if poll.output_rebuilt {
             // Old pipeline (and its Drained event) is gone with the device rebuild.
             tracing::info!("speaker switched mid-playback — ending Talking wait");
-            return;
+            return PlaybackWait::Aborted;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("playback drain deadline exceeded — flushing stuck job");
+            audio.stop();
+            return PlaybackWait::Aborted;
         }
         match output_events.recv_timeout(std::time::Duration::from_millis(40)) {
             Ok(OutputEvent::Started) => continue, // already speaking
-            Ok(OutputEvent::Drained) => return,
-            Ok(OutputEvent::Cleared) => return,
+            Ok(OutputEvent::Drained) => return PlaybackWait::Finished,
+            Ok(OutputEvent::Cleared) => return PlaybackWait::Aborted,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return PlaybackWait::Aborted;
+            }
         }
     }
 }

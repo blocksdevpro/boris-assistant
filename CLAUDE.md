@@ -79,7 +79,7 @@ boris-stt-parakeet  boris-tts-supertone
 |-------|------|
 | `boris-core` | Shared audio type aliases, `TurnId`, foundation `Error`/`Result`. Deliberately dependency-free (no cpal/ORT/HTTP/Tokio) so it compiles everywhere. |
 | `boris-audio` | cpal capture/playback; resample to 16 kHz mono. RT audio callbacks only `try_send` — never block inside a cpal callback. |
-| `boris-sense` | VAD (webrtc-vad) + wake-word (LiveKit open-wake-word ONNX via `ort`). `init_onnx_runtime()` must be called once before constructing wake models. |
+| `boris-sense` | VAD (Silero ONNX via `ort`) + wake-word (LiveKit open-wake-word ONNX via `ort`). `init_onnx_runtime()` must be called once before constructing wake or VAD sessions. |
 | `boris-inference` | Object-safe `SpeechToText`/`TextToSpeech` trait ports only — no concrete models. |
 | `boris-stt-parakeet` | NVIDIA Parakeet STT adapter (via `transcribe-rs`), `backend_id = "parakeet"`. |
 | `boris-tts-supertone` | Product TTS adapter (Supertonic 3 via `st-tts`), 44.1 kHz mono, `backend_id = "supertone"`. Owns inter-unit silence; runs its own private Tokio runtime via `block_on` on the sync engine thread. |
@@ -121,7 +121,7 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
                  #   [agent], [ui] unconditionally, and [logging] when a filter is set;
                  #   unknown tables/keys outside those are preserved
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
-  models/        # parakeet/, supertone/onnx/, supertone/voices/
+  models/        # parakeet/, supertone/onnx/, supertone/voices/, optional livekit/ + silero/ seeds
   sessions/      # transcripts + per-session artifacts/
   memory/        # long-term markdown memory
   skills/        # skill playbooks
@@ -142,6 +142,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate-risk tools |
 | `BORIS_MEMORY` | `0` disables long-term memory |
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
+| `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |
 

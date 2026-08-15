@@ -7,6 +7,11 @@
 !/assets/models/livekit/
 /assets/models/livekit/*
 !/assets/models/livekit/boris-large.onnx
+!/assets/models/silero/
+/assets/models/silero/*
+!/assets/models/silero/silero_vad.onnx
+!/assets/models/silero/LICENSE
+!/assets/models/silero/NOTICE.txt
 # Tauri updater signing private key — never commit
 .tauri/*.key
 .env

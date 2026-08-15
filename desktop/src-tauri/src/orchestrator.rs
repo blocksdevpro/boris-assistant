@@ -28,6 +28,11 @@ use tracing::{debug, error, info, warn};
 static WAKEWORD_MODEL_BYTES: &[u8] =
     include_bytes!("../../../assets/models/livekit/boris-large.onnx");
 
+/// Embedded Silero VAD (path relative to this crate → workspace `assets/`).
+///
+/// Same reason as wake: Hearing cannot run without it, and the graph is ~2 MB.
+static VAD_MODEL_BYTES: &[u8] = include_bytes!("../../../assets/models/silero/silero_vad.onnx");
+
 /// LLM args that force an engine rebuild when they change while a thread is live.
 ///
 /// Pipeline config is fixed at [`Engine::spawn`]; there is no in-thread reconfigure.
@@ -261,6 +266,7 @@ impl AppState {
         info!(
             boris_home = %paths::boris_home().display(),
             wake_model_bytes = WAKEWORD_MODEL_BYTES.len(),
+            vad_model_bytes = VAD_MODEL_BYTES.len(),
             "spawning pipeline engine"
         );
 
@@ -270,8 +276,12 @@ impl AppState {
         prefs.openrouter_model_provider = fingerprint.model_provider.clone();
         prefs.openrouter_fast_provider = fingerprint.fast_provider.clone();
         prefs.openrouter_pin_provider = fingerprint.pin_provider;
-        let config =
-            PipelineConfig::with_llm(prefs, SUPERTONE_SAMPLE_RATE, WAKEWORD_MODEL_BYTES.to_vec());
+        let config = PipelineConfig::with_llm(
+            prefs,
+            SUPERTONE_SAMPLE_RATE,
+            WAKEWORD_MODEL_BYTES.to_vec(),
+            VAD_MODEL_BYTES.to_vec(),
+        );
 
         let (engine, handle, status_rx) = Engine::spawn(config).map_err(|e| e.to_string())?;
         *lock_or_recover(&self.engine, "engine") = Some(engine);

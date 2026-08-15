@@ -86,6 +86,8 @@ pub struct PipelineConfig {
     pub play_source_rate: u32,
     /// Wake-word ONNX model bytes (host may embed or load from disk).
     pub wakeword_model: Vec<u8>,
+    /// Silero VAD ONNX bytes (host embeds or loads from disk).
+    pub vad_model: Vec<u8>,
     pub mic_label: String,
     pub speaker_label: String,
     /// Parakeet model directory.
@@ -105,6 +107,11 @@ pub struct PipelineConfig {
     pub trusted_auto_moderate: bool,
     /// Max HITL confirmations per user turn before remaining calls are denied.
     pub max_confirms_per_turn: u32,
+    /// STT/TTS residency: `low_memory` | `balanced` | `low_latency`.
+    pub model_residency: String,
+    /// Reserved compatibility setting. Ignored until playback has echo-safe
+    /// barge-in; it is intentionally not exposed by the desktop UI.
+    pub voice_barge_in: bool,
 }
 
 impl PipelineConfig {
@@ -121,14 +128,20 @@ impl PipelineConfig {
         openrouter_model: Option<String>,
         play_source_rate: u32,
         wakeword_model: Vec<u8>,
+        vad_model: Vec<u8>,
     ) -> Self {
         let mut prefs = LlmPrefs::new(openrouter_api_key);
         prefs.openrouter_model = openrouter_model;
-        Self::with_llm(prefs, play_source_rate, wakeword_model)
+        Self::with_llm(prefs, play_source_rate, wakeword_model, vad_model)
     }
 
     /// Full LLM configuration (models + OpenRouter model-providers).
-    pub fn with_llm(prefs: LlmPrefs, play_source_rate: u32, wakeword_model: Vec<u8>) -> Self {
+    pub fn with_llm(
+        prefs: LlmPrefs,
+        play_source_rate: u32,
+        wakeword_model: Vec<u8>,
+        vad_model: Vec<u8>,
+    ) -> Self {
         // Best-effort dev seed from workspace `assets/models` only.
         // Product path for clean installs is `download::install_models`.
         if let Err(e) = paths::bootstrap_models_if_needed() {
@@ -157,6 +170,7 @@ impl PipelineConfig {
             system_prompt: BORIS_SYSTEM_PROMPT.to_string(),
             play_source_rate,
             wakeword_model,
+            vad_model,
             mic_label: "Default mic".into(),
             speaker_label: "Default speaker".into(),
             stt_model_dir: paths::parakeet_dir(),
@@ -167,8 +181,29 @@ impl PipelineConfig {
             long_term_memory,
             trusted_auto_moderate,
             max_confirms_per_turn,
+            model_residency: resolve_model_residency(&saved),
+            voice_barge_in: resolve_voice_barge_in(&saved),
         }
     }
+}
+
+fn resolve_model_residency(saved: &AppSettings) -> String {
+    if let Ok(raw) = std::env::var("BORIS_MODEL_RESIDENCY") {
+        let t = raw.trim().to_ascii_lowercase();
+        if matches!(t.as_str(), "low_memory" | "balanced" | "low_latency") {
+            return t;
+        }
+    }
+    let t = saved.model_residency.trim().to_ascii_lowercase();
+    if matches!(t.as_str(), "low_memory" | "balanced" | "low_latency") {
+        t
+    } else {
+        "balanced".into()
+    }
+}
+
+fn resolve_voice_barge_in(saved: &AppSettings) -> bool {
+    env_truthy("BORIS_BARGE_IN").unwrap_or(saved.voice_barge_in)
 }
 
 /// Priority: explicit arg → env → config.toml → None (engine default).

@@ -1,42 +1,54 @@
-//! Voice-activity detection port + WebRTC adapter.
+//! Voice-activity detection port + Silero ONNX adapter.
 //!
-//! The engine feeds fixed-size frames ([`VAD_WINDOW_SIZE`]) at
+//! The engine feeds fixed-size hops ([`VAD_WINDOW_SIZE`]) at
 //! [`boris_core::AUDIO_TARGET_RATE`] and uses silence/initial timeouts from
 //! [`crate::time`] measured in **samples**.
 
 #[cfg(feature = "vad")]
-mod webrtc;
+mod silero;
 
 use std::time::Duration;
 
 use boris_core::{AudioSample, Result};
 
 #[cfg(feature = "vad")]
-pub use webrtc::{WebRtcVad, WEBRTC_VAD_FRAME_SAMPLES_16K};
+pub use silero::{
+    SileroVad, SILERO_SPEECH_THRESHOLD, SILERO_VAD_CONTEXT_SAMPLES_16K,
+    SILERO_VAD_FRAME_SAMPLES_16K, SILERO_VAD_INPUT_SAMPLES_16K, SILERO_VAD_STATE_SHAPE,
+};
 
 /// How long to wait for the first speech after arming listen (audio-time).
 pub const VAD_INITIAL_TIMEOUT: Duration = Duration::from_millis(1600);
 
-/// Trailing non-speech before we end the utterance.
+/// Trailing non-speech before we end a freeform utterance.
 ///
-/// 600ms was cutting multi-sentence user speech on natural mid-thought pauses.
-/// ~900ms still endpoints promptly after a real stop without swallowing the
-/// next clause.
-pub const VAD_SILENCE_WINDOW: Duration = Duration::from_millis(900);
+/// Sized for Silero, not WebRTC. LiveKit Agents' Silero plugin defaults to
+/// 550 ms (`min_silence_duration`) for the same streaming graph; Silero's own
+/// `VADIterator` uses 100 ms, which is for file segmentation and cuts
+/// mid-clause on a voice loop. WebRTC needed ~900 ms because the GMM flickered
+/// to silence mid-sentence; Silero does not, so we can follow LiveKit.
+pub const VAD_SILENCE_WINDOW: Duration = Duration::from_millis(550);
 
-/// Suggested spacing between VAD evaluations on the capture stream.
-pub const VAD_PROCESSING_INTERVAL: Duration = Duration::from_millis(40);
+/// Native Silero hop duration (32 ms at 16 kHz). Not used as a skip interval —
+/// every hop must be scored so the LSTM state stays aligned.
+pub const VAD_PROCESSING_INTERVAL: Duration = Duration::from_millis(32);
 
-/// WebRTC frame size: 10 ms at 16 kHz (see also 20/30 ms: 320 / 480 samples).
-pub const VAD_WINDOW_SIZE: usize = 160;
+/// Silero hop: 32 ms at 16 kHz.
+pub const VAD_WINDOW_SIZE: usize = 512;
 
-/// `true` = speech present in this frame.
+#[cfg(feature = "vad")]
+const _: () = assert!(VAD_WINDOW_SIZE == SILERO_VAD_FRAME_SAMPLES_16K);
+
+/// `true` = speech present in this hop.
 ///
 /// Implementations must be cheap enough to run on the engine thread for every
 /// window; heavy work belongs in STT, not here.
 pub trait Vad: Send {
-    /// Classify one mono PCM frame (typically [`VAD_WINDOW_SIZE`] samples).
-    ///
-    /// WebRTC VAD accepts only 10/20/30 ms frames at 16 kHz (160/320/480 samples).
+    /// Classify one mono PCM hop (exactly [`VAD_WINDOW_SIZE`] samples @ 16 kHz).
     fn predict(&mut self, audio: &[AudioSample]) -> Result<bool>;
+
+    /// Clear backend memory so the next utterance does not inherit LSTM/context.
+    ///
+    /// Default: no-op (stateless backends).
+    fn reset(&mut self) {}
 }

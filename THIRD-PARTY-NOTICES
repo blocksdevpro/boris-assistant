@@ -35,7 +35,7 @@ Native runtime components
 
 | Component | How it is used or distributed | Upstream provenance | Release requirement |
 |-----------|-------------------------------|---------------------|---------------------|
-| ONNX Runtime | `onnxruntime.dll` is staged beside the Windows executable for wake-word inference. | Microsoft ONNX Runtime: <https://github.com/microsoft/onnxruntime> | Record the DLL version and SHA-256 from the final installer; include its applicable license and notices. |
+| ONNX Runtime | `onnxruntime.dll` is staged beside the Windows executable for wake-word and Silero VAD inference. | Microsoft ONNX Runtime: <https://github.com/microsoft/onnxruntime> | Record the DLL version and SHA-256 from the final installer; include its applicable license and notices. |
 | DirectML | `DirectML.dll` is staged with the Windows ONNX Runtime execution provider. | Microsoft DirectML: <https://github.com/microsoft/DirectML> | Record the DLL version and SHA-256 from the final installer; include the applicable Microsoft distribution terms and notices. |
 | `livekit-wakeword` | Rust wake-word implementation; its mel and embedding graphs are linked through the pinned git dependency. | `blocksdevpro/rust-sdks` revision `9cf2528fe649e8846d96a3ec1aedb97ec8b4cfda`: <https://github.com/blocksdevpro/rust-sdks> | Include its license/NOTICE as resolved at that exact revision. |
 
@@ -50,6 +50,7 @@ have been reviewed for that exact revision.
 | Model/component | Product handling | Upstream provenance |
 |-----------------|------------------|---------------------|
 | LiveKit wake classifier (`boris-large.onnx`) | Versioned in the source release and embedded in the desktop executable at build time. SHA-256: `cf786dbfc65508b6adc1168855cf42a694c76cccb450533ced9cf9322e980d1a`. | The source URL/revision and license must be recorded in the release manifest before distributing the binary. |
+| Silero VAD (`silero_vad.onnx`) | Versioned in the source release (`assets/models/silero/`) and embedded in the desktop executable at build time. SHA-256: `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`. MIT. Commit `bfdc0193023f121ea5b3cc7b176dbed570a68a59`. | <https://github.com/snakers4/silero-vad> |
 | Parakeet TDT 0.6B v2 int8 | Downloaded at runtime into the user's Boris model directory. | <https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx> |
 | Supertonic 3 | Downloaded at runtime into the user's Boris model directory. | <https://huggingface.co/Supertone/supertonic-3> |
 | Kokoro-82M (experimental adapter) | Not automatically downloaded or bundled by the product. | <https://huggingface.co/hexgrad/Kokoro-82M> |

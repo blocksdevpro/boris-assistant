@@ -1,0 +1,17 @@
+Silero VAD
+==========
+
+Upstream: https://github.com/snakers4/silero-vad
+File:     src/silero_vad/data/silero_vad.onnx
+Commit:   bfdc0193023f121ea5b3cc7b176dbed570a68a59
+Vendored: 2026-08-15
+SHA-256:  1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+Size:     2327524 bytes
+License:  MIT (see LICENSE in this directory)
+Copyright (c) 2020-present Silero Team
+
+Official streaming export. Contract pinned by this file:
+  16 kHz hop 512 samples, context 64, LSTM state [2, 1, 128]
+  named IO input / state / sr → output / stateN
+
+Do not replace with an unpinned master snapshot without updating this NOTICE.

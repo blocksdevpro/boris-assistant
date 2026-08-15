@@ -1,15 +1,36 @@
 //! Small pure helpers used by the engine thread.
 
-pub(super) use crate::env_util::{env_flag_false, env_flag_true};
+pub(super) use crate::env_util::env_flag_false;
 
 /// Minimum alphanumeric chars required before a transcript is sent to the agent.
 const MIN_TRANSCRIPT_ALNUM: usize = 2;
 
-/// True when STT text is worth sending to the agent.
-///
-/// Rejects empty/whitespace and transcripts with fewer than
-/// [`MIN_TRANSCRIPT_ALNUM`] alphanumeric characters (noise, partial wake,
-/// accidental clicks).
+/// Split a spoken reply into sentence-sized units for streamed TTS.
+pub(super) fn speakable_reply_units(text: &str) -> Vec<String> {
+    #[cfg(feature = "tts-supertone")]
+    {
+        let units = boris_tts_supertone::speakable_units(text);
+        if units.is_empty() {
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![text.trim().to_string()]
+            }
+        } else {
+            units
+        }
+    }
+    #[cfg(not(feature = "tts-supertone"))]
+    {
+        let t = text.trim();
+        if t.is_empty() {
+            Vec::new()
+        } else {
+            vec![t.to_string()]
+        }
+    }
+}
+
 pub(super) fn transcript_usable(text: &str) -> bool {
     text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_TRANSCRIPT_ALNUM
 }

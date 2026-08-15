@@ -172,6 +172,10 @@ export type AppSettings = {
   output_device: string;
   /** Supertone voice stem (e.g. `M4`). */
   tts_voice_id: string;
+  /** STT/TTS RAM policy. */
+  model_residency: "low_memory" | "balanced" | "low_latency";
+  /** Reserved compatibility setting; hidden until echo-safe barge-in exists. */
+  voice_barge_in: boolean;
   /** Long-term markdown memory. */
   long_term_memory: boolean;
   /**
@@ -223,6 +227,8 @@ export const EMPTY_SETTINGS: AppSettings = {
   input_device: "",
   output_device: "",
   tts_voice_id: "M4",
+  model_residency: "balanced",
+  voice_barge_in: false,
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
@@ -329,6 +335,8 @@ export function normalizeSettings(
     input_device: raw?.input_device ?? "",
     output_device: raw?.output_device ?? "",
     tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
+    model_residency: normalizeResidency(raw?.model_residency),
+    voice_barge_in: raw?.voice_barge_in ?? false,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
@@ -353,6 +361,14 @@ export function normalizeSettings(
 function normalizeOverlayScale(raw: number | null | undefined): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
   return Math.min(125, Math.max(75, Math.round(raw / 5) * 5));
+}
+
+function normalizeResidency(
+  raw: string | null | undefined,
+): AppSettings["model_residency"] {
+  const t = raw?.trim().toLowerCase();
+  if (t === "low_memory" || t === "low_latency") return t;
+  return "balanced";
 }
 
 function normalizeMaxConfirms(raw: number | null | undefined): number {

@@ -7,21 +7,44 @@ Local perception ports for the Boris voice pipeline: **wake-word scoring** and
 
 | Feature   | Default | Dependencies                         |
 |-----------|---------|--------------------------------------|
-| `vad`     | on      | `webrtc-vad`                         |
+| `vad`     | on      | `ort` (Silero ONNX)                  |
 | `wake`    | on      | `livekit-wakeword` (git), `ort`      |
 
-Desktop and `boris-pipeline` use the default set (`vad` + `wake`). Disable
-`wake` if you need a build without ONNX Runtime.
+Desktop and `boris-pipeline` use the default set (`vad` + `wake`). `--features vad`
+without `wake` still needs native ONNX Runtime. `--no-default-features` builds
+only `pcm` / `time`.
 
 ## Audio contract
 
 - **Sample rate:** all adapters expect mono PCM at **16 kHz**
   (`boris_core::AUDIO_TARGET_RATE`).
-- **Sample type:** `f32` in roughly `[-1.0, 1.0]`; converted to PCM16 with a
-  **symmetric ±32767** clamp (`f32_to_pcm16_samples` / `_into`).
-- **VAD frame sizes (WebRTC):** only **10 / 20 / 30 ms** at 16 kHz —
-  **160 / 320 / 480** samples. The pipeline uses 10 ms (`VAD_WINDOW_SIZE = 160`).
+- **Sample type:** `f32` in roughly `[-1.0, 1.0]`. Wake still converts to PCM16
+  with a **symmetric ±32767** clamp (`f32_to_pcm16_samples` / `_into`). Silero
+  VAD consumes `f32` directly.
+- **VAD hop (Silero):** **512 samples = 32 ms** at 16 kHz, plus 64 samples of
+  rolling context kept inside the adapter. The pipeline must score **every** hop
+  (`VAD_WINDOW_SIZE = 512`) so LSTM state stays aligned.
 - **Wake window:** ~2 s rolling buffer (`WAKEWORD_WINDOW_SIZE = 32_000` samples).
+
+## VAD model bytes
+
+`SileroVad::try_new(model_bytes)` loads the official Silero streaming ONNX from
+memory. Hosts embed the graph (e.g. `assets/models/silero/silero_vad.onnx`).
+Call `init_onnx_runtime()` first. Call `Vad::reset()` at the start of each
+independent utterance.
+
+Default speech threshold is `0.5`. Hangover / endpointing stay in the pipeline
+(`VAD_SILENCE_WINDOW` = 550 ms, matching LiveKit's Silero `min_silence_duration`;
+confirm path uses 250 ms).
+
+### WebRTC migration timing
+
+The previous WebRTC/libfvad backend scored 160-sample (10 ms) frames every
+40 ms and used 900 ms / 420 ms freeform/confirm hangover to tolerate GMM
+flicker. Silero is stateful: the host must now score every 512-sample (32 ms)
+hop without dropping or skipping samples. The endpoint windows are 550 ms for
+freeform speech and 250 ms for short confirmations. These values are product
+behavior, not model-internal padding.
 
 ## Wake model bytes
 
@@ -40,20 +63,20 @@ max score across all entries (so multi-label models never depend on
 ## ORT init
 
 Call `init_onnx_runtime()` **once** at process start **before** constructing
-wake models. It configures a process-global 1-thread pool with spin disabled
-and returns `Result<()>` so hosts can log hard pool-setup failures.
+wake or Silero VAD sessions. It configures a process-global 1-thread pool with
+spin disabled and returns `Result<()>` so hosts can log hard pool-setup failures.
 
 ```rust
 use boris_sense::{
-    init_onnx_runtime, f32_to_pcm16_samples,
+    init_onnx_runtime,
     WakeWord, LivekitWakeWord, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
-    Vad, WebRtcVad, VAD_WINDOW_SIZE,
+    Vad, SileroVad, VAD_WINDOW_SIZE,
 };
 
 fn main() -> boris_core::Result<()> {
     init_onnx_runtime()?;
-    let mut wake = LivekitWakeWord::try_new("boris", &model_bytes, 16_000)?;
-    let mut vad = WebRtcVad::new();
+    let mut wake = LivekitWakeWord::try_new("boris", &wake_bytes, 16_000)?;
+    let mut vad = SileroVad::try_new(&vad_bytes)?;
     // …
     Ok(())
 }
@@ -73,7 +96,7 @@ HEAD.
 use boris_sense::{
     WakeWord, LivekitWakeWord, LiveKitWakeWord, // alias
     WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
-    Vad, WebRtcVad, VAD_WINDOW_SIZE, WEBRTC_VAD_FRAME_SAMPLES_16K,
+    Vad, SileroVad, VAD_WINDOW_SIZE, SILERO_VAD_FRAME_SAMPLES_16K,
     init_onnx_runtime, f32_to_pcm16_samples, f32_to_pcm16_samples_into,
 };
 ```

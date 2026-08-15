@@ -30,8 +30,21 @@ snapshots. Not a worker mesh and not a Session FSM.
 | `Thinking` | Agent + tools (+ TTS synth) |
 | `Talking` | Playback started |
 
-Wake scoring, VAD capture, STT, agent, and TTS run **inline** on the engine
-thread (or briefly block it). Status is pushed for the UI.
+Wake scoring, VAD capture, STT, and agent orchestration run on the single
+engine thread. Sentence TTS inference is handed to one turn-scoped producer so
+the engine can continue servicing Stop/device-switch commands and audio events;
+the engine remains the sole owner of phases and playback state. Reusable STT
+and TTS loader threads live for the engine lifetime instead of being recreated
+per turn. Status is pushed for the UI.
+
+`low_memory` releases the outgoing model at each STT→TTS handoff. `balanced`
+keeps models warm through an active turn or follow-up chain, then releases both
+when Boris returns to idle. `low_latency` may keep both loaded for the powered-on
+session.
+
+Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
+maintenance lane. Generation latency excludes audible playback. Summarize p50
+and p95 locally with `cargo xtask trace-report` (or add `--json`).
 
 ## Public surface
 
@@ -52,7 +65,7 @@ use boris_pipeline::{Engine, LlmPrefs, PipelineConfig};
 let prefs = LlmPrefs::new(api_key)
     .model("google/gemini-2.5-flash-lite")
     .fast_model("google/gemini-2.5-flash-lite");
-let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes);
+let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes, vad_bytes);
 let (engine, handle, status_rx) = Engine::spawn(config)?;
 handle.start()?;
 // … mirror status_rx to UI …
@@ -78,6 +91,7 @@ Override root with `BORIS_HOME`.
     parakeet/          # STT
     supertone/onnx/    # TTS graphs
     supertone/voices/  # M4.json
+    silero/            # optional seed of embedded Silero VAD ONNX
   sessions/desktop/    # voice session transcripts + artifacts/
   memory/              # long-term markdown memory
   skills/              # skill playbooks

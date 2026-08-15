@@ -388,6 +388,10 @@ impl TextToSpeech for SupertoneTts {
         SupertoneTts::sample_rate(self)
     }
 
+    fn inter_unit_silence_samples(&self) -> usize {
+        (self.inter_unit_silence * SupertoneTts::sample_rate(self) as f32).round() as usize
+    }
+
     fn load(&mut self) -> Result<()> {
         if self.model.is_some() {
             return Ok(());
@@ -567,6 +571,10 @@ mod tests {
         assert!(!tts.is_loaded());
         assert_eq!(TextToSpeech::backend_id(&tts), "supertone");
         assert_eq!(TextToSpeech::sample_rate(&tts), SUPERTONE_SAMPLE_RATE);
+        assert_eq!(
+            TextToSpeech::inter_unit_silence_samples(&tts),
+            (DEFAULT_INTER_UNIT_SILENCE * SUPERTONE_SAMPLE_RATE as f32).round() as usize
+        );
         assert!((tts.silence_duration() - DEFAULT_INTER_UNIT_SILENCE).abs() < f32::EPSILON);
     }
 

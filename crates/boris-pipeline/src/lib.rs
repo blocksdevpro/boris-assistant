@@ -59,8 +59,8 @@ pub use error::{PipelineError, Result as PipelineResult};
 pub use paths::{
     auth_path, boris_home, config_path, ensure_logs_dir, ensure_sessions_dir, logs_dir, memory_dir,
     migrate_home_if_needed, models_dir, notes_path, preflight, profile_path, sessions_dir,
-    sessions_root, supertone_onnx_is_multilingual, supertone_version_problem, workspace_dir,
-    PreflightReport, BORIS_HOME_ENV, DESKTOP_WORKSPACE,
+    sessions_root, supertone_onnx_is_multilingual, supertone_version_problem, traces_dir,
+    turn_traces_path, workspace_dir, PreflightReport, BORIS_HOME_ENV, DESKTOP_WORKSPACE,
 };
 pub use prompt::BORIS_SYSTEM_PROMPT;
 pub use settings::{

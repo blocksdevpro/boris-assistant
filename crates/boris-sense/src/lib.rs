@@ -11,11 +11,12 @@
 //!
 //! | Feature | Default | Enables |
 //! |---------|---------|---------|
-//! | `vad`   | yes     | WebRTC VAD (`WebRtcVad`) |
+//! | `vad`   | yes     | Silero VAD (`SileroVad`, needs ORT) |
 //! | `wake`  | yes     | LiveKit wake-word + ORT init |
 //!
-//! Desktop / pipeline use the default feature set. Disable `wake` to build
-//! without `ort` / `livekit-wakeword` (e.g. lighter local builds).
+//! Desktop / pipeline use the default feature set. `--features vad` without
+//! `wake` still needs native ONNX Runtime. `--no-default-features` builds
+//! only `pcm` / `time`.
 
 pub mod pcm;
 pub mod time;
@@ -23,7 +24,7 @@ pub mod time;
 #[cfg(feature = "vad")]
 pub mod vad;
 
-#[cfg(feature = "wake")]
+#[cfg(any(feature = "wake", feature = "vad"))]
 pub mod ort;
 #[cfg(feature = "wake")]
 pub mod wake;
@@ -38,11 +39,12 @@ pub use time::duration_to_samples;
 pub use time::{vad_initial_timeout_samples, vad_silence_samples};
 #[cfg(feature = "vad")]
 pub use vad::{
-    Vad, WebRtcVad, VAD_INITIAL_TIMEOUT, VAD_PROCESSING_INTERVAL, VAD_SILENCE_WINDOW,
-    VAD_WINDOW_SIZE, WEBRTC_VAD_FRAME_SAMPLES_16K,
+    SileroVad, Vad, SILERO_SPEECH_THRESHOLD, SILERO_VAD_CONTEXT_SAMPLES_16K,
+    SILERO_VAD_FRAME_SAMPLES_16K, SILERO_VAD_INPUT_SAMPLES_16K, SILERO_VAD_STATE_SHAPE,
+    VAD_INITIAL_TIMEOUT, VAD_PROCESSING_INTERVAL, VAD_SILENCE_WINDOW, VAD_WINDOW_SIZE,
 };
 
-#[cfg(feature = "wake")]
+#[cfg(any(feature = "wake", feature = "vad"))]
 pub use ort::init_onnx_runtime;
 #[cfg(feature = "wake")]
 pub use wake::{

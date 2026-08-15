@@ -11,7 +11,7 @@ use boris_agent::{Agent, AgentOutcome};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::{ArcAudioBuffer, TurnId};
-use boris_sense::WebRtcVad;
+use boris_sense::SileroVad;
 
 use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::Phase;
@@ -36,7 +36,7 @@ pub(super) struct ConfirmCtx<'a> {
     pub tts: &'a mut TtsBox,
     pub stt: &'a mut SttBox,
     pub mic: &'a crossbeam_channel::Receiver<ArcAudioBuffer>,
-    pub vad: &'a mut WebRtcVad,
+    pub vad: &'a mut SileroVad,
     pub audio: &'a mut AudioService,
     pub output_events: &'a mut crossbeam_channel::Receiver<OutputEvent>,
     pub cmd_rx: &'a Receiver<EngineCommand>,
@@ -148,13 +148,26 @@ pub(super) fn resolve_agent_outcome(
                 ctx.picture.set_phase(Phase::Talking);
                 // Keep activity as confirm so overlay still reads as yes/no.
                 ctx.picture.activity = Some(format!("confirm · {}", pending.name));
-                wait_playback_or_stop(
+                match wait_playback_or_stop(
                     ctx.output_events,
                     ctx.cmd_rx,
                     ctx.running,
                     ctx.audio,
                     ctx.picture,
-                );
+                ) {
+                    PlaybackWait::Finished => {}
+                    PlaybackWait::Stopped => {
+                        ctx.agent.abort();
+                        ctx.go_off();
+                        return OutcomeResolve::Stopped;
+                    }
+                    PlaybackWait::Aborted => {
+                        ctx.agent.abort();
+                        ctx.picture.detail = Some("confirmation playback interrupted".into());
+                        ctx.picture.set_phase(Phase::Armed);
+                        return OutcomeResolve::ReArm;
+                    }
+                }
             }
         }
         if !*ctx.running {

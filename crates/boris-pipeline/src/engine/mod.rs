@@ -50,6 +50,8 @@ mod picture;
 mod playback;
 mod session;
 mod setup;
+mod speech;
+mod turn_trace;
 mod util;
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -69,14 +71,16 @@ use activity::activity_label;
 use artifact::peek_current;
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
-    join_stt_load, join_tts_load, lost_stt, reclaim_stt_slot, release_voice_models, spawn_stt_load,
-    spawn_tts_load, unload_stt, unload_tts, SttBox,
+    join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
+    release_voice_models,
 };
 use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve};
 use playback::{poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait};
-use session::{agent_message_pairs, begin_session, end_session, go_off};
+use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
-use util::transcript_usable;
+use speech::stream_reply;
+use turn_trace::TurnTraceGuard;
+use util::{speakable_reply_units, transcript_usable};
 
 /// Mic fan-out queue. Must stay large enough that a brief engine stall during
 /// capture (logging, status publish) never drops live speech frames.
@@ -429,6 +433,18 @@ fn run(
         // ── One turn, top to bottom ─────────────────────────────────────────
         let turn = TurnId::new(next_turn);
         next_turn = next_turn.saturating_add(1);
+        let trace_start = if matches!(capture_kind, CaptureKind::AfterWake) {
+            "wake_hit"
+        } else {
+            "speech_start"
+        };
+        let mut turn_trace = TurnTraceGuard::new(
+            turn.to_string(),
+            sess.active_session.as_ref().map(ToString::to_string),
+            rt.maintenance.handle(),
+            crate::paths::turn_traces_path(),
+            trace_start,
+        );
         rt.picture.turn = Some(turn);
         // Overlay glance is this-turn only. The session catalog / Home desk
         // still keep the last card; a new utterance must not resurrect it.
@@ -438,9 +454,10 @@ fn run(
         rt.picture.set_phase(Phase::Hearing);
         tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
 
-        let stt_job = spawn_stt_load(rt.stt);
+        let stt_job = rt.stt_loader.load(rt.stt);
         let capture =
             hear::capture_utterance(&rt.mic, &mut rt.vad, &cmd_rx, &mut running, capture_kind);
+        turn_trace.mark("speech_end", None);
         let (stt_owned, stt_load) = join_stt_load(stt_job);
         rt.stt = stt_owned;
 
@@ -459,6 +476,10 @@ fn run(
         }
 
         if let Err(e) = stt_load {
+            turn_trace.mark(
+                "stt_load_error",
+                Some(serde_json::json!({ "error": e.to_string() })),
+            );
             tracing::error!(error = %e, %turn, "stt load failed");
             crate::diagnostics::log_model_load_failure("parakeet", &rt.stt_model_dir, &e);
             let _ = rt.stt.unload();
@@ -474,6 +495,10 @@ fn run(
         let text = match rt.stt.transcribe(&clip) {
             Ok(t) => t,
             Err(e) => {
+                turn_trace.mark(
+                    "stt_error",
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
                 tracing::error!(error = %e, %turn, "stt failed");
                 let _ = rt.stt.unload();
                 rt.picture.detail = Some(format!("stt: {e}"));
@@ -482,9 +507,14 @@ fn run(
                 continue;
             }
         };
-        // Free ~600MB before agent; TTS will preload while the agent runs.
-        unload_stt(rt.stt.as_mut(), turn);
+        // Low-memory evicts STT now; balanced/low-latency keep it warm.
+        maybe_unload_stt(rt.stt.as_mut(), turn, rt.residency);
         let stt_ms = stt_t.elapsed().as_millis() as u64;
+        turn_trace.span(
+            "stt",
+            stt_ms,
+            Some(serde_json::json!({ "clip_samples": clip.len() })),
+        );
         tracing::info!(
             %turn,
             stt_ms,
@@ -498,6 +528,7 @@ fn run(
 
         // Host guard: skip agent on empty / whitespace / junk transcripts.
         if !transcript_usable(&text) {
+            turn_trace.mark("transcript_rejected", None);
             tracing::warn!(
                 %turn,
                 %text,
@@ -540,7 +571,7 @@ fn run(
         rt.picture.update_context_from_chars(approx_in + text.len());
 
         let agent_t = std::time::Instant::now();
-        let tts_job = spawn_tts_load(rt.tts);
+        let tts_job = rt.tts_loader.load(rt.tts);
         rt.agent.set_turn_id(Some(turn.to_string()));
         if let Some(ref sid) = *sess.active_session {
             rt.agent.set_session_id(Some(sid.to_string()));
@@ -618,6 +649,11 @@ fn run(
         let (outcome, report) = match outcome {
             Ok(pair) => pair,
             Err(e) => {
+                turn_trace.span(
+                    "agent_error",
+                    agent_t.elapsed().as_millis() as u64,
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
                 unsub();
                 tracing::error!(error = %e, %turn, "agent failed");
                 rt.agent.abort();
@@ -703,6 +739,14 @@ fn run(
         unsub(); // full turn finished (or speech path next)
 
         let agent_ms = agent_t.elapsed().as_millis() as u64;
+        turn_trace.span(
+            "agent",
+            agent_ms,
+            Some(serde_json::json!({
+                "tool_rounds": report.tool_rounds,
+                "tools": report.tools_used,
+            })),
+        );
         tracing::info!(%turn, agent_ms, "agent done");
 
         let (reply, expect_reply) = match outcome {
@@ -737,29 +781,13 @@ fn run(
 
         if let Some(ref sid) = *sess.active_session {
             // Full Grok-like transcript: system / user / assistant+tool_calls / tool_result.
-            let pairs = agent_message_pairs(&rt.agent);
-            let sync_t = std::time::Instant::now();
-            match rt.store.sync_messages(sid, &pairs, *sess.transcript_len) {
-                Ok(n) => {
-                    tracing::debug!(
-                        session_id = %sid,
-                        %turn,
-                        messages = n,
-                        ms = sync_t.elapsed().as_millis() as u64,
-                        "session sync_messages"
-                    );
-                    *sess.transcript_len = n;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %sid,
-                        %turn,
-                        ms = sync_t.elapsed().as_millis() as u64,
-                        "session sync_messages failed"
-                    );
-                }
-            }
+            enqueue_transcript_sync(&rt.store, sid, sess.transcript_len, &rt.agent);
+            tracing::debug!(
+                session_id = %sid,
+                %turn,
+                messages = *sess.transcript_len,
+                "session sync queued"
+            );
         }
 
         // Show reply text while still "Thinking" — TTS synth is NOT speaking yet.
@@ -792,104 +820,98 @@ fn run(
             continue;
         }
 
-        // Synthesize under Thinking so UI doesn't say "Speaking" with silence.
-        let tts_t = std::time::Instant::now();
-        let pcm = match rt.tts.synthesize(&reply) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, %turn, "tts failed");
-                let _ = rt.tts.unload();
-                rt.picture.detail = Some(format!("tts: {e}"));
-                follow_up_depth = 0;
-                rt.picture.set_phase(Phase::Armed);
-                continue;
-            }
-        };
-        // Free TTS during playback; optionally preload STT for freeform follow-up.
-        unload_tts(rt.tts.as_mut(), turn);
-        let tts_ms = tts_t.elapsed().as_millis() as u64;
-        let play_samples = pcm.len();
-        tracing::info!(%turn, tts_ms, play_samples, "tts synth done");
+        // Split at sentence boundaries; synth/play the first unit while later
+        // units synthesize. Never speak until we have a final spoken answer
+        // (tool-call turns already finished above).
+        let units = speakable_reply_units(&reply);
+        let gap_samples = rt.tts.inter_unit_silence_samples();
 
-        if !poll_running(
-            &cmd_rx,
-            &mut running,
-            &mut rt.audio,
-            &mut rt.output_events,
-            &mut rt.picture,
-        )
-        .still_running()
-        {
-            go_off_session(&mut rt, &mut sess);
-            continue;
-        }
-
-        // Decide follow-up before playback so we can preload STT while speaking.
+        // Decide follow-up before playback. Balanced and low-latency retain
+        // both models across an active follow-up chain; low-memory reloads STT
+        // while the next utterance is captured.
         let will_await = expect_reply && follow_up_depth < MAX_FOLLOW_UPS;
-        // Move STT into a load job (or keep it in the Option) so the compiler
-        // always sees a single reclaim path after playback.
-        let mut stt_slot: Option<SttBox> = Some(rt.stt);
-        let mut stt_follow_job = if will_await {
-            // Provably `Some` today (nothing between the assignment above and
-            // this `take()` can clear it), but degrade to a `LostStt` stub
-            // instead of panicking the engine thread if a future refactor
-            // ever breaks that invariant — same recovery pattern as
-            // `reclaim_stt_slot`'s own empty-slot fallback.
-            Some(spawn_stt_load(stt_slot.take().unwrap_or_else(lost_stt)))
-        } else {
-            None
-        };
-
-        // Queue audio, then flip UI to Talking only when playback has started.
-        // Speaker switch mid-play rebuilds the output pipeline and aborts the job —
-        // we must not hang waiting for Drained on a dead channel (stuck Talking).
-        let play_t = std::time::Instant::now();
-        while rt.output_events.try_recv().is_ok() {}
-        if let Err(e) = rt.audio.play(pcm) {
-            tracing::error!(error = %e, %turn, "play failed");
-            rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
-            follow_up_depth = 0;
-            rt.picture.detail = Some(format!("play: {e}"));
-            rt.picture.set_phase(Phase::Armed);
-            continue;
-        }
-        match wait_playback_started(
+        let tts = std::mem::replace(&mut rt.tts, lost_tts());
+        let speech_trace_start_ms = turn_trace.elapsed_ms();
+        let speech = stream_reply(
+            tts,
+            units,
+            gap_samples,
+            turn,
+            &mut rt.audio,
             &mut rt.output_events,
             &cmd_rx,
             &mut running,
-            &mut rt.audio,
             &mut rt.picture,
-        ) {
+        );
+        rt.tts = speech.tts;
+        maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+        let tts_ms = speech.tts_ms;
+        let play_ms = speech.play_ms;
+        let speech_ms = speech.speech_ms;
+        if speech.queued_samples > 0 {
+            let first_audio_ms = speech_trace_start_ms.saturating_add(speech.tts_first_ms);
+            turn_trace.mark_at(
+                "tts_first_chunk",
+                first_audio_ms,
+                Some(speech.tts_first_ms),
+                Some(serde_json::json!({ "queued_samples": speech.queued_samples })),
+            );
+        }
+        if let Some(started_ms) = speech.audio_started_ms {
+            turn_trace.mark_at(
+                "audio_started",
+                speech_trace_start_ms.saturating_add(started_ms),
+                None,
+                None,
+            );
+        }
+        turn_trace.span(
+            "tts",
+            tts_ms,
+            Some(serde_json::json!({ "queued_samples": speech.queued_samples })),
+        );
+        tracing::info!(
+            %turn,
+            tts_first_ms = speech.tts_first_ms,
+            tts_ms,
+            play_ms,
+            queued_samples = speech.queued_samples,
+            "streamed speech complete"
+        );
+        match speech.wait {
             PlaybackWait::Stopped => {
-                rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
+                turn_trace.mark("audio_stopped", None);
                 go_off_session(&mut rt, &mut sess);
                 continue;
             }
             PlaybackWait::Aborted => {
-                tracing::info!(
-                    %turn,
-                    "playback aborted (speaker switch) before/during start — skipping Talking"
-                );
+                turn_trace.mark("audio_aborted", None);
+                let detail = speech
+                    .error
+                    .unwrap_or_else(|| "playback interrupted by speaker change".into());
+                tracing::warn!(%turn, played = speech.played, %detail, "streamed speech aborted");
+                rt.picture.detail = Some(detail);
+                follow_up_depth = 0;
+                await_reply = false;
+                rt.picture.set_phase(Phase::Armed);
+                continue;
             }
             PlaybackWait::Finished => {
-                rt.picture.set_phase(Phase::Talking);
-                tracing::info!(
-                    %turn,
-                    queue_ms = play_t.elapsed().as_millis() as u64,
-                    "playback started — UI Talking"
-                );
-                wait_playback_or_stop(
-                    &mut rt.output_events,
-                    &cmd_rx,
-                    &mut running,
-                    &mut rt.audio,
-                    &mut rt.picture,
-                );
+                if let Some(drained_ms) = speech.audio_drained_ms {
+                    turn_trace.mark_at(
+                        "audio_drained",
+                        speech_trace_start_ms.saturating_add(drained_ms),
+                        None,
+                        None,
+                    );
+                } else {
+                    turn_trace.mark("audio_drained", None);
+                }
+                if let Some(error) = speech.error {
+                    rt.picture.detail = Some(error);
+                }
             }
         }
-        let play_ms = play_t.elapsed().as_millis() as u64;
-
-        rt.stt = reclaim_stt_slot(&mut stt_slot, &mut stt_follow_job);
 
         if go_off_if_not_running(&mut rt, &mut sess, running) {
             continue;
@@ -910,9 +932,8 @@ fn run(
             }
             follow_up_depth = 0;
             await_reply = false;
-            // No follow-up — make sure heavy models are gone for Armed idle.
-            unload_stt(rt.stt.as_mut(), turn);
-            unload_tts(rt.tts.as_mut(), turn);
+            // No follow-up: low_memory/balanced evict; low_latency keeps models warm.
+            maybe_unload_idle(rt.stt.as_mut(), rt.tts.as_mut(), turn, rt.residency);
         }
 
         tracing::info!(
@@ -921,7 +942,10 @@ fn run(
             agent_ms,
             tts_ms,
             play_ms,
-            total_post_capture_ms = stt_ms + agent_ms + tts_ms + play_ms,
+            speech_ms,
+            // TTS generation and playback overlap; add the speech wall time,
+            // not both component durations.
+            total_post_capture_ms = stt_ms + agent_ms + speech_ms,
             "turn complete (latency breakdown)"
         );
     }

@@ -5,7 +5,7 @@ edition     = "2021"
 rust-version.workspace = true
 license     = "Apache-2.0"
 repository  = "https://github.com/blocksdevpro/boris-assistant"
-description = "Local perception: WebRTC VAD, LiveKit wake-word ONNX scoring, ORT process init"
+description = "Local perception: Silero VAD, LiveKit wake-word ONNX scoring, ORT process init"
 readme      = "README.md"
 publish     = false
 keywords    = ["vad", "wake-word", "onnx", "audio"]
@@ -13,8 +13,8 @@ categories  = ["multimedia::audio"]
 
 [features]
 default = ["vad", "wake"]
-# WebRTC VAD adapter (`webrtc-vad`). Independent of wake / ORT.
-vad = ["dep:webrtc-vad"]
+# Silero VAD adapter (ORT session). Independent of LiveKit; shares process ORT.
+vad = ["dep:ort"]
 # LiveKit open-wake-word ONNX path (`livekit-wakeword` + `ort`).
 wake = ["dep:livekit-wakeword", "dep:ort"]
 
@@ -28,4 +28,3 @@ livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks", rev = "9
 # Same line as livekit-wakeword; we configure the process-global ORT env
 # before any wakeword sessions are created (shared pool + no spin).
 ort        = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"], optional = true }
-webrtc-vad = { version = "0.4", optional = true }

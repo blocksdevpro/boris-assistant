@@ -1,4 +1,4 @@
-//! Process-global ONNX Runtime setup for the wake-word path.
+//! Process-global ONNX Runtime setup for wake-word and Silero VAD.
 
 use std::sync::OnceLock;
 
@@ -10,12 +10,13 @@ static ORT_INIT: OnceLock<Result<()>> = OnceLock::new();
 
 /// Configure ONNX Runtime **before** any model sessions are created.
 ///
-/// LiveKit wakeword builds 3 ORT sessions (mel / embedding / classifier). Without
-/// a process-global pool, each session gets its own multi-core thread pool and
-/// idle workers **spin**, which shows up as high Idle CPU and dozens of threads.
+/// LiveKit wakeword builds 3 ORT sessions (mel / embedding / classifier) and
+/// Silero VAD builds a fourth. Without a process-global pool, each session
+/// gets its own multi-core thread pool and idle workers **spin**, which shows
+/// up as high Idle CPU and dozens of threads.
 ///
-/// Must be called once at process start, before
-/// [`crate::wake::LivekitWakeWord::try_new`].
+/// Must be called once at process start, before constructing
+/// [`crate::wake::LivekitWakeWord`] or [`crate::vad::SileroVad`].
 ///
 /// Idempotent and safe to call repeatedly or concurrently from multiple
 /// threads: the init body runs at most once per process (via
@@ -58,12 +59,22 @@ fn init_onnx_runtime_once() -> Result<()> {
         .commit()
     {
         tracing::warn!(
-            "ORT environment already configured; wakeword thread-pool settings may not apply"
+            "ORT environment already configured; wake/VAD thread-pool settings may not apply"
         );
     } else {
-        tracing::info!("ORT: shared 1-thread global pool (spin disabled) for wakeword inference");
+        tracing::info!("ORT: shared 1-thread global pool (spin disabled) for wake + VAD");
     }
     Ok(())
+}
+
+/// Serialize tests that touch the process-global ORT env or build sessions.
+///
+/// `init()` / `Session::builder` are not safe to overlap across rustc's
+/// default parallel test threads — they deadlock on the 1-thread pool.
+#[cfg(test)]
+pub(crate) fn lock_ort_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -72,6 +83,7 @@ mod tests {
 
     #[test]
     fn repeat_calls_are_idempotent_and_agree() {
+        let _ort = lock_ort_for_test();
         // Whatever the first call resolves to (Ok or Err depends on the ORT
         // build/environment), repeat calls must return the same result
         // without panicking or re-running the init body.
@@ -82,6 +94,7 @@ mod tests {
 
     #[test]
     fn concurrent_calls_all_agree() {
+        let _ort = lock_ort_for_test();
         let handles: Vec<_> = (0..8)
             .map(|_| std::thread::spawn(init_onnx_runtime))
             .collect();

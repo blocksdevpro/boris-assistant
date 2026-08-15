@@ -26,6 +26,9 @@ Historical paths still work:
 Never block inside cpal callbacks.
 
 `AudioService::play` returns `Result` via non-blocking `try_send` (queue full / worker gone).
+Streamed `append` uses a short bounded enqueue wait. `finish_job` is a reliable,
+bounded, worker-acknowledged control transition; event-loop hosts can use
+`request_finish_job` to retry/poll without blocking command handling.
 `OutputEvent::Started` means samples are queued for the device callback, not that the first sample has hit the DAC.
 
 ## Tests

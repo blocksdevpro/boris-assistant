@@ -11,8 +11,7 @@ use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{ArcAudioBuffer, AudioBuffer};
 use boris_sense::{
     duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, Vad, WakeWord,
-    VAD_PROCESSING_INTERVAL, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
-    WAKEWORD_WINDOW_SIZE,
+    VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
 use crate::engine::EngineCommand;
@@ -33,8 +32,11 @@ const POST_TTS_SETTLE: Duration = Duration::from_millis(550);
 const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(380);
 
 /// Trailing silence for yes/no confirms (short utterances endpoint fast).
-/// Freeform replies keep the longer shared [`vad_silence_samples`] window.
-const CONFIRM_SILENCE_AFTER: Duration = Duration::from_millis(420);
+///
+/// 250 ms is one official Silero hop-window of patience after speech stops —
+/// enough to absorb a breath, not enough to make HITL feel frozen. Freeform
+/// keeps the longer shared [`vad_silence_samples`] (LiveKit 550 ms) window.
+const CONFIRM_SILENCE_AFTER: Duration = Duration::from_millis(250);
 
 /// Why a hear step returned early.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,17 +243,22 @@ pub fn capture_utterance(
         AUDIO_TARGET_RATE as usize * max_secs as usize,
     );
     record.set_recording(true);
+    vad.reset();
 
     let mut has_spoken = false;
     let mut samples_since_speech: usize = 0;
-    let mut frame_buf: Vec<f32> = Vec::new();
-    let score_every = duration_to_samples(VAD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
-    let mut samples_since_score: usize = 0;
+    // Incremental hop assembler. Input callback frames can be any size; consume
+    // every sample without a fixed-capacity staging ring, allocation, drain, or
+    // memmove. Silero still receives exact 512-sample hops in stream order.
+    let mut hop = [0.0f32; VAD_WINDOW_SIZE];
+    let mut hop_len = 0usize;
+    let mut n_predicts: u32 = 0;
+    let mut n_speech_hops: u32 = 0;
     // Confirm: *shorter* trailing silence than freeform — "yes"/"no" end cleanly
     // and 1.3s+ of post-speech wait made HITL feel frozen after the answer.
     let silence_after = match kind {
         CaptureKind::AwaitConfirm => {
-            duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).max(score_every)
+            duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).max(VAD_WINDOW_SIZE)
         }
         _ => vad_silence_samples(),
     };
@@ -281,25 +288,26 @@ pub fn capture_utterance(
             return Ok(clip);
         }
 
-        frame_buf.extend_from_slice(&frame);
-        while frame_buf.len() >= VAD_WINDOW_SIZE {
-            let chunk: Vec<f32> = frame_buf.drain(..VAD_WINDOW_SIZE).collect();
-            samples_since_score = samples_since_score.saturating_add(chunk.len());
-            if samples_since_score < score_every {
+        for &sample in frame.iter() {
+            hop[hop_len] = sample;
+            hop_len += 1;
+            if hop_len < VAD_WINDOW_SIZE {
                 continue;
             }
-            samples_since_score = 0;
+            hop_len = 0;
+            n_predicts = n_predicts.saturating_add(1);
 
-            match vad.predict(&chunk) {
+            match vad.predict(&hop) {
                 Ok(true) => {
                     if !has_spoken {
                         tracing::debug!("vad: speech started");
                     }
                     has_spoken = true;
+                    n_speech_hops = n_speech_hops.saturating_add(1);
                     samples_since_speech = 0;
                 }
                 Ok(false) => {
-                    samples_since_speech = samples_since_speech.saturating_add(score_every);
+                    samples_since_speech = samples_since_speech.saturating_add(hop.len());
                     let limit = if has_spoken {
                         silence_after
                     } else {
@@ -315,6 +323,8 @@ pub fn capture_utterance(
                             clip_ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
                             ms = wall.elapsed().as_millis() as u64,
                             has_spoken,
+                            n_predicts,
+                            n_speech_hops,
                             ?kind,
                             "capture_utterance end (silence endpoint)"
                         );
@@ -324,5 +334,127 @@ pub fn capture_utterance(
                 Err(e) => tracing::error!(error = %e, "vad predict failed"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    use boris_core::ArcAudioBuffer;
+    use boris_sense::Vad;
+
+    use super::*;
+
+    struct ScriptedVad {
+        answers: Vec<bool>,
+        idx: usize,
+        reset_count: u32,
+    }
+
+    impl Vad for ScriptedVad {
+        fn reset(&mut self) {
+            self.reset_count = self.reset_count.saturating_add(1);
+        }
+
+        fn predict(&mut self, audio: &[f32]) -> boris_core::Result<bool> {
+            assert_eq!(audio.len(), VAD_WINDOW_SIZE);
+            let i = self.idx.min(self.answers.len().saturating_sub(1));
+            self.idx = self.idx.saturating_add(1);
+            Ok(self.answers.get(i).copied().unwrap_or(false))
+        }
+    }
+
+    fn run_capture(
+        kind: CaptureKind,
+        answers: Vec<bool>,
+        hops: usize,
+    ) -> (boris_core::AudioBuffer, u32) {
+        let (mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        for _ in 0..hops {
+            mic_tx
+                .send(Arc::from(vec![0.0f32; VAD_WINDOW_SIZE]))
+                .expect("send hop");
+        }
+        let mut vad = ScriptedVad {
+            answers,
+            idx: 0,
+            reset_count: 0,
+        };
+        let mut running = true;
+        let clip = capture_utterance(&mic_rx, &mut vad, &cmd_rx, &mut running, kind)
+            .expect("capture should endpoint");
+        (clip, vad.reset_count)
+    }
+
+    #[test]
+    fn all_false_after_wake_hits_start_timeout() {
+        // Start timeout is hop-aligned by construction (duration / 32 ms).
+        let start_hops = vad_initial_timeout_samples() / VAD_WINDOW_SIZE;
+        let (clip, resets) = run_capture(CaptureKind::AfterWake, vec![false], start_hops);
+        assert_eq!(resets, 1);
+        assert_eq!(clip.len(), start_hops * VAD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn speech_then_silence_waits_trailing_window() {
+        // 1 speech hop + trailing silence hops.
+        let trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let mut answers = vec![false; trailing + 1];
+        answers[0] = true;
+        let (clip, resets) = run_capture(CaptureKind::AfterWake, answers, trailing + 1);
+        assert_eq!(resets, 1);
+        assert_eq!(clip.len(), (trailing + 1) * VAD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn confirm_endpoints_sooner_than_freeform() {
+        let confirm_trailing =
+            duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).div_ceil(VAD_WINDOW_SIZE);
+        let freeform_trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        assert!(confirm_trailing < freeform_trailing);
+
+        let hops = freeform_trailing + 8;
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+
+        let (confirm, _) = run_capture(CaptureKind::AwaitConfirm, answers.clone(), hops);
+        let (reply, _) = run_capture(CaptureKind::AwaitReply, answers, hops);
+        assert_eq!(confirm.len(), (confirm_trailing + 1) * VAD_WINDOW_SIZE);
+        assert_eq!(reply.len(), (freeform_trailing + 1) * VAD_WINDOW_SIZE);
+        assert!(confirm.len() < reply.len());
+    }
+
+    #[test]
+    fn oversized_callback_frame_processes_every_hop_without_drops() {
+        let trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let hops = trailing + 1;
+        let (mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        // One callback frame is deliberately much larger than the former
+        // four-hop pseudo-ring. Speech + all endpoint silence live in it.
+        mic_tx
+            .send(Arc::from(vec![0.0f32; hops * VAD_WINDOW_SIZE]))
+            .expect("send oversized frame");
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+        let mut vad = ScriptedVad {
+            answers,
+            idx: 0,
+            reset_count: 0,
+        };
+        let mut running = true;
+        let clip = capture_utterance(
+            &mic_rx,
+            &mut vad,
+            &cmd_rx,
+            &mut running,
+            CaptureKind::AfterWake,
+        )
+        .expect("oversized frame should contain a complete utterance");
+        assert_eq!(vad.idx, hops, "every complete hop must reach Silero");
+        assert_eq!(clip.len(), hops * VAD_WINDOW_SIZE);
     }
 }

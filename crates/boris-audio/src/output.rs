@@ -33,8 +33,13 @@ const OUTPUT_WORKER_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::fr
 /// Commands from [`crate::AudioService`] to the output worker.
 #[derive(Debug)]
 pub enum OutputCommand {
-    /// Queue mono PCM at the service source rate for playback.
+    /// Replace the current job with one buffer and auto-finish (legacy one-shot).
     Play(AudioBuffer),
+    /// Append PCM to the current job (or start one). Does not finish the job.
+    Append(AudioBuffer),
+    /// Mark the current streaming job complete so Drained can fire after empty,
+    /// then acknowledge that the state transition was applied.
+    FinishJob(crossbeam_channel::Sender<()>),
     /// Clear pending audio immediately.
     Flush,
 }
@@ -42,11 +47,8 @@ pub enum OutputCommand {
 /// Lifecycle signals for the voice engine / UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputEvent {
-    /// Play job was resampled and **queued** for the device callback.
-    ///
-    /// This is emitted from the command worker after samples enter the software
-    /// queue — not when the first sample is actually written to the hardware.
-    /// Audible start typically follows within one or a few device buffer periods.
+    /// The device callback accepted the first real sample for this play job.
+    /// Audible output follows within the device/driver buffer latency.
     Started,
     /// Software + short device-buffer drain after a real Play job finished.
     Drained,
@@ -61,6 +63,8 @@ struct OutputStreamState {
     active: bool,
     /// At least one real sample written to the device for this job.
     started: bool,
+    /// When true, more [`OutputCommand::Append`]s may arrive — do not drain yet.
+    job_open: bool,
 }
 
 impl OutputStreamState {
@@ -70,6 +74,7 @@ impl OutputStreamState {
             empty_callbacks: 0,
             active: false,
             started: false,
+            job_open: false,
         }
     }
 
@@ -78,6 +83,7 @@ impl OutputStreamState {
         self.empty_callbacks = 0;
         self.active = false;
         self.started = false;
+        self.job_open = false;
     }
 
     fn queue_play(&mut self, samples: Vec<AudioSample>) -> bool {
@@ -85,8 +91,27 @@ impl OutputStreamState {
         self.pending.extend(samples);
         self.empty_callbacks = 0;
         self.started = false;
+        self.job_open = false; // one-shot: drain after this buffer
         self.active = !self.pending.is_empty();
         self.active
+    }
+
+    fn queue_append(&mut self, samples: Vec<AudioSample>) -> bool {
+        if samples.is_empty() {
+            return self.active;
+        }
+        if !self.active {
+            self.started = false;
+            self.empty_callbacks = 0;
+        }
+        self.pending.extend(samples);
+        self.job_open = true;
+        self.active = true;
+        true
+    }
+
+    fn finish_job(&mut self) {
+        self.job_open = false;
     }
 }
 
@@ -282,22 +307,48 @@ fn run_output_worker(
                 );
 
                 let mut guard = lock_output_state(&state);
-                if guard.queue_play(resampled) {
-                    // Host can flip UI to "Speaking" only after this — not during TTS synth.
-                    // Non-RT path: blocking send is fine for lifecycle events.
-                    if event_tx.send(OutputEvent::Started).is_err() {
-                        tracing::error!("OutputPipeline: event channel disconnected (Started)");
-                    }
-                } else {
+                if !guard.queue_play(resampled) {
                     tracing::warn!("OutputPipeline: Play produced empty buffer");
                 }
             }
+            OutputCommand::Append(audio) => {
+                let resampled = match resampler.process(&audio) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(error = %e, "OutputPipeline: append resample failed");
+                        continue;
+                    }
+                };
+                lock_output_state(&state).queue_append(resampled);
+            }
+            OutputCommand::FinishJob(ack) => {
+                lock_output_state(&state).finish_job();
+                // Control path, never the RT callback. A bounded acknowledgement
+                // lets the host distinguish "queued" from "job actually closed".
+                let _ = ack.send(());
+            }
             OutputCommand::Flush => {
                 lock_output_state(&state).clear_job();
-                if event_tx.send(OutputEvent::Cleared).is_err() {
-                    tracing::error!("OutputPipeline: event channel disconnected (Cleared)");
-                }
+                try_emit_worker_event(&event_tx, &event_drops, OutputEvent::Cleared);
             }
+        }
+    }
+}
+
+/// Emit from the non-RT command worker without ever blocking command progress.
+/// Call only after releasing [`OutputStreamState`]'s mutex.
+fn try_emit_worker_event(
+    event_tx: &crossbeam_channel::Sender<OutputEvent>,
+    event_drops: &AtomicU64,
+    event: OutputEvent,
+) {
+    match event_tx.try_send(event) {
+        Ok(()) => {}
+        Err(crossbeam_channel::TrySendError::Full(_)) => {
+            event_drops.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            tracing::error!(?event, "OutputPipeline: event channel disconnected");
         }
     }
 }
@@ -355,8 +406,12 @@ where
                 }
 
                 if got_real_sample {
+                    let first_real_sample = !state.started;
                     state.started = true;
                     state.empty_callbacks = 0;
+                    if first_real_sample && event_tx.try_send(OutputEvent::Started).is_err() {
+                        event_drops.fetch_add(1, Ordering::Relaxed);
+                    }
                     return;
                 }
 
@@ -367,7 +422,8 @@ where
 
                 // Software queue empty. Only count toward drain after we have
                 // actually written samples for this job (not pre-play / idle).
-                if !state.started {
+                // Streaming jobs stay open until FinishJob.
+                if !state.started || state.job_open {
                     return;
                 }
 
@@ -403,5 +459,115 @@ impl Drop for OutputPipeline {
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_job_does_not_finish_until_explicit_close() {
+        let mut state = OutputStreamState::new();
+        assert!(state.queue_append(vec![0.1, 0.2]));
+        assert!(state.active);
+        assert!(state.job_open);
+
+        state.finish_job();
+        assert!(state.active, "closing must not discard queued samples");
+        assert!(!state.job_open);
+        assert_eq!(state.pending.len(), 2);
+    }
+
+    #[test]
+    fn flush_clears_an_open_streaming_job() {
+        let mut state = OutputStreamState::new();
+        state.queue_append(vec![0.1]);
+        state.clear_job();
+        assert!(!state.active);
+        assert!(!state.job_open);
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn finish_command_acknowledges_after_job_is_closed() {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::bounded(4);
+        let (event_tx, _event_rx) = crossbeam_channel::bounded(4);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(OutputStreamState::new()));
+        let worker_shutdown = shutdown.clone();
+        let worker_state = state.clone();
+        let worker = thread::spawn(move || {
+            let mut resampler = OutputResampler::new(16_000, 16_000, 1);
+            run_output_worker(
+                cmd_rx,
+                event_tx,
+                worker_shutdown,
+                worker_state,
+                &mut resampler,
+                Arc::new(AtomicU64::new(0)),
+            );
+        });
+
+        cmd_tx.send(OutputCommand::Append(vec![0.2; 32])).unwrap();
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        cmd_tx.send(OutputCommand::FinishJob(ack_tx)).unwrap();
+        ack_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FinishJob acknowledgement");
+
+        let guard = lock_output_state(&state);
+        assert!(!guard.job_open, "ack must mean the job is already closed");
+        assert!(guard.active);
+        drop(guard);
+
+        shutdown.store(true, Ordering::Relaxed);
+        drop(cmd_tx);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn saturated_event_queue_does_not_block_finish_control() {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::bounded(4);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        // Simulate a host that momentarily stopped draining lifecycle events.
+        event_tx.send(OutputEvent::Cleared).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(OutputStreamState::new()));
+        let drops = Arc::new(AtomicU64::new(0));
+        let worker_shutdown = shutdown.clone();
+        let worker_state = state.clone();
+        let worker_drops = drops.clone();
+        let worker = thread::spawn(move || {
+            let mut resampler = OutputResampler::new(16_000, 16_000, 1);
+            run_output_worker(
+                cmd_rx,
+                event_tx,
+                worker_shutdown,
+                worker_state,
+                &mut resampler,
+                worker_drops,
+            );
+        });
+
+        cmd_tx.send(OutputCommand::Append(vec![0.2; 32])).unwrap();
+        cmd_tx.send(OutputCommand::Flush).unwrap();
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        cmd_tx.send(OutputCommand::FinishJob(ack_tx)).unwrap();
+        let applied_without_event_drain = ack_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+
+        // Always make cleanup safe even if this behavior regresses.
+        let _ = event_rx.try_recv();
+        shutdown.store(true, Ordering::Relaxed);
+        drop(cmd_tx);
+        worker.join().unwrap();
+
+        assert!(
+            applied_without_event_drain,
+            "a full event queue must not strand FinishJob"
+        );
+        assert!(drops.load(Ordering::Relaxed) >= 1);
     }
 }

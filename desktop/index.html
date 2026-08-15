@@ -5,6 +5,19 @@
     <link rel="icon" type="image/svg+xml" href="/icons/boris-mark.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <!-- Overlay loads this same document. Hide the launch splash before
+         startup.css so the island HWND is never a solid #0b0b0c slab. -->
+    <style>
+      html.overlay-mode .startup-splash {
+        display: none !important;
+      }
+      html.overlay-mode,
+      html.overlay-mode body,
+      html.overlay-mode #root {
+        background: transparent !important;
+        background-color: transparent !important;
+      }
+    </style>
     <link rel="stylesheet" href="/src/startup.css" />
     <title>Boris</title>
   </head>

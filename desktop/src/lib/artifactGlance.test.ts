@@ -3,6 +3,7 @@ import {
   artifactKindOf,
   clipArtifactBody,
   GLANCE_CODE_LINES,
+  GLANCE_MARKDOWN_LINES,
 } from "./artifactGlance";
 
 describe("artifactGlance", () => {
@@ -34,5 +35,28 @@ describe("artifactGlance", () => {
     expect(clip.hiddenLines).toBeGreaterThan(0);
     expect(clip.text).toContain("## H1");
     expect(clip.text).not.toContain("## H12");
+  });
+
+  it("clips a dense README to the line budget so the pill cannot grow", () => {
+    const body = [
+      "# Hey, I'm Uttam",
+      "India · Student",
+      "## About Me",
+      "A long paragraph about software development that would stretch the island.",
+      "## Links",
+      "- GitHub: https://github.com/BlocksDevPro",
+      "- GitHub (alt): https://github.com/Blockswave%20Pro",
+      "## Tech Stack",
+      "- Languages: JavaScript, TypeScript, Rust",
+      "- Frontend: React, Next.js",
+      "- Backend: Node.js, Express",
+      "- Databases: MongoDB, PostgreSQL",
+      "- Blockchain: Solana",
+    ].join("\n");
+    const clip = clipArtifactBody("markdown", body);
+    expect(clip.clipped).toBe(true);
+    expect(clip.text.split("\n").length).toBeLessThanOrEqual(GLANCE_MARKDOWN_LINES);
+    expect(clip.text).toContain("# Hey, I'm Uttam");
+    expect(clip.text).not.toContain("Blockchain: Solana");
   });
 });

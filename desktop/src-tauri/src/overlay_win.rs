@@ -4,6 +4,8 @@
 //!
 //! Create and position a click-through webview. React paints phase UI inside;
 //! this module only owns **window chrome** (transparency, ignore-cursor, park).
+//! First show waits for the overlay frontend to emit [`EVENT_OVERLAY_READY`]
+//! so a still-loading WebView2 is never parked on-screen as a rectangle.
 //!
 //! # Tauri notes
 //!
@@ -30,7 +32,7 @@ use std::{
 use boris_pipeline::{AppSettings, EngineState, Phase, StatusPicture};
 use serde::Serialize;
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl,
+    AppHandle, Emitter, Listener, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl,
     WebviewWindowBuilder,
 };
 
@@ -90,9 +92,18 @@ static PREFS_SEEDED: AtomicBool = AtomicBool::new(false);
 /// Windows packaged builds and pops the empty title-bar window.
 static OVERLAY_EVER_SHOWN: AtomicBool = AtomicBool::new(false);
 
+/// Overlay React has painted (or the paint-wait fallback fired).
+static OVERLAY_PAINTED: AtomicBool = AtomicBool::new(false);
+
+/// A wake/fault/unlock asked to show before the island's first paint.
+static OVERLAY_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Create the HWND far off-screen so a first-frame style flash cannot appear.
 const OVERLAY_OFFSCREEN_X: f64 = -32_000.0;
 const OVERLAY_OFFSCREEN_Y: f64 = -32_000.0;
+
+/// If the frontend never emits [`EVENT_OVERLAY_READY`], show anyway.
+const OVERLAY_PAINT_FALLBACK: Duration = Duration::from_millis(1_200);
 
 /// Mark overlay prefs as newer than whatever is still being loaded at boot.
 pub fn mark_overlay_prefs_dirty() {
@@ -111,6 +122,9 @@ static OVERLAY_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);
 static OVERLAY_POSITION: AtomicU8 = AtomicU8::new(0);
 
 pub const EVENT_OVERLAY_PREFERENCES: &str = "overlay-preferences";
+
+/// UI → host: overlay React has painted; the HWND may be shown.
+pub const EVENT_OVERLAY_READY: &str = "overlay-ready";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,13 +146,14 @@ impl From<&AppSettings> for OverlayPreferences {
 const OVERLAY_INIT_SCRIPT: &str = r#"
 (function () {
   try {
-    document.documentElement.classList.add('overlay-mode');
-    document.documentElement.classList.remove('dark');
-    document.documentElement.style.setProperty('background', 'transparent', 'important');
-    document.documentElement.style.setProperty('background-color', 'transparent', 'important');
+    var html = document.documentElement;
+    html.classList.add('overlay-mode');
+    html.classList.remove('dark');
+    html.style.setProperty('background', 'transparent', 'important');
+    html.style.setProperty('background-color', 'transparent', 'important');
     var meta = document.querySelector('meta[name="color-scheme"]');
     if (meta) meta.setAttribute('content', 'only light');
-    document.addEventListener('DOMContentLoaded', function () {
+    function clearChrome() {
       if (document.body) {
         document.body.style.setProperty('background', 'transparent', 'important');
         document.body.style.setProperty('background-color', 'transparent', 'important');
@@ -148,7 +163,15 @@ const OVERLAY_INIT_SCRIPT: &str = r#"
         root.style.setProperty('background', 'transparent', 'important');
         root.style.setProperty('background-color', 'transparent', 'important');
       }
-    });
+      var splashes = document.querySelectorAll('.startup-splash');
+      for (var i = 0; i < splashes.length; i++) {
+        splashes[i].remove();
+      }
+    }
+    clearChrome();
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', clearChrome);
+    }
   } catch (e) {}
 })();
 "#;
@@ -197,6 +220,24 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
     }
 
     OVERLAY_EVER_SHOWN.store(false, Ordering::Relaxed);
+    OVERLAY_PAINTED.store(false, Ordering::Relaxed);
+    OVERLAY_REVEAL_PENDING.store(false, Ordering::Relaxed);
+
+    let handle = app.clone();
+    let _ = app.once(EVENT_OVERLAY_READY, move |_| {
+        on_overlay_painted(&handle);
+    });
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(OVERLAY_PAINT_FALLBACK);
+        if OVERLAY_PAINTED.load(Ordering::Acquire) {
+            return;
+        }
+        tracing::warn!("overlay paint signal timed out — revealing if pending");
+        on_overlay_painted(&handle);
+    });
+
     tracing::info!("overlay window ready off-screen (not shown)");
     Ok(())
 }
@@ -213,6 +254,7 @@ fn ensure_overlay<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow
 }
 
 fn hide_if_present<R: Runtime>(app: &AppHandle<R>) {
+    OVERLAY_REVEAL_PENDING.store(false, Ordering::Release);
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
@@ -326,7 +368,7 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
 
     if status.engine == EngineState::Fault {
         if let Some(overlay) = ensure_overlay(app) {
-            reveal_overlay(&overlay, false);
+            request_reveal(&overlay, false);
             schedule_hide(app.clone(), epoch, FAULT_LINGER);
         }
         return;
@@ -365,6 +407,9 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
                     READY_LINGER
                 };
                 schedule_hide(app.clone(), epoch, linger);
+            } else {
+                // Wake ended before first paint — do not show later.
+                OVERLAY_REVEAL_PENDING.store(false, Ordering::Release);
             }
         }
         return;
@@ -375,12 +420,9 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     };
     let visible = overlay_is_visible(&overlay);
     if !visible {
-        // Size while still off-screen, show there, then park. Showing or
-        // SetWindowPos at the on-screen slot is what packaged WebView2
-        // flashes as a decorated frame.
-        apply_overlay_size(&overlay, scale, card);
-        show_without_focus(&overlay);
-        place_overlay(&overlay, cached_position());
+        // Stay off-screen until React paints. show()+park on a still-loading
+        // WebView2 is the solid rectangle on first wake.
+        request_reveal(&overlay, card);
     } else if layout_changed {
         apply_overlay_size(&overlay, scale, card);
         place_overlay(&overlay, cached_position());
@@ -388,6 +430,7 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
 }
 
 fn wants_card_layout(status: &StatusPicture) -> bool {
+    // `artifact` is this-turn only (cleared on the next utterance).
     status.artifact.is_some()
         && status.engine == EngineState::On
         && !matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off)
@@ -439,8 +482,32 @@ fn cached_position() -> &'static str {
     }
 }
 
-fn reveal_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, card: bool) {
+/// Ask to park+show. If the island has not painted yet, remember the request
+/// and wait for [`EVENT_OVERLAY_READY`] (or the spawn fallback).
+fn request_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>, card: bool) {
+    OVERLAY_CARD_LAYOUT.store(card, Ordering::Relaxed);
+    OVERLAY_REVEAL_PENDING.store(true, Ordering::Release);
+    if OVERLAY_PAINTED.load(Ordering::Acquire) {
+        flush_pending_reveal(overlay);
+    }
+}
+
+fn on_overlay_painted<R: Runtime>(app: &AppHandle<R>) {
+    OVERLAY_PAINTED.store(true, Ordering::Release);
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    if OVERLAY_REVEAL_PENDING.load(Ordering::Acquire) {
+        flush_pending_reveal(&overlay);
+    }
+}
+
+fn flush_pending_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    if !OVERLAY_REVEAL_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    let card = OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed);
     apply_overlay_size(overlay, scale, card);
     if !overlay_is_visible(overlay) {
         show_without_focus(overlay);
@@ -467,9 +534,7 @@ fn schedule_hide<R: Runtime>(app: AppHandle<R>, epoch: u64, delay: Duration) {
         if VISIBILITY_EPOCH.load(Ordering::SeqCst) != epoch {
             return;
         }
-        if let Some(overlay) = app.get_webview_window("overlay") {
-            hide_overlay(&overlay);
-        }
+        hide_if_present(&app);
     });
 }
 
@@ -524,7 +589,7 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
     if !locked {
         // Unlocking is an explicit request to position the overlay. Make the
         // otherwise wake-only window visible without focusing it.
-        reveal_overlay(&overlay, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
+        request_reveal(&overlay, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
     }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())

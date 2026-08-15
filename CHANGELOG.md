@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- First overlay show no longer flashes a solid rectangle. The island stays
+  off-screen until React paints, the shared launch splash is stripped from
+  the overlay document, and the island CSS has a radius before Motion runs.
+
 ## [1.1.0-beta.4] - 2026-08-13
 
 ### Fixed

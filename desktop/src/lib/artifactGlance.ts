@@ -1,7 +1,8 @@
 /** Overlay glance: clip a card so it fits the island (no scroll). */
 
-export const GLANCE_CODE_LINES = 8;
-export const GLANCE_MARKDOWN_BLOCKS = 8;
+export const GLANCE_CODE_LINES = 6;
+export const GLANCE_MARKDOWN_LINES = 8;
+export const GLANCE_MARKDOWN_BLOCKS = 4;
 
 export type ArtifactKindName = "markdown" | "code";
 
@@ -23,13 +24,22 @@ export function clipArtifactBody(
   if (kind === "code") {
     return clipLines(raw, GLANCE_CODE_LINES);
   }
+  // Dense READMEs (lists, headings, few blank lines) still have to fit the
+  // 300px island. Always enforce a line budget; also stop after a few blocks
+  // so rendered headings/lists cannot balloon the pill.
+  const byLines = clipLines(raw, GLANCE_MARKDOWN_LINES);
   const blocks = raw.split(/\n{2,}/).filter((b) => b.trim().length > 0);
   if (blocks.length <= GLANCE_MARKDOWN_BLOCKS) {
-    return clipLines(raw, 18);
+    return byLines;
   }
   const kept = blocks.slice(0, GLANCE_MARKDOWN_BLOCKS).join("\n\n");
-  const hidden = hiddenLineCount(blocks.slice(GLANCE_MARKDOWN_BLOCKS).join("\n\n"));
-  return { text: kept.trimEnd(), hiddenLines: hidden, clipped: hidden > 0 };
+  const byBlocks = clipLines(kept, GLANCE_MARKDOWN_LINES);
+  const hidden = hiddenLineCount(raw.slice(byBlocks.text.length));
+  return {
+    text: byBlocks.text,
+    hiddenLines: Math.max(byBlocks.hiddenLines, hidden),
+    clipped: true,
+  };
 }
 
 function clipLines(raw: string, max: number): GlanceClip {

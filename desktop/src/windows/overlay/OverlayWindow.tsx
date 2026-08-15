@@ -1,15 +1,23 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
 import { OverlayArtifactCard } from "@/components/artifacts";
-import { getSettings, useStatus, type AppSettings, type StatusPicture } from "@/bridge";
+import {
+  EVENTS,
+  getSettings,
+  useStatus,
+  type AppSettings,
+  type StatusPicture,
+} from "@/bridge";
+import { isTauriRuntime } from "@/lib/runtime";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
 import {
   isConfirmContext,
   pickCaption,
   pickOverlayPresence,
+  shouldShowOverlayCard,
   type Caption,
 } from "@/lib/statusPresentation";
 
@@ -57,10 +65,7 @@ export function OverlayWindow() {
     liveCaption,
     preferences.overlay_caption_mode,
   );
-  const showCard =
-    Boolean(status.artifact) &&
-    status.phase !== "Hearing" &&
-    status.phase !== "Reading";
+  const showCard = shouldShowOverlayCard(status);
   const caption =
     isReady && readyCaptionHidden && !showCard ? null : privateCaption;
   const orbOnly = isReady && readyCaptionHidden && !showCard;
@@ -139,6 +144,25 @@ export function OverlayWindow() {
     };
   }, []);
 
+  // Host keeps the HWND off-screen until this fires. Two rAFs wait for the
+  // island's first paint so show()+park does not flash a raw rectangle.
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    const id = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        void emit(EVENTS.overlayReady).catch(() => {
+          // Host fallback timer will show the island if this never arrives.
+        });
+      });
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(id);
+    };
+  }, []);
+
   return (
     <div className="overlay-surface relative h-full w-full bg-transparent">
       <div
@@ -150,13 +174,13 @@ export function OverlayWindow() {
       >
         <motion.div
           data-tauri-drag-region
-          layout={reduceMotion ? false : "size"}
+          layout={reduceMotion || showCard ? false : "size"}
           className={cn(
             "overlay-island relative flex select-none",
             orbOnly
               ? "items-center justify-center p-2.5"
               : showCard
-                ? "w-max min-w-[220px] max-w-[388px] flex-col px-3 py-2"
+                ? "max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3 py-2"
                 : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
           )}
           initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
@@ -206,7 +230,7 @@ export function OverlayWindow() {
               <motion.div
                 key="overlay-details"
                 data-tauri-drag-region
-                className="flex w-full flex-col"
+                className="flex min-h-0 w-full min-w-0 flex-col"
                 initial={reduceMotion ? false : { opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98 }}

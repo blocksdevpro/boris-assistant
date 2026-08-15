@@ -71,7 +71,9 @@ pub struct StatusPicture {
     /// Soft context window for the meter (tokens).
     #[serde(default)]
     pub context_limit: Option<u32>,
-    /// Current session card, if any (body is fetched separately).
+    /// Overlay glance for the card presented this turn (or the Ready linger
+    /// after it). Cleared when the next utterance starts. Body is fetched
+    /// separately; the session catalog is the source of truth for Home.
     #[serde(default)]
     pub artifact: Option<ArtifactPeek>,
 }

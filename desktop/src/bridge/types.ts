@@ -77,7 +77,7 @@ export type StatusPicture = {
   context_used?: number | null;
   /** Soft context window for the meter. */
   context_limit?: number | null;
-  /** Current session card peek (body loaded separately). */
+  /** This-turn overlay glance (cleared on the next utterance). Body is separate. */
   artifact?: ArtifactPeek | null;
 };
 

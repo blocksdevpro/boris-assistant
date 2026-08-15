@@ -494,6 +494,19 @@ function isShortConfirmAnswer(text: string): boolean {
   );
 }
 
+/**
+ * Overlay glance: show the card presented this turn, plus the Ready linger.
+ * Pipeline clears `artifact` when the next utterance starts, so a later
+ * Thinking/Talking snapshot only has a card if this turn presented one.
+ */
+export function shouldShowOverlayCard(status: StatusPicture): boolean {
+  if (!status.artifact) return false;
+  if (status.phase === "Off" || status.phase === "Hearing" || status.phase === "Reading") {
+    return false;
+  }
+  return true;
+}
+
 /** Phases that should keep the island expanded (not orb-only). */
 export function shouldStayExpanded(status: StatusPicture): boolean {
   if (status.engine === "Fault" || status.engine === "Starting") return true;

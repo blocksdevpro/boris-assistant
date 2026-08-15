@@ -189,13 +189,35 @@
   height: 300px;
 }
 
+/* Island must stay inside the stage. A tall card used to grow the pill
+   past the native HWND and Framer layout would chase the overflow. */
+.overlay-stage[data-mode="card"] .overlay-island {
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
 /* Glance must never grow scrollbars — overlay is click-through. */
 .overlay-stage[data-mode="card"] .overlay-caption,
+.overlay-stage[data-mode="card"] .overlay-card,
 .overlay-stage[data-mode="card"] .artifact-code {
   overflow: hidden;
 }
 
+.overlay-stage[data-mode="card"] .overlay-card {
+  max-height: 200px;
+}
+
+.overlay-stage[data-mode="card"] .overlay-card__body {
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .overlay-island {
+  /* CSS radius first — Framer Motion applies radius after mount, so without
+     this the island's first paint is a sharp rectangle. */
+  border-radius: 18px;
   /* Single material — near-opaque glass, alpha < 1 for transparent host */
   background: rgba(28, 30, 36, 0.97);
   border: 1px solid rgba(255, 255, 255, 0.11);

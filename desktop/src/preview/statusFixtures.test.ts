@@ -4,6 +4,7 @@ import {
   isConfirmContext,
   pickCaption,
   pickOverlayPresence,
+  shouldShowOverlayCard,
   showProgressBar,
 } from "@/lib/statusPresentation";
 import { STATUS_FIXTURES, getStatusFixture } from "./statusFixtures";
@@ -48,5 +49,14 @@ describe("overlay preview fixtures", () => {
     expect(deviceFaults.mic.ok).toBe(false);
     expect(deviceFaults.speaker.ok).toBe(false);
     expect(getStatusFixture("artifact-card")!.artifact?.id).toBe("a1f3c9");
+  });
+
+  it("shows a card only for this turn and the Ready linger", () => {
+    const card = getStatusFixture("artifact-card")!;
+    expect(shouldShowOverlayCard(card)).toBe(true);
+    expect(shouldShowOverlayCard({ ...card, phase: "Armed" })).toBe(true);
+    expect(shouldShowOverlayCard({ ...card, phase: "Hearing" })).toBe(false);
+    expect(shouldShowOverlayCard({ ...card, phase: "Reading" })).toBe(false);
+    expect(shouldShowOverlayCard(getStatusFixture("thinking")!)).toBe(false);
   });
 });

@@ -40,8 +40,8 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
   const clip = body ? clipArtifactBody(kind, body) : null;
 
   return (
-    <div className="overlay-caption mt-1.5 min-w-0 max-w-[372px] overflow-hidden rounded-[10px] px-2 py-1.5">
-      <div className="mb-1 flex min-w-0 items-baseline gap-1.5">
+    <div className="overlay-card overlay-caption mt-1.5 flex min-h-0 min-w-0 w-full flex-col overflow-hidden rounded-[10px] px-2 py-1.5">
+      <div className="mb-1 flex min-w-0 shrink-0 items-baseline gap-1.5">
         <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.06em] text-white/55">
           Card
         </span>
@@ -49,7 +49,7 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
           {peek.title}
         </span>
       </div>
-      <div className="min-w-0 overflow-hidden">
+      <div className="overlay-card__body min-h-0 min-w-0 flex-1 overflow-hidden break-words">
         {clip ? (
           kind === "code" ? (
             <ArtifactCode source={clip.text} language={peek.language} compact />
@@ -61,11 +61,11 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
         )}
       </div>
       {clip?.clipped ? (
-        <p className="mt-1.5 text-[10px] leading-tight text-white/40">
+        <p className="mt-1.5 shrink-0 text-[10px] leading-tight text-white/40">
           +{clip.hiddenLines} more · full card in Boris
         </p>
       ) : (
-        <p className="mt-1.5 text-[10px] leading-tight text-white/35">
+        <p className="mt-1.5 shrink-0 text-[10px] leading-tight text-white/35">
           Full card in Boris
         </p>
       )}

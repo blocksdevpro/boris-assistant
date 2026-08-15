@@ -3,7 +3,7 @@
  *
  * **Contract:** these string values must match Rust:
  * - commands → `desktop/src-tauri/src/commands.rs` (`#[tauri::command]` fn names)
- * - events   → `commands::EVENT_*` constants
+ * - events   → `commands::EVENT_*` / `overlay_win::EVENT_*` constants
  *
  * Rename only in an atomic host + bridge PR.
  */
@@ -29,12 +29,14 @@ export const COMMANDS = {
   checkAppUpdate: "check_app_update",
 } as const;
 
-/** Event names emitted by the host (`app.emit`). */
+/** Event names. Host→UI unless noted. Must match Rust `EVENT_*` constants. */
 export const EVENTS = {
   /** Payload: `StatusPicture` */
   status: "status",
   /** Payload: `DownloadProgress` */
   modelsProgress: "models-progress",
+  /** UI→host: overlay React has painted; safe to show the HWND. */
+  overlayReady: "overlay-ready",
 } as const;
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];

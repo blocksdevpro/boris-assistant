@@ -14,7 +14,9 @@ export function ArtifactMarkdown({
     <div
       className={cn(
         "min-w-0 text-white/88",
-        compact ? "space-y-1.5 text-[12px] leading-[1.4]" : "space-y-2.5 text-[15px] leading-relaxed",
+        compact
+          ? "space-y-1.5 overflow-hidden break-words text-[12px] leading-[1.4]"
+          : "space-y-2.5 text-[15px] leading-relaxed",
       )}
     >
       {nodes.map((node, i) => (
@@ -75,7 +77,7 @@ function MdBlock({ node, compact }: { node: MdNode; compact: boolean }) {
           className={cn(
             "artifact-code rounded-[8px] bg-[#1e1e1e] px-2 py-1.5 font-mono",
             compact
-              ? "overflow-hidden whitespace-pre text-[11px] leading-[1.4]"
+              ? "overflow-hidden whitespace-pre-wrap break-words text-[11px] leading-[1.4]"
               : "overflow-auto whitespace-pre text-[13px] leading-[1.5]",
           )}
         >

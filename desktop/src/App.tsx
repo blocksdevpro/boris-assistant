@@ -89,7 +89,7 @@ function App() {
     }
   }, [fixtureMatrix, startupPreview, surface]);
 
-  // Overlay paints pure-black chrome (Windows color-key); main keeps dark theme.
+  // Overlay must stay in overlay-mode (transparent chrome); main keeps dark theme.
   useEffect(() => {
     const root = document.documentElement;
     const meta = document.querySelector('meta[name="color-scheme"]');
@@ -103,7 +103,11 @@ function App() {
       meta?.setAttribute("content", "dark");
     }
     return () => {
-      root.classList.remove("overlay-mode");
+      // Overlay must keep this class: removing it lets startup.css paint
+      // html/body as a solid slab (and remount in StrictMode would flash it).
+      if (surface !== "overlay") {
+        root.classList.remove("overlay-mode");
+      }
     };
   }, [surface]);
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { highlightCode, resolveHighlightLanguage } from "./artifactHighlight";
+import {
+  highlightCodeAsync,
+  resolveHighlightLanguage,
+} from "./artifactHighlight";
 
 describe("resolveHighlightLanguage", () => {
   it("maps common aliases", () => {
@@ -13,21 +16,24 @@ describe("resolveHighlightLanguage", () => {
 });
 
 describe("highlightCode", () => {
-  it("colors python keywords", () => {
-    const html = highlightCode("def open_bash_session():\n    pass\n", "python");
+  it("colors python keywords", async () => {
+    const html = await highlightCodeAsync(
+      "def open_bash_session():\n    pass\n",
+      "python",
+    );
     expect(html).toContain("hljs-keyword");
     expect(html).toContain("def");
     expect(html).not.toContain("<script");
   });
 
-  it("colors rust keywords", () => {
-    const html = highlightCode("async fn main() {}", "rust");
+  it("colors rust keywords", async () => {
+    const html = await highlightCodeAsync("async fn main() {}", "rust");
     expect(html).toContain("hljs-keyword");
     expect(html).toContain("fn");
   });
 
-  it("escapes unknown languages", () => {
-    const html = highlightCode("<raw>", "not-a-lang");
+  it("escapes unknown languages", async () => {
+    const html = await highlightCodeAsync("<raw>", "not-a-lang");
     expect(html).toBe("&lt;raw&gt;");
   });
 });

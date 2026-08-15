@@ -1,6 +1,6 @@
-import { highlightCode } from "@/lib/artifactHighlight";
 import { parseMarkdown, splitInline, type MdNode } from "@/lib/renderMarkdown";
 import { cn } from "@/lib/utils";
+import { ArtifactCode } from "./ArtifactCode";
 
 export function ArtifactMarkdown({
   source,
@@ -72,23 +72,7 @@ function MdBlock({ node, compact }: { node: MdNode; compact: boolean }) {
         </ol>
       );
     case "pre":
-      return (
-        <pre
-          className={cn(
-            "artifact-code rounded-[8px] bg-[#1e1e1e] px-2 py-1.5 font-mono",
-            compact
-              ? "overflow-hidden whitespace-pre-wrap break-words text-[11px] leading-[1.4]"
-              : "overflow-auto whitespace-pre text-[13px] leading-[1.5]",
-          )}
-        >
-          <code
-            className="artifact-code__tokens block"
-            dangerouslySetInnerHTML={{
-              __html: highlightCode(node.text, node.lang || null),
-            }}
-          />
-        </pre>
-      );
+      return <ArtifactCode source={node.text} language={node.lang || null} compact={compact} />;
   }
 }
 

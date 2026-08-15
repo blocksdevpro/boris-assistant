@@ -6,8 +6,14 @@ import { AppErrorBoundary } from "@/components/AppErrorBoundary";
 import { StartupScreen } from "@/components/StartupScreen";
 import { logger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
-import { MainWindow } from "@/windows/main/MainWindow";
-import { OverlayWindow } from "@/windows/overlay/OverlayWindow";
+const MainWindow = lazy(() =>
+  import("@/windows/main/MainWindow").then((m) => ({ default: m.MainWindow })),
+);
+const OverlayWindow = lazy(() =>
+  import("@/windows/overlay/OverlayWindow").then((m) => ({
+    default: m.OverlayWindow,
+  })),
+);
 
 type Surface = "main" | "overlay";
 
@@ -144,7 +150,21 @@ function App() {
   }
 
   const surfaceView =
-    surface === "overlay" ? <OverlayWindow /> : <MainWindow />;
+    surface === "overlay" ? (
+      <Suspense
+        fallback={
+          <div className="flex h-screen items-center justify-center bg-transparent text-sm text-black/40">
+            Loading overlay…
+          </div>
+        }
+      >
+        <OverlayWindow />
+      </Suspense>
+    ) : (
+      <Suspense fallback={null}>
+        <MainWindow />
+      </Suspense>
+    );
 
   const surfaceContent = fixtureStatus ? (
     <StatusPreviewProvider status={fixtureStatus}>

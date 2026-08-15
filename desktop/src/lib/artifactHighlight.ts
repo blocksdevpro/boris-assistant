@@ -1,52 +1,54 @@
 import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import c from "highlight.js/lib/languages/c";
-import cpp from "highlight.js/lib/languages/cpp";
-import csharp from "highlight.js/lib/languages/csharp";
-import css from "highlight.js/lib/languages/css";
-import go from "highlight.js/lib/languages/go";
-import ini from "highlight.js/lib/languages/ini";
-import java from "highlight.js/lib/languages/java";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import kotlin from "highlight.js/lib/languages/kotlin";
-import markdown from "highlight.js/lib/languages/markdown";
-import powershell from "highlight.js/lib/languages/powershell";
-import python from "highlight.js/lib/languages/python";
-import ruby from "highlight.js/lib/languages/ruby";
-import rust from "highlight.js/lib/languages/rust";
-import sql from "highlight.js/lib/languages/sql";
-import swift from "highlight.js/lib/languages/swift";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
+import type { LanguageFn } from "highlight.js";
 
-let registered = false;
+const LOADERS: Record<string, () => Promise<LanguageFn>> = {
+    python: () => import("highlight.js/lib/languages/python").then((m) => m.default),
+    rust: () => import("highlight.js/lib/languages/rust").then((m) => m.default),
+    javascript: () =>
+      import("highlight.js/lib/languages/javascript").then((m) => m.default),
+    typescript: () =>
+      import("highlight.js/lib/languages/typescript").then((m) => m.default),
+    powershell: () =>
+      import("highlight.js/lib/languages/powershell").then((m) => m.default),
+    bash: () => import("highlight.js/lib/languages/bash").then((m) => m.default),
+    json: () => import("highlight.js/lib/languages/json").then((m) => m.default),
+    ini: () => import("highlight.js/lib/languages/ini").then((m) => m.default),
+    yaml: () => import("highlight.js/lib/languages/yaml").then((m) => m.default),
+    xml: () => import("highlight.js/lib/languages/xml").then((m) => m.default),
+    css: () => import("highlight.js/lib/languages/css").then((m) => m.default),
+    go: () => import("highlight.js/lib/languages/go").then((m) => m.default),
+    c: () => import("highlight.js/lib/languages/c").then((m) => m.default),
+    cpp: () => import("highlight.js/lib/languages/cpp").then((m) => m.default),
+    java: () => import("highlight.js/lib/languages/java").then((m) => m.default),
+    csharp: () => import("highlight.js/lib/languages/csharp").then((m) => m.default),
+    ruby: () => import("highlight.js/lib/languages/ruby").then((m) => m.default),
+    swift: () => import("highlight.js/lib/languages/swift").then((m) => m.default),
+    kotlin: () => import("highlight.js/lib/languages/kotlin").then((m) => m.default),
+    sql: () => import("highlight.js/lib/languages/sql").then((m) => m.default),
+    markdown: () =>
+      import("highlight.js/lib/languages/markdown").then((m) => m.default),
+  };
 
-function ensureRegistered() {
-  if (registered) return;
-  hljs.registerLanguage("bash", bash);
-  hljs.registerLanguage("c", c);
-  hljs.registerLanguage("cpp", cpp);
-  hljs.registerLanguage("csharp", csharp);
-  hljs.registerLanguage("css", css);
-  hljs.registerLanguage("go", go);
-  hljs.registerLanguage("ini", ini);
-  hljs.registerLanguage("java", java);
-  hljs.registerLanguage("javascript", javascript);
-  hljs.registerLanguage("json", json);
-  hljs.registerLanguage("kotlin", kotlin);
-  hljs.registerLanguage("markdown", markdown);
-  hljs.registerLanguage("powershell", powershell);
-  hljs.registerLanguage("python", python);
-  hljs.registerLanguage("ruby", ruby);
-  hljs.registerLanguage("rust", rust);
-  hljs.registerLanguage("sql", sql);
-  hljs.registerLanguage("swift", swift);
-  hljs.registerLanguage("typescript", typescript);
-  hljs.registerLanguage("xml", xml);
-  hljs.registerLanguage("yaml", yaml);
-  registered = true;
+const registered = new Set<string>();
+const inflight = new Map<string, Promise<void>>();
+
+async function ensureLanguage(lang: string): Promise<void> {
+  if (registered.has(lang)) return;
+  const pending = inflight.get(lang);
+  if (pending) return pending;
+  const loader = LOADERS[lang];
+  if (!loader) return;
+  const work = loader()
+    .then((def) => {
+      hljs.registerLanguage(lang, def);
+      registered.add(lang);
+    })
+    .finally(() => {
+      // A failed dynamic import must be retryable on the next render.
+      inflight.delete(lang);
+    });
+  inflight.set(lang, work);
+  await work;
 }
 
 /** Map Boris language hints onto a highlight.js grammar id. */
@@ -125,12 +127,18 @@ export function resolveHighlightLanguage(
   }
 }
 
-/** highlight.js HTML (escaped text + token spans). Unknown lang → escaped plain. */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** highlight.js HTML. Unknown / not-yet-loaded lang → escaped plain. */
 export function highlightCode(
   source: string,
   language?: string | null,
 ): string {
-  ensureRegistered();
   const lang = resolveHighlightLanguage(language);
   try {
     if (lang && hljs.getLanguage(lang)) {
@@ -142,9 +150,18 @@ export function highlightCode(
   return escapeHtml(source);
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+/** Load the grammar (if any) then highlight. */
+export async function highlightCodeAsync(
+  source: string,
+  language?: string | null,
+): Promise<string> {
+  const lang = resolveHighlightLanguage(language);
+  if (lang) {
+    try {
+      await ensureLanguage(lang);
+    } catch {
+      // fall through to escaped
+    }
+  }
+  return highlightCode(source, language);
 }

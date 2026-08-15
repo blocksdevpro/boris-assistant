@@ -1,4 +1,5 @@
-import { highlightCode } from "@/lib/artifactHighlight";
+import { useEffect, useState } from "react";
+import { escapeHtml, highlightCodeAsync } from "@/lib/artifactHighlight";
 import { cn } from "@/lib/utils";
 
 export function ArtifactCode({
@@ -10,7 +11,27 @@ export function ArtifactCode({
   language?: string | null;
   compact?: boolean;
 }) {
-  const html = highlightCode(source, language);
+  const languageKey = language ?? null;
+  const [rendered, setRendered] = useState(() => ({
+    source,
+    language: languageKey,
+    html: escapeHtml(source),
+  }));
+  // Prop changes render escaped current source immediately; never flash the
+  // previous artifact while its dynamically imported grammar is loading.
+  const html =
+    rendered.source === source && rendered.language === languageKey
+      ? rendered.html
+      : escapeHtml(source);
+  useEffect(() => {
+    let live = true;
+    void highlightCodeAsync(source, languageKey).then((next) => {
+      if (live) setRendered({ source, language: languageKey, html: next });
+    });
+    return () => {
+      live = false;
+    };
+  }, [source, languageKey]);
 
   return (
     <pre

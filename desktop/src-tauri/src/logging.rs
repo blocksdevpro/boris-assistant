@@ -212,13 +212,9 @@ fn prune_old_logs(log_dir: &std::path::Path) -> usize {
     let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| {
-                    n.ends_with(".log")
-                        && (n.starts_with("boris.") || n.starts_with("boris-desktop."))
-                })
+            entry.file_name().to_str().is_some_and(|n| {
+                n.ends_with(".log") && (n.starts_with("boris.") || n.starts_with("boris-desktop."))
+            })
         })
         .filter_map(|entry| {
             let modified = entry.metadata().ok()?.modified().ok()?;

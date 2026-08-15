@@ -17,7 +17,7 @@ use crate::status::{
 
 use super::llm::{
     build_openrouter_client, looks_like_non_agent_model, resolve_model_and_provider,
-    DEFAULT_STRONG_MODEL,
+    DEFAULT_STRONG_MODEL, DEFAULT_STRONG_PROVIDER,
 };
 use super::models::{create_stt, create_tts, SttBox, TtsBox};
 use super::picture::Picture;
@@ -318,6 +318,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         config.openrouter_model_provider.as_deref(),
         DEFAULT_STRONG_MODEL,
     );
+    let strong_provider_raw = strong_provider_raw.or_else(|| Some(DEFAULT_STRONG_PROVIDER.into()));
     let (fast_model, fast_provider_raw) = resolve_model_and_provider(
         config
             .openrouter_fast_model
@@ -326,6 +327,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         config.openrouter_fast_provider.as_deref(),
         &strong_model,
     );
+    let fast_provider_raw = fast_provider_raw.or_else(|| strong_provider_raw.clone());
     let pin = config.openrouter_pin_provider;
     // Morph apply / merge models cannot do tool calling — Boris always sends tools.
     if looks_like_non_agent_model(&strong_model) {
@@ -333,7 +335,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
             model = %strong_model,
             "configured OpenRouter model looks specialized (e.g. Morph apply) and usually \
              cannot use tools (get_time, bash, …). Prefer a chat model such as \
-             google/gemini-3.6-flash. Routing will fall back when tool use is rejected."
+             deepseek/deepseek-v4-flash-0731. Routing will fall back when tool use is rejected."
         );
     }
     // One session id for the engine process → OpenRouter sticky-routes to the

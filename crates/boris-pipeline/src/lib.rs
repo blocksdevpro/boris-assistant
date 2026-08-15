@@ -63,5 +63,8 @@ pub use paths::{
     PreflightReport, BORIS_HOME_ENV, DESKTOP_WORKSPACE,
 };
 pub use prompt::BORIS_SYSTEM_PROMPT;
-pub use settings::{load_settings, save_settings, secrets_path, settings_path, AppSettings};
+pub use settings::{
+    load_settings, save_settings, secrets_path, settings_path, AppSettings,
+    DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_PROVIDER,
+};
 pub use status::{ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture};

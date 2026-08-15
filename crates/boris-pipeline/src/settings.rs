@@ -34,6 +34,12 @@ fn default_true() -> bool {
     true
 }
 
+/// Product default when no model is saved (OpenRouter id).
+pub const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+
+/// Product default model-provider when none is saved.
+pub const DEFAULT_OPENROUTER_PROVIDER: &str = "digitalocean";
+
 fn default_tts_voice() -> String {
     "M4".into()
 }

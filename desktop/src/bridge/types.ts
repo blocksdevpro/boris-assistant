@@ -214,9 +214,9 @@ export function normalizeUpdateChannel(
 export const EMPTY_SETTINGS: AppSettings = {
   openrouter_api_key: "",
   exa_api_key: "",
-  openrouter_model: "",
+  openrouter_model: "deepseek/deepseek-v4-flash-0731",
   openrouter_fast_model: "",
-  openrouter_model_provider: "",
+  openrouter_model_provider: "digitalocean",
   openrouter_fast_provider: "",
   openrouter_pin_provider: false,
   capability_preset: "full",
@@ -238,9 +238,9 @@ export const EMPTY_SETTINGS: AppSettings = {
 
 /** Common OpenRouter chat models for the preset dropdown (kept current for agents). */
 export const MODEL_PRESETS: { id: string; label: string }[] = [
-  { id: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash (recommended)" },
+  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731 (recommended)" },
+  { id: "google/gemini-3.6-flash", label: "Gemini 3.6 Flash" },
   { id: "google/gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (cheap/fast)" },
-  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731" },
   { id: "deepseek/deepseek-v4-flash-latest", label: "DeepSeek V4 Flash Latest" },
   { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5" },
   { id: "anthropic/claude-opus-5", label: "Claude Opus 5" },
@@ -259,6 +259,7 @@ export const MODEL_PRESETS: { id: string; label: string }[] = [
  */
 export const PROVIDER_PRESETS: { id: string; label: string }[] = [
   { id: "", label: "Auto (OpenRouter default)" },
+  { id: "digitalocean", label: "DigitalOcean" },
   { id: "coreweave", label: "CoreWeave" },
   { id: "baseten", label: "Baseten" },
   { id: "siliconflow", label: "SiliconFlow" },
@@ -317,9 +318,11 @@ export function normalizeSettings(
   return {
     openrouter_api_key: raw?.openrouter_api_key ?? "",
     exa_api_key: raw?.exa_api_key ?? "",
-    openrouter_model: raw?.openrouter_model ?? "",
+    openrouter_model:
+      raw?.openrouter_model?.trim() || "deepseek/deepseek-v4-flash-0731",
     openrouter_fast_model: raw?.openrouter_fast_model ?? "",
-    openrouter_model_provider: raw?.openrouter_model_provider ?? "",
+    openrouter_model_provider:
+      raw?.openrouter_model_provider?.trim() || "digitalocean",
     openrouter_fast_provider: raw?.openrouter_fast_provider ?? "",
     openrouter_pin_provider: raw?.openrouter_pin_provider ?? false,
     capability_preset: raw?.capability_preset?.trim() || "full",

@@ -3,9 +3,10 @@
 use boris_agent::{OpenRouterClient, ReasoningConfig};
 
 /// Default strong/primary model when nothing is configured.
-///
-/// Prefer a current, tool-capable OpenRouter chat model for research / tool turns.
-pub(super) const DEFAULT_STRONG_MODEL: &str = "google/gemini-3.6-flash";
+pub(super) const DEFAULT_STRONG_MODEL: &str = crate::settings::DEFAULT_OPENROUTER_MODEL;
+
+/// Default OpenRouter model-provider when none is configured.
+pub(super) const DEFAULT_STRONG_PROVIDER: &str = crate::settings::DEFAULT_OPENROUTER_PROVIDER;
 
 /// Heuristic: specialized apply/merge models (Morph, etc.) usually cannot tool-call.
 pub(super) fn looks_like_non_agent_model(model: &str) -> bool {
@@ -90,6 +91,9 @@ mod tests {
     fn non_agent_model_heuristic() {
         assert!(looks_like_non_agent_model("morph/morph-v3-large"));
         assert!(looks_like_non_agent_model("vendor/apply-model"));
+        assert!(!looks_like_non_agent_model(
+            "deepseek/deepseek-v4-flash-0731"
+        ));
         assert!(!looks_like_non_agent_model("google/gemini-3.6-flash"));
         assert!(!looks_like_non_agent_model("google/gemini-2.5-flash-lite"));
     }
@@ -97,8 +101,10 @@ mod tests {
     #[test]
     fn resolve_defaults_and_inline_provider() {
         let (m, p) = resolve_model_and_provider(None, None, DEFAULT_STRONG_MODEL);
+        assert_eq!(m, "deepseek/deepseek-v4-flash-0731");
         assert_eq!(m, DEFAULT_STRONG_MODEL);
         assert!(p.is_none());
+        assert_eq!(DEFAULT_STRONG_PROVIDER, "digitalocean");
 
         let (m, p) = resolve_model_and_provider(Some("foo@bar"), None, DEFAULT_STRONG_MODEL);
         assert_eq!(m, "foo");

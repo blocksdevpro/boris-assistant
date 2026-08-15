@@ -13,6 +13,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Default chat model is `deepseek/deepseek-v4-flash-0731` via DigitalOcean
+  (`digitalocean`). Existing saved model/provider choices are unchanged.
 - Desktop process and log files are named `boris` (not `boris-desktop`).
   The taskbar, installer binary, and `~/.boris/logs` all use `boris`.
 - Completion logs now include wall-clock `ms` for the thing that just finished:

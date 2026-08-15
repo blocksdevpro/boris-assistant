@@ -27,7 +27,7 @@ pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// Product defaults (voice pipeline, desktop settings) may override via
 /// `OpenRouterClient::new(..., Some(model))` / [`OpenRouterClient::with_model`].
 /// Changing this constant only affects callers that pass `None`.
-pub const DEFAULT_MODEL: &str = "google/gemini-3.6-flash";
+pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 
 /// OpenRouter Chat Completions client.
 ///

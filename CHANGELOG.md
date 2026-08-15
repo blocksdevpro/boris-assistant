@@ -5,11 +5,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0-beta.5] - 2026-08-15
+
 ### Added
 
 - Settings → General: **Start with Windows**. Registers a current-user Run
   key so Boris launches at sign-in. That launch stays in the tray (no main
   window) and turns the engine on.
+- Asynchronous research subagents return immediately and support real
+  `poll`, `join`, and `cancel` actions with session-bound cancellation.
+- Durable per-turn latency traces under `~/.boris/traces/turns.jsonl`, plus
+  `cargo xtask trace-report` for local p50/p95 reports.
+- SQLite FTS5-backed memory search that is rebuilt only when its schema needs
+  migration and stays current as session memory is appended.
 
 ### Changed
 
@@ -19,6 +27,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Silero endpointing: freeform trailing silence is **550 ms** (LiveKit Agents
   Silero default) and yes/no confirm silence is **250 ms**. The old 900 / 420
   ms windows were hangover for WebRTC flicker.
+- Model routing is request-local and trait-driven. Greetings and time/date
+  turns stay on the fast tier even when tools are advertised; research,
+  coding, side effects, and failed tool evidence receive stronger budgets.
+- Progressive tool listing is enabled by default with bounded LRU activation,
+  a hard 64 KiB schema ceiling, central argument validation, per-tool
+  concurrency limits, and parallel read-only calls before the first approval.
+- Session transcripts, long-term-memory appends, personal extraction, and turn
+  traces run on maintenance lanes instead of the speech-critical engine path.
+- Final speech is synthesized in sentence units while earlier audio plays.
+  Stop/device-switch commands remain responsive, and `low_memory`, `balanced`,
+  and `low_latency` now provide distinct model-residency policies.
+- The desktop loads only its selected window and dynamically imports syntax
+  grammars. The production entry chunk is now about 226 KiB and has a 500 KiB
+  release gate.
 - Default chat model is `deepseek/deepseek-v4-flash-0731` via DigitalOcean
   (`digitalocean`). Existing saved model/provider choices are unchanged.
 - Desktop process and log files are named `boris` (not `boris-desktop`).
@@ -34,6 +56,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - First overlay show no longer flashes a solid rectangle. The island stays
   off-screen until React paints, the shared launch splash is stripped from
   the overlay document, and the island CSS has a radius before Motion runs.
+- Malformed, missing, or schema-invalid tool arguments are returned to the
+  model as repairable observations and can never reach tool execution.
+- Transcript compaction now rewrites changed prefixes even when the resulting
+  snapshot grows, preventing mixed pre/post-compaction JSONL history.
+- Playback lifecycle events cannot deadlock the audio worker, `Started` means
+  the first real device sample, and a stuck native TTS call is detached after
+  a bounded cancellation grace instead of freezing shutdown.
+- Research finish gating counts useful current-turn evidence rather than stale
+  or failed search observations.
 
 ## [1.1.0-beta.4] - 2026-08-13
 
@@ -131,6 +162,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.1.0-beta.5]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.5
 [1.1.0-beta.4]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.4
 [1.1.0-beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.3
 [1.1.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.2

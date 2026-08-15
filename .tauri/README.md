@@ -89,6 +89,9 @@ So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notice
 
 ## Publishing a beta
 
+For the current tree, use version/tag **`1.1.0-beta.5`** /
+**`v1.1.0-beta.5`** and put the same version in `latest.json`.
+
 1. Version the product `MAJOR.MINOR.PATCH-beta.N` (e.g. `1.1.0-beta.1`).
    WiX/MSI only accepts numeric pre-release ids (`1.1.0-1`), so betas bundle
    **NSIS only** (`bundle.targets: ["nsis"]` in `tauri.conf.json`). The updater
@@ -103,9 +106,9 @@ So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notice
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-**Do not** uncheck Pre-release on `v1.1.0-beta.3` unless you want every
+**Do not** uncheck Pre-release on `v1.1.0-beta.5` unless you want every
 Stable 1.0.0 install offered a build whose version string is still
-`1.1.0-beta.3` (NSIS only, no MSI).
+`1.1.0-beta.5` (NSIS only, no MSI).
 
 The clean promote:
 
@@ -117,14 +120,14 @@ The clean promote:
    installer(s), `.sig`, and `latest.json` whose `url` points at `v1.1.0`.
 4. Leave the rolling `beta` tag as a pre-release. Do not mark it Latest.
 
-Quick-and-dirty (same binary, still labeled beta.3):
+Quick-and-dirty (same binary, still labeled beta.5):
 
 ```powershell
-gh release edit v1.1.0-beta.3 --prerelease=false
+gh release edit v1.1.0-beta.5 --prerelease=false
 ```
 
 That makes `/releases/latest` this tag. Stable Check will offer
-`1.1.0-beta.3` to 1.0.0 users.
+`1.1.0-beta.5` to 1.0.0 users.
 
 ## CI secrets
 

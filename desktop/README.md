@@ -26,6 +26,8 @@ Windows betas ship **NSIS only** (`Boris_*_x64-setup.exe`). MSI/WiX cannot encod
 `1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
+The current release-prep tree is **`1.1.0-beta.5`**.
+
 ## App updates (Tauri updater)
 
 Release builds can self-update from GitHub Releases using signed installers.
@@ -92,7 +94,7 @@ Override home with `BORIS_HOME` if you need logs elsewhere.
 
 ### ONNX Runtime (Windows)
 
-Wake-word inference uses the `ort` crate. On Windows, `build.rs` stages
+Wake-word and Silero VAD inference use the `ort` crate. On Windows, `build.rs` stages
 `onnxruntime.dll` / `DirectML.dll` (from `target/{profile}/` after ort's
 `copy-dylibs`, or the pyke download cache) into `src-tauri/resources/ort/`.
 Tauri `bundle.resources` then installs those DLLs **next to** `Boris.exe`

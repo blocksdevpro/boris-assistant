@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.1.0-beta.4](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.4) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
-| **This tree** | **1.1.0-beta.4** | Source / `bun run tauri build` |
+| **Beta** | [1.1.0-beta.5](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.5) | Pre-release installer, or **Settings → Updates → Channel → Beta** |
+| **This tree** | **1.1.0-beta.5** | Source / signed `bun run tauri build` |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -57,20 +57,23 @@ Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-pr
 
 Windows **1.1 betas ship NSIS only**. WiX/MSI cannot encode a label like `1.1.0-beta.1`.
 
-Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris-desktop.YYYY-MM-DD.log`.
+Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log`.
 
 ---
 
 ## Features
 
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback
+- **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
 - **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
+- **Async research** — background subagents with poll/join/cancel and read-only tool isolation
 - **Capability presets** — `voice_safe` / `local_power` / `full` plus path policy and human approval for risky work
-- **Local models** — LiveKit-style wake (ONNX), NVIDIA Parakeet STT, Supertone TTS
+- **Local models** — LiveKit-style wake, Silero VAD, NVIDIA Parakeet STT, and Supertone TTS
 - **Your model** — OpenRouter (OpenAI-compatible) via `boris-ai`; audio stays on the machine
 - **Web search without a key** — DuckDuckGo + Wikipedia by default; an Exa key is an optional upgrade *(1.1)*
 - **Session artifacts** — markdown and code cards on the overlay and Home desk; spoken replies stay short *(1.1)*
+- **Local diagnostics** — durable turn traces with `cargo xtask trace-report` p50/p95 summaries
 - **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace
 
 ---
@@ -85,7 +88,11 @@ Armed  →  wake  →  Hearing  →  Reading  →  Thinking  →  Talking  →  
    └──────── AwaitingConfirm (HITL yes / no) ─────────────────┘
 ```
 
-Wake scoring, capture, STT, the agent, and TTS all run on **one engine thread**, sequentially. That is intentional — not a worker mesh or event-bus.
+The engine thread owns voice state and turn ordering. Reusable loader threads
+preload STT/TTS, final speech is produced sentence-by-sentence while playback
+continues, and durable transcript/memory/trace work runs on maintenance lanes.
+This keeps Stop and device-switch commands responsive without turning the
+pipeline into an unbounded worker mesh.
 
 ---
 
@@ -100,7 +107,7 @@ Wake scoring, capture, STT, the agent, and TTS all run on **one engine thread**,
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  boris-pipeline  — single engine thread, sequential turns   │
+│  boris-pipeline  — ordered voice loop + bounded workers     │
 │    Off → Quiet → Armed → Hearing → Reading → Thinking       │
 │         → Talking → AwaitingReply / AwaitingConfirm         │
 └───────┬───────────────┬───────────────┬─────────────────────┘
@@ -161,12 +168,22 @@ bun install
 bun run tauri dev
 ```
 
-Release build:
+Signed Windows release build (PowerShell):
 
-```bash
-cd desktop
+```powershell
+# Tauri reads TAURI_SIGNING_PRIVATE_KEY as a path or the key contents.
+$env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path .\.tauri\boris.key).Path
+# Set this only when the key is password protected:
+# $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
+
+Set-Location desktop
 bun run tauri build
+bun run check:bundle-size
 ```
+
+The NSIS installer and updater signature are written under
+`target/release/bundle/nsis/`. A plain `cargo build --release` does not create
+or sign the Tauri updater artifacts.
 
 More packaging, updater signing, and log detail: [`desktop/README.md`](desktop/README.md).
 
@@ -195,10 +212,13 @@ Crate-level docs live in each `crates/*/README.md`.
 | Model | When needed | How |
 |-------|-------------|-----|
 | **Wake** (`boris-large.onnx`) | **Compile** of `boris-desktop` | Tracked release asset, embedded via `include_bytes!` from `assets/models/livekit/` |
+| **Silero VAD** (`silero_vad.onnx`) | **Compile** of `boris-desktop` | Tracked MIT-licensed asset, embedded from `assets/models/silero/` |
 | **Parakeet STT** | Runtime | App install / HF download into `~/.boris/models/parakeet` |
 | **Supertone TTS** | Runtime | App install into `~/.boris/models/supertone` |
 
-- `/assets` is ignored except for the versioned wake classifier at `assets/models/livekit/boris-large.onnx`; its SHA-256 is `cf786dbfc65508b6adc1168855cf42a694c76cccb450533ced9cf9322e980d1a`.
+- `/assets` is ignored except for the versioned wake classifier and Silero VAD
+  graph. Their provenance and SHA-256 values are recorded in
+  [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
 - Product runtime prefers **`~/.boris/models`** (download / bootstrap), not repo `assets/`.
 - Override data root: `BORIS_HOME`.
 - Override download base: `BORIS_MODEL_BASE_URL` (HTTPS only; downloaded models are verified against pinned SHA-256 digests).
@@ -275,5 +295,5 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 | | |
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
-| Current beta line | **1.1.0** — artifacts, keyless web search, Stable/Beta updater channel, fast update checks |
-| This repository | `1.1.0-beta.4` |
+| Current beta line | **1.1.0** — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
+| This repository | `1.1.0-beta.5` |

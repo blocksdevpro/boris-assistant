@@ -297,4 +297,5 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
 | Current stable | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
-| This repository | `1.1.0` |
+| Git `main` | Stable line (`1.1.x`) — this tree is `1.1.0` |
+| Git `next` | Beta line (`1.2.0-beta.N`) |

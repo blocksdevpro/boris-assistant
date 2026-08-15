@@ -59,6 +59,35 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/boris.key)"
 Tauri writes updater artifacts next to the normal installers (e.g.
 `Boris_*_x64-setup.exe` + `.sig` under `target/release/bundle/nsis/`).
 
+## Branches
+
+| Git branch | Holds | Product version | Installers |
+|---|---|---|---|
+| **`main`** | Current **stable** line | Numeric (`1.1.0`, `1.1.1`, …) | NSIS + MSI |
+| **`next`** | Next minor **beta** line | `MAJOR.MINOR.PATCH-beta.N` | NSIS only |
+
+The updater still keys off **GitHub Releases**, not these branches:
+
+- Stable installs follow `/releases/latest` (newest non-prerelease tag).
+- Beta installs follow versioned `v*-beta.N` pre-releases. The rolling
+  **tag** `beta` is only the installer feed (`latest.json`).
+
+Do **not** name a git branch `beta`. That name is already the rolling
+release tag; `git push origin beta` would be ambiguous.
+
+### Day to day
+
+- New 1.2 work lands on **`next`**. Tag `v1.2.0-beta.N` from `next` as a
+  **pre-release**, then overwrite assets on the rolling `beta` tag.
+- Stable patches (`1.1.1`) land on **`main`**. Tag `v1.1.1` **without**
+  `--prerelease`. Cherry-pick the fix onto `next` so it is not lost.
+- Promote: on `next`, bump to numeric `1.2.0` and restore
+  `bundle.targets: ["nsis", "msi"]`. Merge `next` → `main`. Tag `v1.2.0`
+  from `main` as a normal release. Then bump `next` to `1.3.0-beta.1`
+  and set targets back to `["nsis"]`.
+
+Default GitHub branch stays **`main`**.
+
 ## Publishing `latest.json` (GitHub Releases)
 
 Attach to the **latest** release (same tag users should get):
@@ -89,37 +118,44 @@ So a versioned pre-release tag (`v1.1.0-beta.N`) is what the Beta channel notice
 
 ## Publishing a beta
 
-Future 1.2+ pre-releases use version/tag **`MAJOR.MINOR.PATCH-beta.N`**
-(e.g. `1.2.0-beta.1` / `v1.2.0-beta.1`) and put the same version in
-`latest.json`.
+Cut betas from the **`next`** branch. Version/tag
+**`MAJOR.MINOR.PATCH-beta.N`** (e.g. `1.2.0-beta.1` / `v1.2.0-beta.1`)
+and put the same version in `latest.json`.
 
-1. Version the product `MAJOR.MINOR.PATCH-beta.N` (e.g. `1.2.0-beta.1`).
-   WiX/MSI only accepts numeric pre-release ids (`1.2.0-1`), so betas bundle
-   **NSIS only** (`bundle.targets: ["nsis"]` in `tauri.conf.json`). The updater
-   already uses that `.exe`. Add `"msi"` back on a numeric stable version if you
-   want both installers.
-2. Create tag `v1.2.0-beta.1` as a **pre-release**. Attach the installer, `.sig`, and a `latest.json` whose `url` points at that tag.
-3. Create or update a long-lived pre-release tagged **`beta`** and attach the **same** `latest.json` (and installer if you want the `beta` tag URL to work as a direct download). The in-app Beta channel only reads `releases/download/beta/latest.json`.
-4. Promote by shipping `v1.2.0` as a normal (non-pre-release) release with its own `latest.json`. Do not set a beta as the latest release.
+1. On `next`, version the product `MAJOR.MINOR.PATCH-beta.N`
+   (e.g. `1.2.0-beta.1`). WiX/MSI only accepts numeric pre-release ids
+   (`1.2.0-1`), so betas bundle **NSIS only**
+   (`bundle.targets: ["nsis"]` in `tauri.conf.json`). The updater already
+   uses that `.exe`.
+2. Create tag `v1.2.0-beta.1` **from `next`** as a **pre-release**. Attach
+   the installer, `.sig`, and a `latest.json` whose `url` points at that tag.
+3. Create or update a long-lived pre-release tagged **`beta`** and attach
+   the **same** `latest.json` (and installer if you want the `beta` tag URL
+   to work as a direct download). The in-app Beta channel only reads
+   `releases/download/beta/latest.json`.
+4. Promote by merging `next` → `main` as a numeric `1.2.0` (see below).
+   Do not set a `v*-beta.N` tag as the latest release.
 
 ## Promoting to Latest (stable channel)
 
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-The current tree is the **`1.1.0`** clean promote (numeric version, NSIS +
-MSI). Do **not** uncheck Pre-release on `v1.1.0-beta.5` — that would offer
+`main` is the **`1.1.0`** clean promote (numeric version, NSIS + MSI).
+Do **not** uncheck Pre-release on `v1.1.0-beta.5` — that would offer
 Stable 1.0.0 installs a build still labeled `1.1.0-beta.5` (NSIS only, no
 MSI).
 
-The clean promote (this is what `1.1.0` is):
+The clean promote (`next` → `main`):
 
-1. Bump the product to a numeric version (`1.1.0`) in `package.json`,
+1. On `next`, bump to a numeric version (`1.2.0`) in `package.json`,
    `tauri.conf.json`, both `Cargo.toml`s, and `CHANGELOG.md`.
-2. Set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode `1.1.0`).
-3. Sign-build, then create **`v1.1.0` without `--prerelease`** and attach
-   installer(s), `.sig`, and `latest.json` whose `url` points at `v1.1.0`.
+2. Set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode `1.2.0`).
+3. Merge `next` into `main`. Sign-build from `main`, then create
+   **`v1.2.0` without `--prerelease`** and attach installer(s), `.sig`,
+   and `latest.json` whose `url` points at `v1.2.0`.
 4. Leave the rolling `beta` tag as a pre-release. Do not mark it Latest.
+5. On `next`, bump to `1.3.0-beta.1` and set targets back to `["nsis"]`.
 
 Quick-and-dirty (same binary, still labeled beta.5) — **do not use for 1.1.0**:
 

@@ -43,6 +43,18 @@ cd desktop && bun install && bun run tauri dev
 
 Prefer the lightweight library suite above for day-to-day PR validation unless you are changing desktop packaging.
 
+## Branches
+
+| Branch | Use it for |
+|---|---|
+| **`main`** | Current stable line (`1.1.x`). Hotfixes and docs that should ship in the next patch. |
+| **`next`** | Next minor beta line (`1.2.0-beta.N`). New features and 1.2 work. |
+
+Open feature PRs against **`next`**. Open stable-hotfix PRs against **`main`**,
+then cherry-pick onto `next`. Do not name a branch `beta` — that is the
+rolling GitHub **release tag** the in-app Beta updater downloads from.
+Release steps: [`.tauri/README.md`](.tauri/README.md).
+
 ## Pull request guidance
 
 - **Keep PRs focused.** Prefer one concern per PR (docs, one crate, or a

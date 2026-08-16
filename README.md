@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="desktop/src-tauri/icons/128x128.png" width="88" alt="Boris">
 </p>
@@ -173,7 +175,7 @@ Signed Windows release build (PowerShell):
 ```powershell
 # Tauri reads TAURI_SIGNING_PRIVATE_KEY as a path or the key contents.
 $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path .\.tauri\boris.key).Path
-# Set this only when the key is password protected:
+# Set this only when the key is password protected (use "" for an empty password):
 # $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 
 Set-Location desktop

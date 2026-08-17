@@ -810,6 +810,11 @@ function HomeView({
               {contextMeter ? `Context ${contextMeter}` : ""}
             </p>
           ) : null}
+          {status.phase === "Thinking" && status.thinking?.trim() ? (
+            <p className="mt-1.5 line-clamp-2 pl-[18px] text-[12px] leading-snug text-white/45">
+              {status.thinking.trim()}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 gap-2">
@@ -1007,6 +1012,45 @@ function ModelsBanner({
   );
 }
 
+function LiveThoughts({
+  text,
+  compact = false,
+  className,
+}: {
+  text: string;
+  compact?: boolean;
+  className?: string;
+}) {
+  const scroller = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text]);
+
+  return (
+    <div
+      ref={scroller}
+      className={cn(
+        "overflow-y-auto rounded-[12px] bg-white/[0.035] px-3.5 py-2.5 ring-1 ring-white/[0.05]",
+        compact ? "max-h-[6.5rem]" : "max-h-[9.5rem]",
+        className,
+      )}
+    >
+      <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-white/28">
+        Thinking
+      </p>
+      <p
+        className={cn(
+          "mt-1 whitespace-pre-wrap text-white/52",
+          compact ? "text-[12px] leading-snug" : "text-[13px] leading-relaxed",
+        )}
+      >
+        {text}
+      </p>
+    </div>
+  );
+}
+
 function ConversationView({ status }: { status: StatusPicture }) {
   const lines = conversationLines(status);
 
@@ -1048,6 +1092,8 @@ function ConversationView({ status }: { status: StatusPicture }) {
                 {line.text}
               </p>
             );
+          case "thought":
+            return <LiveThoughts key={`t-${i}`} text={line.text} />;
           case "confirm":
             return (
               <div
@@ -1886,6 +1932,22 @@ function SpeechSettings({
         {enrollErr ? (
           <p className="px-4 pb-3 text-[12px] text-red-300/80">{enrollErr}</p>
         ) : null}
+      </SettingsGroup>
+      <SettingsGroup
+        title="While Boris is talking"
+        footer="Say “Hey Boris”, or just talk over him. Stay quiet, or say continue, and he picks up where he left off. Say stop to drop the rest."
+      >
+        <SettingsRow
+          label="Say Hey Boris to interrupt"
+          subtitle="Pauses leftover speech. Talking louder than the speakers also works — a false pause resumes."
+          last
+        >
+          <Toggle
+            checked={settings.voice_barge_in}
+            onChange={(v) => onPatch({ voice_barge_in: v })}
+            aria-label="Say Hey Boris to interrupt"
+          />
+        </SettingsRow>
       </SettingsGroup>
       <SettingsGroup
         id="speech-models"

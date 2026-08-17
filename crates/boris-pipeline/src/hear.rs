@@ -31,6 +31,10 @@ const POST_TTS_SETTLE: Duration = Duration::from_millis(550);
 /// air before the user knows they can answer.
 const POST_CONFIRM_SETTLE: Duration = Duration::from_millis(380);
 
+/// After a barge-in pause the speaker is already silent. Only wait out the
+/// room tail so VAD does not grab the last syllable of leftover playback.
+const POST_BARGE_SETTLE: Duration = Duration::from_millis(220);
+
 /// Trailing silence for yes/no confirms (short utterances endpoint fast).
 ///
 /// 250 ms is one official Silero hop-window of patience after speech stops —
@@ -216,6 +220,15 @@ pub fn settle_after_confirm(
     settle_after_playback_for(mic, cmd_rx, running, POST_CONFIRM_SETTLE)
 }
 
+/// Brief settle after pausing speech for a barge-in listen.
+pub fn settle_after_barge(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+) -> Result<(), HearBreak> {
+    settle_after_playback_for(mic, cmd_rx, running, POST_BARGE_SETTLE)
+}
+
 fn settle_after_playback_for(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     cmd_rx: &Receiver<EngineCommand>,
@@ -360,7 +373,7 @@ pub struct SpeechCrop {
 }
 
 /// Keep Silero-speech hops plus one hop of context. Used for liveness / enroll.
-pub fn crop_speech(vad: &mut impl Vad, pcm: &[f32]) -> SpeechCrop {
+pub fn crop_speech(vad: &mut (impl Vad + ?Sized), pcm: &[f32]) -> SpeechCrop {
     vad.reset();
     let hop = VAD_WINDOW_SIZE;
     let mut first = None;

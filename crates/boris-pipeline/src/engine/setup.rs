@@ -47,6 +47,8 @@ pub(super) struct EngineRuntime {
     pub system_prompt: String,
     pub residency: super::models::ModelResidency,
     pub liveness: crate::liveness::WakeLiveness,
+    /// Wake-word barge-in while Talking (same live-mic gate as Armed).
+    pub barge_in: bool,
     #[allow(dead_code)]
     pub maintenance: boris_agent::MaintenanceWorker,
 }
@@ -59,10 +61,7 @@ pub(super) fn init_runtime(
     let init_started = std::time::Instant::now();
     tracing::info!("engine thread entered run()");
     if config.voice_barge_in {
-        tracing::warn!(
-            "saved voice_barge_in is ignored: microphone-only VAD cannot safely distinguish \
-             the user from Boris's speaker echo without acoustic echo cancellation"
-        );
+        tracing::info!("wake-word barge-in enabled (mixed-window wake + close-talk energy)");
     }
     publish_starting(&status_tx, &config);
 
@@ -163,6 +162,7 @@ pub(super) fn init_runtime(
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
         artifact: None,
@@ -195,6 +195,7 @@ pub(super) fn init_runtime(
         system_prompt: config.system_prompt,
         residency: super::models::ModelResidency::parse(&config.model_residency),
         liveness: crate::liveness::WakeLiveness::load(config.ignore_speaker_playback),
+        barge_in: config.voice_barge_in,
         maintenance,
     })
 }
@@ -216,6 +217,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
         context_limit: None,
         artifact: None,
@@ -379,6 +381,7 @@ fn fault(
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
         context_limit: None,
         artifact: None,

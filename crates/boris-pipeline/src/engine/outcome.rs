@@ -143,7 +143,7 @@ pub(super) fn resolve_agent_outcome(
                 ctx.go_off();
                 return OutcomeResolve::Stopped;
             }
-            PlaybackWait::Aborted => {}
+            PlaybackWait::Aborted | PlaybackWait::BargedIn => {}
             PlaybackWait::Finished => {
                 ctx.picture.set_phase(Phase::Talking);
                 // Keep activity as confirm so overlay still reads as yes/no.
@@ -161,7 +161,7 @@ pub(super) fn resolve_agent_outcome(
                         ctx.go_off();
                         return OutcomeResolve::Stopped;
                     }
-                    PlaybackWait::Aborted => {
+                    PlaybackWait::Aborted | PlaybackWait::BargedIn => {
                         ctx.agent.abort();
                         ctx.picture.detail = Some("confirmation playback interrupted".into());
                         ctx.picture.set_phase(Phase::Armed);

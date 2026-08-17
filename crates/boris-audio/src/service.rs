@@ -335,6 +335,55 @@ impl AudioService {
         }
     }
 
+    /// Pause the current job without discarding queued samples.
+    pub fn pause(&self) -> Result<()> {
+        self.send_acked_control(OutputCommand::Pause, "pausing playback")
+    }
+
+    /// Resume a paused job from the leftover samples.
+    pub fn resume(&self) -> Result<()> {
+        self.send_acked_control(OutputCommand::Resume, "resuming playback")
+    }
+
+    /// Try to enqueue an acknowledged pause without blocking the host loop.
+    pub fn request_pause(&self) -> Result<crossbeam_channel::Receiver<()>> {
+        self.request_acked_control(OutputCommand::Pause, "requesting pause")
+    }
+
+    fn send_acked_control(
+        &self,
+        command: impl FnOnce(crossbeam_channel::Sender<()>) -> OutputCommand,
+        action: &str,
+    ) -> Result<()> {
+        let ack = self.request_acked_control(command, action)?;
+        match ack.recv_timeout(OUTPUT_CONTROL_TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Err(Error::audio(format!(
+                "output worker did not acknowledge {action} before timeout"
+            ))),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(Error::audio(format!(
+                "output worker dropped {action} acknowledgement"
+            ))),
+        }
+    }
+
+    fn request_acked_control(
+        &self,
+        command: impl FnOnce(crossbeam_channel::Sender<()>) -> OutputCommand,
+        action: &str,
+    ) -> Result<crossbeam_channel::Receiver<()>> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+        match self.output_command_channel.0.try_send(command(ack_tx)) {
+            Ok(()) => Ok(ack_rx),
+            Err(crossbeam_channel::TrySendError::Full(_)) => Err(Error::audio(format!(
+                "output command queue full while {action}"
+            ))),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => Err(Error::audio(format!(
+                "output worker gone while {action}"
+            ))),
+        }
+    }
+
     /// Clone the output event receiver (Started / Drained / Cleared).
     pub fn subscribe_output(&self) -> crossbeam_channel::Receiver<OutputEvent> {
         self.output_event_channel.1.clone()

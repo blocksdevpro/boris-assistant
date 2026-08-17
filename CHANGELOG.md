@@ -7,6 +7,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Further **1.2** work on `next` after [1.2.0-beta.1].
 
+### Added
+
+- Wake-word **barge-in** while Boris is talking. A lower wake threshold plus
+  close-talk energy (not Armed’s playback gate — leftover TTS in the mic
+  window looks like a speaker) pauses leftover speech. Silence, “continue”,
+  or a false hit resumes from the cut; “stop” / a new request discards leftover
+  and either re-arms or starts a turn. Settings → Speech; `BORIS_BARGE_IN=0`
+  disables. Default on.
+- Live **reasoning preview** on Home and the overlay while the strong / tool
+  route thinks. Planning and complex stages now ask OpenRouter for reasoning
+  text and stream the tail into `StatusPicture.thinking`. It is display-only
+  — never spoken and never stored in agent context. The island grows to a
+  thought stage (380 × 216) so four lines stay readable without scrollbars.
+
 ## [1.2.0-beta.1] - 2026-08-17
 
 First 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.

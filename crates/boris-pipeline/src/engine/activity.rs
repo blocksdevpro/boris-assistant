@@ -219,5 +219,13 @@ mod tests {
             activity_label(&tools_next, empty).as_deref(),
             Some("thinking · 3 tools next")
         );
+
+        let thoughts = AgentEvent::Reasoning {
+            preview: "Need to search first.".into(),
+        };
+        assert!(
+            activity_label(&thoughts, empty).is_none(),
+            "reasoning uses StatusPicture.thinking, not the activity chip"
+        );
     }
 }

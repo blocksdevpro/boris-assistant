@@ -92,6 +92,15 @@ impl ReasoningConfig {
         }
     }
 
+    /// Include reasoning text in the stream / response so a host can show it.
+    ///
+    /// Does not change effort. The agent still ignores this text for speech
+    /// and context — only the SSE consumer should surface it.
+    pub fn include_text(mut self) -> Self {
+        self.exclude = false;
+        self
+    }
+
     /// JSON object for the OpenRouter `reasoning` field.
     ///
     /// Always returns `Some` — OpenRouter's unified `reasoning` object is
@@ -127,6 +136,14 @@ mod tests {
         assert_eq!(v["effort"], "high");
         assert_eq!(v["enabled"], true);
         assert_eq!(v["exclude"], true);
+    }
+
+    #[test]
+    fn include_text_clears_exclude() {
+        let v = ReasoningConfig::high().include_text().to_request_value();
+        assert_eq!(v["effort"], "high");
+        assert_eq!(v["exclude"], false);
+        assert_eq!(v["enabled"], true);
     }
 
     #[test]

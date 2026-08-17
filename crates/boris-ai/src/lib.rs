@@ -12,7 +12,7 @@
 //! | [`model_pref`] | `model@provider` + provider list parsing |
 //! | [`usage`] | Token / cache usage |
 //! | [`providers`] | Concrete backends (OpenRouter) |
-//! | [`stream`] | Optional in-process event channel (not used by voice loop) |
+//! | [`stream`] | Typed stream events (`ReasoningDelta` is used by the voice loop) |
 //!
 //! # Host imports
 //!

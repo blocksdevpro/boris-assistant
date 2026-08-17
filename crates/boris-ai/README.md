@@ -44,6 +44,9 @@ use boris_ai::{
 
 - `complete` tries **SSE first**, then falls back to a single JSON response if
   the stream fails or yields an empty (no text, no tools) payload.
+- Tool-planning and complex stages send `reasoning.exclude = false` so thinking
+  tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
+  them. Reasoning is never assembled into `content`.
 - Assistant `content` is normalized to a **string** for the agent loop.
 - `session_id` is sent as JSON and as `x-session-id` on **both** streaming and
   blocking requests (OpenRouter sticky routing / prompt-cache hits).

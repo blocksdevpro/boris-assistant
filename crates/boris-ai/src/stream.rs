@@ -23,6 +23,10 @@ pub enum LlmStreamEvent {
     ContentDelta {
         text: String,
     },
+    /// Incremental hidden reasoning / thinking text (not spoken).
+    ReasoningDelta {
+        text: String,
+    },
     /// Incremental tool-call fragment. Never execute until [`Self::ToolCallComplete`].
     ToolCallDelta {
         index: u32,

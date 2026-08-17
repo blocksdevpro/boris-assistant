@@ -73,6 +73,8 @@ export type StatusPicture = {
   turn?: string | null;
   /** Progressive tool / confirm chip (compact). */
   activity?: string | null;
+  /** Live model reasoning tail while Thinking. Display-only. */
+  thinking?: string | null;
   /** Estimated context tokens used (chars/4). */
   context_used?: number | null;
   /** Soft context window for the meter. */
@@ -184,7 +186,7 @@ export type AppSettings = {
   tts_voice_id: string;
   /** STT/TTS RAM policy. */
   model_residency: "low_memory" | "balanced" | "low_latency";
-  /** Reserved compatibility setting; hidden until echo-safe barge-in exists. */
+  /** Say the wake word while Boris is talking to pause leftover speech. */
   voice_barge_in: boolean;
   /** Ignore TV / Translate / TTS out of a speaker after a live enroll. */
   ignore_speaker_playback: boolean;
@@ -245,7 +247,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   output_device: "",
   tts_voice_id: "M4",
   model_residency: "balanced",
-  voice_barge_in: false,
+  voice_barge_in: true,
   ignore_speaker_playback: true,
   long_term_memory: true,
   trusted_auto_moderate: true,
@@ -309,6 +311,7 @@ export const OFF_STATUS: StatusPicture = {
   speaker: { label: "—", ok: false },
   turn: null,
   activity: null,
+  thinking: null,
   context_used: null,
   context_limit: null,
   artifact: null,
@@ -330,6 +333,7 @@ export function normalizeStatus(
     speaker: raw.speaker ?? OFF_STATUS.speaker,
     turn: raw.turn ?? null,
     activity: raw.activity ?? null,
+    thinking: raw.thinking ?? null,
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
     artifact: raw.artifact ?? null,
@@ -356,7 +360,7 @@ export function normalizeSettings(
     output_device: raw?.output_device ?? "",
     tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
     model_residency: normalizeResidency(raw?.model_residency),
-    voice_barge_in: raw?.voice_barge_in ?? false,
+    voice_barge_in: raw?.voice_barge_in ?? true,
     ignore_speaker_playback: raw?.ignore_speaker_playback ?? true,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,

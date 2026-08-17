@@ -24,8 +24,8 @@ impl RequestStage {
                 },
                 768,
             ),
-            Self::ToolPlanning => (ReasoningConfig::medium(), 4_096),
-            Self::Complex => (ReasoningConfig::high(), DEFAULT_MAX_TOKENS),
+            Self::ToolPlanning => (ReasoningConfig::medium().include_text(), 4_096),
+            Self::Complex => (ReasoningConfig::high().include_text(), DEFAULT_MAX_TOKENS),
         }
     }
 }
@@ -83,6 +83,7 @@ mod tests {
     fn simple_voice_uses_minimal_and_small_cap() {
         let (r, n) = RequestStage::SimpleVoice.budget();
         assert_eq!(r.effort, ReasoningEffort::Minimal);
+        assert!(r.exclude, "short voice replies keep reasoning off the wire");
         assert!(n < 2_048);
     }
 
@@ -90,7 +91,14 @@ mod tests {
     fn complex_keeps_high_headroom() {
         let (r, n) = RequestStage::Complex.budget();
         assert_eq!(r.effort, ReasoningEffort::High);
+        assert!(!r.exclude, "strong route must stream thinking for the UI");
         assert_eq!(n, DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn tool_planning_includes_reasoning_text() {
+        let (r, _) = RequestStage::ToolPlanning.budget();
+        assert!(!r.exclude);
     }
 
     #[test]

@@ -16,10 +16,11 @@ Fixture names are `off`, `ready`, `hearing`, `reading`, `thinking`,
 `thinking-tool`, `confirm`, `talking`, `fault`, `long-caption`,
 `device-faults`, and `artifact-card`.
 
-For release QA, capture each overlay fixture at a 380 × 120 viewport and the
-main window at 640 × 480. Check that no text, focus ring, island shadow, or
-device warning is clipped. The matrix deliberately gives each overlay 160px
-of vertical inspection space so unexpected overflow remains visible.
+For release QA, capture presence fixtures at a 380 × 120 viewport, thinking
+fixtures at 380 × 216, card fixtures at 400 × 300, and the main window at
+640 × 480. Check that no text, focus ring, island shadow, or device warning
+is clipped. The matrix gives presence frames 160px of vertical inspection
+space so unexpected overflow remains visible.
 
 Run deterministic presentation checks with:
 

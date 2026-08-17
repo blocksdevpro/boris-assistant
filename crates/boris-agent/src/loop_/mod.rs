@@ -113,7 +113,7 @@ pub async fn agent_loop(
 
         // On the final allowed round, withhold tools so the model must speak.
         let at_cap = round >= max_rounds;
-        let response = complete_round(&mut state, user_text, config, at_cap).await?;
+        let response = complete_round(&mut state, user_text, config, at_cap, &emit).await?;
 
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
             // One round before cap: run tools, then inject a finish nudge and
@@ -212,7 +212,8 @@ pub async fn agent_loop(
             reply = cleaned;
         }
 
-        reply = ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply).await?;
+        reply = ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply, &emit)
+            .await?;
 
         if !reply.is_empty() {
             last_speakable = Some(reply.clone());

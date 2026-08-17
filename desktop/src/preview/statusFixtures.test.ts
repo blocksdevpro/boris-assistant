@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { toneFor } from "@/lib/phaseVisual";
 import {
   isConfirmContext,
+  overlayStageMode,
+  overlayThinkingText,
   pickCaption,
   pickOverlayPresence,
   shouldShowOverlayCard,
@@ -49,6 +51,16 @@ describe("overlay preview fixtures", () => {
     expect(deviceFaults.mic.ok).toBe(false);
     expect(deviceFaults.speaker.ok).toBe(false);
     expect(getStatusFixture("artifact-card")!.artifact?.id).toBe("a1f3c9");
+  });
+
+  it("streams reasoning on the thinking island, not the tool chip", () => {
+    const thinking = getStatusFixture("thinking")!;
+    expect(overlayStageMode(thinking)).toBe("thought");
+    expect(overlayThinkingText(thinking)).toMatch(/spoken brief/i);
+    expect(overlayThinkingText(getStatusFixture("thinking-tool")!)).toBeNull();
+    expect(overlayStageMode(getStatusFixture("thinking-tool")!)).toBe("thought");
+    expect(overlayStageMode(getStatusFixture("ready")!)).toBe("presence");
+    expect(overlayStageMode(getStatusFixture("artifact-card")!)).toBe("card");
   });
 
   it("shows a card only for this turn and the Ready linger", () => {

@@ -184,6 +184,11 @@
   will-change: transform;
 }
 
+.overlay-stage[data-mode="thought"] {
+  width: 380px;
+  height: 216px;
+}
+
 .overlay-stage[data-mode="card"] {
   width: 400px;
   height: 300px;
@@ -191,6 +196,7 @@
 
 /* Island must stay inside the stage. A tall card used to grow the pill
    past the native HWND and Framer layout would chase the overflow. */
+.overlay-stage[data-mode="thought"] .overlay-island,
 .overlay-stage[data-mode="card"] .overlay-island {
   max-width: 100%;
   max-height: 100%;
@@ -198,6 +204,8 @@
 }
 
 /* Glance must never grow scrollbars — overlay is click-through. */
+.overlay-stage[data-mode="thought"] .overlay-caption,
+.overlay-stage[data-mode="thought"] .overlay-thought,
 .overlay-stage[data-mode="card"] .overlay-caption,
 .overlay-stage[data-mode="card"] .overlay-card,
 .overlay-stage[data-mode="card"] .artifact-code {

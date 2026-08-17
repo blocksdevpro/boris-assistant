@@ -40,6 +40,10 @@ pub enum OutputCommand {
     /// Mark the current streaming job complete so Drained can fire after empty,
     /// then acknowledge that the state transition was applied.
     FinishJob(crossbeam_channel::Sender<()>),
+    /// Stop pulling samples; keep the pending queue so Resume can continue.
+    Pause(crossbeam_channel::Sender<()>),
+    /// Start pulling samples again from the pause point.
+    Resume(crossbeam_channel::Sender<()>),
     /// Clear pending audio immediately.
     Flush,
 }
@@ -65,6 +69,8 @@ struct OutputStreamState {
     started: bool,
     /// When true, more [`OutputCommand::Append`]s may arrive — do not drain yet.
     job_open: bool,
+    /// Device callback writes silence and does not consume [`Self::pending`].
+    paused: bool,
 }
 
 impl OutputStreamState {
@@ -75,6 +81,7 @@ impl OutputStreamState {
             active: false,
             started: false,
             job_open: false,
+            paused: false,
         }
     }
 
@@ -84,6 +91,17 @@ impl OutputStreamState {
         self.active = false;
         self.started = false;
         self.job_open = false;
+        self.paused = false;
+    }
+
+    fn pause(&mut self) {
+        self.paused = true;
+        self.empty_callbacks = 0;
+    }
+
+    fn resume(&mut self) {
+        self.paused = false;
+        self.empty_callbacks = 0;
     }
 
     fn queue_play(&mut self, samples: Vec<AudioSample>) -> bool {
@@ -92,6 +110,7 @@ impl OutputStreamState {
         self.empty_callbacks = 0;
         self.started = false;
         self.job_open = false; // one-shot: drain after this buffer
+        self.paused = false;
         self.active = !self.pending.is_empty();
         self.active
     }
@@ -327,6 +346,14 @@ fn run_output_worker(
                 // lets the host distinguish "queued" from "job actually closed".
                 let _ = ack.send(());
             }
+            OutputCommand::Pause(ack) => {
+                lock_output_state(&state).pause();
+                let _ = ack.send(());
+            }
+            OutputCommand::Resume(ack) => {
+                lock_output_state(&state).resume();
+                let _ = ack.send(());
+            }
             OutputCommand::Flush => {
                 lock_output_state(&state).clear_job();
                 try_emit_worker_event(&event_tx, &event_drops, OutputEvent::Cleared);
@@ -388,6 +415,11 @@ where
                         p.into_inner()
                     }
                 };
+
+                if state.paused {
+                    fill_silence(output);
+                    return;
+                }
 
                 let mut got_real_sample = false;
 
@@ -487,6 +519,33 @@ mod tests {
         assert!(!state.active);
         assert!(!state.job_open);
         assert!(state.pending.is_empty());
+        assert!(!state.paused);
+    }
+
+    #[test]
+    fn pause_keeps_pending_samples_and_resume_clears_the_flag() {
+        let mut state = OutputStreamState::new();
+        assert!(state.queue_append(vec![0.1, 0.2, 0.3]));
+        state.pause();
+        assert!(state.paused);
+        assert_eq!(state.pending.len(), 3);
+        assert!(state.active);
+
+        state.resume();
+        assert!(!state.paused);
+        assert_eq!(state.pending.len(), 3);
+        assert_eq!(state.empty_callbacks, 0);
+    }
+
+    #[test]
+    fn flush_while_paused_discards_leftover() {
+        let mut state = OutputStreamState::new();
+        state.queue_append(vec![0.4, 0.5]);
+        state.pause();
+        state.clear_job();
+        assert!(state.pending.is_empty());
+        assert!(!state.paused);
+        assert!(!state.active);
     }
 
     #[test]

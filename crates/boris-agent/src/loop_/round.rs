@@ -1,14 +1,22 @@
 //! Per-round LLM completion, tool-call gating, and finish-gate checks.
 
+use std::time::{Duration, Instant};
+
+use boris_ai::LlmStreamEvent;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::Role;
 use crate::error::AgentError;
-use crate::types::AgentLoopConfig;
+use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
 
 use super::message_parse::extract_reply_text;
 use super::{listed_tools_json, LoopState};
+
+/// How often to push a reasoning preview to the UI during one complete.
+const REASONING_EMIT_EVERY: Duration = Duration::from_millis(80);
+/// Keep the IPC snapshot small — UI shows the tail of the current thought.
+const REASONING_PREVIEW_CHARS: usize = 900;
 
 /// Injected when the next round will be the hard tool-round cap (tools still available this round).
 pub(super) const NUDGE_NEAR_TOOL_CAP: &str = "\
@@ -28,12 +36,24 @@ pub(super) fn cancelled(cancel: &Option<CancellationToken>) -> bool {
     cancel.as_ref().is_some_and(|ct| ct.is_cancelled())
 }
 
+/// Tail of accumulated reasoning for the status snapshot.
+pub(super) fn reasoning_preview(acc: &str) -> String {
+    let count = acc.chars().count();
+    if count <= REASONING_PREVIEW_CHARS {
+        return acc.to_string();
+    }
+    acc.chars()
+        .skip(count - REASONING_PREVIEW_CHARS)
+        .collect()
+}
+
 /// One LLM completion for this round (tools withheld at cap).
 pub(super) async fn complete_round(
     state: &mut LoopState<'_>,
     user_text: &str,
     config: &AgentLoopConfig,
     at_cap: bool,
+    emit: &EmitFn,
 ) -> Result<Value, AgentError> {
     let tools_json = if at_cap {
         Value::Null
@@ -57,11 +77,38 @@ pub(super) async fn complete_round(
     let round = crate::routing::round_traits_for_task(&messages, task);
     let stage = crate::routing::request_stage_for(task, round);
     let opts = boris_ai::CompleteOptions::for_stage(stage);
-    state
+    let emit = emit.clone();
+    let mut acc = String::new();
+    let mut last_emit = Instant::now();
+    let mut dirty = false;
+    let msg = state
         .client
-        .complete_with_options(messages, tools_json, opts)
+        .complete_stream(messages, tools_json, opts, &mut |ev| {
+            let LlmStreamEvent::ReasoningDelta { text } = ev else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+            acc.push_str(&text);
+            dirty = true;
+            let first = acc.len() == text.len();
+            if first || last_emit.elapsed() >= REASONING_EMIT_EVERY {
+                emit(AgentEvent::Reasoning {
+                    preview: reasoning_preview(&acc),
+                });
+                last_emit = Instant::now();
+                dirty = false;
+            }
+        })
         .await
-        .map_err(Into::into)
+        .map_err(AgentError::from)?;
+    if dirty {
+        emit(AgentEvent::Reasoning {
+            preview: reasoning_preview(&acc),
+        });
+    }
+    Ok(msg)
 }
 
 /// Non-empty tool_calls array when tools are allowed this round.
@@ -84,10 +131,11 @@ pub(super) async fn ensure_spoken_reply_at_cap(
     config: &AgentLoopConfig,
     at_cap: bool,
     mut reply: String,
+    emit: &EmitFn,
 ) -> Result<String, AgentError> {
     if reply.is_empty() && at_cap {
         state.context.push(Role::User, json!(NUDGE_SPEAK_AT_CAP));
-        let forced = complete_round(state, user_text, config, true).await?;
+        let forced = complete_round(state, user_text, config, true, emit).await?;
         reply = extract_reply_text(&forced);
         if !reply.is_empty() {
             state.context.push(Role::Assistant, reply.clone());
@@ -124,4 +172,22 @@ pub(super) fn should_reenter_finish_gate(
     // Open todos only re-enter when this turn already used tools (avoid stale
     // todos forcing silence on casual replies).
     !tools_used.is_empty() && crate::finish_gate::pending_todo_count(todos_file) > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_preview_keeps_short_text() {
+        assert_eq!(reasoning_preview("hello"), "hello");
+    }
+
+    #[test]
+    fn reasoning_preview_keeps_tail() {
+        let acc = "α".repeat(REASONING_PREVIEW_CHARS + 40);
+        let preview = reasoning_preview(&acc);
+        assert_eq!(preview.chars().count(), REASONING_PREVIEW_CHARS);
+        assert!(preview.chars().all(|c| c == 'α'));
+    }
 }

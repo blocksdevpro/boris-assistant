@@ -387,12 +387,31 @@ export function showProgressBar(status: StatusPicture): boolean {
   return true;
 }
 
+/** Live reasoning tail for the island. Hidden once a spoken reply exists. */
+export function overlayThinkingText(status: StatusPicture): string | null {
+  if (status.phase !== "Thinking") return null;
+  if (isConfirmContext(status)) return null;
+  if (status.said?.trim()) return null;
+  const text = status.thinking?.trim() ?? "";
+  return text || null;
+}
+
+/** Host HWND + CSS stage must use the same mode (`overlay_win::layout_for`). */
+export type OverlayStageMode = "presence" | "thought" | "card";
+
+export function overlayStageMode(status: StatusPicture): OverlayStageMode {
+  if (shouldShowOverlayCard(status)) return "card";
+  if (status.phase === "Thinking") return "thought";
+  return "presence";
+}
+
 // ── Main conversation panel lines ──────────────────────────────────────────
 
 export type ConversationLine =
   | { kind: "you"; text: string; muted?: boolean }
   | { kind: "boris"; text: string }
   | { kind: "status"; text: string }
+  | { kind: "thought"; text: string }
   | { kind: "confirm"; activity: string | null; prompt: string }
   | { kind: "error"; text: string }
   | { kind: "placeholder"; text: string };
@@ -453,8 +472,14 @@ export function conversationLines(status: StatusPicture): ConversationLine[] {
 
   if (phase === "Thinking") {
     if (heard) lines.push({ kind: "you", text: heard });
-    if (activityLine) lines.push({ kind: "status", text: activityLine });
-    else lines.push({ kind: "status", text: "Working…" });
+    const thought = status.thinking?.trim() ?? "";
+    if (thought) {
+      lines.push({ kind: "thought", text: thought });
+    } else if (activityLine) {
+      lines.push({ kind: "status", text: activityLine });
+    } else {
+      lines.push({ kind: "status", text: "Working…" });
+    }
     if (said) lines.push({ kind: "boris", text: said });
     return lines;
   }

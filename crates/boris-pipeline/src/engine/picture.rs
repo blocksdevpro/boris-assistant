@@ -21,6 +21,7 @@ pub(super) struct Picture {
     pub speaker: DeviceHealth,
     pub turn: Option<TurnId>,
     pub activity: Option<String>,
+    pub thinking: Option<String>,
     pub context_used: Option<u32>,
     pub context_limit: Option<u32>,
     pub artifact: Option<ArtifactPeek>,
@@ -42,6 +43,7 @@ impl Picture {
             speaker: self.speaker.clone(),
             turn: self.turn.map(|t| t.to_string()),
             activity: self.activity.clone(),
+            thinking: self.thinking.clone(),
             context_used: self.context_used,
             context_limit: self.context_limit,
             artifact: self.artifact.clone(),
@@ -62,12 +64,17 @@ impl Picture {
             tracing::info!(from = ?self.phase, to = ?phase, ms, "status phase");
             self.phase = phase;
             self.phase_started = Instant::now();
+            if phase != Phase::Thinking {
+                self.thinking = None;
+            }
         }
         self.publish();
     }
 
     pub fn clear_activity(&mut self) {
-        if self.activity.take().is_some() {
+        let activity = self.activity.take();
+        let thinking = self.thinking.take();
+        if activity.is_some() || thinking.is_some() {
             self.publish();
         }
     }

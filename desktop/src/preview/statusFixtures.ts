@@ -65,6 +65,8 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     phase: "Thinking",
     heard: "Summarize my notes from today.",
     activity: "Thinking…",
+    thinking:
+      "Notes first, then a short spoken brief. Pull the three decisions and skip anything that looks like a raw dump.",
     turn: "preview-thinking",
   }),
   fixture("thinking-tool", "Thinking · tool", {

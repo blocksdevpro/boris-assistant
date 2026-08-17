@@ -31,6 +31,7 @@ struct ToolCallAcc {
 #[derive(Debug, Clone, Default)]
 pub(super) struct StreamDelta {
     pub content: String,
+    pub reasoning: String,
     pub tool_deltas: Vec<ToolDelta>,
     pub usage: Option<TokenUsage>,
 }
@@ -185,6 +186,8 @@ impl StreamAssembler {
             self.role = r.to_string();
         }
 
+        append_reasoning_delta(&mut delta.reasoning, piece);
+
         if let Some(c) = piece.get("content") {
             let before = self.content.len();
             // Full `message` objects sometimes carry trimmed-friendly content;
@@ -280,6 +283,36 @@ pub(super) fn flush_sse_buffer(buffer: &mut Vec<u8>, mut on_data: impl FnMut(&st
     if !line.is_empty() {
         dispatch_sse_line(line, &mut on_data);
     }
+}
+
+/// Pull incremental thinking text from OpenRouter / OpenAI-compatible deltas.
+///
+/// Prefers the string `reasoning` field, then `reasoning_content`, then
+/// `reasoning_details[].text` (Anthropic-style via OpenRouter). Never mixed
+/// into assembled `content` — this is display-only.
+fn append_reasoning_delta(sink: &mut String, piece: &Value) {
+    if let Some(s) = string_delta(piece.get("reasoning")) {
+        sink.push_str(s);
+        return;
+    }
+    if let Some(s) = string_delta(piece.get("reasoning_content")) {
+        sink.push_str(s);
+        return;
+    }
+    let Some(details) = piece.get("reasoning_details").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for detail in details {
+        if let Some(s) = string_delta(detail.get("text")) {
+            sink.push_str(s);
+        } else if let Some(s) = string_delta(detail.get("summary")) {
+            sink.push_str(s);
+        }
+    }
+}
+
+fn string_delta(value: Option<&Value>) -> Option<&str> {
+    value.and_then(|v| v.as_str()).filter(|s| !s.is_empty())
 }
 
 fn dispatch_sse_line(line: &str, on_data: &mut impl FnMut(&str)) {
@@ -483,6 +516,41 @@ mod tests {
         }));
         let msg = a.finish();
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_time");
+    }
+
+    #[test]
+    fn reasoning_string_does_not_enter_content() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "reasoning": "Need to look this up. " } }]
+        }));
+        assert_eq!(delta.reasoning, "Need to look this up. ");
+        assert!(delta.content.is_empty());
+
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "reasoning_content": "Then search. ", "content": "On it." } }]
+        }));
+        // First field (`reasoning`) is absent, so `reasoning_content` is used.
+        assert_eq!(delta.reasoning, "Then search. ");
+        assert_eq!(delta.content, "On it.");
+        assert_eq!(a.finish()["content"], "On it.");
+    }
+
+    #[test]
+    fn reasoning_details_text_is_collected() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "Step one."
+                    }]
+                }
+            }]
+        }));
+        assert_eq!(delta.reasoning, "Step one.");
+        assert!(delta.content.is_empty());
     }
 
     #[test]

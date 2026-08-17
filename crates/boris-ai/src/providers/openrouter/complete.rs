@@ -337,11 +337,18 @@ fn emit_stream_delta(
     started: Instant,
     first_delta_emitted: &mut bool,
 ) {
-    let has_payload = !delta.content.is_empty() || !delta.tool_deltas.is_empty();
+    let has_payload = !delta.content.is_empty()
+        || !delta.reasoning.is_empty()
+        || !delta.tool_deltas.is_empty();
     if has_payload && !*first_delta_emitted {
         *first_delta_emitted = true;
         on_event(LlmStreamEvent::FirstDelta {
             ttfb_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+    if !delta.reasoning.is_empty() {
+        on_event(LlmStreamEvent::ReasoningDelta {
+            text: delta.reasoning,
         });
     }
     if !delta.content.is_empty() {
@@ -420,6 +427,7 @@ mod tests {
             &mut |event| events.push(event),
             StreamDelta {
                 content: "Hel".into(),
+                reasoning: String::new(),
                 tool_deltas: vec![],
                 usage: None,
             },
@@ -430,6 +438,7 @@ mod tests {
             &mut |event| events.push(event),
             StreamDelta {
                 content: "lo".into(),
+                reasoning: String::new(),
                 tool_deltas: vec![ToolDelta {
                     index: 0,
                     id: Some("c1".into()),
@@ -476,6 +485,7 @@ mod tests {
             &mut |event| events.push(event),
             StreamDelta {
                 content: String::new(),
+                reasoning: String::new(),
                 tool_deltas: vec![],
                 usage: Some(TokenUsage {
                     total_tokens: 1,
@@ -488,5 +498,30 @@ mod tests {
         assert!(!first);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], LlmStreamEvent::Usage(_)));
+    }
+
+    #[test]
+    fn reasoning_delta_counts_as_first_byte() {
+        let mut events = Vec::new();
+        let mut first = false;
+        emit_stream_delta(
+            &mut |event| events.push(event),
+            StreamDelta {
+                content: String::new(),
+                reasoning: "Let me think.".into(),
+                tool_deltas: vec![],
+                usage: None,
+            },
+            Instant::now(),
+            &mut first,
+        );
+        assert!(first);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                LlmStreamEvent::FirstDelta { .. },
+                LlmStreamEvent::ReasoningDelta { text }
+            ] if text == "Let me think."
+        ));
     }
 }

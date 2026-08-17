@@ -29,6 +29,9 @@ Never block inside cpal callbacks.
 Streamed `append` uses a short bounded enqueue wait. `finish_job` is a reliable,
 bounded, worker-acknowledged control transition; event-loop hosts can use
 `request_finish_job` to retry/poll without blocking command handling.
+`pause` / `resume` are the same acknowledged control path: the device writes
+silence while paused and keeps leftover PCM so speech can continue from the
+cut. `stop` / `Flush` still discard the job.
 `OutputEvent::Started` means samples are queued for the device callback, not that the first sample has hit the DAC.
 
 ## Tests

@@ -95,6 +95,10 @@ pub enum AgentEvent {
         message: String,
         byte_total: Option<u64>,
     },
+    /// Live model reasoning preview (throttled; not spoken, not stored in context).
+    Reasoning {
+        preview: String,
+    },
     NeedsConfirmation {
         pending: PendingToolCall,
     },

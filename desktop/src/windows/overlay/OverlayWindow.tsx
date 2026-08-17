@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Mic, Volume2 } from "lucide-react";
@@ -15,6 +15,8 @@ import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
 import {
   isConfirmContext,
+  overlayStageMode,
+  overlayThinkingText,
   pickCaption,
   pickOverlayPresence,
   shouldShowOverlayCard,
@@ -66,6 +68,8 @@ export function OverlayWindow() {
     preferences.overlay_caption_mode,
   );
   const showCard = shouldShowOverlayCard(status);
+  const thought = overlayThinkingText(status);
+  const stageMode = overlayStageMode(status);
   const caption =
     isReady && readyCaptionHidden && !showCard ? null : privateCaption;
   const orbOnly = isReady && readyCaptionHidden && !showCard;
@@ -167,7 +171,7 @@ export function OverlayWindow() {
     <div className="overlay-surface relative h-full w-full bg-transparent">
       <div
         className="overlay-stage absolute left-1/2 top-1/2 flex items-center justify-center bg-transparent p-3"
-        data-mode={showCard ? "card" : "presence"}
+        data-mode={stageMode}
         style={{
           ["--overlay-scale" as string]: scale,
         } as CSSProperties}
@@ -179,9 +183,11 @@ export function OverlayWindow() {
             "overlay-island relative flex select-none",
             orbOnly
               ? "items-center justify-center p-2.5"
-              : showCard
+              : stageMode === "card"
                 ? "max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3 py-2"
-                : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
+                : stageMode === "thought"
+                  ? "max-h-full w-max min-w-[220px] max-w-[356px] flex-col overflow-hidden px-3 py-2"
+                  : "w-max min-w-[220px] max-w-[356px] flex-col px-3 py-2",
           )}
           initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
           animate={{
@@ -295,6 +301,14 @@ export function OverlayWindow() {
                 </div>
 
                 <AnimatePresence mode="popLayout" initial={false}>
+                  {thought ? (
+                    <OverlayThoughts
+                      key="thought"
+                      text={thought}
+                      compact={showCard}
+                      reducedMotion={reduceMotion}
+                    />
+                  ) : null}
                   {showCard && status.artifact ? (
                     <OverlayArtifactCard
                       key={status.artifact.id}
@@ -335,6 +349,56 @@ function filterCaption(
   if (!caption || mode === "hidden") return null;
   if (mode === "assistant" && caption.kind === "heard") return null;
   return caption;
+}
+
+function OverlayThoughts({
+  text,
+  compact,
+  reducedMotion,
+}: {
+  text: string;
+  compact: boolean;
+  reducedMotion: boolean;
+}) {
+  const scroller = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text]);
+
+  return (
+    <motion.div
+      layout={reducedMotion ? false : "size"}
+      data-tauri-drag-region
+      className="overlay-caption overlay-thought mt-1.5 min-w-0 max-w-[324px] overflow-hidden rounded-[10px] px-2 py-1.5"
+      initial={reducedMotion ? false : { opacity: 0, height: 0, y: -2 }}
+      animate={{ opacity: 1, height: "auto", y: 0 }}
+      exit={reducedMotion ? undefined : { opacity: 0, height: 0, y: -2 }}
+      transition={{ duration: reducedMotion ? 0 : 0.28, ease: soft }}
+    >
+      <p
+        data-tauri-drag-region
+        className="text-[10px] font-semibold uppercase tracking-[0.06em] text-white/55"
+      >
+        Thinking
+      </p>
+      <div
+        ref={scroller}
+        data-tauri-drag-region
+        className={cn(
+          "mt-0.5 overflow-hidden",
+          compact ? "max-h-[2.7rem]" : "max-h-[4.6rem]",
+        )}
+      >
+        <p
+          data-tauri-drag-region
+          className="whitespace-pre-wrap text-[12px] leading-[1.35] tracking-[-0.01em] text-white/80"
+        >
+          {text}
+        </p>
+      </div>
+    </motion.div>
+  );
 }
 
 function CaptionBody({ caption }: { caption: Caption }) {

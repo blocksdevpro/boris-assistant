@@ -49,7 +49,7 @@ fn default_model_residency() -> String {
 }
 
 fn default_barge_in() -> bool {
-    false
+    true
 }
 
 fn normalize_model_residency(raw: String) -> String {
@@ -127,7 +127,8 @@ pub struct AppSettings {
     /// STT/TTS RAM policy: `low_memory` | `balanced` | `low_latency`.
     #[serde(default = "default_model_residency")]
     pub model_residency: String,
-    /// Reserved compatibility flag; ignored until echo-safe barge-in exists.
+    /// Say the wake word while Boris is talking to pause him.
+    /// Silence / "continue" resumes leftover speech; a new request starts a turn.
     #[serde(default = "default_barge_in")]
     pub voice_barge_in: bool,
     /// Ignore TV / Translate / TTS coming out of a speaker after enroll.

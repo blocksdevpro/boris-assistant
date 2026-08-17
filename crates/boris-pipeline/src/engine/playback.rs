@@ -41,6 +41,8 @@ pub(super) enum PlaybackWait {
     Aborted,
     /// Host stop / disconnect — go Off.
     Stopped,
+    /// Live wake during speech. Playback is paused; leftover PCM is still queued.
+    BargedIn,
 }
 
 /// Drain host commands; apply device switches immediately.

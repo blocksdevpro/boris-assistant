@@ -45,6 +45,8 @@ const OVERLAY_SIDE_MARGIN: i32 = 18;
 /// The React stage's logical dimensions. It contains the island itself.
 const OVERLAY_STAGE_WIDTH: f64 = 380.0;
 const OVERLAY_STAGE_HEIGHT: f64 = 120.0;
+/// Thinking stage — header + heard caption + 4-line reasoning tail.
+const OVERLAY_THOUGHT_STAGE_HEIGHT: f64 = 216.0;
 
 /// Clear WebView space around the stage. CSS shadows cannot draw beyond the
 /// native window, so this gutter prevents their blurred edges being cropped
@@ -54,6 +56,8 @@ const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
 /// Base logical window size, including the transparent shadow gutter.
 const OVERLAY_BASE_WIDTH: f64 = OVERLAY_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
 const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
+const OVERLAY_THOUGHT_BASE_HEIGHT: f64 =
+    OVERLAY_THOUGHT_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
 /// Glance card stage — clipped body, not a document editor.
 const OVERLAY_CARD_STAGE_WIDTH: f64 = 400.0;
 const OVERLAY_CARD_STAGE_HEIGHT: f64 = 300.0;
@@ -116,7 +120,25 @@ pub fn overlay_prefs_dirty() -> bool {
 }
 
 /// Last layout the host applied so prefs/scale changes keep a live card sized.
-static OVERLAY_CARD_LAYOUT: AtomicBool = AtomicBool::new(false);
+/// 0 = presence, 1 = thought, 2 = card.
+static OVERLAY_LAYOUT: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayLayout {
+    Presence = 0,
+    Thought = 1,
+    Card = 2,
+}
+
+impl OverlayLayout {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            2 => Self::Card,
+            1 => Self::Thought,
+            _ => Self::Presence,
+        }
+    }
+}
 static OVERLAY_SCALE_PERCENT: AtomicU16 = AtomicU16::new(100);
 /// 0 = top_center, 1 = top_left, 2 = top_right
 static OVERLAY_POSITION: AtomicU8 = AtomicU8::new(0);
@@ -340,7 +362,7 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
             apply_overlay_size(
                 &overlay,
                 f64::from(scale) / 100.0,
-                OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed),
+                OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed)),
             );
             if pos_changed {
                 place_overlay(&overlay, cached_position());
@@ -368,7 +390,7 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
 
     if status.engine == EngineState::Fault {
         if let Some(overlay) = ensure_overlay(app) {
-            request_reveal(&overlay, false);
+            request_reveal(&overlay, OverlayLayout::Presence);
             schedule_hide(app.clone(), epoch, FAULT_LINGER);
         }
         return;
@@ -379,8 +401,9 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
         return;
     }
 
-    let card = wants_card_layout(status);
-    let layout_changed = OVERLAY_CARD_LAYOUT.swap(card, Ordering::Relaxed) != card;
+    let layout = layout_for(status);
+    let layout_changed =
+        OVERLAY_LAYOUT.swap(layout as u8, Ordering::Relaxed) != layout as u8;
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
 
     let active = matches!(
@@ -398,7 +421,7 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
         if let Some(overlay) = app.get_webview_window("overlay") {
             if overlay_is_visible(&overlay) {
                 if layout_changed {
-                    apply_overlay_size(&overlay, scale, card);
+                    apply_overlay_size(&overlay, scale, layout);
                     place_overlay(&overlay, cached_position());
                 }
                 let linger = if status.artifact.is_some() {
@@ -422,9 +445,9 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     if !visible {
         // Stay off-screen until React paints. show()+park on a still-loading
         // WebView2 is the solid rectangle on first wake.
-        request_reveal(&overlay, card);
+        request_reveal(&overlay, layout);
     } else if layout_changed {
-        apply_overlay_size(&overlay, scale, card);
+        apply_overlay_size(&overlay, scale, layout);
         place_overlay(&overlay, cached_position());
     }
 }
@@ -436,14 +459,32 @@ fn wants_card_layout(status: &StatusPicture) -> bool {
         && !matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off)
 }
 
-fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64, card: bool) {
-    let (w, h) = if card {
-        (
+/// Must stay aligned with `overlayStageMode` in the overlay React surface.
+fn layout_for(status: &StatusPicture) -> OverlayLayout {
+    if wants_card_layout(status) {
+        OverlayLayout::Card
+    } else if status.phase == Phase::Thinking {
+        OverlayLayout::Thought
+    } else {
+        OverlayLayout::Presence
+    }
+}
+
+fn apply_overlay_size<R: Runtime>(
+    overlay: &tauri::WebviewWindow<R>,
+    scale: f64,
+    layout: OverlayLayout,
+) {
+    let (w, h) = match layout {
+        OverlayLayout::Card => (
             OVERLAY_CARD_BASE_WIDTH * scale,
             OVERLAY_CARD_BASE_HEIGHT * scale,
-        )
-    } else {
-        (OVERLAY_BASE_WIDTH * scale, OVERLAY_BASE_HEIGHT * scale)
+        ),
+        OverlayLayout::Thought => (
+            OVERLAY_BASE_WIDTH * scale,
+            OVERLAY_THOUGHT_BASE_HEIGHT * scale,
+        ),
+        OverlayLayout::Presence => (OVERLAY_BASE_WIDTH * scale, OVERLAY_BASE_HEIGHT * scale),
     };
     // Max size is set once at spawn. Re-applying set_max_size on Windows
     // restyles the HWND and flashes a decorated transparent frame.
@@ -451,7 +492,7 @@ fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64,
         return;
     }
     if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(w, h))) {
-        tracing::warn!(error = %e, card, "overlay resize failed");
+        tracing::warn!(error = %e, ?layout, "overlay resize failed");
     }
 }
 
@@ -484,8 +525,8 @@ fn cached_position() -> &'static str {
 
 /// Ask to park+show. If the island has not painted yet, remember the request
 /// and wait for [`EVENT_OVERLAY_READY`] (or the spawn fallback).
-fn request_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>, card: bool) {
-    OVERLAY_CARD_LAYOUT.store(card, Ordering::Relaxed);
+fn request_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>, layout: OverlayLayout) {
+    OVERLAY_LAYOUT.store(layout as u8, Ordering::Relaxed);
     OVERLAY_REVEAL_PENDING.store(true, Ordering::Release);
     if OVERLAY_PAINTED.load(Ordering::Acquire) {
         flush_pending_reveal(overlay);
@@ -507,8 +548,8 @@ fn flush_pending_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
         return;
     }
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
-    let card = OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed);
-    apply_overlay_size(overlay, scale, card);
+    let layout = OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed));
+    apply_overlay_size(overlay, scale, layout);
     if !overlay_is_visible(overlay) {
         show_without_focus(overlay);
         place_overlay(overlay, cached_position());
@@ -589,8 +630,53 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
     if !locked {
         // Unlocking is an explicit request to position the overlay. Make the
         // otherwise wake-only window visible without focusing it.
-        request_reveal(&overlay, OVERLAY_CARD_LAYOUT.load(Ordering::Relaxed));
+        request_reveal(
+            &overlay,
+            OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed)),
+        );
     }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boris_pipeline::{ArtifactPeek, EngineState, Phase, StatusPicture};
+
+    fn on() -> StatusPicture {
+        let mut picture = StatusPicture::off();
+        picture.engine = EngineState::On;
+        picture
+    }
+
+    #[test]
+    fn thinking_phase_uses_thought_layout() {
+        let mut picture = on();
+        picture.phase = Phase::Thinking;
+        picture.thinking = Some("Need to search first.".into());
+        assert_eq!(layout_for(&picture), OverlayLayout::Thought);
+    }
+
+    #[test]
+    fn artifact_wins_over_thought_layout() {
+        let mut picture = on();
+        picture.phase = Phase::Thinking;
+        picture.thinking = Some("Still thinking.".into());
+        picture.artifact = Some(ArtifactPeek {
+            id: "a1".into(),
+            title: "Notes".into(),
+            kind: "markdown".into(),
+            language: None,
+            path: "notes.md".into(),
+        });
+        assert_eq!(layout_for(&picture), OverlayLayout::Card);
+    }
+
+    #[test]
+    fn hearing_stays_presence() {
+        let mut picture = on();
+        picture.phase = Phase::Hearing;
+        assert_eq!(layout_for(&picture), OverlayLayout::Presence);
+    }
 }

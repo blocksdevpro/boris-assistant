@@ -126,6 +126,7 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
   memory/        # long-term markdown memory
   skills/        # skill playbooks
   logs/          # boris-desktop.*.log (packaged Windows builds have no console)
+  speaker/       # live.json — wake liveness enroll (acoustic takes)
   workspace/     # sandboxed agent workspace
 ```
 
@@ -143,6 +144,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_MEMORY` | `0` disables long-term memory |
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
+| `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |
 

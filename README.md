@@ -64,6 +64,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 ## Features
 
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback
+- **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
 - **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
@@ -74,7 +75,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Web search without a key** — DuckDuckGo + Wikipedia by default; an Exa key is an optional upgrade *(1.1)*
 - **Session artifacts** — markdown and code cards on the overlay and Home desk; spoken replies stay short *(1.1)*
 - **Local diagnostics** — durable turn traces with `cargo xtask trace-report` p50/p95 summaries
-- **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace
+- **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace, speaker teach
 
 ---
 

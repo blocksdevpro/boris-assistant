@@ -5,8 +5,34 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Start of the **1.2** line on the `next` branch. Stable **1.1.x** stays on
-`main`.
+Further **1.2** work on `next` after [1.2.0-beta.1].
+
+## [1.2.0-beta.1] - 2026-08-17
+
+First 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.
+
+### Added
+
+- Wake **live-mic teach**: Settings → Speech → Teach walks through four
+  “Boris” takes. The profile lives at `~/.boris/speaker/live.json`.
+- After a profile exists, Armed wake hits that look like a speaker (TV,
+  Translate, TTS) or that do not match the taught takes stay Armed and do
+  not start a turn. A live person still wakes Boris.
+- Settings → Speech: **Ignore speakers and TV** (`[speech]
+  ignore_speaker_playback`, default on). The gate is a no-op until teach
+  finishes. Override with `BORIS_WAKE_LIVENESS=0`.
+
+### Changed
+
+- `wait_for_wake` returns the 2 s window so the engine can crop speech and
+  score liveness on the same samples.
+- Empty wake crops no longer fall back to the raw buffer (that enrolled
+  room noise).
+
+### Fixed
+
+- ORT unit tests no longer deadlock: process-global `ort::init` finishes on
+  the test thread before concurrent `init_onnx_runtime` calls.
 
 ## [1.1.0] - 2026-08-15
 

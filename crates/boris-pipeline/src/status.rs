@@ -76,6 +76,21 @@ pub struct StatusPicture {
     /// separately; the session catalog is the source of truth for Home.
     #[serde(default)]
     pub artifact: Option<ArtifactPeek>,
+    /// Live-mic teach progress. Present while the user is recording takes
+    /// (or just finished). Not a turn — the teach page is the surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_enroll: Option<WakeEnrollPeek>,
+}
+
+/// Progress for the dedicated “teach your voice” page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeEnrollPeek {
+    pub have: u32,
+    pub want: u32,
+    pub ready: bool,
+    /// Why the last take was rejected (speak closer, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// Default soft context window for the overlay meter (token estimate).
@@ -102,6 +117,7 @@ impl StatusPicture {
             context_used: None,
             context_limit: None,
             artifact: None,
+            wake_enroll: None,
         }
     }
 }

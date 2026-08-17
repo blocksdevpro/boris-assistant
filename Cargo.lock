@@ -581,6 +581,8 @@ dependencies = [
  "boris-core",
  "livekit-wakeword",
  "ort",
+ "rustfft",
+ "serde",
  "tracing",
 ]
 

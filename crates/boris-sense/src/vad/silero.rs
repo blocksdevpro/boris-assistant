@@ -262,12 +262,14 @@ mod tests {
 
     #[test]
     fn rejects_empty_bytes() {
+        let _ort = crate::ort::lock_ort_for_test();
         let err = SileroVad::try_new(&[]).unwrap_err();
         assert!(err.to_string().contains("bytes=0"), "{err}");
     }
 
     #[test]
     fn rejects_bad_threshold() {
+        let _ort = crate::ort::lock_ort_for_test();
         let err = SileroVad::try_new_with_threshold(&[1, 2, 3], 0.0).unwrap_err();
         assert!(err.to_string().contains("threshold"), "{err}");
     }

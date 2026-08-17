@@ -79,6 +79,16 @@ export type StatusPicture = {
   context_limit?: number | null;
   /** This-turn overlay glance (cleared on the next utterance). Body is separate. */
   artifact?: ArtifactPeek | null;
+  /** Live-mic teach progress (dedicated teach page). */
+  wake_enroll?: WakeEnrollPeek | null;
+};
+
+/** Mirrors `boris_pipeline::WakeEnrollPeek`. */
+export type WakeEnrollPeek = {
+  have: number;
+  want: number;
+  ready: boolean;
+  hint?: string | null;
 };
 
 /** Device list entry from `list_input_devices` / `list_output_devices`. */
@@ -176,6 +186,8 @@ export type AppSettings = {
   model_residency: "low_memory" | "balanced" | "low_latency";
   /** Reserved compatibility setting; hidden until echo-safe barge-in exists. */
   voice_barge_in: boolean;
+  /** Ignore TV / Translate / TTS out of a speaker after a live enroll. */
+  ignore_speaker_playback: boolean;
   /** Long-term markdown memory. */
   long_term_memory: boolean;
   /**
@@ -207,6 +219,11 @@ export type AppSettings = {
 };
 
 /** Which GitHub Releases feed the desktop updater polls. */
+export type LivenessStatus = {
+  enrolled: boolean;
+  takes: number;
+};
+
 export type UpdateChannel = "stable" | "beta";
 
 export function normalizeUpdateChannel(
@@ -229,6 +246,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   tts_voice_id: "M4",
   model_residency: "balanced",
   voice_barge_in: false,
+  ignore_speaker_playback: true,
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
@@ -294,6 +312,7 @@ export const OFF_STATUS: StatusPicture = {
   context_used: null,
   context_limit: null,
   artifact: null,
+  wake_enroll: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -314,6 +333,7 @@ export function normalizeStatus(
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
     artifact: raw.artifact ?? null,
+    wake_enroll: raw.wake_enroll ?? null,
   };
 }
 
@@ -337,6 +357,7 @@ export function normalizeSettings(
     tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
     model_residency: normalizeResidency(raw?.model_residency),
     voice_barge_in: raw?.voice_barge_in ?? false,
+    ignore_speaker_playback: raw?.ignore_speaker_playback ?? true,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),

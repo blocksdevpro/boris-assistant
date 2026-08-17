@@ -411,6 +411,24 @@ impl AppState {
         Ok(())
     }
 
+    pub fn start_wake_enroll(&self, takes: u32) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("Start Boris first, then say Boris a few times.".into());
+        };
+        handle
+            .start_wake_enroll(takes)
+            .map_err(|e| format!("wake enroll: {e}"))
+    }
+
+    pub fn clear_wake_profile(&self) -> Result<(), String> {
+        if let Some(handle) = lock_or_recover(&self.handle, "handle").as_ref() {
+            let _ = handle.clear_wake_profile();
+        }
+        boris_pipeline::clear_liveness_profile();
+        Ok(())
+    }
+
     pub fn list_inputs() -> Vec<DeviceDto> {
         let list = devices::list_input_devices();
         debug!(count = list.len(), "list_input_devices");

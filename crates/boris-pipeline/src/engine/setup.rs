@@ -46,6 +46,7 @@ pub(super) struct EngineRuntime {
     pub tts_model_dir: std::path::PathBuf,
     pub system_prompt: String,
     pub residency: super::models::ModelResidency,
+    pub liveness: crate::liveness::WakeLiveness,
     #[allow(dead_code)]
     pub maintenance: boris_agent::MaintenanceWorker,
 }
@@ -165,6 +166,7 @@ pub(super) fn init_runtime(
         context_used: None,
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
         artifact: None,
+        wake_enroll: None,
         status_tx,
         phase_started: std::time::Instant::now(),
     };
@@ -192,6 +194,7 @@ pub(super) fn init_runtime(
         tts_model_dir: config.tts_model_dir,
         system_prompt: config.system_prompt,
         residency: super::models::ModelResidency::parse(&config.model_residency),
+        liveness: crate::liveness::WakeLiveness::load(config.ignore_speaker_playback),
         maintenance,
     })
 }
@@ -216,6 +219,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         context_used: None,
         context_limit: None,
         artifact: None,
+        wake_enroll: None,
     });
 }
 
@@ -378,6 +382,7 @@ fn fault(
         context_used: None,
         context_limit: None,
         artifact: None,
+        wake_enroll: None,
     });
 }
 

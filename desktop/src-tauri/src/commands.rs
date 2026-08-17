@@ -261,6 +261,21 @@ pub async fn stop_engine(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn wake_liveness_status() -> boris_pipeline::LivenessStatus {
+    boris_pipeline::liveness_status()
+}
+
+#[tauri::command]
+pub fn start_wake_enroll(state: State<'_, AppState>, takes: Option<u32>) -> Result<(), String> {
+    state.start_wake_enroll(takes.unwrap_or(4))
+}
+
+#[tauri::command]
+pub fn clear_wake_profile(state: State<'_, AppState>) -> Result<(), String> {
+    state.clear_wake_profile()
+}
+
+#[tauri::command]
 pub async fn list_input_devices() -> Vec<DeviceDto> {
     let list = tauri::async_runtime::spawn_blocking(AppState::list_inputs)
         .await

@@ -30,6 +30,7 @@ import {
   type PreflightReport,
   type ArtifactCard,
   type ArtifactListItem,
+  type LivenessStatus,
   type StatusPicture,
 } from "./types";
 
@@ -275,6 +276,23 @@ export async function getSessionArtifact(
 }
 
 /** Persist API keys + models/providers (never log secret values). */
+export async function wakeLivenessStatus(): Promise<LivenessStatus> {
+  try {
+    return await invoke<LivenessStatus>(COMMANDS.wakeLivenessStatus);
+  } catch (e) {
+    logger.warn("wake_liveness_status failed", invokeErrorMessage(e));
+    return { enrolled: false, takes: 0 };
+  }
+}
+
+export async function startWakeEnroll(takes = 4): Promise<void> {
+  await invoke(COMMANDS.startWakeEnroll, { takes });
+}
+
+export async function clearWakeProfile(): Promise<void> {
+  await invoke(COMMANDS.clearWakeProfile);
+}
+
 export async function saveSettings(settings: AppSettings): Promise<void> {
   const wire = settingsToWire(settings);
   try {

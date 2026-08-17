@@ -49,6 +49,10 @@ pub enum HearBreak {
     SwitchInput { device_id: String },
     /// Host wants a different speaker.
     SwitchOutput { device_id: String },
+    /// Next wake hits are enroll takes, not turns.
+    StartWakeEnroll { takes: u32 },
+    /// Drop the stored live-mic profile.
+    ClearWakeProfile,
 }
 
 /// Capture mode for utterance recording.
@@ -79,6 +83,12 @@ fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result
             Ok(EngineCommand::SwitchOutput { device_id }) => {
                 return Err(HearBreak::SwitchOutput { device_id });
             }
+            Ok(EngineCommand::StartWakeEnroll { takes }) => {
+                return Err(HearBreak::StartWakeEnroll { takes });
+            }
+            Ok(EngineCommand::ClearWakeProfile) => {
+                return Err(HearBreak::ClearWakeProfile);
+            }
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => return Err(HearBreak::Disconnected),
         }
@@ -103,12 +113,15 @@ fn next_frame(
 }
 
 /// Block until the wake model crosses threshold, or the host stops / switches devices.
+///
+/// Returns the 2 s window that fired so the engine can run liveness / enroll
+/// on the same samples.
 pub fn wait_for_wake(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     wake: &mut impl WakeWord,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
-) -> Result<(), HearBreak> {
+) -> Result<AudioBuffer, HearBreak> {
     tracing::info!(
         threshold = WAKEWORD_THRESHOLD,
         window = WAKEWORD_WINDOW_SIZE,
@@ -149,7 +162,8 @@ pub fn wait_for_wake(
         }
         samples_since_score = 0;
 
-        match wake.predict(&window.read()) {
+        let pcm = window.read();
+        match wake.predict(&pcm) {
             Ok(score) if score >= WAKEWORD_THRESHOLD => {
                 tracing::info!(
                     score,
@@ -158,7 +172,7 @@ pub fn wait_for_wake(
                     ms = wait_started.elapsed().as_millis() as u64,
                     "wake hit"
                 );
-                return Ok(());
+                return Ok(pcm);
             }
             Ok(score) => {
                 scores = scores.saturating_add(1);
@@ -335,6 +349,72 @@ pub fn capture_utterance(
             }
         }
     }
+}
+
+/// Speech region inside a wake window. Empty when Silero heard no speech —
+/// do **not** fall back to the raw 2 s buffer (that enrolled room noise).
+#[derive(Debug, Clone)]
+pub struct SpeechCrop {
+    pub pcm: AudioBuffer,
+    pub speech_hops: u32,
+}
+
+/// Keep Silero-speech hops plus one hop of context. Used for liveness / enroll.
+pub fn crop_speech(vad: &mut impl Vad, pcm: &[f32]) -> SpeechCrop {
+    vad.reset();
+    let hop = VAD_WINDOW_SIZE;
+    let mut first = None;
+    let mut last = None;
+    let mut speech_hops = 0u32;
+    let mut i = 0;
+    while i + hop <= pcm.len() {
+        match vad.predict(&pcm[i..i + hop]) {
+            Ok(true) => {
+                speech_hops = speech_hops.saturating_add(1);
+                if first.is_none() {
+                    first = Some(i);
+                }
+                last = Some(i);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::debug!(error = %e, "vad crop"),
+        }
+        i += hop;
+    }
+    match (first, last) {
+        (Some(a), Some(b)) => {
+            let start = a.saturating_sub(hop);
+            let end = (b + hop * 2).min(pcm.len());
+            SpeechCrop {
+                pcm: pcm[start..end].to_vec(),
+                speech_hops,
+            }
+        }
+        _ => SpeechCrop {
+            pcm: Vec::new(),
+            speech_hops: 0,
+        },
+    }
+}
+
+/// Drop incoming mic for `ms` so the same wake does not re-fire immediately.
+pub fn drain_ms(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    ms: u64,
+) -> Result<(), HearBreak> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+    while std::time::Instant::now() < deadline {
+        still_running(cmd_rx, running)?;
+        match mic.recv_timeout(Duration::from_millis(20)) {
+            Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return Err(HearBreak::Disconnected);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

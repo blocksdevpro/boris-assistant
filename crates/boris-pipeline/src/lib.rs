@@ -41,6 +41,7 @@ pub mod engine;
 pub mod env_util;
 pub mod error;
 pub mod hear;
+pub mod liveness;
 pub mod paths;
 pub mod prompt;
 pub mod settings;
@@ -56,6 +57,9 @@ pub use download::{
 };
 pub use engine::{Engine, EngineCommand, EngineHandle};
 pub use error::{PipelineError, Result as PipelineResult};
+pub use liveness::{
+    clear_liveness_profile, liveness_status, LivenessStatus, WakeLiveness, WakeOrigin,
+};
 pub use paths::{
     auth_path, boris_home, config_path, ensure_logs_dir, ensure_sessions_dir, logs_dir, memory_dir,
     migrate_home_if_needed, models_dir, notes_path, preflight, profile_path, sessions_dir,
@@ -67,4 +71,6 @@ pub use settings::{
     load_settings, save_settings, secrets_path, settings_path, AppSettings,
     DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_PROVIDER,
 };
-pub use status::{ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture};
+pub use status::{
+    ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture, WakeEnrollPeek,
+};

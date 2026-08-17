@@ -112,6 +112,9 @@ pub struct PipelineConfig {
     /// Reserved compatibility setting. Ignored until playback has echo-safe
     /// barge-in; it is intentionally not exposed by the desktop UI.
     pub voice_barge_in: bool,
+    /// Reject speaker-played wake hits (TV / Translate / TTS) when a live
+    /// profile is enrolled. Live mouths always pass.
+    pub ignore_speaker_playback: bool,
 }
 
 impl PipelineConfig {
@@ -183,6 +186,7 @@ impl PipelineConfig {
             max_confirms_per_turn,
             model_residency: resolve_model_residency(&saved),
             voice_barge_in: resolve_voice_barge_in(&saved),
+            ignore_speaker_playback: resolve_ignore_speaker_playback(&saved),
         }
     }
 }
@@ -204,6 +208,15 @@ fn resolve_model_residency(saved: &AppSettings) -> String {
 
 fn resolve_voice_barge_in(saved: &AppSettings) -> bool {
     env_truthy("BORIS_BARGE_IN").unwrap_or(saved.voice_barge_in)
+}
+
+fn resolve_ignore_speaker_playback(saved: &AppSettings) -> bool {
+    // BORIS_WAKE_LIVENESS=0 disables the gate.
+    match std::env::var("BORIS_WAKE_LIVENESS") {
+        Ok(v) if matches!(v.trim(), "0" | "false" | "off" | "no") => false,
+        Ok(v) if matches!(v.trim(), "1" | "true" | "on" | "yes") => true,
+        _ => saved.ignore_speaker_playback,
+    }
 }
 
 /// Priority: explicit arg → env → config.toml → None (engine default).

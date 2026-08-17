@@ -81,6 +81,21 @@ description = "Read one session visual card (meta + body)"
 commands.allow = ["get_session_artifact"]
 
 [[permission]]
+identifier = "allow-wake-liveness-status"
+description = "Read whether a live-mic wake profile is enrolled"
+commands.allow = ["wake_liveness_status"]
+
+[[permission]]
+identifier = "allow-start-wake-enroll"
+description = "Record live Boris takes for the speaker-playback filter"
+commands.allow = ["start_wake_enroll"]
+
+[[permission]]
+identifier = "allow-clear-wake-profile"
+description = "Delete the live-mic wake profile"
+commands.allow = ["clear_wake_profile"]
+
+[[permission]]
 identifier = "allow-check-app-update"
 description = "Check GitHub Releases for a signed app update on the selected channel"
 commands.allow = ["check_app_update"]

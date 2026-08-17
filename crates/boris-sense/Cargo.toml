@@ -12,15 +12,19 @@ keywords    = ["vad", "wake-word", "onnx", "audio"]
 categories  = ["multimedia::audio"]
 
 [features]
-default = ["vad", "wake"]
+default = ["vad", "wake", "speaker"]
 # Silero VAD adapter (ORT session). Independent of LiveKit; shares process ORT.
 vad = ["dep:ort"]
 # LiveKit open-wake-word ONNX path (`livekit-wakeword` + `ort`).
 wake = ["dep:livekit-wakeword", "dep:ort"]
+# Live-vs-loudspeaker acoustic features (no extra ONNX).
+speaker = ["dep:rustfft"]
 
 [dependencies]
 boris-core = { workspace = true }
 tracing    = { workspace = true }
+serde      = { version = "1", features = ["derive"] }
+rustfft    = { version = "6", optional = true }
 
 # Pinned to the rev resolved in the workspace Cargo.lock so desktop builds
 # do not float on git main. Bump intentionally when upgrading the SDK.

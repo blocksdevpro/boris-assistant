@@ -130,6 +130,9 @@ pub struct AppSettings {
     /// Reserved compatibility flag; ignored until echo-safe barge-in exists.
     #[serde(default = "default_barge_in")]
     pub voice_barge_in: bool,
+    /// Ignore TV / Translate / TTS coming out of a speaker after enroll.
+    #[serde(default = "default_true")]
+    pub ignore_speaker_playback: bool,
     /// Markdown long-term memory tools + session logs.
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
@@ -182,6 +185,7 @@ impl Default for AppSettings {
             tts_voice_id: default_tts_voice(),
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
+            ignore_speaker_playback: true,
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
@@ -297,6 +301,8 @@ struct SpeechSection {
     model_residency: String,
     #[serde(default = "default_barge_in")]
     voice_barge_in: bool,
+    #[serde(default = "default_true")]
+    ignore_speaker_playback: bool,
 }
 
 impl Default for SpeechSection {
@@ -305,6 +311,7 @@ impl Default for SpeechSection {
             tts_voice_id: default_tts_voice(),
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
+            ignore_speaker_playback: true,
         }
     }
 }
@@ -384,6 +391,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     };
     out.model_residency = normalize_model_residency(cfg.speech.model_residency);
     out.voice_barge_in = cfg.speech.voice_barge_in;
+    out.ignore_speaker_playback = cfg.speech.ignore_speaker_playback;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
@@ -522,6 +530,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         },
         model_residency: normalize_model_residency(settings.model_residency.clone()),
         voice_barge_in: settings.voice_barge_in,
+        ignore_speaker_playback: settings.ignore_speaker_playback,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
@@ -1009,6 +1018,7 @@ mod tests {
             tts_voice_id: "M4".into(),
             model_residency: "balanced".into(),
             voice_barge_in: false,
+            ignore_speaker_playback: true,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,

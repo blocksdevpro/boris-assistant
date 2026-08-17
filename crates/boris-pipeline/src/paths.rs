@@ -33,6 +33,8 @@
 //!       tool_calls.jsonl
 //!   models/
 //!     parakeet/ | supertone/ | livekit/ | silero/
+//!   speaker/
+//!     live.json              # wake liveness enroll (acoustic takes)
 //!   state/
 //!     workspace/             # default agent write root (was top-level sandbox/)
 //! ```
@@ -119,6 +121,10 @@ pub fn supertone_voices_dir() -> PathBuf {
 
 pub fn livekit_dir() -> PathBuf {
     models_dir().join("livekit")
+}
+
+pub fn speaker_dir() -> PathBuf {
+    boris_home().join("speaker")
 }
 
 pub fn silero_dir() -> PathBuf {

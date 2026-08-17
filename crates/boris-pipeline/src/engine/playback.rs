@@ -70,6 +70,9 @@ pub(super) fn poll_running(
                     output_rebuilt = true;
                 }
             }
+            Ok(EngineCommand::StartWakeEnroll { .. } | EngineCommand::ClearWakeProfile) => {
+                tracing::debug!("wake liveness command ignored during playback");
+            }
             Err(mpsc::TryRecvError::Empty) => {
                 return PollOutcome {
                     running: *running,

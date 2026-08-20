@@ -6,7 +6,9 @@ use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::ArcAudioBuffer;
 use boris_inference::TextToSpeech;
-use boris_sense::{init_onnx_runtime, LivekitWakeWord, SileroVad, SILERO_SPEECH_THRESHOLD};
+use boris_sense::{
+    init_onnx_runtime, LivekitWakeWord, SileroVad, SpeakerEmbedder, SILERO_SPEECH_THRESHOLD,
+};
 
 use crate::config::PipelineConfig;
 use crate::error::{PipelineError, Result};
@@ -194,7 +196,10 @@ pub(super) fn init_runtime(
         tts_model_dir: config.tts_model_dir,
         system_prompt: config.system_prompt,
         residency: super::models::ModelResidency::parse(&config.model_residency),
-        liveness: crate::liveness::WakeLiveness::load(config.ignore_speaker_playback),
+        liveness: crate::liveness::WakeLiveness::load(
+            config.ignore_speaker_playback,
+            load_speaker_embedder(),
+        ),
         barge_in: config.voice_barge_in,
         maintenance,
     })
@@ -339,6 +344,39 @@ fn load_vad(
             let detail = format!("silero vad init: {e}");
             fault(status_tx, config, detail.clone());
             Err(PipelineError::init(detail))
+        }
+    }
+}
+
+/// Optional CAM++ bytes from `~/.boris/models/speaker/`. Missing file is fine.
+fn load_speaker_embedder() -> Option<SpeakerEmbedder> {
+    let path = paths::speaker_embed_model_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => {
+            tracing::warn!(path = %path.display(), "speaker embed model is empty");
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(
+                path = %path.display(),
+                "no CAM++ speaker model — identity uses brightness until Install models"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "speaker embed model unreadable");
+            return None;
+        }
+    };
+    match SpeakerEmbedder::try_new(&bytes) {
+        Ok(e) => {
+            tracing::info!(bytes = bytes.len(), "CAM++ speaker embedder loaded");
+            Some(e)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "CAM++ speaker embedder failed to load");
+            None
         }
     }
 }

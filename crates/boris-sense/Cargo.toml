@@ -17,8 +17,8 @@ default = ["vad", "wake", "speaker"]
 vad = ["dep:ort"]
 # LiveKit open-wake-word ONNX path (`livekit-wakeword` + `ort`).
 wake = ["dep:livekit-wakeword", "dep:ort"]
-# Live-vs-loudspeaker acoustic features (no extra ONNX).
-speaker = ["dep:rustfft"]
+# Live-vs-loudspeaker acoustics + optional CAM++ speaker embeddings (ORT).
+speaker = ["dep:rustfft", "dep:ort"]
 
 [dependencies]
 boris-core = { workspace = true }

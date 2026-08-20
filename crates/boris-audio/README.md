@@ -1,6 +1,6 @@
 # boris-audio
 
-Real-time duplex audio for Boris: capture → 16 kHz mono, TTS mono → device playback.
+Real-time duplex audio for Boris: capture → 16 kHz mono → HPF/AGC/AEC, TTS mono → device playback.
 
 ## Public surface
 
@@ -20,10 +20,12 @@ Historical paths still work:
 
 | Path | RT callback | Worker |
 |------|-------------|--------|
-| Input | f32 convert + `try_send` only | resample + fan-out |
-| Output | pull samples + drain detect (`try_send` events) | command recv + oneshot resample |
+| Input | f32 convert + `try_send` only | resample → HPF/AGC/AEC → fan-out |
+| Output | pull samples + drain detect (`try_send` events) | command recv + oneshot resample + AEC far-end |
 
 Never block inside cpal callbacks.
+
+After resample, the input worker runs a WebRTC APM (sonora): high-pass, AGC2, and AEC3. TTS PCM is copied to 16 kHz and fed as the AEC far-end, in lockstep with capture frames. Noise suppression stays off — it tends to hurt Parakeet. `BORIS_AUDIO_FRONTEND=0` bypasses the APM for debugging.
 
 `AudioService::play` returns `Result` via non-blocking `try_send` (queue full / worker gone).
 Streamed `append` uses a short bounded enqueue wait. `finish_job` is a reliable,

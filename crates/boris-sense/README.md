@@ -9,7 +9,7 @@ Local perception ports for the Boris voice pipeline: **wake-word scoring** and
 |-----------|---------|--------------------------------------|
 | `vad`     | on      | `ort` (Silero ONNX)                  |
 | `wake`    | on      | `livekit-wakeword` (git), `ort`      |
-| `speaker` | on      | `rustfft` (live-vs-loudspeaker cues) |
+| `speaker` | on      | `rustfft` + `ort` (acoustics + CAM++ embeddings) |
 
 Desktop and `boris-pipeline` use the default set (`vad` + `wake`). `--features vad`
 without `wake` still needs native ONNX Runtime. `--no-default-features` builds
@@ -108,5 +108,6 @@ use boris_sense::{
 
 `compute_acoustic_feat` + [`AcousticModel::playback_z`] measure whether a wake
 crop is darker / more band-limited than enrolled live takes (TV, Translate,
-TTS out of a speaker). The pipeline owns enroll storage and the accept/reject
-cutoff (`PLAYBACK_Z_REJECT` is only a suggested default).
+TTS out of a speaker). Identity (“taught voice”) is [`SpeakerEmbedder`] cosine
+vs enrolled CAM++ embeddings when that ONNX is loaded. The pipeline owns enroll
+storage and the cutoffs.

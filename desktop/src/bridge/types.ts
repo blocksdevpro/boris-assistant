@@ -125,7 +125,7 @@ export type ModelsStatus = {
   base_url_override: string | null;
 };
 
-export type ModelComponent = "parakeet" | "supertone";
+export type ModelComponent = "parakeet" | "supertone" | "speaker";
 
 export type DownloadFileStatus =
   | "starting"

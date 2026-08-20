@@ -17,3 +17,6 @@
 .env
 .env.*
 !.env.example
+
+# Local Grok rules. Do not commit.
+.grok/rules/

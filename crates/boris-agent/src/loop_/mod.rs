@@ -244,6 +244,12 @@ pub async fn agent_loop(
                     "finish gate: weak research — continue tooling"
                 );
                 crate::finish_gate::research_gate_reminder()
+            } else if crate::finish_gate::should_local_work_gate(user_text, &tools_used) {
+                tracing::info!(
+                    left = finish_gate_left,
+                    "finish gate: weak local work — continue tooling"
+                );
+                crate::finish_gate::local_work_gate_reminder()
             } else {
                 let pending = crate::finish_gate::pending_todo_count(&todos_file);
                 tracing::info!(

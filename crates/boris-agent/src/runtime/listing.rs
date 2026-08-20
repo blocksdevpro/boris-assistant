@@ -95,6 +95,9 @@ impl ActivationTable {
 }
 
 /// Hard-core tool names always listed when progressive is on (if registered).
+///
+/// Work tools (read/search/shell) stay listed even on non-coding turns so the
+/// model can actually execute instead of discovering them via `tool_search`.
 pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "get_time",
     "get_date",
@@ -105,6 +108,14 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "get_system_info",
     "get_user_context",
     "tool_search",
+    "file_read",
+    "file_write",
+    "file_edit",
+    "list_dir",
+    "glob",
+    "grep",
+    "bash",
+    "present_artifact",
 ];
 
 /// Feature flags for listing / concurrency / progress (owned by [`crate::Agent`]).
@@ -353,6 +364,10 @@ mod tests {
                 list: false,
             }),
             Arc::new(Named {
+                name: "web_fetch",
+                list: false,
+            }),
+            Arc::new(Named {
                 name: "bash",
                 list: false,
             }),
@@ -392,7 +407,8 @@ mod tests {
         assert!(listed.contains(&"get_time"));
         assert!(listed.contains(&"list_skills"));
         assert!(listed.contains(&"file_read"));
-        assert!(!listed.contains(&"bash"));
+        assert!(listed.contains(&"bash"));
+        assert!(!listed.contains(&"web_fetch"));
     }
 
     #[test]

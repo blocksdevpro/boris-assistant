@@ -68,7 +68,7 @@ use crate::error::{PipelineError, Result};
 use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::{EngineState, Phase, StatusPicture};
 
-use activity::activity_label;
+use activity::{activity_label, note_tool_start};
 use artifact::peek_current;
 use barge::{decide_barge_listen, BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
@@ -830,13 +830,22 @@ fn run(
         // Recent tool names (for "thinking · after web_search" style labels).
         let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let recent_w = recent_tools.clone();
+        let wave = std::sync::Arc::new(std::sync::Mutex::new(boris_agent::ActivityWave::default()));
+        let wave_w = wave.clone();
+        let thought_t = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let thought_w = thought_t.clone();
         let art_store = rt.store.clone();
         let art_sid = (*sess.active_session).clone();
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
-            // Track tools for post-tool thinking labels.
-            if let AgentEvent::ToolExecutionStart { tool_name, .. } = ev {
+            // Track tools for post-tool thinking labels + same-kind collapse.
+            if let AgentEvent::ToolExecutionStart {
+                tool_name,
+                args_summary,
+                ..
+            } = ev
+            {
                 if let Ok(mut g) = recent_w.lock() {
                     if !g.iter().any(|t| t == tool_name) {
                         g.push(tool_name.clone());
@@ -844,6 +853,20 @@ fn run(
                     while g.len() > 4 {
                         g.remove(0);
                     }
+                }
+                if let Ok(mut w) = wave_w.lock() {
+                    note_tool_start(&mut w, tool_name, args_summary);
+                }
+                if let Ok(mut t) = thought_w.lock() {
+                    *t = std::time::Instant::now();
+                }
+            }
+            if let AgentEvent::TurnStart { .. } = ev {
+                if let Ok(mut t) = thought_w.lock() {
+                    *t = std::time::Instant::now();
+                }
+                if let Ok(mut w) = wave_w.lock() {
+                    w.reset();
                 }
             }
             if let AgentEvent::ToolExecutionEnd {
@@ -868,7 +891,20 @@ fn run(
                 };
                 base.thinking = Some(preview.clone());
                 let mut snap = base.clone();
-                if snap.activity.is_none() {
+                let elapsed = thought_w
+                    .lock()
+                    .ok()
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default();
+                let thought = boris_agent::describe_thought(elapsed);
+                // Don't clobber a live tool chip with the think timer.
+                let busy_tool = snap
+                    .activity
+                    .as_deref()
+                    .is_some_and(|a| a.starts_with("tool ·") || a.starts_with("done ·"));
+                if !busy_tool {
+                    snap.activity = Some(format!("thinking · {thought}"));
+                } else if snap.activity.is_none() {
                     snap.activity = Some("thinking…".into());
                 }
                 let _ = activity_tx.send(snap);
@@ -887,7 +923,8 @@ fn run(
                 }
             }
             let tools_snapshot = recent_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            let Some(label) = activity_label(ev, &tools_snapshot) else {
+            let wave_snapshot = wave_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            let Some(label) = activity_label(ev, &tools_snapshot, &wave_snapshot) else {
                 return;
             };
             let Ok(base) = base_w.lock() else {
@@ -950,7 +987,7 @@ fn run(
         };
         // Live tool labels already mirrored; keep a soft chip until speech/confirm.
         if !report.tools_used.is_empty() {
-            rt.picture.activity = Some(format!("{} tools", report.tools_used.len()));
+            rt.picture.activity = Some(boris_agent::summarize_tools_used(&report.tools_used));
         }
         if report.tools_used.iter().any(|n| n == "present_artifact") {
             if let Some(sid) = sess.active_session.as_ref() {

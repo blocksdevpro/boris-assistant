@@ -17,7 +17,9 @@ mod schema;
 mod trait_;
 
 pub use args::{
-    optional_bool, optional_string, optional_u64, require_object, require_string, value_type_name,
+    coerce_bool, coerce_u64, optional_bool, optional_bool_keys, optional_string,
+    optional_string_keys, optional_u64, optional_u64_keys, require_object, require_string,
+    value_type_name,
 };
 pub use error::{ToolError, ToolErrorKind};
 pub use meta::{Permission, ToolKind, ToolMeta, ToolRisk};

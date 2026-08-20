@@ -702,12 +702,8 @@ fn child_progress_emit(ctx: &ToolCallContext) -> EmitFn {
                 args_summary,
                 ..
             } => {
-                let detail = short_args_detail(tool_name, args_summary);
-                if detail.is_empty() {
-                    Some(format!("via {tool_name}"))
-                } else {
-                    Some(format!("via {tool_name}: {detail}"))
-                }
+                let line = crate::describe_tool(tool_name, args_summary, crate::Tense::Present);
+                Some(format!("via {line}"))
             }
             AgentEvent::ToolProgress {
                 tool_name, message, ..
@@ -719,11 +715,14 @@ fn child_progress_emit(ctx: &ToolCallContext) -> EmitFn {
                     Some(format!("via {tool_name}: {}", truncate_chars(msg, 48)))
                 }
             }
-            AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
-                format!("via {tool_name} · done")
-            } else {
-                format!("via {tool_name} · failed")
-            }),
+            AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => {
+                let line = crate::describe_tool(tool_name, "", crate::Tense::Past);
+                Some(if *ok {
+                    format!("via {line}")
+                } else {
+                    format!("via {line} failed")
+                })
+            }
             AgentEvent::TurnStart { round } if *round > 0 => Some(format!("step {}", round + 1)),
             AgentEvent::Error { message } => {
                 let m = message.trim();
@@ -739,19 +738,6 @@ fn child_progress_emit(ctx: &ToolCallContext) -> EmitFn {
             ctx.report_text(text);
         }
     })
-}
-
-fn short_args_detail(tool_name: &str, args_summary: &str) -> String {
-    let s = args_summary.trim();
-    if s.is_empty() || s == tool_name {
-        return String::new();
-    }
-    let inner = s
-        .strip_prefix(tool_name)
-        .map(str::trim)
-        .and_then(|rest| rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')))
-        .unwrap_or(s);
-    truncate_chars(inner.trim(), 40)
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {

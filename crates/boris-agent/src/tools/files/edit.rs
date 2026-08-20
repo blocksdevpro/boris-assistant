@@ -193,6 +193,7 @@ impl Tool for EditFileTool {
 
     fn description(&self) -> &str {
         "Replace an exact string in a file (old_string → new_string). \
+         Prefer this over bash sed/awk. Read the file first. \
          old_string must match exactly once (including whitespace). Requires confirmation."
     }
 

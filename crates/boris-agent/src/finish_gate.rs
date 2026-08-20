@@ -166,6 +166,32 @@ pub fn should_research_gate_with(
     !coverage.meets(traits.research_depth)
 }
 
+/// True when the user asked for local workspace work and no file/search/shell
+/// tools ran this turn.
+pub fn should_local_work_gate(user_text: &str, tools_used: &[String]) -> bool {
+    let traits = crate::task::classify_task(user_text);
+    if !traits.is_workspace_job(user_text) {
+        return false;
+    }
+    !tools_used.iter().any(|n| {
+        matches!(
+            n.as_str(),
+            "grep" | "glob" | "file_read" | "list_dir" | "bash" | "file_edit" | "file_write"
+        )
+    })
+}
+
+/// System-reminder when local workspace work was under-tooled.
+pub fn local_work_gate_reminder() -> String {
+    "<system-reminder>\n\
+     This is local workspace work. Use grep, glob, list_dir, and file_read \
+     (not bash cat/grep/find, not web_search) before answering. \
+     Batch independent searches and reads in one multi-tool message. \
+     Do not claim you looked unless tool output says so.\n\
+     </system-reminder>"
+        .to_string()
+}
+
 /// System-reminder when research was under-tooled after a content-only reply.
 pub fn research_gate_reminder() -> String {
     "<system-reminder>\n\
@@ -497,5 +523,22 @@ mod tests {
             "Need more hints.",
             &[]
         ));
+    }
+
+    #[test]
+    fn local_work_gate_on_undertooled_file_ask() {
+        assert!(should_local_work_gate(
+            "find the function in src/main.rs",
+            &[]
+        ));
+        assert!(!should_local_work_gate(
+            "find the function in src/main.rs",
+            &[s("grep")]
+        ));
+        assert!(!should_local_work_gate("what time is it", &[]));
+        assert!(!should_local_work_gate("find Jane Doe on LinkedIn", &[]));
+        let reminder = local_work_gate_reminder();
+        assert!(reminder.contains("grep"));
+        assert!(reminder.contains("<system-reminder>"));
     }
 }

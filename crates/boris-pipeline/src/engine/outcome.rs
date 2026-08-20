@@ -91,7 +91,7 @@ pub(super) fn resolve_agent_outcome(
         // “You” while waiting for yes/no (fresh answer is written after STT).
         ctx.picture.detail = None;
         ctx.picture.heard = None;
-        ctx.picture.activity = Some(format!("confirm · {}", pending.name));
+        ctx.picture.activity = Some(confirm_activity(&pending.name, &pending.args_summary));
         ctx.picture.said = Some(prompt.clone());
         ctx.picture.publish();
 
@@ -147,7 +147,7 @@ pub(super) fn resolve_agent_outcome(
             PlaybackWait::Finished => {
                 ctx.picture.set_phase(Phase::Talking);
                 // Keep activity as confirm so overlay still reads as yes/no.
-                ctx.picture.activity = Some(format!("confirm · {}", pending.name));
+                ctx.picture.activity = Some(confirm_activity(&pending.name, &pending.args_summary));
                 match wait_playback_or_stop(
                     ctx.output_events,
                     ctx.cmd_rx,
@@ -377,4 +377,9 @@ pub(super) fn resolve_agent_outcome(
     ctx.picture.detail = Some("too many confirmations".into());
     ctx.picture.set_phase(Phase::Armed);
     OutcomeResolve::ReArm
+}
+
+fn confirm_activity(name: &str, args_summary: &str) -> String {
+    let phrase = boris_agent::describe_tool(name, args_summary, boris_agent::Tense::Present);
+    format!("confirm · {phrase}")
 }

@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolKind, ToolMeta, ToolRisk,
+    optional_string, optional_u64, require_object, require_string, truncate_tool_result,
+    Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::files::FsRoots;
 use crate::tools::fs_common::resolve_under_roots;
@@ -49,8 +49,10 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by glob pattern under allowed roots (e.g. '**/*.rs', 'notes/*.md'). \
-         Returns paths sorted newest-first. Relative search path defaults to sandbox."
+        "Find files by glob pattern relative to a search root. \
+         Use for locating files by name or extension before reading them. \
+         Returns matching file paths sorted newest first and caps large result sets. \
+         Prefer this over bash find/ls for file discovery. Pattern examples: '**/*.rs', 'notes/*.md'."
     }
 
     fn parameters(&self) -> Value {
@@ -59,11 +61,15 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern, e.g. '**/*.rs' or '*.txt'"
+                    "description": "Glob pattern relative to the search root, e.g. '**/*.rs' or '*.txt'"
                 },
                 "path": {
                     "type": "string",
                     "description": "Root directory to search (default: sandbox)"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max paths to return (default 200)"
                 }
             },
             "required": ["pattern"]
@@ -98,6 +104,11 @@ impl Tool for GlobTool {
             )));
         }
 
+        let limit = optional_u64(obj, "limit")
+            .map(|n| n as usize)
+            .unwrap_or(MAX_RESULTS)
+            .clamp(1, MAX_RESULTS);
+
         let pattern_owned = pattern.clone();
         let root_owned = root.clone();
         let mut matches = tokio::task::spawn_blocking(move || {
@@ -110,15 +121,17 @@ impl Tool for GlobTool {
 
         if matches.is_empty() {
             return Ok(format!(
-                "No files matched pattern '{pattern}' under {}.",
+                "No files matched pattern '{pattern}' under {}.\n\
+                 Next: try '**/{pattern}' if this was a basename, drop a too-tight prefix, \
+                 or list_dir the parent. Prefer glob over bash find.",
                 root.display()
             ));
         }
 
         matches.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
         let total = matches.len();
-        let truncated = total > MAX_RESULTS;
-        let shown = &matches[..total.min(MAX_RESULTS)];
+        let truncated = total > limit;
+        let shown = &matches[..total.min(limit)];
 
         let mut lines = Vec::with_capacity(shown.len());
         for (p, _) in shown {
@@ -131,7 +144,7 @@ impl Tool for GlobTool {
             lines.join("\n")
         );
         if truncated {
-            out.push_str(&format!("\n…[truncated to {MAX_RESULTS}]"));
+            out.push_str(&format!("\n…[truncated to {limit}]"));
         }
         Ok(truncate_tool_result(out))
     }

@@ -74,6 +74,31 @@ impl TaskTraits {
                 || self.time_date
                 || (self.local_only && self.complexity == TaskComplexity::Simple))
     }
+
+    /// Strong enough local-workspace signal to finish-gate on under-tooling.
+    ///
+    /// Broader than [`Self::coding`] (which also matches the word "function").
+    pub fn is_workspace_job(self, user_text: &str) -> bool {
+        if self.greeting || self.time_date {
+            return false;
+        }
+        if self.research_depth != ResearchDepth::None {
+            return false;
+        }
+        let t = user_text.to_ascii_lowercase();
+        self.coding
+            && (LOCAL_WORK_NEEDLES.iter().any(|n| t.contains(n))
+                || t.contains("file")
+                || t.contains("project")
+                || t.contains("debug")
+                || t.contains("implement")
+                || t.contains("refactor")
+                || t.contains("compile")
+                || t.contains("stack trace")
+                || t.contains("codebase")
+                || t.contains(".rs")
+                || t.contains("src/"))
+    }
 }
 
 const RESEARCH_NEEDLES: &[&str] = &[
@@ -115,6 +140,34 @@ const CODING_NEEDLES: &[&str] = &[
     "stack trace",
     "function",
     "codebase",
+];
+
+/// Local workspace work — must not be routed as web research.
+const LOCAL_WORK_NEEDLES: &[&str] = &[
+    "grep",
+    "glob",
+    "ripgrep",
+    "in src",
+    "in the repo",
+    "this file",
+    "the file",
+    "these files",
+    "this folder",
+    "this directory",
+    "this project",
+    "my project",
+    "list files",
+    "find files",
+    "search files",
+    "search the code",
+    "in the code",
+    "compile error",
+    "run tests",
+    "run the test",
+    "cargo test",
+    "cargo build",
+    "npm test",
+    "pytest",
 ];
 
 const SIDE_EFFECT_NEEDLES: &[&str] = &[
@@ -198,11 +251,20 @@ pub fn classify_task(user_text: &str) -> TaskTraits {
         || (t.contains("date") && words <= 7 && !t.contains("update"));
 
     let person = PERSON_FIND_NEEDLES.iter().any(|n| t.contains(n));
-    let research = person || RESEARCH_NEEDLES.iter().any(|n| t.contains(n));
-    let coding = CODING_NEEDLES.iter().any(|n| t.contains(n))
+    let local_work = LOCAL_WORK_NEEDLES.iter().any(|n| t.contains(n))
+        || t.contains(".rs")
+        || t.contains(".py")
+        || t.contains(".ts")
+        || t.contains(".js")
+        || t.contains("src/");
+    let coding = local_work
+        || CODING_NEEDLES.iter().any(|n| t.contains(n))
         || (t.contains("code") && !t.contains("zip code"))
         || t.contains("file")
         || t.contains("project");
+    // "search for TODO in src" is local work, not a web lookup.
+    let web_lookup = person || RESEARCH_NEEDLES.iter().any(|n| t.contains(n));
+    let research = person || (web_lookup && !coding);
     let side_effects = SIDE_EFFECT_NEEDLES.iter().any(|n| t.contains(n));
     let multi_step = MULTI_STEP_NEEDLES.iter().any(|n| t.contains(n)) || words > LONG_REQUEST_WORDS;
     let freshness = FRESHNESS_NEEDLES.iter().any(|n| t.contains(n)) || time_date;
@@ -373,6 +435,16 @@ mod tests {
         let t = classify_task("find the function in src/main.rs");
         assert_eq!(t.research_depth, ResearchDepth::None);
         assert!(t.coding);
+    }
+
+    #[test]
+    fn search_files_is_local_not_web() {
+        let t = classify_task("search files for TODO");
+        assert!(t.coding);
+        assert_eq!(t.research_depth, ResearchDepth::None);
+        let t = classify_task("grep for handle_wake in this project");
+        assert!(t.coding);
+        assert_eq!(t.research_depth, ResearchDepth::None);
     }
 
     #[test]

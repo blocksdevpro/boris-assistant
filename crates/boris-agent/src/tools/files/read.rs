@@ -150,8 +150,9 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file under allowed paths. Returns numbered lines (LINE\\tcontent). \
-         Use offset/limit for large files. Relative paths resolve under the sandbox."
+        "Read a text file under allowed paths. Returns numbered lines (`LINE\\tcontent`). \
+         Use this instead of bash cat/head/tail/type/Get-Content. \
+         Use offset/limit for large files (offset is 1-based). Relative paths resolve under the sandbox."
     }
 
     fn parameters(&self) -> Value {

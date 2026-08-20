@@ -37,12 +37,64 @@ pub fn require_string(obj: &Map<String, Value>, key: &str) -> Result<String, Too
 
 /// Optional number coerced to `u64` (JSON number only).
 pub fn optional_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
-    obj.get(key).and_then(|v| v.as_u64())
+    obj.get(key).and_then(coerce_u64)
 }
 
 /// Optional bool.
 pub fn optional_bool(obj: &Map<String, Value>, key: &str) -> Option<bool> {
-    obj.get(key).and_then(|v| v.as_bool())
+    obj.get(key).and_then(coerce_bool)
+}
+
+/// First present string among `keys` (models alias Grok-style names).
+pub fn optional_string_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| optional_string(obj, k))
+}
+
+/// First present number among `keys`, accepting ints, floats, and numeric strings.
+pub fn optional_u64_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|k| obj.get(*k).and_then(coerce_u64))
+}
+
+/// First present bool among `keys`, accepting true/false, 1/0, and "true"/"false".
+pub fn optional_bool_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|k| obj.get(*k).and_then(coerce_bool))
+}
+
+/// Lenient JSON → u64 (number, numeric string, truncated float).
+pub fn coerce_u64(v: &Value) -> Option<u64> {
+    if let Some(n) = v.as_u64() {
+        return Some(n);
+    }
+    if let Some(i) = v.as_i64() {
+        return u64::try_from(i).ok();
+    }
+    if let Some(f) = v.as_f64() {
+        if f.is_finite() && f >= 0.0 {
+            return Some(f as u64);
+        }
+    }
+    v.as_str().and_then(|s| s.trim().parse().ok())
+}
+
+/// Lenient JSON → bool (bool, 0/1, "true"/"false"/"yes"/"no").
+pub fn coerce_bool(v: &Value) -> Option<bool> {
+    if let Some(b) = v.as_bool() {
+        return Some(b);
+    }
+    if let Some(n) = v.as_i64() {
+        return match n {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
+    }
+    v.as_str()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .and_then(|s| match s.as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        })
 }
 
 /// JSON type name for error messages.
@@ -113,5 +165,27 @@ mod tests {
         assert_eq!(optional_u64(&obj, "n"), Some(3));
         assert_eq!(optional_bool(&obj, "b"), Some(true));
         assert_eq!(optional_u64(&obj, "missing"), None);
+    }
+
+    #[test]
+    fn lenient_coercion_and_aliases() {
+        let obj = json!({
+            "-i": "true",
+            "-C": "3",
+            "head_limit": 12.0,
+            "output_mode": "files_with_matches"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(optional_bool_keys(&obj, &["ignore_case", "-i"]), Some(true));
+        assert_eq!(optional_u64_keys(&obj, &["context", "-C"]), Some(3));
+        assert_eq!(optional_u64_keys(&obj, &["head_limit", "limit"]), Some(12));
+        assert_eq!(
+            optional_string_keys(&obj, &["output_mode"]).as_deref(),
+            Some("files_with_matches")
+        );
+        assert_eq!(coerce_bool(&json!(1)), Some(true));
+        assert_eq!(coerce_bool(&json!("no")), Some(false));
     }
 }

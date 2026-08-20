@@ -27,20 +27,23 @@ export function isToolActivity(activity: string | null | undefined): boolean {
   if (!a) return false;
   if (a === "thinking…" || a === "thinking...") return false;
   if (a.startsWith("confirm")) return false;
-  // "3 tools" / multi-tool sticky — still tool progress while working
+  // Post-turn sticky ("Read 4 files" / "3 tools")
   if (/^\d+\s+tools?$/.test(a)) return true;
-  // Pure LLM "next action" thinking is not tool activity
-  if (/^thinking\s*[·.]\s*(next action|step\s*\d+|round\s*\d+)$/i.test(a)) {
-    return false;
+  if (
+    /^(read|reading|searched|searching|ran|running|listed|listing|fetched|fetching|wrote|writing|edited|editing|found|finding)\b/.test(
+      a,
+    )
+  ) {
+    return true;
+  }
+  if (a.startsWith("thinking")) {
+    return /tools?\s+next|calling tools|after\b/i.test(a);
   }
   return (
     a.startsWith("tool") ||
     a.startsWith("done") ||
     a.startsWith("fail") ||
-    /tools?\s+next|calling tools/i.test(a) ||
-    /^thinking\s*[·.]\s*after\b/i.test(a) ||
-    a.startsWith("thinking ·") ||
-    a.startsWith("thinking.")
+    /tools?\s+next|calling tools/i.test(a)
   );
 }
 
@@ -54,7 +57,11 @@ export function humanizeActivity(
   const raw = activity?.trim();
   if (!raw) return null;
 
-  // Multi-tool batch count (pipeline sticky or host summary)
+  // Already a Grok-style summary ("Read 4 files, Searched 1 pattern")
+  if (looksLikeVerbPhrase(raw) && !/^(tool|done|fail|thinking|confirm)\s*[·.]/i.test(raw)) {
+    return clip(raw, 64);
+  }
+
   const multi = raw.match(/^(\d+)\s+tools?$/i);
   if (multi) {
     const n = multi[1];
@@ -67,16 +74,15 @@ export function humanizeActivity(
     return "Thinking…";
   }
 
-  // thinking · …
   if (lower.startsWith("thinking")) {
     const rest = raw.replace(/^thinking\s*[·.]\s*/i, "").trim();
     if (!rest) return "Thinking…";
-
-    // Legacy step/round numbers → meaningful copy (no more "Planning step 3")
+    if (/^thought for\b/i.test(rest) || /^\d+(\.\d+)?s$/.test(rest)) {
+      return /^thought for\b/i.test(rest) ? rest : `Thought for ${rest}`;
+    }
     if (/^(?:step|round)\s*\d+/i.test(rest)) {
       return "Choosing next action…";
     }
-    // "3 tools next" / "1 tool next"
     const nextTools = rest.match(/^(\d+)\s+tools?\s+next$/i);
     if (nextTools) {
       const n = nextTools[1];
@@ -84,7 +90,6 @@ export function humanizeActivity(
     }
     if (/^calling tools$/i.test(rest)) return "About to run tools…";
     if (/^next action$/i.test(rest)) return "Choosing next action…";
-    // "after web_search, web_fetch"
     const after = rest.match(/^after\s+(.+)$/i);
     if (after) {
       const names = after[1]!
@@ -94,46 +99,66 @@ export function humanizeActivity(
         .join(", ");
       return names ? `Thinking after ${names}…` : "Choosing next action…";
     }
-    // drafting / other hints
-    const short = rest.length > 48 ? `${rest.slice(0, 46)}…` : rest;
-    return short.charAt(0).toUpperCase() + short.slice(1);
+    return clip(capitalize(rest), 56);
   }
 
-  // confirm · name | confirm · say yes or no | confirm · listening
   if (lower.startsWith("confirm")) {
     const rest = raw.replace(/^confirm\s*[·.]\s*/i, "").trim();
     if (!rest) return "Waiting for your yes";
     if (/yes|no|sure|cancel|listen/i.test(rest)) return "Your turn — say yes or no";
-    return `Approve ${friendlyTool(rest)}?`;
+    const stripped = rest.replace(
+      /^(Running|Opening|Writing|Editing|Reading|Fetching)\s+/i,
+      "",
+    );
+    return `Approve ${clip(stripped, 48)}?`;
   }
 
-  // fail · name
   const fail = raw.match(/^fail\s*[·.]\s*(.+)$/i);
-  if (fail) return `${friendlyTool(fail[1]!.trim())} failed`;
+  if (fail) {
+    const rest = fail[1]!.trim();
+    if (looksLikeVerbPhrase(rest)) return `${clip(rest, 52)} failed`;
+    return `${friendlyTool(rest)} failed`;
+  }
 
-  // done · name
   const done = raw.match(/^done\s*[·.]\s*(.+)$/i);
-  if (done) return `Finished ${friendlyTool(done[1]!.trim())}`;
+  if (done) {
+    const rest = done[1]!.trim();
+    if (looksLikeVerbPhrase(rest)) return clip(rest, 64);
+    return `Finished ${friendlyTool(rest)}`;
+  }
 
-  // tool · name · msg | tool · name
-  const tool = raw.match(/^tool\s*[·.]\s*([^·.]+)(?:\s*[·.]\s*(.+))?$/i);
+  const tool = raw.match(/^tool\s*[·.]\s*(.+)$/i);
   if (tool) {
-    const name = friendlyTool(tool[1]!.trim());
-    const msg = tool[2]?.trim();
-    if (msg) {
-      // Subagent nests "via bash: …" — keep readable
-      if (/^via\s+/i.test(msg) || /^research:/i.test(msg) || /^step\s+\d+/i.test(msg)) {
-        const short = msg.length > 52 ? `${msg.slice(0, 50)}…` : msg;
-        return name === "Subagent" ? short : `${name}: ${short}`;
-      }
-      const short = msg.length > 52 ? `${msg.slice(0, 50)}…` : msg;
-      return `${name}: ${short}`;
+    const rest = tool[1]!.trim();
+    if (/^via\s+/i.test(rest) || /^research:/i.test(rest) || /^step\s+\d+/i.test(rest)) {
+      return clip(rest, 56);
     }
+    if (looksLikeVerbPhrase(rest)) return clip(rest, 64);
+    const parts = rest.split(/\s*[·.]\s*/);
+    const name = friendlyTool(parts[0] ?? rest);
+    const msg = parts.slice(1).join(" · ").trim();
+    if (msg) return clip(`${name}: ${msg}`, 64);
     return name === "Subagent" ? "Researching…" : `Running ${name}…`;
   }
 
-  // Unknown — soft-sanitize mid-dots
-  return raw.replace(/\s*·\s*/g, " · ").slice(0, 64);
+  return clip(raw.replace(/\s*·\s*/g, " · "), 64);
+}
+
+function looksLikeVerbPhrase(s: string): boolean {
+  return /^(Read|Reading|Searched|Searching|Ran|Running|Listed|Listing|Fetched|Fetching|Wrote|Writing|Edited|Editing|Found|Finding|Showed|Showing|Loaded|Loading|Checked|Checking|Updated|Updating|Copied|Copying|Recalled|Recalling|Saved|Saving|Opened|Opening|Called|Calling)\b/.test(
+    s.trim(),
+  );
+}
+
+function clip(s: string, max: number): string {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+function capitalize(s: string): string {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function friendlyTool(name: string): string {
@@ -292,6 +317,16 @@ export function pickSecondary(
   }
 }
 
+/** "Searching" + "Searching weather in Bengaluru" → keep the query as the subtitle. */
+function stripEchoedVerb(primary: string, secondary: string): string {
+  const p = primary.trim();
+  const s = secondary.trim();
+  if (!p || !s) return s;
+  const re = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+`, "i");
+  const stripped = s.replace(re, "").trim();
+  return stripped || s;
+}
+
 function isEchoOfThinking(line: string): boolean {
   const n = normalizeLabel(line);
   return n === "thinking" || n === "working" || n === "on it";
@@ -349,9 +384,12 @@ export function pickOverlayPresence(
   // Refine primary for work phases (tools vs pure LLM vs research)
   if (status.engine === "On" || status.engine === "Starting") {
     if (phase === "Thinking") {
-      if (/spawn_subagent/i.test(activity)) {
+      if (/spawn_subagent|subagent/i.test(activity)) {
         primary = "Researching";
-      } else if (/web_search|web_fetch/i.test(activity)) {
+      } else if (
+        /web_search|web_fetch/i.test(activity) ||
+        /\b(Searching|Searched|Fetching|Fetched)\b/.test(activity)
+      ) {
         primary = "Searching";
       } else if (isToolActivity(activity)) {
         primary = "Working";
@@ -368,6 +406,7 @@ export function pickOverlayPresence(
   }
 
   let secondary = pickSecondary(status, phaseHint);
+  secondary = stripEchoedVerb(primary, secondary);
   secondary = dedupeSecondary(primary, secondary);
 
   // Subagent: if secondary still says "Researching…", drop it
@@ -555,6 +594,11 @@ export function canCollapseToOrb(status: StatusPicture): boolean {
   // Ignore sticky post-turn tool counts on Ready so the island can idle
   const a = status.activity?.trim() ?? "";
   if (/^\d+\s+tools?$/i.test(a)) return true;
+  if (
+    /^(Read|Searched|Ran|Listed|Fetched|Wrote|Edited|Found|Showed)\b/.test(a.trim())
+  ) {
+    return true;
+  }
   const sticky = humanizeActivity(status.activity);
   if (sticky) return false;
   return true;

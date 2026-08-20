@@ -91,7 +91,8 @@ impl Tool for ListDirTool {
 
     fn description(&self) -> &str {
         "List files and folders in a directory under allowed paths. \
-         Defaults to the Boris sandbox. Returns name + type (dir/file)."
+         Use this instead of bash ls/dir/Get-ChildItem. Defaults to the Boris sandbox. \
+         Returns name + type (dir/file). For name patterns across a tree, use glob."
     }
 
     fn parameters(&self) -> Value {

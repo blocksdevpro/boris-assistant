@@ -1,49 +1,75 @@
-//! Pure string-formatting helpers for the overlay's tool-activity chip.
+//! Overlay chip labels — Grok-style verb + object, stable wire prefixes.
 //!
-//! These translate raw [`AgentEvent`]s (and tool-call arg summaries) into the
-//! short `"tool · web_search · query"` style labels the UI displays. No I/O,
-//! no engine state — moved out of `engine::mod` so the turn-loop file stays
-//! focused on the loop itself.
+//! Wire format stays parseable by the UI (`tool ·`, `done ·`, `fail ·`,
+//! `thinking ·`, `confirm ·`). The text after the prefix is the human line
+//! (`Reading finish_gate.rs (471-520)`, `Thought for 9.0s`, `Read 4 files`).
 
-use boris_agent::{AgentEvent, Role};
+use boris_agent::{describe_batch, describe_tool, ActivityWave, AgentEvent, Role, Tense};
 
 /// Compact tool-activity label for the overlay chip.
 ///
-/// Wire format is stable (`tool ·`, `done ·`, `fail ·`, `thinking ·`, `confirm ·`)
-/// so the UI humanizer can parse it. Prefer *what* is happening over step numbers.
-///
 /// `recent_tools` (most recent last) enriches post-tool thinking labels.
-pub(super) fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option<String> {
+/// `wave` counts consecutive same-kind starts so parallel reads collapse.
+pub(super) fn activity_label(
+    ev: &AgentEvent,
+    recent_tools: &[String],
+    wave: &ActivityWave,
+) -> Option<String> {
     match ev {
         AgentEvent::ToolExecutionStart {
             tool_name,
             args_summary,
             ..
         } => {
-            let detail = tool_start_detail(tool_name, args_summary);
-            if detail.is_empty() {
-                Some(format!("tool · {tool_name}"))
+            let n = wave.count();
+            let phrase = if n >= 2 {
+                if let Some(kind) = wave.kind() {
+                    describe_batch(kind, n, Tense::Present)
+                } else {
+                    describe_tool(tool_name, args_summary, Tense::Present)
+                }
             } else {
-                Some(format!("tool · {tool_name} · {detail}"))
+                describe_tool(tool_name, args_summary, Tense::Present)
+            };
+            Some(format!("tool · {phrase}"))
+        }
+        AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => {
+            let n = wave.count();
+            let name = if wave.last_name().is_empty() {
+                tool_name.as_str()
+            } else {
+                wave.last_name()
+            };
+            let phrase = if n >= 2 {
+                wave.kind()
+                    .map(|kind| describe_batch(kind, n, Tense::Past))
+                    .unwrap_or_else(|| describe_tool(name, wave.last_args(), Tense::Past))
+            } else {
+                describe_tool(name, wave.last_args(), Tense::Past)
+            };
+            if *ok {
+                Some(format!("done · {phrase}"))
+            } else {
+                Some(format!("fail · {phrase}"))
             }
         }
-        AgentEvent::ToolExecutionEnd { tool_name, ok, .. } => Some(if *ok {
-            format!("done · {tool_name}")
-        } else {
-            format!("fail · {tool_name}")
-        }),
-        AgentEvent::ToolProgress {
-            tool_name, message, ..
-        } => {
+        // Stdout floods must not replace "Running cargo test". Subagent
+        // `via …` lines are useful and stay.
+        AgentEvent::ToolProgress { message, .. } => {
             let msg = message.trim();
             if msg.is_empty() {
-                Some(format!("tool · {tool_name}"))
-            } else {
+                return None;
+            }
+            if msg.starts_with("via ")
+                || msg.to_ascii_lowercase().starts_with("research:")
+                || msg.to_ascii_lowercase().starts_with("step ")
+            {
                 let short = truncate_activity(msg, 56);
-                Some(format!("tool · {tool_name} · {short}"))
+                Some(format!("tool · {short}"))
+            } else {
+                None
             }
         }
-        // Assistant decided on tools — show count before ToolExecutionStart fires.
         AgentEvent::MessageEnd { role, preview }
             if matches!(role, Role::Assistant) && preview.contains("tool call") =>
         {
@@ -59,8 +85,6 @@ pub(super) fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option
                 Some(format!("thinking · {n} tools next"))
             }
         }
-        // Round 0 is the first LLM call (already shown as "thinking…").
-        // Later rounds = model deciding after tools — name the last tools when known.
         AgentEvent::TurnStart { round } if *round > 0 => {
             if recent_tools.is_empty() {
                 Some("thinking · next action".into())
@@ -78,54 +102,17 @@ pub(super) fn activity_label(ev: &AgentEvent, recent_tools: &[String]) -> Option
                 Some(format!("thinking · after {names}"))
             }
         }
-        AgentEvent::NeedsConfirmation { pending } => Some(format!("confirm · {}", pending.name)),
+        AgentEvent::NeedsConfirmation { pending } => {
+            let phrase = describe_tool(&pending.name, &pending.args_summary, Tense::Present);
+            Some(format!("confirm · {phrase}"))
+        }
         _ => None,
     }
 }
 
-/// Prefer a short args hint over the raw `tool (k=v)` audit summary.
-fn tool_start_detail(tool_name: &str, args_summary: &str) -> String {
-    let s = args_summary.trim();
-    if s.is_empty() || s == tool_name {
-        return String::new();
-    }
-    // args_summary is often `bash (command=ls -la)` — strip the name wrapper.
-    let inner = s
-        .strip_prefix(tool_name)
-        .map(str::trim)
-        .and_then(|rest| rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')))
-        .unwrap_or(s);
-    let inner = inner.trim();
-    // Prefer the most useful arg for the chip (query / url / goal / command).
-    for key in ["query", "url", "goal", "command", "path", "name"] {
-        if let Some(v) = extract_arg_value(inner, key) {
-            return truncate_activity(&v, 48);
-        }
-    }
-    truncate_activity(inner, 48)
-}
-
-/// Pull `key=value` or `key="value"` from a compact args summary.
-fn extract_arg_value(summary: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=");
-    let idx = summary.find(&needle)?;
-    let rest = &summary[idx + needle.len()..];
-    if let Some(body) = rest.strip_prefix('"') {
-        let end = body.find('"')?;
-        let v = body[..end].trim();
-        if v.is_empty() {
-            return None;
-        }
-        return Some(v.to_string());
-    }
-    // Unquoted: until comma or end.
-    let end = rest.find(',').unwrap_or(rest.len());
-    let v = rest[..end].trim().trim_matches('"');
-    if v.is_empty() {
-        None
-    } else {
-        Some(v.to_string())
-    }
+/// Record a tool start on the wave (same-kind consecutive collapse).
+pub(super) fn note_tool_start(wave: &mut ActivityWave, tool_name: &str, args_summary: &str) {
+    let _ = wave.on_start(tool_name, args_summary);
 }
 
 fn truncate_activity(s: &str, max: usize) -> String {
@@ -142,6 +129,14 @@ mod tests {
     use super::*;
     use boris_agent::Role;
 
+    fn wave_for(names: &[&str]) -> ActivityWave {
+        let mut w = ActivityWave::default();
+        for n in names {
+            w.on_start(n, "");
+        }
+        w
+    }
+
     #[test]
     fn activity_label_tools() {
         let empty: &[String] = &[];
@@ -151,8 +146,8 @@ mod tests {
             args_summary: String::new(),
         };
         assert_eq!(
-            activity_label(&start, empty).as_deref(),
-            Some("tool · bash")
+            activity_label(&start, empty, &wave_for(&["bash"])).as_deref(),
+            Some("tool · Running a command")
         );
 
         let start_args = AgentEvent::ToolExecutionStart {
@@ -161,8 +156,8 @@ mod tests {
             args_summary: "bash (command=ls -la)".into(),
         };
         assert_eq!(
-            activity_label(&start_args, empty).as_deref(),
-            Some("tool · bash · ls -la")
+            activity_label(&start_args, empty, &wave_for(&["bash"])).as_deref(),
+            Some("tool · Running ls -la")
         );
 
         let search = AgentEvent::ToolExecutionStart {
@@ -171,8 +166,35 @@ mod tests {
             args_summary: "web_search (query=Uttam LinkedIn Dhanbad)".into(),
         };
         assert_eq!(
-            activity_label(&search, empty).as_deref(),
-            Some("tool · web_search · Uttam LinkedIn Dhanbad")
+            activity_label(&search, empty, &wave_for(&["web_search"])).as_deref(),
+            Some("tool · Searching Uttam LinkedIn Dhanbad")
+        );
+
+        let read = AgentEvent::ToolExecutionStart {
+            call_id: "4".into(),
+            tool_name: "file_read".into(),
+            args_summary:
+                "file_read (path=crates/boris-agent/src/finish_gate.rs, offset=471, limit=50)"
+                    .into(),
+        };
+        assert_eq!(
+            activity_label(&read, empty, &wave_for(&["file_read"])).as_deref(),
+            Some("tool · Reading finish_gate.rs (471-520)")
+        );
+
+        let batch = AgentEvent::ToolExecutionStart {
+            call_id: "5".into(),
+            tool_name: "file_read".into(),
+            args_summary: "file_read (path=a.rs)".into(),
+        };
+        assert_eq!(
+            activity_label(
+                &batch,
+                empty,
+                &wave_for(&["file_read", "file_read", "file_read", "file_read"])
+            )
+            .as_deref(),
+            Some("tool · Reading 4 files")
         );
 
         let end_ok = AgentEvent::ToolExecutionEnd {
@@ -182,8 +204,8 @@ mod tests {
             duration_ms: 1,
         };
         assert_eq!(
-            activity_label(&end_ok, empty).as_deref(),
-            Some("done · bash")
+            activity_label(&end_ok, empty, &wave_for(&["bash"])).as_deref(),
+            Some("done · Ran a command")
         );
 
         let end_fail = AgentEvent::ToolExecutionEnd {
@@ -193,21 +215,21 @@ mod tests {
             duration_ms: 1,
         };
         assert_eq!(
-            activity_label(&end_fail, empty).as_deref(),
-            Some("fail · bash")
+            activity_label(&end_fail, empty, &wave_for(&["bash"])).as_deref(),
+            Some("fail · Ran a command")
         );
 
         let noise = AgentEvent::TurnStart { round: 0 };
-        assert!(activity_label(&noise, empty).is_none());
+        assert!(activity_label(&noise, empty, &ActivityWave::default()).is_none());
 
         let round2 = AgentEvent::TurnStart { round: 1 };
         assert_eq!(
-            activity_label(&round2, empty).as_deref(),
+            activity_label(&round2, empty, &ActivityWave::default()).as_deref(),
             Some("thinking · next action")
         );
         let after = vec!["web_search".into(), "web_fetch".into()];
         assert_eq!(
-            activity_label(&round2, &after).as_deref(),
+            activity_label(&round2, &after, &ActivityWave::default()).as_deref(),
             Some("thinking · after web_search, web_fetch")
         );
 
@@ -216,7 +238,7 @@ mod tests {
             preview: "3 tool call(s)".into(),
         };
         assert_eq!(
-            activity_label(&tools_next, empty).as_deref(),
+            activity_label(&tools_next, empty, &ActivityWave::default()).as_deref(),
             Some("thinking · 3 tools next")
         );
 
@@ -224,8 +246,19 @@ mod tests {
             preview: "Need to search first.".into(),
         };
         assert!(
-            activity_label(&thoughts, empty).is_none(),
+            activity_label(&thoughts, empty, &ActivityWave::default()).is_none(),
             "reasoning uses StatusPicture.thinking, not the activity chip"
+        );
+
+        let flood = AgentEvent::ToolProgress {
+            call_id: "1".into(),
+            tool_name: "bash".into(),
+            message: "a".repeat(200),
+            byte_total: Some(200),
+        };
+        assert!(
+            activity_label(&flood, empty, &wave_for(&["bash"])).is_none(),
+            "stdout chunks must not clobber the command line"
         );
     }
 }

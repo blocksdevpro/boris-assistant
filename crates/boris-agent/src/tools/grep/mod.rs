@@ -1,4 +1,4 @@
-//! Content search — in-process first; `rg` only when a regex would need it.
+//! Content search — ripgrep when it helps; regex-capable in-process fallback.
 //!
 //! # Tool
 //!
@@ -6,21 +6,16 @@
 //! |-----------|------|---------|
 //! | `grep` | [`GrepTool`] | Regex/text search under allowed roots |
 //!
-//! # Module layout
+//! Schema follows Grok Build / Claude Code: `-A`/`-B`/`-C`/`-i`, `type`,
+//! `multiline`, `output_mode`, `head_limit`. Boris aliases (`ignore_case`,
+//! `context`, `limit`) still work.
 //!
-//! | Module | Responsibility |
-//! |--------|----------------|
-//! | (this) | Tool surface + execute orchestration |
-//! | [`rg`] | Spawn / parse ripgrep (regex / large trees) |
-//! | [`fallback`] | Pure-Rust walk + substring search |
-//!
-//! Name filters reuse [`crate::tools::path_pattern`].
-//!
-//! Spawning `rg` on Windows is ~30–60ms even for one file, so literals and
-//! single-file searches stay in-process. `rg` is used only when the pattern
-//! looks like a regex *and* `rg` is on PATH (probed once, cached).
+//! Directory searches prefer `rg` (gitignore, speed). Single files and missing
+//! `rg` use the `regex` crate — never a silent substring fallback for regex.
 
 mod fallback;
+mod format;
+mod query;
 mod rg;
 
 use std::time::Duration;
@@ -29,17 +24,19 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolKind, ToolMeta, ToolRisk,
+    require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::files::FsRoots;
 use crate::tools::fs_common::resolve_under_roots;
 
 use fallback::rust_grep;
+use query::GrepQuery;
 use rg::run_rg;
 
-const DEFAULT_LIMIT: usize = 100;
-const MAX_LIMIT: usize = 500;
+const DEFAULT_LIMIT: usize = 200;
+const MAX_LIMIT: usize = 1000;
+const MAX_CONTEXT: usize = 20;
+const MAX_LINE_CHARS: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct GrepTool {
@@ -59,8 +56,14 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex/text under allowed paths. \
-         Returns path:line:content matches."
+        "Search file contents with regular expressions (ripgrep).
+
+- Full regex syntax, so escape literal special characters: `functionCall\\(`, or `interface\\{\\}` to find interface{} in Go.
+- Pass pattern as a raw regex string — no surrounding quotes.
+- Respects .gitignore unless you pass a broad glob like '--glob *'.
+- Only filter by 'type' or 'glob' when you are sure of the file type; import paths may not match source file types (.js vs .ts).
+- Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report \"at least\" counts.
+- Use this instead of bash grep/rg/findstr. Batch several greps in one multi-tool message."
     }
 
     fn parameters(&self) -> Value {
@@ -69,23 +72,59 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for"
+                    "description": "The regular expression pattern to search for in file contents (rg --regexp)"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search (default: sandbox)"
+                    "description": "File or directory to search in (rg pattern -- PATH). Defaults to workspace path."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional file filter, e.g. '*.rs'"
+                    "description": "Glob pattern (rg --glob GLOB -- PATH) to filter files (e.g. \"*.js\", \"*.{ts,tsx}\")."
+                },
+                "-B": {
+                    "type": "number",
+                    "description": "Number of lines to show before each match (rg -B)."
+                },
+                "-A": {
+                    "type": "number",
+                    "description": "Number of lines to show after each match (rg -A)."
+                },
+                "-C": {
+                    "type": "number",
+                    "description": "Number of lines to show before and after each match (rg -C)."
+                },
+                "-i": {
+                    "type": "boolean",
+                    "description": "Case insensitive search (rg -i)."
+                },
+                "type": {
+                    "type": "string",
+                    "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."
+                },
+                "head_limit": {
+                    "type": "number",
+                    "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries."
+                },
+                "multiline": {
+                    "type": "boolean",
+                    "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall)."
+                },
+                "output_mode": {
+                    "type": "string",
+                    "description": "content (default, matching lines), files_with_matches (paths only), or count (per-file counts)."
                 },
                 "ignore_case": {
                     "type": "boolean",
-                    "description": "Case-insensitive search (default false)"
+                    "description": "Alias of -i."
+                },
+                "context": {
+                    "type": "number",
+                    "description": "Alias of -C."
                 },
                 "limit": {
                     "type": "number",
-                    "description": "Max matching lines (default 100)"
+                    "description": "Alias of head_limit."
                 }
             },
             "required": ["pattern"]
@@ -107,77 +146,68 @@ impl Tool for GrepTool {
         args: Value,
     ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
-        let pattern = require_string(obj, "pattern")?;
-        if pattern.trim().is_empty() {
-            return Err(ToolError::invalid_args("pattern is empty"));
-        }
-        let raw_path = optional_string(obj, "path")
+        let query = GrepQuery::parse(obj)?;
+        let raw_path = query
+            .path
+            .clone()
             .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
         let search_path = resolve_under_roots(&raw_path, &self.roots.readers())?;
-        let ignore_case = obj
-            .get("ignore_case")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let limit = obj
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, MAX_LIMIT);
-        let glob_filter = optional_string(obj, "glob");
+        if !search_path.exists() {
+            return Ok(format!(
+                "Path not found: {}. Check the path, or glob / list_dir from a parent directory first.",
+                search_path.display()
+            ));
+        }
 
-        // Process spawn is the expensive part (~30–60ms on Windows). Stay
-        // in-process for literals and single files; only pay `rg` when the
-        // pattern actually needs a regex engine.
-        if should_spawn_rg(&search_path, &pattern) {
-            match run_rg(
-                &pattern,
-                &search_path,
-                ignore_case,
-                glob_filter.as_deref(),
-                limit,
-            )
-            .await
-            {
-                Ok(out) => return Ok(out),
+        let display = search_path.display().to_string();
+        let glob = query.glob.clone();
+        let pattern = query.pattern.clone();
+
+        if should_spawn_rg(&search_path) {
+            match run_rg(&query, &search_path).await {
+                Ok(hits) => {
+                    return Ok(truncate_tool_result(hits.render(
+                        &pattern,
+                        &display,
+                        glob.as_deref(),
+                    )));
+                }
+                Err(e) if e.kind() == crate::tool::ToolErrorKind::InvalidArgs => {
+                    return Err(e);
+                }
                 Err(e) => {
                     tracing::debug!(error = %e, "rg failed; using Rust fallback");
+                    // Invalid regex from rg should not silently substring-match.
+                    if e.message.to_ascii_lowercase().contains("regex")
+                        || e.message.contains("regex parse")
+                    {
+                        return Err(e);
+                    }
                 }
             }
         }
 
-        // In-process walk (substring). Fast on sandbox-sized trees.
-        let pattern_owned = pattern.clone();
+        let query_owned = query;
         let path_owned = search_path.clone();
-        let glob_owned = glob_filter.clone();
-        let matches = tokio::task::spawn_blocking(move || {
-            rust_grep(
-                &pattern_owned,
-                &path_owned,
-                ignore_case,
-                glob_owned.as_deref(),
-                limit,
-            )
-        })
-        .await
-        .map_err(|e| ToolError::failed(format!("grep task: {e}")))??;
+        let hits = tokio::task::spawn_blocking(move || rust_grep(&query_owned, &path_owned))
+            .await
+            .map_err(|e| ToolError::failed(format!("grep task: {e}")))??;
 
-        if matches.is_empty() {
-            return Ok(format!("No matches for pattern '{pattern}'."));
-        }
-        Ok(truncate_tool_result(matches.join("\n")))
+        Ok(truncate_tool_result(hits.render(
+            &pattern,
+            &display,
+            glob.as_deref(),
+        )))
     }
 }
 
 /// Whether this call should pay for an `rg` process.
 ///
-/// Literals and single-file searches are faster in-process. `rg` is worth it
-/// when the pattern uses regex metacharacters *and* ripgrep is installed.
-pub(super) fn should_spawn_rg(search_path: &std::path::Path, pattern: &str) -> bool {
-    if search_path.is_file() {
-        return false;
-    }
-    looks_like_regex(pattern) && rg::rg_available()
+/// Single-file searches stay in-process (spawn is the expensive part on Windows).
+/// Directory trees use `rg` whenever it is installed — literals included — so
+/// gitignore and large walks stay fast.
+pub(super) fn should_spawn_rg(search_path: &std::path::Path) -> bool {
+    !search_path.is_file() && rg::rg_available()
 }
 
 /// True when `pattern` looks like a regex, not a plain keyword / `foo.rs` path.
@@ -209,18 +239,21 @@ mod tests {
     use crate::tools::files::FsRoots;
     use serde_json::json;
 
+    fn roots_at(dir: std::path::PathBuf) -> FsRoots {
+        FsRoots {
+            sandbox: dir,
+            data: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn rust_fallback_finds_line() {
         let dir = std::env::temp_dir().join(format!("boris-grep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "hello\nfindme please\nbye\n").unwrap();
-        let roots = FsRoots {
-            sandbox: dir.clone(),
-            data: vec![],
-            allow_read: vec![],
-            allow_write: vec![],
-        };
-        let tool = GrepTool::new(roots);
+        let tool = GrepTool::new(roots_at(dir.clone()));
         let out = tool
             .execute(
                 &crate::tool_context::ToolCallContext::new("t"),
@@ -229,17 +262,60 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("findme"), "got: {out}");
+        assert!(out.contains("<workspace_result"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regex_fallback_matches_fn_defs() {
+        let dir = std::env::temp_dir().join(format!("boris-grep-re-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn main() {}\nconst X = 1;\nfn helper() {}\n",
+        )
+        .unwrap();
+        let tool = GrepTool::new(roots_at(dir.clone()));
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "pattern": r"fn\s+\w+", "path": dir.to_string_lossy() }),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("fn main"), "got: {out}");
+        assert!(out.contains("fn helper"), "got: {out}");
+        assert!(out.contains("Found 2"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn grok_context_and_ignore_case_aliases() {
+        let dir = std::env::temp_dir().join(format!("boris-grep-c-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha\nFINDME\nomega\n").unwrap();
+        let tool = GrepTool::new(roots_at(dir.clone()));
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({
+                    "pattern": "findme",
+                    "path": dir.to_string_lossy(),
+                    "-i": true,
+                    "-C": 1
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("alpha"), "got: {out}");
+        assert!(out.contains("FINDME"), "got: {out}");
+        assert!(out.contains("omega"), "got: {out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn empty_pattern_rejected() {
-        let roots = FsRoots {
-            sandbox: std::env::temp_dir(),
-            data: vec![],
-            allow_read: vec![],
-            allow_write: vec![],
-        };
+        let roots = roots_at(std::env::temp_dir());
         let tool = GrepTool::new(roots);
         let err = tool
             .execute(
@@ -249,6 +325,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("empty") || err.message.contains("pattern"));
+    }
+
+    #[tokio::test]
+    async fn missing_path_is_actionable() {
+        let dir = std::env::temp_dir().join(format!("boris-grep-miss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = GrepTool::new(roots_at(dir.clone()));
+        let missing = dir.join("nope-not-here");
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "pattern": "x", "path": missing.to_string_lossy() }),
+            )
+            .await
+            .unwrap();
+        assert!(out.to_ascii_lowercase().contains("not found"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -273,8 +366,8 @@ mod tests {
         let file = dir.join("only.txt");
         std::fs::write(&file, "needle\n").unwrap();
         assert!(
-            !should_spawn_rg(&file, "foo.*bar"),
-            "single-file grep must stay in-process even for regex"
+            !should_spawn_rg(&file),
+            "single-file grep must stay in-process"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -481,6 +481,7 @@ dependencies = [
  "futures",
  "htmd",
  "open",
+ "regex",
  "reqwest 0.13.4",
  "rusqlite",
  "serde",

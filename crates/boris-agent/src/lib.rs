@@ -39,6 +39,7 @@
 //! HITL confirmation only skips the confirm UI — path/shell/network hard gates
 //! still run after a user grant. See the crate README “Security model” section.
 
+pub mod activity;
 pub mod agent;
 pub mod capability;
 pub mod client;
@@ -74,6 +75,10 @@ pub use boris_ai::{
     TokenUsage, DEFAULT_MAX_TOKENS,
 };
 
+pub use activity::{
+    describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
+    Tense, VerbKind,
+};
 pub use agent::{Agent, AgentOptions};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{Context, Message, Role};

@@ -73,7 +73,7 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     engine: "On",
     phase: "Thinking",
     heard: "Check the forecast before my trip.",
-    activity: "tool · web_search · weather in Bengaluru",
+    activity: "tool · Searching weather in Bengaluru",
     turn: "preview-tool",
   }),
   fixture("confirm", "Confirm", {

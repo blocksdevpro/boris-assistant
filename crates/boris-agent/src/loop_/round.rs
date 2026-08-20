@@ -167,6 +167,9 @@ pub(super) fn should_reenter_finish_gate(
     ) {
         return true;
     }
+    if crate::finish_gate::should_local_work_gate(user_text, tools_used) {
+        return true;
+    }
     // Open todos only re-enter when this turn already used tools (avoid stale
     // todos forcing silence on casual replies).
     !tools_used.is_empty() && crate::finish_gate::pending_todo_count(todos_file) > 0

@@ -13,7 +13,22 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
                 .into(),
         ),
         "bash" if err => Some(
-            "Shell failed. Read the error, fix the command or path, and retry only if useful."
+            "Shell failed. Read the error, fix the command or cwd, and retry with a different command. \
+             Do not repeat the exact same failing call. For files/search use file_read/grep/glob, not bash."
+                .into(),
+        ),
+        "bash" if observation.contains("Command was not run.") => Some(
+            "Call the dedicated tool named in the observation now (file_read, grep, glob, or list_dir). \
+             Do not wrap it in bash."
+                .into(),
+        ),
+        "grep" if !err && observation.contains("No matches found") => Some(
+            "Empty grep is not done. Drop glob/type, set -i true, simplify or escape the regex, \
+             or search a parent path. Batch alternate greps in one message."
+                .into(),
+        ),
+        "glob" if !err && observation.contains("No files matched") => Some(
+            "Empty glob is not done. Try '**/*.ext', list_dir on a parent, or a simpler pattern."
                 .into(),
         ),
         "todo_write" if !err => Some(
@@ -225,6 +240,26 @@ mod tests {
         );
         assert!(out.contains("<system-reminder>"));
         assert!(out.contains("Aggregate") || out.contains("fetch") || out.contains("person"));
+    }
+
+    #[test]
+    fn empty_grep_gets_retry_reminder() {
+        let out = with_reminder(
+            "grep",
+            "<workspace_result path=\"/tmp\">\nNo matches found\n</workspace_result>\nNo matches for pattern 'TODO' under /tmp.".into(),
+        );
+        assert!(out.contains("<system-reminder>"));
+        assert!(out.contains("Empty grep") || out.contains("-i") || out.contains("glob"));
+    }
+
+    #[test]
+    fn bash_steer_gets_dedicated_tool_reminder() {
+        let out = with_reminder(
+            "bash",
+            "Command was not run.\nDo not use bash to read files. Call file_read...".into(),
+        );
+        assert!(out.contains("<system-reminder>"));
+        assert!(out.contains("file_read") || out.contains("dedicated"));
     }
 
     #[test]

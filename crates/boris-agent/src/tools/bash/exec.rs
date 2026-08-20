@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use super::output::{parse_timeout_secs, truncate_output};
 use super::policy::validate_command;
+use super::steer::steer_simple_command;
 use super::CAPTURE_MAX_BYTES;
 use crate::runtime::ProgressEvent;
 use crate::tool::{
@@ -24,6 +25,35 @@ use crate::tools::fs_common::resolve_under_roots;
 
 /// Capacity of the progress channel (drop-on-full via `try_send`).
 const PROGRESS_CHANNEL_CAP: usize = 32;
+
+const BASH_DESCRIPTION: &str = "Run a bash command and return its output.
+
+Use this only for real system commands (git, cargo, npm, python, builds, tests). \
+Prefer dedicated tools when they exist:
+- file_read instead of cat/head/tail/type
+- grep instead of grep/rg/findstr
+- glob / list_dir instead of find/ls/dir
+- file_edit / file_write instead of sed/awk
+NEVER use bash echo (or any shell) to talk to the user — speak after tools.
+
+Git Bash is invoked as `bash -c` (not a login shell). Sequential commands may use `&&`. \
+If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept). \
+Relative cwd defaults to the Boris sandbox. Always requires user confirmation.";
+
+#[cfg(windows)]
+const POWERSHELL_DESCRIPTION: &str = "Run a shell command and return its output.
+
+This session's fallback shell is PowerShell. The Unix utilities `grep`, `head`, `tail`, \
+`sed`, `awk`, and `find` are NOT available — use the dedicated tools instead:
+- file_read instead of Get-Content/type/cat
+- grep instead of Select-String/findstr
+- glob / list_dir instead of Get-ChildItem/dir
+- file_edit / file_write instead of rewriting files by hand
+NEVER use echo/Write-Output to talk to the user — speak after tools.
+
+Use this only for real system commands (git, cargo, npm, python, builds, tests). \
+If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept). \
+Relative cwd defaults to the Boris sandbox. Always requires user confirmation.";
 
 /// Run a bash/shell command with timeout and output caps.
 #[derive(Debug, Clone)]
@@ -318,9 +348,13 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command (bash when available). Always requires user confirmation. \
-         Prefer read-only commands. Relative cwd defaults to the Boris sandbox. \
-         Output is truncated (last 2000 lines / 30KB)."
+        match resolved_shell() {
+            ResolvedShell::Bash(_) => BASH_DESCRIPTION,
+            #[cfg(windows)]
+            ResolvedShell::PowerShell => POWERSHELL_DESCRIPTION,
+            #[cfg(not(windows))]
+            ResolvedShell::Sh => BASH_DESCRIPTION,
+        }
     }
 
     fn parameters(&self) -> Value {
@@ -329,15 +363,15 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash/shell command to execute"
+                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo."
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Working directory under allowed roots (default: sandbox)"
+                    "description": "Working directory under allowed roots (default: sandbox). Set this when the work is not in the sandbox."
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "Timeout in seconds (default 120, max 300)"
+                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline."
                 }
             },
             "required": ["command"]
@@ -363,6 +397,9 @@ impl Tool for BashTool {
         let command = require_string(obj, "command")?;
         let command = command.trim();
         validate_command(command)?;
+        if let Some(steer) = steer_simple_command(command) {
+            return Ok(steer);
+        }
 
         // Prefer explicit cwd arg, then session ToolCallContext cwd (if under roots),
         // then sandbox default.
@@ -482,18 +519,23 @@ impl Tool for BashTool {
         // Soft-wrap long lines (preserve bytes) then line/byte cap.
         let mut text = truncate_output(soft_wrap_text(&combined, DEFAULT_SOFT_WRAP_WIDTH));
         let exit_code = status.code().unwrap_or(-1);
-        if exit_code != 0 {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(&format!("Exit code: {exit_code}\n"));
-        }
         if text.trim().is_empty() {
-            text = format!("(no output) exit={exit_code}\n");
+            text = "(no output)\n".into();
+        } else if !text.ends_with('\n') {
+            text.push('\n');
         }
 
+        let hint = if exit_code != 0 {
+            " Command failed — read the error, change the command or cwd, and retry. Do not repeat the exact same failing call."
+        } else {
+            ""
+        };
+
         Ok(truncate_tool_result(format!(
-            "cwd={} duration_ms={duration_ms}\n{text}",
+            "Exit code: {exit_code}{hint}\n\
+             cwd: {}\n\
+             duration_ms: {duration_ms}\n\n\
+             {text}",
             cwd.display()
         )))
     }
@@ -532,22 +574,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_works() {
+    async fn pwd_smoke_works() {
         let dir = std::env::temp_dir().join(format!("boris-bash-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let tool = BashTool::new(vec![dir.clone()], dir.clone());
-        let cmd = "echo bash-smoke-ok";
         let out = tool
             .execute(
                 &crate::tool_context::ToolCallContext::new("t"),
-                json!({ "command": cmd }),
+                json!({ "command": "pwd" }),
             )
             .await
             .expect("run");
         assert!(
-            out.contains("bash-smoke-ok") || out.contains("Exit code"),
+            out.contains("Exit code: 0") && !out.contains("Command was not run."),
             "got: {out}"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn echo_is_steered_to_speech() {
+        let dir = std::env::temp_dir().join(format!("boris-bash-steer-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "command": "echo hello-from-bash" }),
+            )
+            .await
+            .expect("steer");
+        assert!(out.contains("Command was not run."), "got: {out}");
+        assert!(
+            out.contains("spoken") || out.contains("present_artifact"),
+            "got: {out}"
+        );
+        assert!(!out.contains("Exit code:"), "got: {out}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

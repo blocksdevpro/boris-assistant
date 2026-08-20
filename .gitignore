@@ -18,5 +18,9 @@
 .env.*
 !.env.example
 
-# Local Grok rules. Do not commit.
-.grok/rules/
+# Grok local scratch. Keep committed rules and skills.
+.grok/*
+!.grok/rules/
+!.grok/rules/**
+!.grok/skills/
+!.grok/skills/**

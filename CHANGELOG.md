@@ -9,6 +9,11 @@ Further **1.2** work on `next` after [1.2.0-beta.1].
 
 ### Added
 
+- Capture **front-end** on the 16 kHz tap: high-pass, AGC2, and AEC3 (sonora /
+  WebRTC APM). TTS is the echo reference, so leftover playback is subtracted
+  before VAD / wake / STT. Quiet talk at laptop distance is gained up. Neural
+  noise suppression is off (it hurts Parakeet). `BORIS_AUDIO_FRONTEND=0`
+  bypasses the APM.
 - Wake-word **barge-in** while Boris is talking. A lower wake threshold plus
   close-talk energy (not Armed’s playback gate — leftover TTS in the mic
   window looks like a speaker) pauses leftover speech. Silence, “continue”,

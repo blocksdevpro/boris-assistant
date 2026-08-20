@@ -12,10 +12,11 @@ use std::{
     thread,
 };
 
-use boris_core::{AudioBuffer, AudioSample, Error, Result};
+use boris_core::{AudioBuffer, AudioSample, Error, Result, AUDIO_TARGET_RATE};
 use cpal::traits::{DeviceTrait, StreamTrait};
 
-use crate::resampler::OutputResampler;
+use crate::frontend::{try_send_far_end, FarEnd};
+use crate::resampler::{OutputResampler, Resampler};
 
 /// Empty device callbacks required after the software queue empties before
 /// [`OutputEvent::Drained`]. Covers OS/driver ring-buffer lag.
@@ -134,6 +135,10 @@ impl OutputStreamState {
     }
 }
 
+/// Shared AEC far-end sender so input-device switches can replace the receiver
+/// without rebuilding the output worker.
+pub(crate) type FarEndTx = Arc<Mutex<crossbeam_channel::Sender<FarEnd>>>;
+
 /// Live output stream + command worker for one playback device.
 pub(crate) struct OutputPipeline {
     /// Held so the device callback lives for the pipeline lifetime.
@@ -149,11 +154,13 @@ impl OutputPipeline {
     /// Open `device` and process commands from `cmd_rx`.
     ///
     /// `source_rate` is the rate of PCM on [`OutputCommand::Play`] (TTS native rate).
+    /// `far_end_tx` receives a 16 kHz copy of that PCM for AEC.
     pub(crate) fn from_device(
         device: &cpal::Device,
         cmd_rx: crossbeam_channel::Receiver<OutputCommand>,
         event_tx: crossbeam_channel::Sender<OutputEvent>,
         source_rate: u32,
+        far_end_tx: FarEndTx,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let device_id = device
@@ -233,6 +240,7 @@ impl OutputPipeline {
             stream_config.sample_rate,
             stream_config.channels,
         );
+        let mut far_end = FarEndTap::new(source_rate, far_end_tx);
 
         let worker = thread::spawn(move || {
             run_output_worker(
@@ -241,6 +249,7 @@ impl OutputPipeline {
                 shutdown_worker,
                 state_worker,
                 &mut resampler,
+                &mut far_end,
                 event_drops,
             );
         });
@@ -267,12 +276,61 @@ fn lock_output_state(
     }
 }
 
+struct FarEndTap {
+    resampler: Resampler,
+    tx: FarEndTx,
+}
+
+impl FarEndTap {
+    fn new(source_rate: u32, tx: FarEndTx) -> Self {
+        Self {
+            resampler: Resampler::new(1, source_rate, AUDIO_TARGET_RATE),
+            tx,
+        }
+    }
+
+    fn sender(&self) -> Option<crossbeam_channel::Sender<FarEnd>> {
+        match self.tx.lock() {
+            Ok(g) => Some(g.clone()),
+            Err(poisoned) => Some(poisoned.into_inner().clone()),
+        }
+    }
+
+    fn push_pcm(&mut self, mono: &[AudioSample]) {
+        let Ok(pcm) = self.resampler.resample_stream(mono) else {
+            tracing::error!("OutputPipeline: far-end resample failed");
+            return;
+        };
+        if pcm.is_empty() {
+            return;
+        }
+        if let Some(tx) = self.sender() {
+            try_send_far_end(&tx, FarEnd::Samples(pcm));
+        }
+    }
+
+    fn send(&self, msg: FarEnd) {
+        if let Some(tx) = self.sender() {
+            try_send_far_end(&tx, msg);
+        }
+    }
+
+    fn reset_job(&mut self) {
+        // Drop FFT delay so a new Play does not leak the previous utterance.
+        let input_rate = self.resampler.input_rate();
+        let output_rate = self.resampler.output_rate();
+        self.resampler = Resampler::new(1, input_rate, output_rate);
+        self.send(FarEnd::Clear);
+    }
+}
+
 fn run_output_worker(
     cmd_rx: crossbeam_channel::Receiver<OutputCommand>,
     event_tx: crossbeam_channel::Sender<OutputEvent>,
     shutdown: Arc<AtomicBool>,
     state: Arc<Mutex<OutputStreamState>>,
     resampler: &mut OutputResampler,
+    far_end: &mut FarEndTap,
     event_drops: Arc<AtomicU64>,
 ) {
     let mut last_event_drops = 0u64;
@@ -311,6 +369,8 @@ fn run_output_worker(
                 // Resample outside the state lock so the stream callback is not
                 // blocked for the full FFT oneshot duration.
                 let in_samples = audio.len();
+                far_end.reset_job();
+                far_end.push_pcm(&audio);
                 let resampled = match resampler.process(&audio) {
                     Ok(r) => r,
                     Err(e) => {
@@ -331,6 +391,7 @@ fn run_output_worker(
                 }
             }
             OutputCommand::Append(audio) => {
+                far_end.push_pcm(&audio);
                 let resampled = match resampler.process(&audio) {
                     Ok(r) => r,
                     Err(e) => {
@@ -348,14 +409,17 @@ fn run_output_worker(
             }
             OutputCommand::Pause(ack) => {
                 lock_output_state(&state).pause();
+                far_end.send(FarEnd::Pause);
                 let _ = ack.send(());
             }
             OutputCommand::Resume(ack) => {
                 lock_output_state(&state).resume();
+                far_end.send(FarEnd::Resume);
                 let _ = ack.send(());
             }
             OutputCommand::Flush => {
                 lock_output_state(&state).clear_job();
+                far_end.reset_job();
                 try_emit_worker_event(&event_tx, &event_drops, OutputEvent::Cleared);
             }
         }
@@ -558,12 +622,15 @@ mod tests {
         let worker_state = state.clone();
         let worker = thread::spawn(move || {
             let mut resampler = OutputResampler::new(16_000, 16_000, 1);
+            let (far_tx, _far_rx) = crossbeam_channel::bounded(4);
+            let mut far_end = FarEndTap::new(16_000, Arc::new(Mutex::new(far_tx)));
             run_output_worker(
                 cmd_rx,
                 event_tx,
                 worker_shutdown,
                 worker_state,
                 &mut resampler,
+                &mut far_end,
                 Arc::new(AtomicU64::new(0)),
             );
         });
@@ -599,12 +666,15 @@ mod tests {
         let worker_drops = drops.clone();
         let worker = thread::spawn(move || {
             let mut resampler = OutputResampler::new(16_000, 16_000, 1);
+            let (far_tx, _far_rx) = crossbeam_channel::bounded(4);
+            let mut far_end = FarEndTap::new(16_000, Arc::new(Mutex::new(far_tx)));
             run_output_worker(
                 cmd_rx,
                 event_tx,
                 worker_shutdown,
                 worker_state,
                 &mut resampler,
+                &mut far_end,
                 worker_drops,
             );
         });

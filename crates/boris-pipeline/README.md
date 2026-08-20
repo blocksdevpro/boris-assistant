@@ -138,6 +138,7 @@ still match the catalog hash.
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking |
+| `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_LOG` / `RUST_LOG` | Logging filters (host) |
 
 ## Features

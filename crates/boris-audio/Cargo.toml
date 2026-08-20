@@ -17,3 +17,4 @@ tracing           = { workspace = true }
 crossbeam-channel = { workspace = true }
 cpal   = "0.18"
 rubato = "3.0"
+sonora = "0.2"

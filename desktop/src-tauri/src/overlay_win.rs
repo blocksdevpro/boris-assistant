@@ -56,8 +56,7 @@ const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
 /// Base logical window size, including the transparent shadow gutter.
 const OVERLAY_BASE_WIDTH: f64 = OVERLAY_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
 const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
-const OVERLAY_THOUGHT_BASE_HEIGHT: f64 =
-    OVERLAY_THOUGHT_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
+const OVERLAY_THOUGHT_BASE_HEIGHT: f64 = OVERLAY_THOUGHT_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
 /// Glance card stage — clipped body, not a document editor.
 const OVERLAY_CARD_STAGE_WIDTH: f64 = 400.0;
 const OVERLAY_CARD_STAGE_HEIGHT: f64 = 300.0;
@@ -402,8 +401,7 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     }
 
     let layout = layout_for(status);
-    let layout_changed =
-        OVERLAY_LAYOUT.swap(layout as u8, Ordering::Relaxed) != layout as u8;
+    let layout_changed = OVERLAY_LAYOUT.swap(layout as u8, Ordering::Relaxed) != layout as u8;
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
 
     let active = matches!(

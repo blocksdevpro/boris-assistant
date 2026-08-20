@@ -11,8 +11,8 @@ use boris_audio::buffer::SlidingBuffer;
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::ArcAudioBuffer;
 use boris_sense::{
-    duration_to_samples, WakeWord, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
-    WAKEWORD_WINDOW_SIZE, VAD_WINDOW_SIZE,
+    duration_to_samples, WakeWord, VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL,
+    WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
 /// Shortest crop we treat as "the user said something" after a barge-in pause.
@@ -134,8 +134,8 @@ impl<'a> BargeWatch<'a> {
             self.last_heartbeat = Instant::now();
         }
 
-        let energy_only = self.loud_hops >= ENERGY_ONLY_STREAK
-            || self.close_hops >= ENERGY_CLOSE_STREAK;
+        let energy_only =
+            self.loud_hops >= ENERGY_ONLY_STREAK || self.close_hops >= ENERGY_CLOSE_STREAK;
         let energy_with_wake = energy_hit && self.last_score >= BARGE_WAKE_SOFT;
         if !wake_hit && !energy_only && !energy_with_wake {
             return None;
@@ -295,8 +295,10 @@ fn strip_wake_prefix(text: &str) -> &str {
             return rest;
         }
     }
-    if matches!(text, "boris" | "hey boris" | "hi boris" | "ok boris" | "okay boris")
-    {
+    if matches!(
+        text,
+        "boris" | "hey boris" | "hi boris" | "ok boris" | "okay boris"
+    ) {
         return "";
     }
     text
@@ -379,10 +381,7 @@ mod tests {
             decide_barge_listen(0, "anything", false),
             BargeDecision::Resume
         );
-        assert_eq!(
-            decide_barge_listen(12, "  ", false),
-            BargeDecision::Resume
-        );
+        assert_eq!(decide_barge_listen(12, "  ", false), BargeDecision::Resume);
         assert_eq!(
             decide_barge_listen(12, "Boris", false),
             BargeDecision::Resume
@@ -395,10 +394,7 @@ mod tests {
             decide_barge_listen(12, "never mind", false),
             BargeDecision::Resume
         );
-        assert_eq!(
-            decide_barge_listen(12, "ok", false),
-            BargeDecision::Resume
-        );
+        assert_eq!(decide_barge_listen(12, "ok", false), BargeDecision::Resume);
     }
 
     #[test]
@@ -454,7 +450,10 @@ mod tests {
             idx: 0,
         };
         let mut watch = BargeWatch::new(&rx, &mut wake);
-        assert!(watch.poll().is_some(), "Armed-threshold wake must pause leftover");
+        assert!(
+            watch.poll().is_some(),
+            "Armed-threshold wake must pause leftover"
+        );
     }
 
     #[test]
@@ -517,8 +516,11 @@ mod tests {
             idx: 0,
         };
         let mut watch = BargeWatch::new(&rx, &mut wake);
-        tx.send(hops(0.08, (ENERGY_WARMUP_HOPS + ENERGY_ONLY_STREAK) as usize))
-            .unwrap();
+        tx.send(hops(
+            0.08,
+            (ENERGY_WARMUP_HOPS + ENERGY_ONLY_STREAK) as usize,
+        ))
+        .unwrap();
         assert!(
             watch.poll().is_none(),
             "constant speaker echo must not look like barge-in"

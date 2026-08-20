@@ -42,9 +42,7 @@ pub(super) fn reasoning_preview(acc: &str) -> String {
     if count <= REASONING_PREVIEW_CHARS {
         return acc.to_string();
     }
-    acc.chars()
-        .skip(count - REASONING_PREVIEW_CHARS)
-        .collect()
+    acc.chars().skip(count - REASONING_PREVIEW_CHARS).collect()
 }
 
 /// One LLM completion for this round (tools withheld at cap).

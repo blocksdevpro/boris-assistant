@@ -27,16 +27,14 @@ fn store_at(dir: &Path) -> ArtifactStore {
     ArtifactStore::new(dir)
 }
 
-fn run_blocking<T: Send + 'static>(
+async fn run_blocking<T: Send + 'static>(
     label: &'static str,
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> impl std::future::Future<Output = Result<T, ToolError>> {
-    async move {
-        tokio::task::spawn_blocking(f)
-            .await
-            .map_err(|e| ToolError::failed(format!("{label} task failed: {e}")))?
-            .map_err(ToolError::failed)
-    }
+) -> Result<T, ToolError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ToolError::failed(format!("{label} task failed: {e}")))?
+        .map_err(ToolError::failed)
 }
 
 fn format_meta_line(meta: &ArtifactMeta, current: Option<&str>) -> String {

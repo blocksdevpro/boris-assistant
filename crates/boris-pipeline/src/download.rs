@@ -304,10 +304,10 @@ fn file_name_of(rel: &str) -> String {
 /// re-reads multi-hundred-MB weights. Integrity (SHA-256) is enforced when a
 /// file is freshly downloaded — see [`download_one`].
 fn file_size_ok(path: &Path, entry: &CatalogEntry) -> bool {
-    match fs::metadata(path) {
-        Ok(m) if m.is_file() && m.len() >= entry.min_bytes => true,
-        _ => false,
-    }
+    matches!(
+        fs::metadata(path),
+        Ok(m) if m.is_file() && m.len() >= entry.min_bytes
+    )
 }
 
 /// Remove installed Supertone files so Install models can fetch Supertonic 3.

@@ -74,7 +74,7 @@ pub(super) async fn run_rg(
     args.push(pattern.to_string());
     args.push(search_path.to_string_lossy().into_owned());
 
-    let mut cmd = Command::new(&exe);
+    let mut cmd = Command::new(exe);
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

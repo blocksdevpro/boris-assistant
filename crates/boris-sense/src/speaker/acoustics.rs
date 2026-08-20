@@ -191,7 +191,10 @@ mod tests {
     fn tone(freq: f32, secs: f32) -> Vec<f32> {
         let n = (secs * AUDIO_TARGET_RATE as f32) as usize;
         (0..n)
-            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / AUDIO_TARGET_RATE as f32).sin() * 0.4)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * freq * i as f32 / AUDIO_TARGET_RATE as f32).sin()
+                    * 0.4
+            })
             .collect()
     }
 

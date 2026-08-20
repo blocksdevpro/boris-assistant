@@ -24,9 +24,13 @@ use crate::paths;
 pub enum WakeOrigin {
     Live,
     /// Band-limited vs enroll (Translate / TTS / YouTube out of a speaker).
-    Playback { z: f32 },
+    Playback {
+        z: f32,
+    },
     /// Speech, but not the enrolled voice / room (false wake, other talk).
-    Mismatch { z: f32 },
+    Mismatch {
+        z: f32,
+    },
     /// Wake window had no usable speech.
     TooShort,
     /// Gate off or no profile yet → do not block.

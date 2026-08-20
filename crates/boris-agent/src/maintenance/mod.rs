@@ -531,10 +531,15 @@ fn run_extract(
 
     if do_llm {
         if let Some(rt) = rt {
-            match rt.block_on(tokio::time::timeout(
-                LLM_EXTRACT_TIMEOUT,
-                extract_with_llm(client.as_ref(), user, assistant, &profile_summary),
-            )) {
+            // `timeout` looks up the current reactor at construction, so it
+            // must run inside `block_on`, not as its argument.
+            match rt.block_on(async {
+                tokio::time::timeout(
+                    LLM_EXTRACT_TIMEOUT,
+                    extract_with_llm(client.as_ref(), user, assistant, &profile_summary),
+                )
+                .await
+            }) {
                 Ok(Ok(llm_delta)) if !llm_delta.is_empty() => {
                     if let Some(n) = llm_delta.preferred_name.clone() {
                         delta.preferred_name = Some(n);
@@ -828,6 +833,57 @@ mod tests {
         assert_eq!(traces.len(), 2);
         assert_eq!(traces[0].turn_id, "turn-1");
         assert_eq!(traces[1].turn_id, "turn-2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn llm_extract_timeout_runs_inside_worker_runtime() {
+        use async_trait::async_trait;
+        use boris_ai::{LlmClient, LlmError};
+        use serde_json::{json, Value};
+
+        struct ExtractClient;
+
+        #[async_trait]
+        impl LlmClient for ExtractClient {
+            async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+                Ok(json!({
+                    "role": "assistant",
+                    "content": r#"{"preferred_name":null,"address_as":null,"preferences_add":["short answers"],"facts_add":[],"facts_remove_query":[],"ongoing_add":[],"ongoing_replace":null}"#
+                }))
+            }
+        }
+
+        let root = temp_root("llm-extract");
+        let path = root.join("profile.json");
+        let store = ProfileStore::new(&path);
+        let profile = Arc::new(Mutex::new(UserProfile::default()));
+
+        let worker = MaintenanceWorker::spawn_with_capacity(8);
+        worker
+            .handle()
+            .submit(MaintenanceJob::ExtractPersonal {
+                store: store.clone(),
+                profile: profile.clone(),
+                llm_extract: true,
+                user: "I always prefer short answers at my job".into(),
+                assistant: "Got it.".into(),
+                tools_used: vec![],
+                client: Arc::new(ExtractClient),
+            })
+            .unwrap();
+        assert!(worker.handle().flush(Duration::from_secs(2)));
+        worker.shutdown();
+
+        let saved = store.load().unwrap();
+        assert_eq!(saved.turns_seen, 1);
+        assert!(
+            saved
+                .preferences
+                .iter()
+                .any(|p| p.contains("short answers")),
+            "expected llm extract to persist a preference, got {saved:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -209,8 +209,7 @@ pub(super) fn stream_reply(
         picture.set_phase(Phase::Talking);
     }
 
-    let (join, cancel, synth_events, mut synthesis_done, mut held_tts) = if all_units.is_empty()
-    {
+    let (join, cancel, synth_events, mut synthesis_done, mut held_tts) = if all_units.is_empty() {
         if !already_audible {
             return StreamedSpeech {
                 tts,
@@ -349,8 +348,7 @@ pub(super) fn stream_reply(
                             tracing::warn!(%turn, unit = index, "TTS unit produced no samples");
                             continue;
                         }
-                        let pcm =
-                            pace_unit(pcm, gap_samples, already_audible || queued_units > 0);
+                        let pcm = pace_unit(pcm, gap_samples, already_audible || queued_units > 0);
                         let samples = pcm.len();
                         if let Err(error) = audio.append(pcm) {
                             synthesis_error =

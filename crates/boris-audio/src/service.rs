@@ -378,9 +378,9 @@ impl AudioService {
             Err(crossbeam_channel::TrySendError::Full(_)) => Err(Error::audio(format!(
                 "output command queue full while {action}"
             ))),
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => Err(Error::audio(format!(
-                "output worker gone while {action}"
-            ))),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                Err(Error::audio(format!("output worker gone while {action}")))
+            }
         }
     }
 

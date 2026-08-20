@@ -28,10 +28,10 @@ pub mod vad;
 
 #[cfg(any(feature = "wake", feature = "vad"))]
 pub mod ort;
-#[cfg(feature = "wake")]
-pub mod wake;
 #[cfg(feature = "speaker")]
 pub mod speaker;
+#[cfg(feature = "wake")]
+pub mod wake;
 
 // Pipeline rate for all sense adapters is 16 kHz mono.
 const _: () = assert!(boris_core::AUDIO_TARGET_RATE == 16_000);
@@ -50,12 +50,12 @@ pub use vad::{
 
 #[cfg(any(feature = "wake", feature = "vad"))]
 pub use ort::init_onnx_runtime;
+#[cfg(feature = "speaker")]
+pub use speaker::{
+    compute_acoustic_feat, AcousticFeat, AcousticModel, MATCH_Z_REJECT, PLAYBACK_Z_REJECT,
+};
 #[cfg(feature = "wake")]
 pub use wake::{
     LiveKitWakeWord, LivekitWakeWord, WakeWord, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,
     WAKEWORD_WINDOW_SIZE,
-};
-#[cfg(feature = "speaker")]
-pub use speaker::{
-    compute_acoustic_feat, AcousticFeat, AcousticModel, MATCH_Z_REJECT, PLAYBACK_Z_REJECT,
 };

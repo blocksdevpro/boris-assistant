@@ -337,9 +337,8 @@ fn emit_stream_delta(
     started: Instant,
     first_delta_emitted: &mut bool,
 ) {
-    let has_payload = !delta.content.is_empty()
-        || !delta.reasoning.is_empty()
-        || !delta.tool_deltas.is_empty();
+    let has_payload =
+        !delta.content.is_empty() || !delta.reasoning.is_empty() || !delta.tool_deltas.is_empty();
     if has_payload && !*first_delta_emitted {
         *first_delta_emitted = true;
         on_event(LlmStreamEvent::FirstDelta {

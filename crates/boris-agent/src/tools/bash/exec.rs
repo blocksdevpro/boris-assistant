@@ -137,7 +137,7 @@ fn find_real_bash() -> Option<PathBuf> {
                 return Some(candidate);
             }
         }
-        return None;
+        None
     }
     #[cfg(not(windows))]
     {

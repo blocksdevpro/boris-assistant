@@ -212,8 +212,8 @@ pub async fn agent_loop(
             reply = cleaned;
         }
 
-        reply = ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply, &emit)
-            .await?;
+        reply =
+            ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply, &emit).await?;
 
         if !reply.is_empty() {
             last_speakable = Some(reply.clone());

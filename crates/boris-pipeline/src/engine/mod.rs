@@ -97,10 +97,16 @@ pub enum EngineCommand {
     Start,
     Stop,
     Shutdown,
-    SwitchInput { device_id: String },
-    SwitchOutput { device_id: String },
+    SwitchInput {
+        device_id: String,
+    },
+    SwitchOutput {
+        device_id: String,
+    },
     /// Next `takes` wake hits train the live-mic profile (not a turn).
-    StartWakeEnroll { takes: u32 },
+    StartWakeEnroll {
+        takes: u32,
+    },
     /// Forget the stored live-mic profile.
     ClearWakeProfile,
 }
@@ -322,7 +328,10 @@ fn listen_after_barge(
     )?;
     let crop = hear::crop_speech(&mut rt.vad, &clip);
     if crop.speech_hops < 10 {
-        tracing::info!(hops = crop.speech_hops, "barge-in listen was silence — resume");
+        tracing::info!(
+            hops = crop.speech_hops,
+            "barge-in listen was silence — resume"
+        );
         rt.picture.clear_activity();
         return Ok(BargeDecision::Resume);
     }
@@ -438,13 +447,17 @@ fn run(
                 }
                 Ok(EngineCommand::StartWakeEnroll { takes }) => {
                     enroll_left = takes.clamp(2, 8);
-                    tracing::info!(takes = enroll_left, "wake enroll queued (start engine to record)");
-                    rt.picture.set_wake_enroll(Some(crate::status::WakeEnrollPeek {
-                        have: 0,
-                        want: enroll_left,
-                        ready: false,
-                        hint: None,
-                    }));
+                    tracing::info!(
+                        takes = enroll_left,
+                        "wake enroll queued (start engine to record)"
+                    );
+                    rt.picture
+                        .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                            have: 0,
+                            want: enroll_left,
+                            ready: false,
+                            hint: None,
+                        }));
                 }
                 Ok(EngineCommand::ClearWakeProfile) => {
                     rt.liveness.clear();
@@ -506,32 +519,33 @@ fn run(
             rt.picture.set_phase(Phase::Armed);
             if enroll_left > 0 {
                 let have = rt.liveness.take_count() as u32;
-                rt.picture.set_wake_enroll(Some(crate::status::WakeEnrollPeek {
-                    have,
-                    want: have + enroll_left,
-                    ready: false,
-                    hint: None,
-                }));
+                rt.picture
+                    .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                        have,
+                        want: have + enroll_left,
+                        ready: false,
+                        hint: None,
+                    }));
             }
 
-            let wake_window = match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running)
-            {
-                Ok(w) => w,
-                Err(HearBreak::StartWakeEnroll { takes }) => {
-                    enroll_left = takes.clamp(2, 8);
-                    continue;
-                }
-                Err(HearBreak::ClearWakeProfile) => {
-                    rt.liveness.clear();
-                    enroll_left = 0;
-                    rt.picture.set_wake_enroll(None);
-                    continue;
-                }
-                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
-                    LoopReact::Continue => continue,
-                    LoopReact::Exit => return Ok(()),
-                },
-            };
+            let wake_window =
+                match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
+                    Ok(w) => w,
+                    Err(HearBreak::StartWakeEnroll { takes }) => {
+                        enroll_left = takes.clamp(2, 8);
+                        continue;
+                    }
+                    Err(HearBreak::ClearWakeProfile) => {
+                        rt.liveness.clear();
+                        enroll_left = 0;
+                        rt.picture.set_wake_enroll(None);
+                        continue;
+                    }
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                };
 
             if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
@@ -543,26 +557,33 @@ fn run(
                 match rt.liveness.add_take(&crop.pcm, crop.speech_hops, want) {
                     Ok(p) => {
                         enroll_left = want.saturating_sub(p.have);
-                        tracing::info!(have = p.have, want = p.want, ready = p.ready, "wake enroll take");
+                        tracing::info!(
+                            have = p.have,
+                            want = p.want,
+                            ready = p.ready,
+                            "wake enroll take"
+                        );
                         if p.ready {
                             enroll_left = 0;
                         }
-                        rt.picture.set_wake_enroll(Some(crate::status::WakeEnrollPeek {
-                            have: p.have,
-                            want: p.want,
-                            ready: p.ready,
-                            hint: None,
-                        }));
+                        rt.picture
+                            .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                                have: p.have,
+                                want: p.want,
+                                ready: p.ready,
+                                hint: None,
+                            }));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "wake enroll take rejected");
                         let have = rt.liveness.take_count() as u32;
-                        rt.picture.set_wake_enroll(Some(crate::status::WakeEnrollPeek {
-                            have,
-                            want,
-                            ready: false,
-                            hint: Some(e),
-                        }));
+                        rt.picture
+                            .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                                have,
+                                want,
+                                ready: false,
+                                hint: Some(e),
+                            }));
                     }
                 }
                 if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 500) {
@@ -576,7 +597,11 @@ fn run(
 
             match rt.liveness.classify(&crop.pcm, crop.speech_hops) {
                 crate::liveness::WakeOrigin::Playback { z } => {
-                    tracing::info!(z, hops = crop.speech_hops, "wake rejected — speaker playback");
+                    tracing::info!(
+                        z,
+                        hops = crop.speech_hops,
+                        "wake rejected — speaker playback"
+                    );
                     if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
                         match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                             LoopReact::Continue => continue,
@@ -586,7 +611,11 @@ fn run(
                     continue;
                 }
                 crate::liveness::WakeOrigin::Mismatch { z } => {
-                    tracing::info!(z, hops = crop.speech_hops, "wake rejected — not the taught voice");
+                    tracing::info!(
+                        z,
+                        hops = crop.speech_hops,
+                        "wake rejected — not the taught voice"
+                    );
                     if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
                         match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                             LoopReact::Continue => continue,
@@ -596,7 +625,10 @@ fn run(
                     continue;
                 }
                 crate::liveness::WakeOrigin::TooShort => {
-                    tracing::info!(hops = crop.speech_hops, "wake rejected — no speech in window");
+                    tracing::info!(
+                        hops = crop.speech_hops,
+                        "wake rejected — no speech in window"
+                    );
                     if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 250) {
                         match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                             LoopReact::Continue => continue,

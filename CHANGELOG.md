@@ -12,7 +12,8 @@ Further **1.2** work on `next` after [1.2.0-beta.1].
 - Wake identity uses WeSpeaker **CAM++** embeddings (cosine vs enrolled takes)
   when `~/.boris/models/speaker/campplus_lm.onnx` is present. Brightness
   mismatch is no longer the identity test. Spectral playback scoring still
-  rejects TV / Translate. Install models fetches the ONNX; re-teach after.
+  rejects TV / Translate. Fbank matches WeSpeaker Hamming + per-frame DC
+  removal; re-teach if you enrolled on an earlier build of this work.
 - Capture **front-end** on the 16 kHz tap: high-pass, AGC2, and AEC3 (sonora /
   WebRTC APM). TTS is the echo reference, so leftover playback is subtracted
   before VAD / wake / STT. Quiet talk at laptop distance is gained up. Neural

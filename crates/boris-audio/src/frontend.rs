@@ -11,7 +11,8 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 /// 10 ms at [`AUDIO_TARGET_RATE`]. WebRTC APM frame size.
 pub const FRAME_SAMPLES: usize = (AUDIO_TARGET_RATE as usize) / 100;
 
-/// Drop render that races more than this ahead of capture (~3 s of TTS).
+/// Bound far-end that races ahead of capture (~3 s of TTS). Overflow drops
+/// newest samples so AEC3 keeps the reference still in the air.
 const MAX_RENDER_PENDING: usize = AUDIO_TARGET_RATE as usize * 3;
 
 /// Starting AEC delay. WASAPI shared-mode buffering plus resample; AEC3
@@ -47,7 +48,10 @@ impl CaptureFrontEnd {
     }
 
     fn with_delay_ms(delay_ms: i32) -> Self {
-        let enabled = frontend_enabled();
+        Self::build(delay_ms, frontend_enabled())
+    }
+
+    fn build(delay_ms: i32, enabled: bool) -> Self {
         let stream = StreamConfig::new(AUDIO_TARGET_RATE, 1);
         let agc = GainController2 {
             // We do not drive the OS mixer.
@@ -93,6 +97,16 @@ impl CaptureFrontEnd {
         }
     }
 
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self::build(STREAM_DELAY_MS, true)
+    }
+
+    #[cfg(test)]
+    fn for_test_with_delay_ms(delay_ms: i32) -> Self {
+        Self::build(delay_ms, true)
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -107,14 +121,22 @@ impl CaptureFrontEnd {
                 if pcm.is_empty() {
                     return;
                 }
-                self.render_pending.extend_from_slice(&pcm);
-                if self.render_pending.len() > MAX_RENDER_PENDING {
-                    let overflow = self.render_pending.len() - MAX_RENDER_PENDING;
-                    self.render_pending.drain(..overflow);
+                let room = MAX_RENDER_PENDING.saturating_sub(self.render_pending.len());
+                if room == 0 {
                     tracing::warn!(
-                        overflow,
-                        "capture front-end: far-end queue overflow — dropped oldest"
+                        dropped = pcm.len(),
+                        "capture front-end: far-end queue full — dropped newest"
                     );
+                    return;
+                }
+                if pcm.len() > room {
+                    self.render_pending.extend_from_slice(&pcm[..room]);
+                    tracing::warn!(
+                        dropped = pcm.len() - room,
+                        "capture front-end: far-end queue overflow — dropped newest"
+                    );
+                } else {
+                    self.render_pending.extend_from_slice(&pcm);
                 }
             }
             FarEnd::Pause => self.paused = true,
@@ -243,13 +265,13 @@ mod tests {
 
     #[test]
     fn empty_input_stays_empty() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         assert!(fe.process_capture(&[]).is_empty());
     }
 
     #[test]
     fn partial_frame_is_held() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         let out = fe.process_capture(&[0.1; 80]);
         assert!(out.is_empty(), "partial 10 ms frame must not emit");
         let out = fe.process_capture(&[0.1; 80]);
@@ -258,7 +280,7 @@ mod tests {
 
     #[test]
     fn quiet_tone_is_gained_up() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         let input = tone(700.0, 0.02, AUDIO_TARGET_RATE as usize);
         let in_rms = rms(&input);
         let out = fe.process_capture(&input);
@@ -275,7 +297,7 @@ mod tests {
 
     #[test]
     fn highpass_kills_sub_bass() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         // 40 Hz rumble + a mid tone so AGC has something to track.
         let n = AUDIO_TARGET_RATE as usize;
         let rumble = tone(40.0, 0.4, n);
@@ -302,7 +324,7 @@ mod tests {
     #[test]
     fn aec_reduces_matched_echo() {
         // Lockstep render/capture: delay is already 0 in this harness.
-        let mut fe = CaptureFrontEnd::with_delay_ms(0);
+        let mut fe = CaptureFrontEnd::for_test_with_delay_ms(0);
         let n = AUDIO_TARGET_RATE as usize; // 1 s
         let echo = tone(440.0, 0.3, n);
         fe.apply_far_end(FarEnd::Samples(echo.clone()));
@@ -319,7 +341,7 @@ mod tests {
 
     #[test]
     fn pause_holds_queued_render() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         fe.apply_far_end(FarEnd::Samples(vec![0.2; FRAME_SAMPLES * 4]));
         fe.apply_far_end(FarEnd::Pause);
         let _ = fe.process_capture(&[0.0; FRAME_SAMPLES * 2]);
@@ -331,9 +353,31 @@ mod tests {
 
     #[test]
     fn clear_drops_queued_render() {
-        let mut fe = CaptureFrontEnd::new();
+        let mut fe = CaptureFrontEnd::for_test();
         fe.apply_far_end(FarEnd::Samples(vec![0.2; FRAME_SAMPLES * 3]));
         fe.apply_far_end(FarEnd::Clear);
         assert!(fe.render_pending.is_empty());
+    }
+
+    #[test]
+    fn overflow_drops_newest_keeps_in_air() {
+        let mut fe = CaptureFrontEnd::for_test();
+        fe.apply_far_end(FarEnd::Samples(vec![1.0; MAX_RENDER_PENDING]));
+        fe.apply_far_end(FarEnd::Samples(vec![9.0; FRAME_SAMPLES]));
+        assert_eq!(fe.render_pending.len(), MAX_RENDER_PENDING);
+        assert!(
+            fe.render_pending.iter().all(|&s| s == 1.0),
+            "overflow must not drop the reference already queued for playback"
+        );
+    }
+
+    #[test]
+    fn oversized_chunk_keeps_the_start() {
+        let mut fe = CaptureFrontEnd::for_test();
+        let mut pcm = vec![1.0; MAX_RENDER_PENDING];
+        pcm.extend(std::iter::repeat_n(9.0, FRAME_SAMPLES));
+        fe.apply_far_end(FarEnd::Samples(pcm));
+        assert_eq!(fe.render_pending.len(), MAX_RENDER_PENDING);
+        assert!(fe.render_pending.iter().all(|&s| s == 1.0));
     }
 }

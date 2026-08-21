@@ -105,31 +105,22 @@ impl WakeLiveness {
         if play >= PLAYBACK_Z_REJECT {
             return WakeOrigin::Playback { z: play };
         }
-        if let (Some(embedder), Some(vp)) = (self.embedder.as_mut(), self.voiceprint.as_ref()) {
-            match embedder.embed(pcm) {
-                Ok(Some(emb)) => {
-                    let cos = vp.cosine(&emb);
-                    if cos < COSINE_REJECT {
-                        tracing::debug!(cosine = cos, "wake identity miss");
-                        return WakeOrigin::Mismatch { z: 1.0 - cos };
-                    }
-                    return WakeOrigin::Live;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(error = %e, "speaker embed failed — acoustic fallback"),
-            }
-        }
-        if self.embedder.is_some() {
-            // CAM++ is loaded. Brightness mismatch is what fails at 15–30 cm,
-            // so do not use it as identity — either cosine already ran, or this
-            // crop could not be embedded / the profile still needs a re-teach.
-            return WakeOrigin::Live;
-        }
         let miss = model.mismatch_z(feat);
-        if miss >= MATCH_Z_REJECT {
-            return WakeOrigin::Mismatch { z: miss };
-        }
-        WakeOrigin::Live
+        let probe = match (self.embedder.as_mut(), self.voiceprint.as_ref()) {
+            (Some(embedder), Some(vp)) => match embedder.embed(pcm) {
+                Ok(Some(emb)) => IdentityProbe::Cosine(vp.cosine(&emb)),
+                Ok(None) => IdentityProbe::CosineMiss,
+                Err(e) => {
+                    tracing::warn!(error = %e, "speaker embed failed — acoustic fallback");
+                    IdentityProbe::CosineMiss
+                }
+            },
+            // Brightness mismatch fails at 15–30 cm. Until a voiceprint exists,
+            // only playback_z can reject.
+            (Some(_), None) => IdentityProbe::WaitingForVoiceprint,
+            (None, _) => IdentityProbe::AcousticsOnly,
+        };
+        decide_identity(probe, miss)
     }
 
     /// Record one enroll take from a wake crop. Persists when `target` takes
@@ -146,16 +137,7 @@ impl WakeLiveness {
         let feat = compute_acoustic_feat(pcm)
             .ok_or_else(|| "need a clearer take — speak closer to the mic".to_string())?;
         let embedding = match self.embedder.as_mut() {
-            Some(embedder) => match embedder.embed(pcm) {
-                Ok(Some(e)) => Some(e),
-                Ok(None) => {
-                    return Err("need a longer take — say Boris toward the mic".into());
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "speaker embed on enroll take failed");
-                    None
-                }
-            },
+            Some(embedder) => embedding_from_embed_outcome(embedder.embed(pcm))?,
             None => None,
         };
         if let Some(ref emb) = embedding {
@@ -179,12 +161,20 @@ impl WakeLiveness {
         if have >= want {
             self.model = AcousticModel::from_takes(&self.takes);
             self.voiceprint = Voiceprint::from_embeddings(&self.embeddings);
+            if self.embedder.is_some() && self.voiceprint.is_none() {
+                // CAM++ is loaded. Do not persist a ready acoustics-only profile.
+                return Err("need another take — say Boris toward the mic".into());
+            }
             save_profile(&self.takes, &self.embeddings)?;
         }
         Ok(EnrollProgress {
             have,
             want,
-            ready: self.model.is_some(),
+            ready: enroll_is_ready(
+                self.embedder.is_some(),
+                self.model.is_some(),
+                self.voiceprint.is_some(),
+            ),
         })
     }
 
@@ -200,6 +190,57 @@ impl WakeLiveness {
             }
         }
     }
+}
+
+/// Cosine identity vs acoustic fallback after playback has already been ruled out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IdentityProbe {
+    /// CAM++ ran; value is cosine vs enrolled mean.
+    Cosine(f32),
+    /// Embedder + voiceprint exist but embed() missed or errored.
+    CosineMiss,
+    /// CAM++ ONNX loaded, no enrolled voiceprint yet (re-teach pending).
+    WaitingForVoiceprint,
+    /// Acoustics-only identity.
+    AcousticsOnly,
+}
+
+fn decide_identity(probe: IdentityProbe, mismatch_z: f32) -> WakeOrigin {
+    match probe {
+        IdentityProbe::Cosine(cos) => {
+            if cos < COSINE_REJECT {
+                tracing::debug!(cosine = cos, "wake identity miss");
+                WakeOrigin::Mismatch { z: 1.0 - cos }
+            } else {
+                WakeOrigin::Live
+            }
+        }
+        IdentityProbe::WaitingForVoiceprint => WakeOrigin::Live,
+        IdentityProbe::CosineMiss | IdentityProbe::AcousticsOnly => {
+            if mismatch_z >= MATCH_Z_REJECT {
+                WakeOrigin::Mismatch { z: mismatch_z }
+            } else {
+                WakeOrigin::Live
+            }
+        }
+    }
+}
+
+fn embedding_from_embed_outcome(
+    outcome: boris_core::Result<Option<Vec<f32>>>,
+) -> Result<Option<Vec<f32>>, String> {
+    match outcome {
+        Ok(Some(e)) => Ok(Some(e)),
+        Ok(None) => Err("need a longer take — say Boris toward the mic".into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "speaker embed on enroll take failed");
+            Err("need a clearer take — say Boris toward the mic".into())
+        }
+    }
+}
+
+fn enroll_is_ready(embedder_loaded: bool, model: bool, voiceprint: bool) -> bool {
+    model && (!embedder_loaded || voiceprint)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,5 +361,59 @@ mod tests {
             WakeOrigin::Playback { z } => assert!(z >= PLAYBACK_Z_REJECT, "z={z}"),
             other => panic!("expected playback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cosine_below_reject_is_mismatch() {
+        match decide_identity(IdentityProbe::Cosine(0.05), 0.0) {
+            WakeOrigin::Mismatch { z } => assert!((z - 0.95).abs() < 1e-5),
+            other => panic!("expected mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cosine_above_reject_is_live() {
+        assert_eq!(
+            decide_identity(IdentityProbe::Cosine(0.5), MATCH_Z_REJECT + 10.0),
+            WakeOrigin::Live
+        );
+    }
+
+    #[test]
+    fn waiting_for_voiceprint_is_live_even_if_mismatch_z_is_high() {
+        assert_eq!(
+            decide_identity(IdentityProbe::WaitingForVoiceprint, MATCH_Z_REJECT + 10.0),
+            WakeOrigin::Live
+        );
+    }
+
+    #[test]
+    fn cosine_miss_keeps_mismatch_z() {
+        match decide_identity(IdentityProbe::CosineMiss, MATCH_Z_REJECT + 1.0) {
+            WakeOrigin::Mismatch { z } => assert!(z >= MATCH_Z_REJECT),
+            other => panic!("expected mismatch, got {other:?}"),
+        }
+        assert_eq!(
+            decide_identity(IdentityProbe::CosineMiss, 0.1),
+            WakeOrigin::Live
+        );
+    }
+
+    #[test]
+    fn embed_err_rejects_enroll_take() {
+        let err = embedding_from_embed_outcome(Err(boris_core::Error::other("onnx")));
+        assert!(err.is_err(), "CAM++ embed Err must not store an acoustics-only take");
+        assert!(embedding_from_embed_outcome(Ok(None)).is_err());
+        assert!(embedding_from_embed_outcome(Ok(Some(vec![1.0])))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn enroll_ready_requires_voiceprint_when_campplus_loaded() {
+        assert!(!enroll_is_ready(true, true, false));
+        assert!(enroll_is_ready(true, true, true));
+        assert!(enroll_is_ready(false, true, false));
+        assert!(!enroll_is_ready(false, false, false));
     }
 }

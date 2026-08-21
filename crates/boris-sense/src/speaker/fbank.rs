@@ -1,7 +1,8 @@
-//! WeSpeaker-style 80-dim log-Mel fbank (Kaldi / torchaudio.compliance.kaldi).
+//! WeSpeaker CAM++ test-time fbank (Kaldi / torchaudio.compliance.kaldi).
 //!
-//! Test-time recipe used with CAM++: int16-scale PCM, 25 ms / 10 ms, povey
-//! window, 80 bins, log, then mean subtract over time.
+//! Matches WeSpeaker infer: Hamming (not povey), per-frame DC then preemphasis,
+//! 25 ms / 10 ms, 80 bins, log, utterance CMN, dither 0. Changing this
+//! invalidates enrolled embeddings; re-teach after upgrades.
 
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
@@ -28,26 +29,35 @@ pub fn log_mel_fbank(pcm: &[f32]) -> Option<Vec<f32>> {
         return None;
     }
 
-    let window = povey_window();
+    let window = hamming_window();
     let filters = mel_filters();
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(N_FFT);
 
-    let mut pre = vec![0.0f32; pcm.len()];
-    pre[0] = pcm[0] * INT16;
-    for i in 1..pcm.len() {
-        pre[i] = pcm[i] * INT16 - PREEMPH * pcm[i - 1] * INT16;
-    }
-
     let mut frames = vec![0.0f32; n_frames * N_MELS];
     let mut buf = vec![Complex::new(0.0, 0.0); N_FFT];
     let mut power = [0.0f32; N_BINS];
+    let mut frame = [0.0f32; WIN];
 
     for t in 0..n_frames {
         let start = t * HOP;
-        buf.fill(Complex::new(0.0, 0.0));
+        let mut sum = 0.0f32;
         for k in 0..WIN {
-            buf[k] = Complex::new(pre[start + k] * window[k], 0.0);
+            let x = pcm[start + k] * INT16;
+            frame[k] = x;
+            sum += x;
+        }
+        let mean = sum / WIN as f32;
+        buf.fill(Complex::new(0.0, 0.0));
+        // Kaldi: remove_dc_offset per frame, then preemphasis (first sample
+        // against itself), then Hamming.
+        let mut prev = frame[0] - mean;
+        buf[0] = Complex::new(prev * (1.0 - PREEMPH) * window[0], 0.0);
+        for k in 1..WIN {
+            let x = frame[k] - mean;
+            let pre = x - PREEMPH * prev;
+            buf[k] = Complex::new(pre * window[k], 0.0);
+            prev = x;
         }
         fft.process(&mut buf);
         for (k, p) in power.iter_mut().enumerate() {
@@ -88,12 +98,11 @@ pub fn n_frames(pcm_len: usize) -> usize {
 
 pub const MEL_BINS: usize = N_MELS;
 
-fn povey_window() -> [f32; WIN] {
+fn hamming_window() -> [f32; WIN] {
     let mut w = [0.0f32; WIN];
     let den = (WIN - 1) as f32;
     for (i, slot) in w.iter_mut().enumerate() {
-        let hamming = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / den).cos();
-        *slot = hamming.powf(0.85);
+        *slot = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * i as f32 / den).cos();
     }
     w
 }
@@ -167,5 +176,14 @@ mod tests {
             }
             assert!(sum.abs() < 1e-3, "bin {m} mean {sum} after CMN");
         }
+    }
+
+    #[test]
+    fn window_is_kaldi_hamming_not_povey() {
+        let w = hamming_window();
+        // Povey is 0 at the edges; Kaldi Hamming is 0.08.
+        assert!((w[0] - 0.08).abs() < 1e-6);
+        assert!((w[WIN - 1] - 0.08).abs() < 1e-6);
+        assert!(w.iter().copied().fold(0.0f32, f32::max) > 0.999);
     }
 }

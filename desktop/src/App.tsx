@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StatusPreviewProvider } from "@/bridge/useStatus";
 import { OFF_STATUS, type StatusPicture } from "@/bridge";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
+import { GridPresence } from "@/components/presence";
 import { StartupScreen } from "@/components/StartupScreen";
 import { logger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -16,6 +17,27 @@ const OverlayWindow = lazy(() =>
 );
 
 type Surface = "main" | "overlay";
+
+function SurfaceFallback({
+  label,
+  transparent = false,
+}: {
+  label: string;
+  transparent?: boolean;
+}) {
+  return (
+    <div
+      className="surface-loader"
+      data-transparent={transparent || undefined}
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+    >
+      <GridPresence state="starting" reducedMotion={false} size="md" />
+      <span className="surface-loader__label">{label}</span>
+    </div>
+  );
+}
 
 const OverlayFixtureMatrix = lazy(
   () => import("@/preview/OverlayFixtureMatrix"),
@@ -121,11 +143,7 @@ function App() {
     return (
       <AppErrorBoundary>
         <Suspense
-          fallback={
-            <div className="flex h-screen items-center justify-center bg-[#111114] text-sm text-white/50">
-              Loading fixture matrix…
-            </div>
-          }
+          fallback={<SurfaceFallback label="Preparing preview gallery" />}
         >
           <OverlayFixtureMatrix />
         </Suspense>
@@ -142,26 +160,20 @@ function App() {
   }
 
   if (fixtureName && !fixtureStatus) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-        Loading fixture…
-      </div>
-    );
+    return <SurfaceFallback label="Preparing preview" />;
   }
 
   const surfaceView =
     surface === "overlay" ? (
       <Suspense
         fallback={
-          <div className="flex h-screen items-center justify-center bg-transparent text-sm text-black/40">
-            Loading overlay…
-          </div>
+          <SurfaceFallback label="Waking Boris" transparent />
         }
       >
         <OverlayWindow />
       </Suspense>
     ) : (
-      <Suspense fallback={null}>
+      <Suspense fallback={<SurfaceFallback label="Opening Boris" />}>
         <MainWindow />
       </Suspense>
     );

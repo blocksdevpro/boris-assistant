@@ -2,11 +2,15 @@ import { normalizeStatus, type StatusPicture } from "@/bridge";
 
 export type StatusFixtureName =
   | "off"
+  | "starting"
   | "ready"
+  | "awaiting-reply"
   | "hearing"
   | "reading"
   | "thinking"
+  | "thinking-long"
   | "thinking-tool"
+  | "tool-failure"
   | "confirm"
   | "talking"
   | "fault"
@@ -45,9 +49,20 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     mic: { label: "Microphone unavailable", ok: false },
     speaker: { label: "Speaker unavailable", ok: false },
   }),
+  fixture("starting", "Starting", {
+    engine: "Starting",
+    phase: "Off",
+    detail: "Initializing voice models…",
+  }),
   fixture("ready", "Ready", {
     engine: "On",
     phase: "Armed",
+  }),
+  fixture("awaiting-reply", "Awaiting reply", {
+    engine: "On",
+    phase: "AwaitingReply",
+    said: "Would you like the shorter version or the detailed one?",
+    turn: "preview-awaiting-reply",
   }),
   fixture("hearing", "Hearing", {
     engine: "On",
@@ -69,12 +84,28 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
       "Notes first, then a short spoken brief. Pull the three decisions and skip anything that looks like a raw dump.",
     turn: "preview-thinking",
   }),
+  fixture("thinking-long", "Thinking · long stream", {
+    engine: "On",
+    phase: "Thinking",
+    heard: "Turn this messy brief into an ordered launch checklist.",
+    activity: "Thinking…",
+    thinking:
+      "Start with the decisions that can block the launch. Group the remaining work by owner, keep dependencies close to the tasks they affect, and separate required checks from optional polish. The overlay should preserve the newest lines without growing beyond its glanceable reading budget.",
+    turn: "preview-thinking-long",
+  }),
   fixture("thinking-tool", "Thinking · tool", {
     engine: "On",
     phase: "Thinking",
     heard: "Check the forecast before my trip.",
     activity: "tool · Searching weather in Bengaluru",
     turn: "preview-tool",
+  }),
+  fixture("tool-failure", "Thinking · tool failed", {
+    engine: "On",
+    phase: "Thinking",
+    heard: "Check the latest train times.",
+    activity: "fail · web_search",
+    turn: "preview-tool-failure",
   }),
   fixture("confirm", "Confirm", {
     engine: "On",

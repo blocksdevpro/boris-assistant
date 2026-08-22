@@ -23,49 +23,49 @@ export type PhaseTone = {
   motion: "none" | "breathe" | "listen" | "think" | "speak";
 };
 
-/** Shared cool base — product identity, not status carnival. */
+/** Apple system-color family — one product voice, semantic exceptions only. */
 const BASE = {
-  accent: "oklch(0.78 0.06 250)",
-  glow: "oklch(0.5 0.05 250 / 28%)",
+  accent: "#0a84ff",
+  glow: "rgb(10 132 255 / 26%)",
 } as const;
 
 const READY = {
-  accent: "oklch(0.8 0.07 200)",
-  glow: "oklch(0.52 0.06 200 / 30%)",
+  accent: "#64d2ff",
+  glow: "rgb(100 210 255 / 24%)",
 } as const;
 
 const LISTEN = {
-  accent: "oklch(0.8 0.09 230)",
-  glow: "oklch(0.52 0.07 230 / 32%)",
+  accent: "#0a84ff",
+  glow: "rgb(10 132 255 / 30%)",
 } as const;
 
 const WORK = {
-  accent: "oklch(0.76 0.07 255)",
-  glow: "oklch(0.48 0.06 255 / 30%)",
+  accent: "#7d7aff",
+  glow: "rgb(94 92 230 / 28%)",
 } as const;
 
 const SPEAK = {
-  accent: "oklch(0.8 0.08 55)",
-  glow: "oklch(0.52 0.06 55 / 28%)",
+  accent: "#64d2ff",
+  glow: "rgb(100 210 255 / 26%)",
 } as const;
 
 const CONFIRM = {
-  accent: "oklch(0.84 0.12 75)",
-  glow: "oklch(0.55 0.1 75 / 35%)",
+  accent: "#ff9f0a",
+  glow: "rgb(255 159 10 / 30%)",
 } as const;
 
 const PHASE: Record<Phase, PhaseTone> = {
   Off: {
     label: "Off",
     hint: "Press Start to begin",
-    accent: "oklch(0.58 0.02 250)",
-    glow: "oklch(0.35 0.02 250 / 20%)",
+    accent: "#8e8e93",
+    glow: "rgb(142 142 147 / 18%)",
     alive: false,
     motion: "none",
   },
   Quiet: {
     label: "Ready",
-    hint: "Say the wake word to talk",
+    hint: "Say the wake word",
     accent: READY.accent,
     glow: READY.glow,
     alive: true,
@@ -73,7 +73,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Armed: {
     label: "Ready",
-    hint: "Say the wake word to talk",
+    hint: "Say the wake word",
     accent: READY.accent,
     glow: READY.glow,
     alive: true,
@@ -81,7 +81,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   AwaitingReply: {
     label: "Your turn",
-    hint: "Answer freely — no wake word",
+    hint: "No wake word needed",
     accent: LISTEN.accent,
     glow: LISTEN.glow,
     alive: true,
@@ -89,7 +89,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   AwaitingConfirm: {
     label: "Confirm",
-    hint: "Waiting for your yes",
+    hint: "Say yes or no",
     accent: CONFIRM.accent,
     glow: CONFIRM.glow,
     alive: true,
@@ -97,7 +97,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Hearing: {
     label: "Listening",
-    hint: "Go ahead",
+    hint: "Speak naturally",
     accent: LISTEN.accent,
     glow: LISTEN.glow,
     alive: true,
@@ -136,8 +136,8 @@ export function toneFor(phase: Phase, engine: EngineState): PhaseTone {
     return {
       label: "Error",
       hint: "Something went wrong",
-      accent: "oklch(0.68 0.18 25)",
-      glow: "oklch(0.45 0.14 25 / 40%)",
+      accent: "#ff453a",
+      glow: "rgb(255 69 58 / 32%)",
       alive: true,
       motion: "breathe",
     };
@@ -145,7 +145,7 @@ export function toneFor(phase: Phase, engine: EngineState): PhaseTone {
   if (engine === "Starting") {
     return {
       label: "Starting",
-      hint: "Loading…",
+      hint: "Getting ready",
       accent: BASE.accent,
       glow: BASE.glow,
       alive: true,

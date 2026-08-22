@@ -1,0 +1,61 @@
+.led-grid {
+  --led-size: 28px;
+  --led-gap: 3px;
+  --led-accent: #64d2ff;
+  display: grid;
+  width: var(--led-size);
+  height: var(--led-size);
+  flex: 0 0 var(--led-size);
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: var(--led-gap);
+  place-items: stretch;
+  pointer-events: none;
+}
+
+.led-grid[data-size="md"] {
+  --led-size: 36px;
+  --led-gap: 3.5px;
+}
+
+.led-grid[data-size="lg"] {
+  --led-size: 56px;
+  --led-gap: 5px;
+}
+
+.led-grid[data-size="xl"] {
+  --led-size: 72px;
+  --led-gap: 6px;
+}
+
+.led-grid[data-state="off"] {
+  opacity: 0.42;
+}
+
+.led-grid__cell {
+  border-radius: 22%;
+  background: var(--led-accent);
+  box-shadow:
+    0 0 3px var(--led-accent),
+    0 0 8px color-mix(in srgb, var(--led-accent) 70%, transparent),
+    0 0 16px color-mix(in srgb, var(--led-accent) 32%, transparent);
+  transform-origin: center;
+}
+
+.led-grid__cell[data-on="false"] {
+  background: transparent;
+  box-shadow: none;
+}
+
+@media (prefers-contrast: more) {
+  .led-grid__cell[data-on="true"] {
+    box-shadow: 0 0 0 1px CanvasText;
+  }
+}
+
+@media (forced-colors: active) {
+  .led-grid__cell[data-on="true"] {
+    background: Highlight;
+    box-shadow: none;
+  }
+}

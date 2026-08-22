@@ -19,6 +19,8 @@ export function presenceStateFromStatus(
       return "awaiting-reply";
     case "AwaitingConfirm":
       return "confirm";
+    case "AwaitingInput":
+      return "awaiting-reply";
     case "Hearing":
       return "hearing";
     case "Reading":

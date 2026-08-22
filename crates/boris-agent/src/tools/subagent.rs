@@ -393,6 +393,9 @@ async fn run_child(
             let summary = match result.outcome {
                 crate::outcome::AgentOutcome::Speak { text, .. } => text,
                 crate::outcome::AgentOutcome::Silent => "(subagent finished with no text)".into(),
+                crate::outcome::AgentOutcome::NeedsInput { text, .. } => {
+                    format!("(subagent needed typed input: {text})")
+                }
                 crate::outcome::AgentOutcome::NeedsConfirmation { text, .. } => {
                     format!("(subagent paused for confirm: {text})")
                 }

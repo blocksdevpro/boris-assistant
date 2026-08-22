@@ -22,9 +22,18 @@ pub(super) fn finish_paused(
     tools_used: Vec<String>,
     pending_turn: PendingTurn,
 ) -> Result<LoopResult, AgentError> {
-    emit(AgentEvent::NeedsConfirmation {
-        pending: pending_turn.pending.clone(),
-    });
+    match &outcome {
+        AgentOutcome::NeedsInput { pending, .. } => {
+            emit(AgentEvent::NeedsInput {
+                pending: pending.clone(),
+            });
+        }
+        _ => {
+            emit(AgentEvent::NeedsConfirmation {
+                pending: pending_turn.pending.clone(),
+            });
+        }
+    }
     emit(AgentEvent::TurnEnd { round });
     emit(AgentEvent::AgentEnd {
         outcome: outcome.clone(),

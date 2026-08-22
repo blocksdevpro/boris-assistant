@@ -25,11 +25,57 @@ Further **1.2** work on `next` after [1.2.0-beta.1].
   or a false hit resumes from the cut; “stop” / a new request discards leftover
   and either re-arms or starts a turn. Settings → Speech; `BORIS_BARGE_IN=0`
   disables. Default on.
+- On-screen **typed input** when voice is a bad channel. `collect_input`
+  (exact / secret / blob) pauses the turn. The overlay unlocks a field (or
+  textarea for a paste). Home shows the same field. Secrets are masked, never
+  spoken, and redacted from session transcripts. Same submit from either
+  window.
+- Wake-word **barge-in** while Boris is working (Thinking, including tools
+  after you confirm a dangerous call). The agent turn runs off the engine
+  thread so the mic can still score wake. Armed live-mic liveness applies.
+  Work keeps running until STT decides. Silence or a rejected speaker is a
+  no-op; a bare “stop” / “wait” cancels; a new instruction (“no, do xyz
+  instead”) replaces the turn. Same `voice_barge_in` toggle.
 - Live **reasoning preview** on Home and the overlay while the strong / tool
   route thinks. Planning and complex stages now ask OpenRouter for reasoning
   text and stream the tail into `StatusPicture.thinking`. It is display-only
   — never spoken and never stored in agent context. The island grows to a
   thought stage (380 × 216) so four lines stay readable without scrollbars.
+- **Presence grid** on splash, Home, and the overlay (3×3 cells). Engine
+  Starting, Fault, and Off have their own copy so a slow boot is not labeled
+  Off. Home and Settings are split out of the old MainWindow blob.
+- `grep` takes Grok/Claude-style flags: `-A` / `-B` / `-C` / `-i`, `type`,
+  `glob`, `output_mode` (`content` / `files_with_matches` / `count`), and
+  `head_limit`.
+
+### Changed
+
+- Overlay activity is verb + object (`Reading src/lib.rs`) instead of
+  `tool · bash`. Consecutive same-kind calls collapse (`Read 4 files`).
+- Simple `bash cat` / `grep` / `ls` / `echo` is steered into `file_read`,
+  `grep`, `list_dir`, or speech. Real pipelines stay on bash.
+- Local file and code asks finish-gate if the turn never grepped, listed,
+  or read. Same reminder style as weak research.
+- Typed input has no Send / Paste / Cancel buttons. Enter or Ctrl+Enter
+  submits (Settings → Overlay). Esc cancels. Paste with Ctrl+V.
+
+### Fixed
+
+- Once a voiceprint exists, a missing or failed CAM++ embedding is a
+  mismatch, not Live. Teach rejects embed errors until two takes exist.
+- AEC far-end overflow drops newest TTS, not the start already in the air,
+  so echo cancel stays aligned with what you hear.
+- Maintenance LLM timeouts are built inside the Tokio `block_on` future.
+  Building `tokio::time::timeout` on the maintenance thread panicked it.
+- A slower `get_status` invoke no longer overwrites a later pushed snapshot.
+- Native overlay size stays on the card budget until React finishes the
+  island exit, so scale does not snap while the card is still leaving.
+- Overlay typed input no longer sits under a Thinking header, repeats the
+  field label, or grows off the top of the screen. Short exact/secret
+  fields stay thought-sized. Blob paste still uses the glance card. The
+  HWND parks on-screen for either.
+- Overlay and Home can actually submit typed input. `submit_input` /
+  `cancel_input` were registered but missing from the Tauri allowlist.
 
 ## [1.2.0-beta.1] - 2026-08-17
 

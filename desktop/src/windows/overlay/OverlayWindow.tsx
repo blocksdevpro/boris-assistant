@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { CollectInputField } from "@/components/CollectInputField";
 import { OverlayArtifactCard } from "@/components/artifacts";
 import {
   EVENTS,
@@ -14,12 +15,14 @@ import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
 import {
   isConfirmContext,
+  overlayInputUsesCard,
   overlayStageMode,
   overlayThinkingText,
   pickCaption,
   pickOverlayPresence,
   shouldShowOverlayCard,
   type Caption,
+  type OverlayStageMode,
 } from "@/lib/statusPresentation";
 import {
   CaptionBody,
@@ -114,7 +117,9 @@ export function OverlayWindow() {
   const orbOnly = isReady && readyCaptionHidden && !showCard;
   const confirm = isConfirmContext(status);
   const displayThought =
-    contentHidden || showCard || liveCaption?.kind === "error" ? null : thought;
+    contentHidden || showCard || status.input || liveCaption?.kind === "error"
+      ? null
+      : thought;
   const displayCard = !contentHidden && showCard;
   const faultKey = deviceFaultKey(status);
   const visualState =
@@ -261,7 +266,10 @@ export function OverlayWindow() {
   return (
     <div className="overlay-surface relative flex h-full w-full items-center justify-center bg-transparent">
       <div
-        className="overlay-stage flex items-center justify-center bg-transparent"
+        className={cn(
+          "overlay-stage flex justify-center bg-transparent",
+          status.input ? "items-start" : "items-center",
+        )}
         data-mode={stageMode}
         style={{
           ["--overlay-scale" as string]: scale,
@@ -275,13 +283,12 @@ export function OverlayWindow() {
           layout={reduceMotion ? false : true} // size + position, so the pill grows from its midpoint
           className={cn(
             "overlay-island overlay-island--premium relative flex select-none",
-            orbOnly
-              ? "items-center justify-center gap-2 px-3 py-2.5"
-              : stageMode === "card" && displayCard
-                ? "h-[264px] max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3"
-                : stageMode === "thought"
-                  ? "max-h-full w-max min-w-[228px] max-w-[356px] flex-col overflow-hidden px-3.5 py-3"
-                  : "w-max min-w-[228px] max-w-[356px] flex-col px-3.5 py-3",
+            overlayIslandClass({
+              orbOnly,
+              status,
+              stageMode,
+              displayCard,
+            }),
           )}
           style={
             {
@@ -335,7 +342,7 @@ export function OverlayWindow() {
                 data-tauri-drag-region
                 className={cn(
                   "overlay-details flex min-h-0 w-full min-w-0 flex-col",
-                  displayCard && "h-full",
+                  (displayCard || overlayInputUsesCard(status)) && "h-full",
                 )}
                 initial={reduceMotion ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -403,7 +410,13 @@ export function OverlayWindow() {
                 </div>
 
                 <AnimatePresence mode="popLayout" initial={false}>
-                  {displayCard && status.artifact ? (
+                  {status.input ? (
+                    <CollectInputField
+                      key={status.input.id}
+                      input={status.input}
+                      compact
+                    />
+                  ) : displayCard && status.artifact ? (
                     <OverlayArtifactCard
                       key={status.artifact.id}
                       peek={status.artifact}
@@ -462,6 +475,30 @@ export function OverlayWindow() {
   );
 }
 
+function overlayIslandClass({
+  orbOnly,
+  status,
+  stageMode,
+  displayCard,
+}: {
+  orbOnly: boolean;
+  status: StatusPicture;
+  stageMode: OverlayStageMode;
+  displayCard: boolean;
+}): string {
+  if (orbOnly) return "items-center justify-center gap-2 px-3 py-2.5";
+  if (overlayInputUsesCard(status) || (stageMode === "card" && displayCard)) {
+    return "h-[264px] max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3";
+  }
+  if (status.input) {
+    return "max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3";
+  }
+  if (stageMode === "thought") {
+    return "max-h-full w-max min-w-[228px] max-w-[356px] flex-col overflow-hidden px-3.5 py-3";
+  }
+  return "w-max min-w-[228px] max-w-[356px] flex-col px-3.5 py-3";
+}
+
 function filterCaption(
   caption: Caption | null,
   mode: AppSettings["overlay_caption_mode"],
@@ -499,6 +536,7 @@ function overlayAccessibleSummary({
     parts.push(`${speaker}: ${caption.text}`);
   }
   if (status.artifact) parts.push(`Created card: ${status.artifact.title}`);
+  if (status.input) parts.push(`Needs typed input: ${status.input.label}`);
   return parts.join(". ");
 }
 

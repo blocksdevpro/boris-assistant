@@ -21,6 +21,8 @@ export const COMMANDS = {
   listOutputDevices: "list_output_devices",
   switchInput: "switch_input",
   switchOutput: "switch_output",
+  submitInput: "submit_input",
+  cancelInput: "cancel_input",
   modelsStatus: "models_status",
   downloadModels: "download_models",
   getSettings: "get_settings",

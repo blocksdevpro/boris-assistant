@@ -47,6 +47,26 @@ export function OverlaySettings({
           <option value="hidden">Hidden</option>
         </select>
       </SettingsRow>
+      <SettingsRow
+        label="Send typed input"
+        subtitle="Overlay and Home. Esc cancels. Paste with Ctrl+V."
+        labelFor="typed-input-submit"
+      >
+        <select
+          id="typed-input-submit"
+          className={selectCompactClass}
+          value={settings.typed_input_submit}
+          onChange={(e) =>
+            onPatch({
+              typed_input_submit: e.target
+                .value as AppSettings["typed_input_submit"],
+            })
+          }
+        >
+          <option value="enter">Enter</option>
+          <option value="ctrl_enter">Ctrl+Enter</option>
+        </select>
+      </SettingsRow>
       <SettingsRow label="Position" labelFor="overlay-position">
         <select
           id="overlay-position"

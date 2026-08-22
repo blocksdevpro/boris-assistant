@@ -402,7 +402,10 @@ mod tests {
     #[test]
     fn embed_err_rejects_enroll_take() {
         let err = embedding_from_embed_outcome(Err(boris_core::Error::other("onnx")));
-        assert!(err.is_err(), "CAM++ embed Err must not store an acoustics-only take");
+        assert!(
+            err.is_err(),
+            "CAM++ embed Err must not store an acoustics-only take"
+        );
         assert!(embedding_from_embed_outcome(Ok(None)).is_err());
         assert!(embedding_from_embed_outcome(Ok(Some(vec![1.0])))
             .unwrap()

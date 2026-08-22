@@ -71,4 +71,6 @@ pub use settings::{
     load_settings, save_settings, secrets_path, settings_path, AppSettings,
     DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_PROVIDER,
 };
-pub use status::{ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture, WakeEnrollPeek};
+pub use status::{
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, Phase, StatusPicture, WakeEnrollPeek,
+};

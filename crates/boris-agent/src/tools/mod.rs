@@ -19,6 +19,7 @@
 pub mod artifacts;
 pub mod bash;
 pub mod clipboard;
+pub mod collect_input;
 pub mod files;
 pub mod fs_common;
 pub mod glob;
@@ -253,6 +254,7 @@ pub fn register_builtin_tools_with_preset(
     // taught the model to call todo_write → "unknown tool" hard-fail loop.
     tools.extend(plan_tools(&paths));
     tools.extend(artifact_tools(&paths));
+    tools.push(Box::new(collect_input::CollectInputTool));
     tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {

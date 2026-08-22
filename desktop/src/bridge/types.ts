@@ -18,6 +18,7 @@ export type Phase =
   | "Armed"
   | "AwaitingReply"
   | "AwaitingConfirm"
+  | "AwaitingInput"
   | "Hearing"
   | "Reading"
   | "Thinking"
@@ -83,6 +84,18 @@ export type StatusPicture = {
   artifact?: ArtifactPeek | null;
   /** Live-mic teach progress (dedicated teach page). */
   wake_enroll?: WakeEnrollPeek | null;
+  /** On-screen typed input request. Never includes the typed value. */
+  input?: InputPeek | null;
+};
+
+/** Mirrors `boris_pipeline::InputPeek`. */
+export type InputPeek = {
+  id: string;
+  kind: "exact" | "secret" | "blob" | string;
+  label: string;
+  spoken: string;
+  multiline: boolean;
+  max_chars: number;
 };
 
 /** Mirrors `boris_pipeline::WakeEnrollPeek`. */
@@ -210,6 +223,8 @@ export type AppSettings = {
   overlay_position: "top_center" | "top_left" | "top_right";
   /** Overlay size as a percentage, clamped to 75-125. */
   overlay_scale_percent: number;
+  /** Chord that submits typed overlay/Home input. */
+  typed_input_submit: "enter" | "ctrl_enter";
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
   /** Launch at Windows sign-in (silent, engine on, no main window). */
@@ -256,6 +271,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   overlay_caption_mode: "full",
   overlay_position: "top_center",
   overlay_scale_percent: 100,
+  typed_input_submit: "enter",
   start_engine_on_launch: false,
   start_with_windows: false,
   update_channel: "stable",
@@ -316,6 +332,7 @@ export const OFF_STATUS: StatusPicture = {
   context_limit: null,
   artifact: null,
   wake_enroll: null,
+  input: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -338,6 +355,7 @@ export function normalizeStatus(
     context_limit: raw.context_limit ?? null,
     artifact: raw.artifact ?? null,
     wake_enroll: raw.wake_enroll ?? null,
+    input: raw.input ?? null,
   };
 }
 
@@ -376,6 +394,7 @@ export function normalizeSettings(
         ? raw.overlay_position
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
+    typed_input_submit: normalizeTypedInputSubmit(raw?.typed_input_submit),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
     start_with_windows: raw?.start_with_windows ?? false,
     update_channel: normalizeUpdateChannel(raw?.update_channel),
@@ -386,6 +405,13 @@ export function normalizeSettings(
 function normalizeOverlayScale(raw: number | null | undefined): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
   return Math.min(125, Math.max(75, Math.round(raw / 5) * 5));
+}
+
+function normalizeTypedInputSubmit(
+  raw: string | null | undefined,
+): AppSettings["typed_input_submit"] {
+  const t = raw?.trim().toLowerCase().replace(/[+-]/g, "_");
+  return t === "ctrl_enter" ? "ctrl_enter" : "enter";
 }
 
 function normalizeResidency(

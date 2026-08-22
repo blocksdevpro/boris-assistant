@@ -113,6 +113,12 @@ static OVERLAY_PAINTED: AtomicBool = AtomicBool::new(false);
 /// A wake/fault/unlock asked to show before the island's first paint.
 static OVERLAY_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Tray asked to make the island clickable (drag to reposition).
+static OVERLAY_USER_UNLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Engine is waiting for typed input on the island.
+static OVERLAY_AWAIT_INPUT: AtomicBool = AtomicBool::new(false);
+
 /// Create the HWND far off-screen so a first-frame style flash cannot appear.
 const OVERLAY_OFFSCREEN_X: f64 = -32_000.0;
 const OVERLAY_OFFSCREEN_Y: f64 = -32_000.0;
@@ -437,7 +443,9 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
             | Phase::Talking
             | Phase::AwaitingReply
             | Phase::AwaitingConfirm
+            | Phase::AwaitingInput
     );
+    OVERLAY_AWAIT_INPUT.store(status.phase == Phase::AwaitingInput, Ordering::Release);
 
     if !active {
         // Armed/Quiet: never create or resurrect the island at startup.
@@ -468,6 +476,10 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     let Some(overlay) = ensure_overlay(app) else {
         return;
     };
+    apply_cursor_passthrough(&overlay);
+    if status.phase == Phase::AwaitingInput {
+        let _ = overlay.set_focus();
+    }
     let visible = overlay_is_visible(&overlay);
     if !visible {
         // Stay off-screen until React paints. show()+park on a still-loading
@@ -475,23 +487,36 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
         request_reveal(&overlay, layout);
     } else {
         coordinate_overlay_geometry(app, &overlay, scale_percent, LAYOUT_CONTRACTION_SETTLE);
+        place_overlay(&overlay, cached_position());
     }
 }
 
 fn wants_card_layout(status: &StatusPicture) -> bool {
-    // `artifact` is this-turn only (cleared on the next utterance).
-    status.artifact.is_some()
-        && status.engine == EngineState::On
-        && !matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off)
+    if status.engine != EngineState::On {
+        return false;
+    }
+    if matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off) {
+        return false;
+    }
+    status.artifact.is_some() || input_wants_card(status)
+}
+
+fn input_wants_card(status: &StatusPicture) -> bool {
+    status
+        .input
+        .as_ref()
+        .is_some_and(|input| input.multiline || input.kind.eq_ignore_ascii_case("blob"))
 }
 
 /// Must stay aligned with `overlayStageMode` in the overlay React surface.
+/// Park math is separate: [`overlay_park_y`] uses Card while typed input is
+/// up so a thought-sized field can still grow without clipping the top.
 fn layout_for(status: &StatusPicture) -> OverlayLayout {
     if OVERLAY_CONTENT_HIDDEN.load(Ordering::Relaxed) {
         OverlayLayout::Presence
     } else if wants_card_layout(status) {
         OverlayLayout::Card
-    } else if status.phase == Phase::Thinking {
+    } else if status.phase == Phase::Thinking || status.input.is_some() {
         OverlayLayout::Thought
     } else {
         OverlayLayout::Presence
@@ -662,10 +687,7 @@ fn show_without_focus<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
     if let Err(e) = overlay.show() {
         tracing::warn!(error = %e, "overlay show failed");
     }
-    // Showing a window must never turn it into a game input target.
-    if let Err(e) = overlay.set_ignore_cursor_events(true) {
-        tracing::warn!(error = %e, "overlay click-through reassert failed");
-    }
+    apply_cursor_passthrough(overlay);
 }
 
 fn schedule_hide<R: Runtime>(app: AppHandle<R>, epoch: u64, delay: Duration) {
@@ -728,7 +750,30 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
 /// so shift up by half the extra height. That keeps a compact pill where the
 /// old presence window sat instead of dropping it into the middle of the card.
 fn overlay_park_y(monitor_y: i32, screen_height: u32, scale: f64) -> i32 {
+    let layout = OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed));
+    // Short exact fields paint a thought-sized island, but the HWND still
+    // parks as a card so growth cannot run off the top of the monitor.
+    let park = if OVERLAY_AWAIT_INPUT.load(Ordering::Relaxed) {
+        OverlayLayout::Card
+    } else {
+        layout
+    };
+    overlay_park_y_for(monitor_y, screen_height, scale, park)
+}
+
+/// Presence/thought: keep the small island at the top margin by shifting the
+/// card-budget HWND up. Card: park the HWND on-screen so the grown island is
+/// not clipped by the top of the monitor.
+fn overlay_park_y_for(
+    monitor_y: i32,
+    screen_height: u32,
+    scale: f64,
+    layout: OverlayLayout,
+) -> i32 {
     let margin = (f64::from(screen_height) * OVERLAY_TOP_MARGIN_FRAC) as i32;
+    if layout == OverlayLayout::Card {
+        return monitor_y + margin;
+    }
     let presence_h = OVERLAY_BASE_HEIGHT * scale;
     let max_h = OVERLAY_CARD_BASE_HEIGHT * scale;
     monitor_y + margin + ((presence_h - max_h) / 2.0).round() as i32
@@ -741,7 +786,8 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
         tracing::warn!("set_overlay_input_locked: overlay window missing");
         return Ok(());
     };
-    overlay.set_ignore_cursor_events(locked)?;
+    OVERLAY_USER_UNLOCKED.store(!locked, Ordering::Release);
+    apply_cursor_passthrough(&overlay);
     if !locked {
         // Unlocking is an explicit request to position the overlay. Make the
         // otherwise wake-only window visible without focusing it.
@@ -752,6 +798,14 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
     }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())
+}
+
+fn apply_cursor_passthrough<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    let locked = !OVERLAY_USER_UNLOCKED.load(Ordering::Relaxed)
+        && !OVERLAY_AWAIT_INPUT.load(Ordering::Relaxed);
+    if let Err(e) = overlay.set_ignore_cursor_events(locked) {
+        tracing::debug!(error = %e, locked, "overlay cursor passthrough");
+    }
 }
 
 #[cfg(test)]
@@ -789,6 +843,36 @@ mod tests {
     }
 
     #[test]
+    fn typed_input_short_uses_thought_layout() {
+        let mut picture = on();
+        picture.phase = Phase::AwaitingInput;
+        picture.input = Some(boris_pipeline::InputPeek {
+            id: "p1".into(),
+            kind: "exact".into(),
+            label: "Your ID".into(),
+            spoken: "Type your ID.".into(),
+            multiline: false,
+            max_chars: 512,
+        });
+        assert_eq!(layout_for(&picture), OverlayLayout::Thought);
+    }
+
+    #[test]
+    fn typed_input_blob_uses_card_layout() {
+        let mut picture = on();
+        picture.phase = Phase::AwaitingInput;
+        picture.input = Some(boris_pipeline::InputPeek {
+            id: "p1".into(),
+            kind: "blob".into(),
+            label: "Log".into(),
+            spoken: "Paste the log.".into(),
+            multiline: true,
+            max_chars: 12_000,
+        });
+        assert_eq!(layout_for(&picture), OverlayLayout::Card);
+    }
+
+    #[test]
     fn hearing_stays_presence() {
         let mut picture = on();
         picture.phase = Phase::Hearing;
@@ -810,7 +894,7 @@ mod tests {
     #[test]
     fn park_y_keeps_presence_center_on_a_card_hwnd() {
         let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
-        let y = overlay_park_y(0, 1080, 1.0);
+        let y = overlay_park_y_for(0, 1080, 1.0, OverlayLayout::Presence);
         assert_eq!(y, margin - 90);
         assert_eq!(margin + 184 / 2, y + 364 / 2);
 
@@ -818,6 +902,19 @@ mod tests {
         assert_eq!(
             margin + (184.0_f64 * 1.25 / 2.0).round() as i32,
             y125 + (364.0_f64 * 1.25 / 2.0).round() as i32
+        );
+    }
+
+    #[test]
+    fn park_y_keeps_a_card_hwnd_on_screen() {
+        let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
+        assert_eq!(
+            overlay_park_y_for(0, 1080, 1.0, OverlayLayout::Card),
+            margin
+        );
+        assert_eq!(
+            overlay_park_y_for(0, 1080, 1.25, OverlayLayout::Card),
+            margin
         );
     }
 }

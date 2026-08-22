@@ -1,9 +1,12 @@
-//! Wake-word barge-in while Boris is talking.
+//! Wake-word barge-in while Boris is talking or working.
 //!
-//! Armed's live-mic gate is the wrong test here: the 2 s window is full of
-//! speaker echo, so playback_z / mismatch_z reject a real "Boris" said over
-//! leftover TTS. Barge-in therefore uses a lower wake threshold plus a
+//! Talking: Armed's live-mic gate is the wrong test because the 2 s window is
+//! full of speaker echo, so playback_z / mismatch_z reject a real "Boris" said
+//! over leftover TTS. Barge-in therefore uses a lower wake threshold plus a
 //! close-talk energy rise. A false pause still resumes leftover speech.
+//!
+//! Thinking: there is no TTS in the mic, so the Armed live-mic gate applies.
+//! Wake-only (no energy fallback). Work keeps running until STT decides.
 
 use std::time::Instant;
 
@@ -83,6 +86,31 @@ impl<'a> BargeWatch<'a> {
 
     /// Drain available mic frames and return a barge-in hit window.
     pub(super) fn poll(&mut self) -> Option<boris_core::AudioBuffer> {
+        self.poll_hit(false)
+    }
+
+    /// Thinking barge-in: wake word only. Close-talk energy is a Talking
+    /// fallback because leftover TTS masks the wake; during Thinking there is
+    /// no TTS in the mic, so energy-only would fire on a roommate or a video.
+    pub(super) fn poll_wake_only(&mut self) -> Option<boris_core::AudioBuffer> {
+        self.poll_hit(true)
+    }
+
+    /// Drop the rolling window so the same wake crop cannot re-fire.
+    pub(super) fn reset(&mut self) {
+        self.window = SlidingBuffer::new(WAKEWORD_WINDOW_SIZE);
+        self.samples_since_score = 0;
+        self.hop_len = 0;
+        self.energy_hops = 0;
+        self.baseline_rms = 0.0;
+        self.loud_hops = 0;
+        self.close_hops = 0;
+        self.wake_streak = 0;
+        self.last_score = 0.0;
+        self.max_score = 0.0;
+    }
+
+    fn poll_hit(&mut self, wake_only: bool) -> Option<boris_core::AudioBuffer> {
         let score_every = duration_to_samples(WAKEWORD_PROCESSING_INTERVAL, AUDIO_TARGET_RATE);
         let mut energy_hit = false;
         loop {
@@ -137,7 +165,12 @@ impl<'a> BargeWatch<'a> {
         let energy_only =
             self.loud_hops >= ENERGY_ONLY_STREAK || self.close_hops >= ENERGY_CLOSE_STREAK;
         let energy_with_wake = energy_hit && self.last_score >= BARGE_WAKE_SOFT;
-        if !wake_hit && !energy_only && !energy_with_wake {
+        let hit = if wake_only {
+            wake_hit
+        } else {
+            wake_hit || energy_only || energy_with_wake
+        };
+        if !hit {
             return None;
         }
 
@@ -155,6 +188,7 @@ impl<'a> BargeWatch<'a> {
             streak = self.wake_streak,
             baseline_rms = self.baseline_rms,
             loud_hops = self.loud_hops,
+            wake_only,
             why,
             "barge-in accepted"
         );
@@ -261,6 +295,53 @@ pub(super) fn decide_barge_listen(
     BargeDecision::TakeTurn(transcript.trim().to_string())
 }
 
+/// Classify a barge-in while the agent is still working.
+///
+/// Silence / wake-only / continue → [`BargeDecision::Resume`] (work keeps
+/// running). A bare stop → [`BargeDecision::StopTalking`] (cancel the turn).
+/// A stop plus a new instruction, or any other request, takes a new turn.
+pub(super) fn decide_thinking_barge_listen(speech_hops: u32, transcript: &str) -> BargeDecision {
+    if speech_hops < MIN_BARGE_SPEECH_HOPS {
+        return BargeDecision::Resume;
+    }
+    let normalized = normalize_utterance(transcript);
+    if normalized.is_empty() {
+        return BargeDecision::Resume;
+    }
+    let rest = strip_wake_prefix(&normalized);
+    if rest.is_empty() || is_thinking_continue_phrase(rest) || is_short_ack(rest) {
+        return BargeDecision::Resume;
+    }
+    if is_thinking_stop_only(rest) {
+        return BargeDecision::StopTalking;
+    }
+    BargeDecision::TakeTurn(transcript.trim().to_string())
+}
+
+/// New user text after interrupting in-flight work. Keeps the original request
+/// as context so "do the python one instead" still makes sense.
+pub(super) fn thinking_takeover_text(previous: Option<&str>, barge: &str) -> String {
+    let barge = barge.trim();
+    let prev = previous
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != barge);
+    match prev {
+        None => barge.to_string(),
+        Some(prev) => format!("{barge}\n\n(Interrupted previous request: {prev})"),
+    }
+}
+
+/// True when the utterance is only the wake word, so we should wait for a
+/// follow-up ("Boris" … "stop") instead of treating it as resume immediately.
+#[cfg(test)]
+pub(super) fn thinking_needs_followup(transcript: &str) -> bool {
+    let normalized = normalize_utterance(transcript);
+    if normalized.is_empty() {
+        return true;
+    }
+    strip_wake_prefix(&normalized).is_empty()
+}
+
 fn normalize_utterance(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last_space = true;
@@ -341,6 +422,109 @@ fn is_stop_phrase(text: &str) -> bool {
             | "thats enough"
             | "that is enough"
             | "cancel"
+    )
+}
+
+fn is_thinking_stop_only(text: &str) -> bool {
+    if is_bare_thinking_stop(text) {
+        return true;
+    }
+    if let Some(rest) = strip_thinking_stop_lead(text) {
+        return rest.is_empty()
+            || is_bare_thinking_stop(rest)
+            || is_stop_filler(rest)
+            || is_thinking_continue_phrase(rest)
+            || is_short_ack(rest);
+    }
+    if let Some(idx) = text.find("not what i said") {
+        let after = text[idx + "not what i said".len()..].trim();
+        return after.is_empty() || is_stop_filler(after) || is_bare_thinking_stop(after);
+    }
+    false
+}
+
+fn is_bare_thinking_stop(text: &str) -> bool {
+    matches!(
+        text,
+        "stop"
+            | "stop talking"
+            | "stop that"
+            | "stop it"
+            | "cancel"
+            | "cancel that"
+            | "wait"
+            | "wait stop"
+            | "wait no"
+            | "hold on"
+            | "hold up"
+            | "never mind"
+            | "nevermind"
+            | "abort"
+            | "quit"
+            | "enough"
+            | "thats enough"
+            | "that is enough"
+            | "no"
+            | "nope"
+            | "nah"
+            | "wrong"
+            | "shut up"
+            | "be quiet"
+            | "quiet"
+            | "silence"
+            | "thats not what i said"
+            | "that is not what i said"
+            | "not what i said"
+    )
+}
+
+fn strip_thinking_stop_lead(text: &str) -> Option<&str> {
+    const LEADS: &[&str] = &[
+        "stop ",
+        "cancel ",
+        "wait ",
+        "hold on ",
+        "hold up ",
+        "never mind ",
+        "nevermind ",
+        "no ",
+        "nope ",
+        "nah ",
+        "wrong ",
+    ];
+    for lead in LEADS {
+        if let Some(rest) = text.strip_prefix(lead) {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+fn is_stop_filler(text: &str) -> bool {
+    matches!(
+        text,
+        "that" | "it" | "this" | "now" | "please" | "right now" | "please stop"
+    )
+}
+
+fn is_thinking_continue_phrase(text: &str) -> bool {
+    matches!(
+        text,
+        "continue"
+            | "go on"
+            | "keep going"
+            | "keep working"
+            | "keep talking"
+            | "go ahead"
+            | "carry on"
+            | "sorry"
+            | "sorry go on"
+            | "sorry continue"
+            | "thats fine"
+            | "that is fine"
+            | "its fine"
+            | "nothing"
+            | "keep at it"
     )
 }
 
@@ -505,6 +689,122 @@ mod tests {
         assert!(
             watch.poll().is_some(),
             "sustained close-talk over echo must pause leftover"
+        );
+    }
+
+    #[test]
+    fn thinking_stop_includes_wait_and_never_mind() {
+        assert_eq!(
+            decide_thinking_barge_listen(12, "stop",),
+            BargeDecision::StopTalking
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "Boris wait",),
+            BargeDecision::StopTalking
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "never mind",),
+            BargeDecision::StopTalking
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "that's not what I said",),
+            BargeDecision::StopTalking
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "hold on",),
+            BargeDecision::StopTalking
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "cancel that",),
+            BargeDecision::StopTalking
+        );
+    }
+
+    #[test]
+    fn thinking_silence_and_continue_keep_the_turn() {
+        assert_eq!(
+            decide_thinking_barge_listen(0, "stop"),
+            BargeDecision::Resume
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "Boris",),
+            BargeDecision::Resume
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "hey Boris, continue",),
+            BargeDecision::Resume
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "keep going",),
+            BargeDecision::Resume
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "ok"),
+            BargeDecision::Resume
+        );
+    }
+
+    #[test]
+    fn thinking_new_request_takes_a_turn() {
+        assert_eq!(
+            decide_thinking_barge_listen(12, "search rust docs instead",),
+            BargeDecision::TakeTurn("search rust docs instead".into())
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "Boris open notes",),
+            BargeDecision::TakeTurn("Boris open notes".into())
+        );
+        let redirect = "hey boris, no i dont think thats the right approach please just do xyz";
+        assert_eq!(
+            decide_thinking_barge_listen(12, redirect),
+            BargeDecision::TakeTurn(redirect.into())
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "wait search rust docs instead"),
+            BargeDecision::TakeTurn("wait search rust docs instead".into())
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "stop doing rust and write python"),
+            BargeDecision::TakeTurn("stop doing rust and write python".into())
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "that's not what I said, grep the other folder"),
+            BargeDecision::TakeTurn("that's not what I said, grep the other folder".into())
+        );
+    }
+
+    #[test]
+    fn thinking_takeover_keeps_previous_request() {
+        assert_eq!(thinking_takeover_text(None, " do xyz "), "do xyz");
+        assert_eq!(
+            thinking_takeover_text(Some("write a rust parser"), "do python instead"),
+            "do python instead\n\n(Interrupted previous request: write a rust parser)"
+        );
+    }
+
+    #[test]
+    fn thinking_followup_only_after_bare_wake() {
+        assert!(thinking_needs_followup("Boris"));
+        assert!(thinking_needs_followup("hey boris"));
+        assert!(thinking_needs_followup(""));
+        assert!(!thinking_needs_followup("Boris stop"));
+        assert!(!thinking_needs_followup("continue"));
+    }
+
+    #[test]
+    fn poll_wake_only_ignores_close_talk_energy() {
+        let (tx, rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let mut wake = ScriptedWake {
+            scores: vec![0.05],
+            idx: 0,
+        };
+        let mut watch = BargeWatch::new(&rx, &mut wake);
+        tx.send(hops(0.02, ENERGY_WARMUP_HOPS as usize)).unwrap();
+        assert!(watch.poll_wake_only().is_none());
+        tx.send(hops(0.12, ENERGY_ONLY_STREAK as usize)).unwrap();
+        assert!(
+            watch.poll_wake_only().is_none(),
+            "thinking barge-in must not fire on energy without a wake"
         );
     }
 

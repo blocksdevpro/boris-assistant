@@ -79,11 +79,11 @@ pub use activity::{
     describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
     Tense, VerbKind,
 };
-pub use agent::{Agent, AgentOptions};
+pub use agent::{Agent, AgentOptions, TurnCancel};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{Context, Message, Role};
 pub use error::{AgentError, AgentErrorKind};
-pub use loop_::{agent_loop, resume_pending_tool, LoopState};
+pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};
 pub use memory::{
     FactCategory, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact, UserProfile,
@@ -94,9 +94,9 @@ pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
 pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};
 pub use runtime::{
-    default_user_read_roots, ActivationSet, JsonlAuditSink, ListToolsContext, NetworkPolicy,
-    NullAuditSink, PendingToolCall, ProgressEvent, SandboxConfig, ShellPolicy, ToolRuntime,
-    ToolRuntimeFeatures,
+    default_user_read_roots, ActivationSet, InputKind, JsonlAuditSink, ListToolsContext,
+    NetworkPolicy, NullAuditSink, PendingInput, PendingToolCall, ProgressEvent, SandboxConfig,
+    ShellPolicy, ToolRuntime, ToolRuntimeFeatures,
 };
 pub use session::{
     generate_session_id, messages_fingerprint, ArtifactIndex, ArtifactKind, ArtifactMeta,

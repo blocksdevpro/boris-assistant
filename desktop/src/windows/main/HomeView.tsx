@@ -8,6 +8,7 @@ import {
   PowerOff,
 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
+import { CollectInputField } from "@/components/CollectInputField";
 import { SessionArtifactDesk } from "@/components/artifacts";
 import { Button } from "@/components/ui/button";
 import type {
@@ -82,7 +83,8 @@ export function HomeView({
   const reduceMotion = useReducedMotion();
   const act = humanizeActivity(status.activity);
   const showActivity =
-    act && (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
+    act &&
+      (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
   const stopAvailable = engineOn || engineFault;
   const showUpdateBanner =
     availableUpdate != null &&
@@ -441,6 +443,23 @@ function ConversationView({ status }: { status: StatusPicture }) {
             );
           case "thought":
             return <LiveThoughts key={`t-${i}`} text={line.text} />;
+          case "input":
+            return (
+              <div
+                key={`i-${i}`}
+                className="rounded-[12px] bg-white/[0.04] px-4 py-3 ring-1 ring-white/10"
+              >
+                <p className="text-[13px] font-medium text-white/55">
+                  {line.label}
+                </p>
+                <p className="mt-1.5 text-[15px] leading-relaxed text-white/88">
+                  {line.prompt}
+                </p>
+                {status.input ? (
+                  <CollectInputField input={status.input} hideHeading />
+                ) : null}
+              </div>
+            );
           case "confirm":
             return (
               <div

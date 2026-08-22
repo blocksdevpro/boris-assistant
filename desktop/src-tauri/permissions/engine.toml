@@ -41,6 +41,16 @@ description = "Switch speaker device"
 commands.allow = ["switch_output"]
 
 [[permission]]
+identifier = "allow-submit-input"
+description = "Send typed overlay or Home input to the engine"
+commands.allow = ["submit_input"]
+
+[[permission]]
+identifier = "allow-cancel-input"
+description = "Cancel a typed overlay or Home input request"
+commands.allow = ["cancel_input"]
+
+[[permission]]
 identifier = "allow-models-status"
 description = "Read local STT/TTS model install status"
 commands.allow = ["models_status"]

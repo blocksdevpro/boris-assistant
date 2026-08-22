@@ -275,6 +275,28 @@ async fn run_tool_batch_sequential(
                     emit,
                 );
             }
+            InvokeResult::NeedsInput {
+                pending,
+                speak_prompt,
+            } => {
+                let rest: Vec<RawToolCall> = iter.collect();
+                let pending_turn = PendingTurn {
+                    pending: pending.clone(),
+                    batch_with: Vec::new(),
+                    remaining_calls: rest,
+                    tools_used: tools_used.clone(),
+                    tool_rounds,
+                    confirms_used: *confirms_used,
+                    user_text: user_text.to_string(),
+                };
+                return Ok(ToolBatchResult::Paused {
+                    outcome: AgentOutcome::NeedsInput {
+                        text: speak_prompt,
+                        pending,
+                    },
+                    pending_turn,
+                });
+            }
             InvokeResult::NeedsConfirmation {
                 pending,
                 speak_prompt,

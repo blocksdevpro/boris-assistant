@@ -11,7 +11,9 @@ use crate::tool::{
 };
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
-use super::pending::PendingToolCall;
+use crate::tools::collect_input::parse_collect_args;
+
+use super::pending::{PendingInput, PendingToolCall};
 use super::policy::{decide, PolicyDecision, SandboxConfig};
 use super::timeout::{is_timeout, run_with_timeout};
 
@@ -164,7 +166,30 @@ impl ToolRuntime {
                     speak_prompt,
                 }
             }
+            PolicyDecision::Allow if meta.collects_input => self.pause_input(inv, meta, args),
             PolicyDecision::Allow => self.execute_allowed(tool, inv, meta, args, opts).await,
+        }
+    }
+
+    fn pause_input(&self, inv: ToolInvocation, meta: ToolMeta, args: Value) -> InvokeResult {
+        let (kind, spoken, label, max_chars) = parse_collect_args(&args);
+        let pending = PendingToolCall::new(
+            self.next_pending_id(),
+            inv.name.clone(),
+            args,
+            args_summary(&inv.name, &inv.args),
+            meta.risk,
+            inv.call_id.clone(),
+        )
+        .with_input(PendingInput {
+            kind,
+            label,
+            max_chars,
+        });
+        self.audit_event(&inv, &meta, "input", None, None, Some("needs_input"));
+        InvokeResult::NeedsInput {
+            pending,
+            speak_prompt: spoken,
         }
     }
 

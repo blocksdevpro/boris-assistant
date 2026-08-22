@@ -187,12 +187,12 @@ export function SpeechSettings({
         ) : null}
       </SettingsGroup>
       <SettingsGroup
-        title="While Boris is talking"
-        footer="Say “Hey Boris”, or just talk over him. Stay quiet, or say continue, and he picks up where he left off. Say stop to drop the rest."
+        title="While Boris is talking or working"
+        footer="Talking: say “Hey Boris”, or just talk over him. Stay quiet, or say continue, and he picks up where he left off. Say stop to drop the rest. Working: say “Hey Boris”, then stop or a new ask. Stay quiet and he keeps going."
       >
         <SettingsRow
           label="Say Hey Boris to interrupt"
-          subtitle="Pauses leftover speech. Talking louder than the speakers also works — a false pause resumes."
+          subtitle="Pauses leftover speech, or cancels a running turn after he hears you. Talking louder than the speakers works while he is speaking. A false hit resumes."
           last
         >
           <Toggle

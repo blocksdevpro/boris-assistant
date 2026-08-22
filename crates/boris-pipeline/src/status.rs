@@ -22,6 +22,8 @@ pub enum Phase {
     AwaitingReply,
     /// Waiting for yes/no after a dangerous tool confirmation prompt.
     AwaitingConfirm,
+    /// Waiting for typed / pasted input on the overlay or Home.
+    AwaitingInput,
     Hearing,
     Reading,
     Thinking,
@@ -83,6 +85,21 @@ pub struct StatusPicture {
     /// (or just finished). Not a turn — the teach page is the surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_enroll: Option<WakeEnrollPeek>,
+    /// On-screen typed input request. Never includes the typed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputPeek>,
+}
+
+/// Field the UI should show while [`Phase::AwaitingInput`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputPeek {
+    pub id: String,
+    /// `exact` | `secret` | `blob`
+    pub kind: String,
+    pub label: String,
+    pub spoken: String,
+    pub multiline: bool,
+    pub max_chars: u32,
 }
 
 /// Progress for the dedicated “teach your voice” page.
@@ -122,6 +139,7 @@ impl StatusPicture {
             context_limit: None,
             artifact: None,
             wake_enroll: None,
+            input: None,
         }
     }
 }

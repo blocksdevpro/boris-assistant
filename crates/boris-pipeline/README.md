@@ -30,13 +30,16 @@ snapshots. Not a worker mesh and not a Session FSM.
 | `Thinking` | Agent + tools (+ TTS synth) |
 | `Talking` | Playback started |
 
-Wake scoring, VAD capture, STT, and agent orchestration run on the single
-engine thread. Sentence TTS inference is handed to one turn-scoped producer so
-the engine can continue servicing Stop/device-switch commands and audio events;
+Wake scoring, VAD capture, and STT run on the engine thread. The agent turn
+runs on a scoped thread during Thinking so the engine can still service Stop
+and barge-in. Sentence TTS inference is handed to one turn-scoped producer;
 the engine remains the sole owner of phases and playback state. While Talking,
 a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
 liveness is not used — leftover TTS in the mic looks like a speaker); silence
-or “continue” resumes from the cut (`voice_barge_in` / `BORIS_BARGE_IN`). Reusable STT
+or “continue” resumes from the cut. While Thinking, the same toggle uses wake
+plus the Armed live-mic gate; work keeps running until STT decides. Silence
+or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
+request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Reusable STT
 and TTS loader threads live for the engine lifetime instead of being recreated
 per turn. Status is pushed for the UI.
 
@@ -137,7 +140,7 @@ still match the catalog hash.
 | `BORIS_MODEL_BASE_URL` | Mirror base for `install_models` |
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
-| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking |
+| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking or Thinking |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_LOG` / `RUST_LOG` | Logging filters (host) |
 

@@ -3,6 +3,7 @@ import { toneFor } from "@/lib/phaseVisual";
 import {
   isConfirmContext,
   isToolActivity,
+  overlayInputUsesCard,
   overlayStageMode,
   overlayThinkingText,
   pickCaption,
@@ -27,6 +28,7 @@ describe("overlay preview fixtures", () => {
       "thinking-long",
       "thinking-tool",
       "tool-failure",
+      "typed-input",
       "confirm",
       "talking",
       "fault",
@@ -76,6 +78,10 @@ describe("overlay preview fixtures", () => {
       "No wake word needed",
     );
     expect(presenceFor("confirm").secondary).toBe("Say yes or no");
+    expect(presenceFor("typed-input")).toEqual({
+      primary: "Your turn",
+      secondary: "API key",
+    });
     expect(presenceFor("fault").secondary).toBe("");
     expect(presenceFor("thinking")).toEqual({
       primary: "Thinking",
@@ -99,6 +105,17 @@ describe("overlay preview fixtures", () => {
     expect(overlayStageMode(getStatusFixture("thinking-tool")!)).toBe("thought");
     expect(overlayStageMode(getStatusFixture("ready")!)).toBe("presence");
     expect(overlayStageMode(getStatusFixture("artifact-card")!)).toBe("card");
+    const typed = getStatusFixture("typed-input")!;
+    expect(overlayStageMode(typed)).toBe("thought");
+    expect(overlayInputUsesCard(typed)).toBe(false);
+    expect(
+      overlayInputUsesCard({
+        ...typed,
+        input: typed.input
+          ? { ...typed.input, kind: "blob", multiline: true }
+          : null,
+      }),
+    ).toBe(true);
   });
 
   it("shows a card only for this turn and the Ready linger", () => {

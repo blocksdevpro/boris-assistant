@@ -95,6 +95,14 @@ const PHASE: Record<Phase, PhaseTone> = {
     alive: true,
     motion: "listen",
   },
+  AwaitingInput: {
+    label: "Your turn",
+    hint: "Type or paste on screen",
+    accent: LISTEN.accent,
+    glow: LISTEN.glow,
+    alive: true,
+    motion: "listen",
+  },
   Hearing: {
     label: "Listening",
     hint: "Speak naturally",

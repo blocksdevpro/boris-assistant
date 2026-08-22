@@ -113,7 +113,8 @@ pub async fn agent_loop(
 
         // On the final allowed round, withhold tools so the model must speak.
         let at_cap = round >= max_rounds;
-        let response = complete_round(&mut state, user_text, config, at_cap, &emit).await?;
+        let response =
+            complete_round(&mut state, user_text, config, at_cap, &emit, &cancel).await?;
 
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
             // One round before cap: run tools, then inject a finish nudge and
@@ -212,8 +213,10 @@ pub async fn agent_loop(
             reply = cleaned;
         }
 
-        reply =
-            ensure_spoken_reply_at_cap(&mut state, user_text, config, at_cap, reply, &emit).await?;
+        reply = ensure_spoken_reply_at_cap(
+            &mut state, user_text, config, at_cap, reply, &emit, &cancel,
+        )
+        .await?;
 
         if !reply.is_empty() {
             last_speakable = Some(reply.clone());
@@ -285,6 +288,105 @@ pub async fn agent_loop(
     })
 }
 
+/// Continue after the host collected (or cancelled) typed input, then remaining tools.
+pub async fn resume_pending_input(
+    mut state: LoopState<'_>,
+    pending_turn: PendingTurn,
+    value: Option<String>,
+    config: &AgentLoopConfig,
+    emit: Option<EmitFn>,
+    cancel: Option<CancellationToken>,
+) -> Result<LoopResult, AgentError> {
+    let emit = emit.unwrap_or_else(noop_emit);
+    let mut tools_used = pending_turn.tools_used;
+    let activation_start = tools_used.len();
+    let tool_rounds = pending_turn.tool_rounds;
+    let mut confirms_used = pending_turn.confirms_used;
+    let remaining = pending_turn.remaining_calls;
+    let pending = pending_turn.pending;
+    let user_text = pending_turn.user_text;
+    let input = pending
+        .input
+        .clone()
+        .ok_or_else(|| AgentError::new("pending pause is not typed input"))?;
+
+    let started = Instant::now();
+    let observation = match value {
+        Some(raw) => {
+            let clipped: String = raw.chars().take(input.max_chars as usize).collect();
+            crate::tools::collect_input::format_input_observation(input.kind, &clipped)
+        }
+        None => "Error: user cancelled typed input".into(),
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let ok = observation_looks_ok(&observation);
+    log_tool_done(&pending.name, ok, duration_ms);
+    emit(AgentEvent::ToolExecutionEnd {
+        call_id: pending.call_id.clone(),
+        tool_name: pending.name.clone(),
+        ok,
+        duration_ms,
+    });
+    tools_used.push(pending.name.clone());
+    state.context.push(
+        Role::Tool,
+        tool_observation_json(&pending.call_id, observation),
+    );
+
+    let batch_result = process_tool_calls(
+        &mut state,
+        remaining,
+        &mut tools_used,
+        tool_rounds,
+        &mut confirms_used,
+        &user_text,
+        config,
+        &emit,
+        cancel.clone(),
+    )
+    .await?;
+    if let Some(activated) = state.activated {
+        crate::runtime::activate_tools(
+            activated,
+            tools_used[activation_start..]
+                .iter()
+                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
+                .cloned(),
+        );
+    }
+
+    match batch_result {
+        ToolBatchResult::Continue => {}
+        ToolBatchResult::Paused {
+            outcome,
+            pending_turn,
+        } => {
+            return finish_paused(
+                &emit,
+                tool_rounds,
+                outcome,
+                tool_rounds,
+                tools_used,
+                pending_turn,
+            );
+        }
+    }
+
+    agent_loop(
+        state,
+        &user_text,
+        config,
+        tools_used,
+        tool_rounds,
+        confirms_used,
+        cancel,
+        Some(emit),
+        None,
+        0,
+    )
+    .await
+}
+
 /// Execute one already-approved (or rejected) pending tool (plus any
 /// `batch_with` siblings covered by the same yes/no), then remaining siblings.
 pub async fn resume_pending_tool(
@@ -341,8 +443,8 @@ pub async fn resume_pending_tool(
         match state.runtime.invoke(tool, inv, opts).await {
             InvokeResult::Observation(s) => s,
             InvokeResult::Denied { reason } => format!("Error: {reason}"),
-            InvokeResult::NeedsConfirmation { .. } => {
-                "Error: unexpected confirmation after grant".to_string()
+            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => {
+                "Error: unexpected pause after grant".to_string()
             }
         }
     } else {
@@ -406,8 +508,8 @@ pub async fn resume_pending_tool(
             match state.runtime.invoke(tool, inv, opts).await {
                 InvokeResult::Observation(s) => s,
                 InvokeResult::Denied { reason } => format!("Error: {reason}"),
-                InvokeResult::NeedsConfirmation { .. } => {
-                    "Error: unexpected confirmation after grant".to_string()
+                InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => {
+                    "Error: unexpected pause after grant".to_string()
                 }
             }
         } else {

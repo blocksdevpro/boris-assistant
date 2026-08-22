@@ -49,7 +49,7 @@ pub(super) struct EngineRuntime {
     pub system_prompt: String,
     pub residency: super::models::ModelResidency,
     pub liveness: crate::liveness::WakeLiveness,
-    /// Wake-word barge-in while Talking (same live-mic gate as Armed).
+    /// Wake-word barge-in while Talking or Thinking.
     pub barge_in: bool,
     #[allow(dead_code)]
     pub maintenance: boris_agent::MaintenanceWorker,
@@ -63,7 +63,9 @@ pub(super) fn init_runtime(
     let init_started = std::time::Instant::now();
     tracing::info!("engine thread entered run()");
     if config.voice_barge_in {
-        tracing::info!("wake-word barge-in enabled (mixed-window wake + close-talk energy)");
+        tracing::info!(
+            "wake-word barge-in enabled (talking: mixed-window wake + close-talk; thinking: wake + live-mic gate)"
+        );
     }
     publish_starting(&status_tx, &config);
 
@@ -169,6 +171,7 @@ pub(super) fn init_runtime(
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
         artifact: None,
         wake_enroll: None,
+        input: None,
         status_tx,
         phase_started: std::time::Instant::now(),
     };
@@ -227,6 +230,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         context_limit: None,
         artifact: None,
         wake_enroll: None,
+        input: None,
     });
 }
 
@@ -424,6 +428,7 @@ fn fault(
         context_limit: None,
         artifact: None,
         wake_enroll: None,
+        input: None,
     });
 }
 

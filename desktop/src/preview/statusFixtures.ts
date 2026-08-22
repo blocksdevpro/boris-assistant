@@ -11,6 +11,7 @@ export type StatusFixtureName =
   | "thinking-long"
   | "thinking-tool"
   | "tool-failure"
+  | "typed-input"
   | "confirm"
   | "talking"
   | "fault"
@@ -106,6 +107,21 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     heard: "Check the latest train times.",
     activity: "fail · web_search",
     turn: "preview-tool-failure",
+  }),
+  fixture("typed-input", "Typed input", {
+    engine: "On",
+    phase: "AwaitingInput",
+    said: "Paste the API key on screen. I will not read it back.",
+    activity: "input · API key",
+    input: {
+      id: "preview-input",
+      kind: "secret",
+      label: "API key",
+      spoken: "Paste the API key on screen. I will not read it back.",
+      multiline: false,
+      max_chars: 2048,
+    },
+    turn: "preview-input",
   }),
   fixture("confirm", "Confirm", {
     engine: "On",

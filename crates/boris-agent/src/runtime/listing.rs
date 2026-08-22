@@ -116,6 +116,7 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "grep",
     "bash",
     "present_artifact",
+    "collect_input",
 ];
 
 /// Feature flags for listing / concurrency / progress (owned by [`crate::Agent`]).

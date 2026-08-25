@@ -22,7 +22,7 @@ pub mod store;
 pub use extract::{extract_heuristic, extract_with_llm, should_llm_extract, ProfileDelta};
 pub use index::{IndexHit, MemoryIndex};
 pub use long_term::{LongTermMemory, MemoryHit, SessionMemoryTarget};
-pub use profile::{FactCategory, UserFact, UserProfile};
+pub use profile::{now_ms, FactCategory, FactStatus, UserFact, UserProfile};
 pub use store::ProfileStore;
 
 /// Default max size of the injected `<personal_context>` block.

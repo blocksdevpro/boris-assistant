@@ -136,6 +136,8 @@ impl Agent {
                     delta
                         .facts_remove_query
                         .extend(llm_delta.facts_remove_query);
+                    delta.forget_preferred_name |= llm_delta.forget_preferred_name;
+                    delta.forget_all |= llm_delta.forget_all;
                     delta.ongoing_add.extend(llm_delta.ongoing_add);
                     if llm_delta.ongoing_replace.is_some() {
                         delta.ongoing_replace = llm_delta.ongoing_replace;
@@ -199,10 +201,12 @@ impl Agent {
 
     /// Refresh system prompt when profile tools mutated personal context mid-turn.
     pub(super) fn maybe_refresh_after_tools(&mut self, tools_used: &[String]) {
-        if tools_used
-            .iter()
-            .any(|n| n == "save_user_fact" || n == "update_user_profile" || n == "get_user_context")
-        {
+        if tools_used.iter().any(|n| {
+            n == "save_user_fact"
+                || n == "update_user_profile"
+                || n == "forget_user_memory"
+                || n == "get_user_context"
+        }) {
             self.refresh_system_prompt();
         }
     }

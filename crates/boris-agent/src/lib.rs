@@ -81,13 +81,16 @@ pub use activity::{
 };
 pub use agent::{Agent, AgentOptions, TurnCancel};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
-pub use context::{Context, ContextBudget, Message, MessageOrigin, Role};
+pub use context::{
+    Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
+    TaskStateEntry, TaskStatus,
+};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};
 pub use memory::{
-    FactCategory, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact, UserProfile,
-    PERSONAL_CONTEXT_MAX_CHARS,
+    FactCategory, FactStatus, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact,
+    UserProfile, PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
 pub use outcome::AgentOutcome;

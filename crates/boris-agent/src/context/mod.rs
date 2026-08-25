@@ -1,7 +1,8 @@
 //! Working conversation memory for the agent loop.
 //!
-//! Holds [`Message`]s, prunes by user-turn count, and applies mechanical /
-//! summary compaction so the wire payload stays within token budgets.
+//! Keeps canonical append-only [`Message`] history separate from the derived
+//! model view, which may be pruned, compacted, and enriched with task/memory
+//! capsules to stay within token budgets.
 //!
 //! # Module layout
 //!
@@ -22,18 +23,28 @@
 
 mod compact;
 mod message;
+mod retrieval;
 mod role;
+mod task_state;
 mod turns;
 
 use serde_json::{json, Value};
 
 pub use compact::ContextBudget;
 pub use message::{Message, MessageOrigin};
+pub use retrieval::RetrievedMemory;
 pub use role::Role;
+pub use task_state::{TaskStateCapsule, TaskStateEntry, TaskStatus};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Context {
-    pub messages: Vec<Message>,
+    /// Mutable, budgeted model view. Compaction is allowed to rewrite this.
+    messages: Vec<Message>,
+    /// Canonical transcript. Only original system/human/assistant/tool events
+    /// enter this vector, and compaction never mutates it.
+    history: Vec<Message>,
+    task_state: TaskStateCapsule,
+    retrieved_memory: Vec<RetrievedMemory>,
     pub max_turns: u32,
 }
 
@@ -41,12 +52,19 @@ impl Context {
     pub fn new(max_turns: u32) -> Self {
         Self {
             messages: Vec::new(),
+            history: Vec::new(),
+            task_state: TaskStateCapsule::default(),
+            retrieved_memory: Vec::new(),
             max_turns,
         }
     }
 
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
-        self.messages.push(Message::new(role, content));
+        let message = Message::new(role, content);
+        if message.origin.is_history_event() {
+            self.history.push(message.clone());
+        }
+        self.messages.push(message);
         self.prune();
     }
 
@@ -70,15 +88,51 @@ impl Context {
         {
             self.messages[0].content = content;
         } else {
-            self.messages.insert(
-                0,
-                Message {
-                    role: Role::System,
-                    origin: MessageOrigin::System,
-                    content,
-                },
-            );
+            let message = Message {
+                role: Role::System,
+                origin: MessageOrigin::System,
+                content,
+            };
+            self.messages.insert(0, message.clone());
+            if !self
+                .history
+                .iter()
+                .any(|item| matches!(item.role, Role::System))
+            {
+                self.history.insert(0, message);
+            }
         }
+    }
+
+    /// Start a new derived task capsule from the current human request.
+    pub fn begin_task(&mut self, user_text: &str) {
+        self.task_state.begin_turn(user_text);
+        self.retrieved_memory.clear();
+    }
+
+    pub fn record_tool_result(&mut self, name: &str, call_id: &str, ok: bool, output: &str) {
+        self.task_state
+            .record_tool_result(name, call_id, ok, output);
+    }
+
+    pub fn finish_task(&mut self, status: TaskStatus, assistant_text: &str) {
+        self.task_state.finish(status, assistant_text);
+    }
+
+    pub fn task_state(&self) -> &TaskStateCapsule {
+        &self.task_state
+    }
+
+    pub fn set_task_state(&mut self, capsule: TaskStateCapsule) {
+        self.task_state = capsule;
+    }
+
+    pub fn set_retrieved_memory(&mut self, memories: Vec<RetrievedMemory>) {
+        self.retrieved_memory = memories;
+    }
+
+    pub fn retrieved_memory(&self) -> &[RetrievedMemory] {
+        &self.retrieved_memory
     }
 
     /// Replace non-system messages with history loaded from a session.
@@ -88,22 +142,67 @@ impl Context {
     /// messages that are not `Role::System` are appended, then pruned once.
     pub fn load_history(&mut self, system_prompt: &str, history: Vec<Message>) {
         self.messages.clear();
-        self.messages.push(Message {
+        let current_system = Message {
             role: Role::System,
             origin: MessageOrigin::System,
             content: Value::String(system_prompt.to_string()),
-        });
-        for msg in history {
+        };
+        self.messages.push(current_system.clone());
+        self.history = history
+            .into_iter()
+            .filter(|message| message.origin.is_history_event())
+            .collect();
+        if !self
+            .history
+            .iter()
+            .any(|message| matches!(message.role, Role::System))
+        {
+            self.history.insert(0, current_system);
+        }
+        for msg in &self.history {
             if !matches!(msg.role, Role::System) {
-                self.messages.push(msg);
+                self.messages.push(msg.clone());
             }
         }
+        self.task_state.rebuild_from_history(&self.history);
+        self.retrieved_memory.clear();
         self.prune();
     }
 
-    /// All messages (borrowed) for persistence / debug.
+    /// Current derived model messages (borrowed) for request inspection.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Canonical append-only transcript for persistence and audit.
+    pub fn history(&self) -> &[Message] {
+        &self.history
+    }
+
+    /// Replace both canonical history and its freshly-derived model view.
+    pub fn replace_history(&mut self, messages: Vec<Message>) {
+        let system_prompt = messages
+            .iter()
+            .find(|message| matches!(message.role, Role::System))
+            .and_then(|message| message.content.as_str())
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .find(|message| matches!(message.role, Role::System))
+                    .and_then(|message| message.content.as_str())
+            })
+            .unwrap_or_default()
+            .to_string();
+        self.load_history(&system_prompt, messages);
+    }
+
+    /// Clear all canonical and derived state and install a fresh system prompt.
+    pub fn reset(&mut self, system_prompt: impl Into<Value>) {
+        self.messages.clear();
+        self.history.clear();
+        self.task_state = TaskStateCapsule::default();
+        self.retrieved_memory.clear();
+        self.push(Role::System, system_prompt);
     }
 
     /// Build [`Message`] list from transcript role strings + content values.
@@ -126,8 +225,26 @@ impl Context {
     }
 
     pub fn as_json(&self) -> Value {
-        let messages: Vec<Value> = self.messages.iter().map(|m| m.dump()).collect();
+        let messages: Vec<Value> = self.wire_messages().iter().map(|m| m.dump()).collect();
         json!(messages)
+    }
+
+    pub(super) fn wire_messages(&self) -> Vec<Message> {
+        let mut messages = self.messages.clone();
+        let insert_at = usize::from(
+            messages
+                .first()
+                .is_some_and(|message| matches!(message.role, Role::System)),
+        );
+        let mut derived = Vec::new();
+        if let Some(memory) = retrieval::as_message(&self.retrieved_memory) {
+            derived.push(memory);
+        }
+        if let Some(task_state) = self.task_state.as_message() {
+            derived.push(task_state);
+        }
+        messages.splice(insert_at..insert_at, derived);
+        messages
     }
 }
 
@@ -263,5 +380,59 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["role"], "user");
         assert_eq!(arr[0]["content"], "hello");
+    }
+
+    #[test]
+    fn pruning_and_summary_never_rewrite_append_only_history() {
+        let mut ctx = Context::new(1);
+        ctx.push(Role::System, "sys");
+        ctx.push(Role::User, "u1");
+        ctx.push(Role::Assistant, "a1");
+        ctx.push(Role::User, "u2");
+        ctx.push(Role::Assistant, "a2");
+
+        assert_eq!(ctx.messages().len(), 3, "derived view is pruned");
+        assert_eq!(ctx.history().len(), 5, "canonical events remain complete");
+        assert!(ctx
+            .history()
+            .iter()
+            .any(|message| message.content == json!("u1")));
+
+        let mut summarized = Context::new(20);
+        summarized.push(Role::System, "sys");
+        for turn in 1..=4 {
+            summarized.push(Role::User, format!("u{turn}"));
+            summarized.push(Role::Assistant, format!("a{turn}"));
+        }
+        summarized.apply_summary_compact("older work", 1);
+        assert!(summarized
+            .messages()
+            .iter()
+            .any(|message| message.origin == MessageOrigin::Summary));
+        assert_eq!(summarized.history().len(), 9);
+        assert!(!summarized
+            .history()
+            .iter()
+            .any(|message| message.origin == MessageOrigin::Summary));
+    }
+
+    #[test]
+    fn task_and_retrieval_are_derived_and_provenance_carrying() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+        ctx.push(Role::User, "fix only the parser");
+        ctx.begin_task("fix only the parser");
+        ctx.set_retrieved_memory(vec![RetrievedMemory {
+            snippet: "Parser lives in parser.rs".into(),
+            path: "session/abc/memory.md".into(),
+            source: "session".into(),
+            score: 42,
+        }]);
+
+        let wire = ctx.as_json().to_string();
+        assert!(wire.contains("<task_state>"));
+        assert!(wire.contains("<retrieved_memory>"));
+        assert!(wire.contains("session/abc/memory.md"));
+        assert_eq!(ctx.history().len(), 2);
     }
 }

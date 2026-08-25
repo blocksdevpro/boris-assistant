@@ -45,6 +45,14 @@ pub(super) fn score_file_as(
     }
     let snippet = best_snippet(&raw, query_lc, 220);
     hits.push(MemoryHit {
+        source: if display_path.starts_with(super::SESSION_PATH_PREFIX) {
+            "session"
+        } else if display_path == "MEMORY.md" {
+            "global"
+        } else {
+            "workspace"
+        }
+        .to_string(),
         path: display_path.replace('\\', "/"),
         score,
         snippet,

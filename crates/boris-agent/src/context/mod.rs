@@ -14,7 +14,8 @@
 //!
 //! # Contributor notes
 //!
-//! - **Public surface**: [`Context`], [`Message`], [`Role`] only (re-exported from crate root).
+//! - **Public surface**: [`Context`], [`Message`], [`MessageOrigin`], [`Role`],
+//!   and [`ContextBudget`] (re-exported from crate root).
 //! - Prune never splits assistant `tool_calls` from following tool results.
 //! - Compact must emit plain-string assistant content (never nested message objects).
 //! - Prefer pure helpers in submodules with unit tests over growing `Context` methods.
@@ -26,7 +27,8 @@ mod turns;
 
 use serde_json::{json, Value};
 
-pub use message::Message;
+pub use compact::ContextBudget;
+pub use message::{Message, MessageOrigin};
 pub use role::Role;
 
 #[derive(Debug, Default)]
@@ -44,10 +46,17 @@ impl Context {
     }
 
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
-        self.messages.push(Message {
-            role,
-            content: content.into(),
-        });
+        self.messages.push(Message::new(role, content));
+        self.prune();
+    }
+
+    /// Add an ephemeral harness instruction without creating a human turn.
+    pub fn push_control(&mut self, content: impl Into<Value>) {
+        self.messages.push(Message::with_origin(
+            Role::User,
+            MessageOrigin::HostControl,
+            content,
+        ));
         self.prune();
     }
 
@@ -65,6 +74,7 @@ impl Context {
                 0,
                 Message {
                     role: Role::System,
+                    origin: MessageOrigin::System,
                     content,
                 },
             );
@@ -80,6 +90,7 @@ impl Context {
         self.messages.clear();
         self.messages.push(Message {
             role: Role::System,
+            origin: MessageOrigin::System,
             content: Value::String(system_prompt.to_string()),
         });
         for msg in history {
@@ -104,8 +115,10 @@ impl Context {
             .iter()
             .filter_map(|(role, content)| {
                 let role = Role::from_role_str(role)?;
+                let origin = infer_transcript_origin(role.clone(), content);
                 Some(Message {
                     role,
+                    origin,
                     content: content.clone(),
                 })
             })
@@ -116,6 +129,17 @@ impl Context {
         let messages: Vec<Value> = self.messages.iter().map(|m| m.dump()).collect();
         json!(messages)
     }
+}
+
+fn infer_transcript_origin(role: Role, content: &Value) -> MessageOrigin {
+    let text = content.as_str().unwrap_or_default().trim_start();
+    if text.starts_with("<conversation_summary>") {
+        return MessageOrigin::Summary;
+    }
+    if text.starts_with("<system-reminder>") {
+        return MessageOrigin::HostControl;
+    }
+    MessageOrigin::for_role(role)
 }
 
 #[cfg(test)]
@@ -151,14 +175,17 @@ mod tests {
         let history = vec![
             Message {
                 role: Role::System,
+                origin: MessageOrigin::System,
                 content: json!("history-sys"),
             },
             Message {
                 role: Role::User,
+                origin: MessageOrigin::Human,
                 content: json!("hello"),
             },
             Message {
                 role: Role::Assistant,
+                origin: MessageOrigin::Assistant,
                 content: json!("hi"),
             },
         ];
@@ -186,6 +213,25 @@ mod tests {
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
         assert!(matches!(msgs[2].role, Role::Tool));
+    }
+
+    #[test]
+    fn transcript_markers_restore_non_human_origins() {
+        let records = vec![
+            (
+                "user".into(),
+                json!("<conversation_summary>facts</conversation_summary>"),
+            ),
+            (
+                "user".into(),
+                json!("<system-reminder>finish</system-reminder>"),
+            ),
+            ("user".into(), json!("real question")),
+        ];
+        let messages = Context::messages_from_transcript(&records);
+        assert_eq!(messages[0].origin, MessageOrigin::Summary);
+        assert_eq!(messages[1].origin, MessageOrigin::HostControl);
+        assert_eq!(messages[2].origin, MessageOrigin::Human);
     }
 
     #[test]

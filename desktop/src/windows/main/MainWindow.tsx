@@ -97,6 +97,7 @@ export function MainWindow() {
   const contextMeter = formatContextMeter(
     status.context_used,
     status.context_limit,
+    status.context_estimated,
   );
 
   useEffect(() => {

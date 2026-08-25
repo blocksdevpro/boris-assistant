@@ -346,6 +346,17 @@ impl LlmClient for RoutingClient {
     fn model(&self) -> &str {
         &self.model_label
     }
+
+    fn context_window_tokens(&self) -> Option<u32> {
+        match (
+            self.fast.context_window_tokens(),
+            self.strong.context_window_tokens(),
+        ) {
+            (Some(fast), Some(strong)) => Some(fast.min(strong)),
+            (Some(tokens), None) | (None, Some(tokens)) => Some(tokens),
+            (None, None) => None,
+        }
+    }
 }
 
 fn tools_requested(tools: &Value) -> bool {

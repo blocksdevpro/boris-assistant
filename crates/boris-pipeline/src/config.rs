@@ -28,6 +28,8 @@ pub struct LlmPrefs {
     pub openrouter_fast_provider: Option<String>,
     /// When `Some`, overrides pin; when `None`, falls back to env / saved.
     pub openrouter_pin_provider: Option<bool>,
+    /// Combined prompt + completion window from provider model metadata.
+    pub context_window_tokens: Option<u32>,
 }
 
 impl LlmPrefs {
@@ -62,6 +64,11 @@ impl LlmPrefs {
         self.openrouter_pin_provider = Some(pin);
         self
     }
+
+    pub fn context_window_tokens(mut self, tokens: u32) -> Self {
+        self.context_window_tokens = Some(tokens.max(4_096));
+        self
+    }
 }
 
 /// Host-supplied configuration for [`crate::Engine::spawn`].
@@ -80,6 +87,8 @@ pub struct PipelineConfig {
     pub openrouter_fast_provider: Option<String>,
     /// When true, do not fall back to other OpenRouter hosts if preferred list fails.
     pub openrouter_pin_provider: bool,
+    /// Combined prompt + completion window used for compaction and UI status.
+    pub context_window_tokens: u32,
     pub system_prompt: String,
     /// Rate of PCM passed to playback (must match TTS native rate).
     /// When `0` or unused, the engine prefers [`boris_inference::TextToSpeech::sample_rate`].
@@ -162,6 +171,7 @@ impl PipelineConfig {
         let tts_voice_id = resolve_tts_voice_id(&saved);
 
         let (strong, strong_prov, fast, fast_prov, pin) = resolve_llm_prefs(&saved, &prefs);
+        let context_window_tokens = resolve_context_window_tokens(&prefs);
 
         Self {
             openrouter_api_key: prefs.openrouter_api_key,
@@ -170,6 +180,7 @@ impl PipelineConfig {
             openrouter_model_provider: strong_prov,
             openrouter_fast_provider: fast_prov,
             openrouter_pin_provider: pin,
+            context_window_tokens,
             system_prompt: BORIS_SYSTEM_PROMPT.to_string(),
             play_source_rate,
             wakeword_model,
@@ -189,6 +200,22 @@ impl PipelineConfig {
             ignore_speaker_playback: resolve_ignore_speaker_playback(&saved),
         }
     }
+}
+
+fn resolve_context_window_tokens(prefs: &LlmPrefs) -> u32 {
+    if let Some(tokens) = prefs.context_window_tokens {
+        return tokens.max(4_096);
+    }
+    if let Some(raw) = env_opt("BORIS_CONTEXT_WINDOW_TOKENS") {
+        match raw.trim().parse::<u32>() {
+            Ok(tokens) if tokens >= 4_096 => return tokens,
+            _ => tracing::warn!(
+                value = %raw,
+                "invalid BORIS_CONTEXT_WINDOW_TOKENS; using conservative default"
+            ),
+        }
+    }
+    boris_agent::DEFAULT_CONTEXT_WINDOW_TOKENS
 }
 
 fn resolve_model_residency(saved: &AppSettings) -> String {
@@ -358,6 +385,7 @@ mod tests {
             openrouter_model_provider: Some("arg-prov".into()),
             openrouter_fast_provider: Some("arg-fast-prov".into()),
             openrouter_pin_provider: Some(true),
+            context_window_tokens: None,
         };
         let (strong, strong_p, fast, fast_p, pin) = resolve_llm_prefs(&saved, &prefs);
         assert_eq!(strong.as_deref(), Some("arg-strong"));
@@ -393,11 +421,13 @@ mod tests {
             .model("m")
             .fast_model("f")
             .model_provider("p")
-            .pin_provider(true);
+            .pin_provider(true)
+            .context_window_tokens(96_000);
         assert_eq!(p.openrouter_api_key, "sk");
         assert_eq!(p.openrouter_model.as_deref(), Some("m"));
         assert_eq!(p.openrouter_fast_model.as_deref(), Some("f"));
         assert_eq!(p.openrouter_model_provider.as_deref(), Some("p"));
         assert_eq!(p.openrouter_pin_provider, Some(true));
+        assert_eq!(p.context_window_tokens, Some(96_000));
     }
 }

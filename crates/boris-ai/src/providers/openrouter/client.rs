@@ -29,6 +29,9 @@ pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// Changing this constant only affects callers that pass `None`.
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 
+/// Conservative fallback when a host has not supplied provider model metadata.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+
 /// OpenRouter Chat Completions client.
 ///
 /// # Model-provider routing
@@ -58,6 +61,8 @@ pub struct OpenRouterClient {
     pub(super) reasoning: ReasoningConfig,
     /// Completion token cap (must exceed reasoning allocation on some models).
     pub(super) max_tokens: u32,
+    /// Provider-advertised combined prompt + completion window.
+    pub(super) context_window_tokens: u32,
     pub(super) http: Client,
 }
 
@@ -143,6 +148,12 @@ impl OpenRouterClient {
         self
     }
 
+    /// Set the configured model's combined prompt + completion window.
+    pub fn with_context_window_tokens(mut self, tokens: u32) -> Self {
+        self.context_window_tokens = tokens.max(4_096);
+        self
+    }
+
     /// Model id configured for this client.
     pub fn model(&self) -> &str {
         &self.model
@@ -156,6 +167,11 @@ impl OpenRouterClient {
     /// Current max_tokens.
     pub fn max_tokens(&self) -> u32 {
         self.max_tokens
+    }
+
+    /// Configured combined prompt + completion window.
+    pub fn context_window_tokens(&self) -> u32 {
+        self.context_window_tokens
     }
 
     /// Configured OpenRouter model-provider order (may be empty).
@@ -202,6 +218,7 @@ impl OpenRouterClient {
             base_url: DEFAULT_BASE_URL.to_string(),
             reasoning: ReasoningConfig::default(),
             max_tokens: DEFAULT_MAX_TOKENS,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             http: build_http_client(connect_timeout, timeout),
         }
     }
@@ -268,5 +285,17 @@ mod tests {
         assert_eq!(c.base_url(), DEFAULT_BASE_URL);
         assert!(c.endpoint_url().ends_with("/chat/completions"));
         assert_eq!(c.model(), DEFAULT_MODEL);
+        assert_eq!(c.context_window_tokens(), DEFAULT_CONTEXT_WINDOW_TOKENS);
+    }
+
+    #[test]
+    fn context_window_is_configurable_and_safely_clamped() {
+        let configured =
+            OpenRouterClient::new("k".into(), Some("m".into())).with_context_window_tokens(96_000);
+        assert_eq!(configured.context_window_tokens(), 96_000);
+
+        let clamped =
+            OpenRouterClient::new("k".into(), Some("m".into())).with_context_window_tokens(10);
+        assert_eq!(clamped.context_window_tokens(), 4_096);
     }
 }

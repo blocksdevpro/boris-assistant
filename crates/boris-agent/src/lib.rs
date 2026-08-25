@@ -72,7 +72,7 @@ pub mod types;
 pub use boris_ai::{
     parse_provider_list, split_model_and_provider, CompleteOptions, LlmClient, LlmError,
     LlmErrorKind, LlmStreamEvent, OpenRouterClient, ReasoningConfig, ReasoningEffort, RequestStage,
-    TokenUsage, DEFAULT_MAX_TOKENS,
+    TokenUsage, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS,
 };
 
 pub use activity::{
@@ -81,7 +81,7 @@ pub use activity::{
 };
 pub use agent::{Agent, AgentOptions, TurnCancel};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
-pub use context::{Context, Message, Role};
+pub use context::{Context, ContextBudget, Message, MessageOrigin, Role};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};

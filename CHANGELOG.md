@@ -29,8 +29,11 @@ First 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.
   stay masked, silent, and out of session transcripts.
 - A live **reasoning preview** appears in Home and the overlay for planning
   and complex work. It is display-only: never spoken or stored as context.
-- A 3×3 **presence grid** now shows engine state on the splash, Home, and
-  overlay, including distinct Starting, Fault, and Off states.
+- A phase-aware 3×3 **presence grid** now shows engine state on Home and the
+  overlay: framed chases signal boot/work, audio meters cover listening and
+  speech, a scan indicates transcription, and an ellipsis prompts for input.
+  Ready, Confirm, Fault, and Off remain distinct; the launch splash keeps its
+  own dedicated signal mark.
 - `grep` supports `-A` / `-B` / `-C` / `-i`, `type`, `glob`, `output_mode`,
   and `head_limit`.
 

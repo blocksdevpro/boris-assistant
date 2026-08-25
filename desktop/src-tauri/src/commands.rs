@@ -315,6 +315,28 @@ pub async fn switch_input(app: AppHandle, device_id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub async fn submit_input(app: AppHandle, id: String, value: String) -> Result<(), String> {
+    tracing::info!(%id, chars = value.chars().count(), "submit_input command");
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.submit_input(id, value)
+    })
+    .await
+    .map_err(|e| format!("submit_input task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn cancel_input(app: AppHandle, id: String) -> Result<(), String> {
+    tracing::info!(%id, "cancel_input command");
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.cancel_input(id)
+    })
+    .await
+    .map_err(|e| format!("cancel_input task failed: {e}"))?
+}
+
+#[tauri::command]
 pub async fn switch_output(app: AppHandle, device_id: String) -> Result<(), String> {
     tracing::info!(%device_id, "switch_output command");
     tauri::async_runtime::spawn_blocking(move || {

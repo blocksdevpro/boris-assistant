@@ -11,6 +11,8 @@ pub enum TurnOutcomeKind {
     Silent,
     /// Tool loop paused for HITL confirmation.
     NeedsConfirm,
+    /// Tool loop paused for typed / pasted input.
+    NeedsInput,
 }
 
 impl TurnOutcomeKind {
@@ -20,6 +22,7 @@ impl TurnOutcomeKind {
             Self::Speak => "speak",
             Self::Silent => "silent",
             Self::NeedsConfirm => "needs_confirm",
+            Self::NeedsInput => "needs_input",
         }
     }
 }

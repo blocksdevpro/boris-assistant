@@ -6,8 +6,9 @@ use boris_core::{ArcAudioBuffer, AudioBuffer, Error, Result};
 use cpal::{traits::HostTrait, DeviceId};
 
 use crate::devices::{self, device_name};
+use crate::frontend::FarEnd;
 use crate::input::{InputPipeline, InputSubscribers};
-use crate::output::{OutputCommand, OutputEvent, OutputPipeline};
+use crate::output::{FarEndTx, OutputCommand, OutputEvent, OutputPipeline};
 
 // Historical path: `boris_audio::service::{DeviceInfo, Direction}` (pipeline).
 pub use crate::devices::{DeviceInfo, Direction};
@@ -27,6 +28,8 @@ const OUTPUT_EVENT_CAPACITY: usize = 32;
 const OUTPUT_COMMAND_CAPACITY: usize = 16;
 /// Default fan-out queue size for input subscribers.
 const DEFAULT_INPUT_SUBSCRIBER_QUEUE: usize = 64;
+/// AEC far-end messages (one TTS unit or control). A few seconds of speech.
+const FAR_END_QUEUE: usize = 32;
 /// Default play source rate when unspecified (Supertone native).
 const DEFAULT_SOURCE_RATE_HZ: u32 = 44_100;
 /// Maximum time a lifecycle control command may take to reach and be applied
@@ -59,6 +62,9 @@ pub struct AudioService {
     output_event_channel: EventChannel,
     output_command_channel: CommandChannel,
     output_pipeline: OutputPipeline,
+    /// Shared so a mic switch can replace the AEC receiver without tearing
+    /// down playback.
+    far_end_tx: FarEndTx,
     /// Sample rate of PCM passed to [`Self::play`] (must match TTS).
     source_rate: u32,
 }
@@ -123,7 +129,10 @@ impl AudioService {
         tracing::info!(%input_name, "opening default input device");
 
         let input_subscribers: InputSubscribers = Arc::new(Mutex::new(Vec::new()));
-        let input_pipeline = InputPipeline::from_device(&input_device, input_subscribers.clone())?;
+        let (far_tx, far_rx) = crossbeam_channel::bounded::<FarEnd>(FAR_END_QUEUE);
+        let far_end_tx: FarEndTx = Arc::new(Mutex::new(far_tx));
+        let input_pipeline =
+            InputPipeline::from_device(&input_device, input_subscribers.clone(), far_rx)?;
         tracing::info!(%input_name, "input pipeline open");
 
         let output_device = host.default_output_device().ok_or_else(|| {
@@ -136,7 +145,7 @@ impl AudioService {
         tracing::info!(%output_name, source_rate, "opening default output device");
 
         let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&output_device, source_rate)?;
+            open_output_pipeline(&output_device, source_rate, far_end_tx.clone())?;
         tracing::info!(%output_name, "output pipeline open");
 
         Ok(Self {
@@ -145,6 +154,7 @@ impl AudioService {
             output_pipeline,
             output_event_channel,
             output_command_channel,
+            far_end_tx,
             source_rate,
         })
     }
@@ -195,8 +205,12 @@ impl AudioService {
         })?;
         let name = device_name(&device);
         tracing::info!(%name, "opening input device");
-        // Open new pipeline before replacing so a failure keeps the old stream.
-        let new_pipeline = InputPipeline::from_device(&device, self.input_subscribers.clone())?;
+        // Open new pipeline before replacing so a failure keeps the old stream
+        // and the old AEC sender.
+        let (far_tx, far_rx) = crossbeam_channel::bounded::<FarEnd>(FAR_END_QUEUE);
+        let new_pipeline =
+            InputPipeline::from_device(&device, self.input_subscribers.clone(), far_rx)?;
+        replace_far_end(&self.far_end_tx, far_tx);
         self.input_pipeline = new_pipeline;
         Ok(())
     }
@@ -223,7 +237,7 @@ impl AudioService {
         tracing::info!(%name, "opening output device");
 
         let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&device, self.source_rate)?;
+            open_output_pipeline(&device, self.source_rate, self.far_end_tx.clone())?;
         self.output_command_channel = output_command_channel;
         self.output_event_channel = output_event_channel;
         self.output_pipeline = output_pipeline;
@@ -413,9 +427,19 @@ fn enqueue_flush(
     }
 }
 
+fn replace_far_end(slot: &FarEndTx, tx: crossbeam_channel::Sender<FarEnd>) {
+    match slot.lock() {
+        Ok(mut g) => *g = tx,
+        Err(poisoned) => {
+            *poisoned.into_inner() = tx;
+        }
+    }
+}
+
 fn open_output_pipeline(
     device: &cpal::Device,
     source_rate: u32,
+    far_end_tx: FarEndTx,
 ) -> Result<(EventChannel, CommandChannel, OutputPipeline)> {
     let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(OUTPUT_EVENT_CAPACITY);
     let output_command_channel =
@@ -423,8 +447,13 @@ fn open_output_pipeline(
 
     let output_event_tx = output_event_channel.0.clone();
     let output_command_rx = output_command_channel.1.clone();
-    let output_pipeline =
-        OutputPipeline::from_device(device, output_command_rx, output_event_tx, source_rate)?;
+    let output_pipeline = OutputPipeline::from_device(
+        device,
+        output_command_rx,
+        output_event_tx,
+        source_rate,
+        far_end_tx,
+    )?;
 
     Ok((
         output_event_channel,

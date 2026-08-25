@@ -27,6 +27,8 @@
     "allow-list-output-devices",
     "allow-switch-input",
     "allow-switch-output",
+    "allow-submit-input",
+    "allow-cancel-input",
     "allow-models-status",
     "allow-download-models",
     "allow-get-settings",

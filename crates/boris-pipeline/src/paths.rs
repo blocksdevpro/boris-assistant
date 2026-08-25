@@ -32,9 +32,9 @@
 //!     audit/                 # legacy global audit (unused by engine)
 //!       tool_calls.jsonl
 //!   models/
-//!     parakeet/ | supertone/ | livekit/ | silero/
+//!     parakeet/ | supertone/ | livekit/ | silero/ | speaker/
 //!   speaker/
-//!     live.json              # wake liveness enroll (acoustic takes)
+//!     live.json              # wake liveness enroll (takes + embeddings)
 //!   state/
 //!     workspace/             # default agent write root (was top-level sandbox/)
 //! ```
@@ -125,6 +125,15 @@ pub fn livekit_dir() -> PathBuf {
 
 pub fn speaker_dir() -> PathBuf {
     boris_home().join("speaker")
+}
+
+/// CAM++ ONNX used for wake identity (separate from [`speaker_dir`] enroll JSON).
+pub fn speaker_model_dir() -> PathBuf {
+    models_dir().join("speaker")
+}
+
+pub fn speaker_embed_model_path() -> PathBuf {
+    speaker_model_dir().join("campplus_lm.onnx")
 }
 
 pub fn silero_dir() -> PathBuf {
@@ -255,6 +264,7 @@ pub fn ensure_model_dirs() -> std::io::Result<()> {
         supertone_voices_dir(),
         livekit_dir(),
         silero_dir(),
+        speaker_model_dir(),
     ] {
         fs::create_dir_all(&d)?;
     }

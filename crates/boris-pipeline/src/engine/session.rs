@@ -19,7 +19,7 @@ const DURABLE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Export agent messages as `(role, content)` pairs for session persistence.
 pub(super) fn agent_message_pairs(agent: &Agent) -> Vec<(String, serde_json::Value)> {
     agent
-        .export_messages()
+        .export_messages_for_persist()
         .into_iter()
         .map(|m| (m.role.to_string(), m.content))
         .collect()

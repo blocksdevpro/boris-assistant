@@ -390,6 +390,26 @@ impl AppState {
         Ok(())
     }
 
+    pub fn submit_input(&self, id: String, value: String) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("engine is not running".into());
+        };
+        handle
+            .submit_input(id, value)
+            .map_err(|e| format!("submit input: {e}"))
+    }
+
+    pub fn cancel_input(&self, id: String) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("engine is not running".into());
+        };
+        handle
+            .cancel_input(id)
+            .map_err(|e| format!("cancel input: {e}"))
+    }
+
     pub fn switch_output(&self, device_id: String) -> Result<(), String> {
         if device_id.trim().is_empty() {
             return Err("empty output device id".into());

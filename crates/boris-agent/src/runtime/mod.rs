@@ -24,7 +24,7 @@ pub use listing::{
     ListToolsContext, ToolRuntimeFeatures, DEFAULT_CORE_TOOL_NAMES, MAX_ACTIVATED,
     MAX_TOOL_SCHEMA_CHARS,
 };
-pub use pending::{PendingToolCall, PendingTurn, RawToolCall};
+pub use pending::{InputKind, PendingInput, PendingToolCall, PendingTurn, RawToolCall};
 pub use policy::{
     decide, default_user_read_roots, normalize_path, path_is_within, resolve_in_roots,
     resolve_path_for_policy, NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,

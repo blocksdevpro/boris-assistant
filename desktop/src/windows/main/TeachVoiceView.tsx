@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { AlertCircle, Check, Mic, Power } from "lucide-react";
+import {
+  AlertCircle,
+  Check,
+  LoaderCircle,
+  Mic,
+  Power,
+  RefreshCw,
+} from "lucide-react";
 import {
   clearWakeProfile,
   startWakeEnroll,
   type StatusPicture,
 } from "@/bridge";
+import { GridPresence, type PresenceState } from "@/components/presence";
 import { cn } from "@/lib/utils";
 
 const WANT = 4;
@@ -99,17 +107,48 @@ export function TeachVoiceView({
     : { duration: 0.28, ease: [0.22, 1, 0.36, 1] as const };
 
   return (
-    <div className="teach-view relative mx-auto flex min-h-full w-full max-w-xl flex-col overflow-hidden px-7 pb-6 pt-7 sm:px-10">
-      <div
-        className="pointer-events-none absolute left-1/2 top-[46%] size-80 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/[0.018] blur-3xl"
+    <motion.div
+      className="teach-view relative mx-auto flex min-h-full w-full max-w-2xl flex-col overflow-hidden px-7 pb-6 pt-7 sm:px-10"
+      initial={reduceMotion ? false : { opacity: 0, scale: 0.992 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={transition}
+    >
+      <motion.div
+        className={cn(
+          "pointer-events-none absolute left-1/2 top-[46%] size-96 -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl",
+          ready ? "bg-emerald-300/[0.035]" : "bg-sky-200/[0.025]",
+        )}
+        animate={
+          reduceMotion
+            ? undefined
+            : { opacity: [0.55, 1, 0.55], scale: [0.96, 1.04, 0.96] }
+        }
+        transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
         aria-hidden
       />
 
       <header className="teach-header relative mx-auto max-w-md text-center">
-        <div className="teach-kicker mb-3 inline-flex items-center gap-2 rounded-full border border-white/[0.07] bg-white/[0.035] px-3 py-1.5 text-[11px] font-medium tracking-wide text-white/55">
-          <Mic className="size-3" strokeWidth={2} />
-          Voice setup
-        </div>
+        <motion.div
+          layout
+          className={cn(
+            "teach-kicker mb-3 inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium tracking-wide",
+            ready
+              ? "border-emerald-200/10 bg-emerald-300/[0.055] text-emerald-100/65"
+              : "border-white/[0.07] bg-white/[0.035] text-white/55",
+          )}
+        >
+          {ready ? (
+            <Check className="size-3" strokeWidth={2.2} />
+          ) : stage === "starting" ? (
+            <LoaderCircle
+              className="size-3 animate-spin motion-reduce:animate-none"
+              strokeWidth={2}
+            />
+          ) : (
+            <Mic className="size-3" strokeWidth={2} />
+          )}
+          {ready ? "Voice learned" : "Voice setup"}
+        </motion.div>
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={ready ? "complete-heading" : "setup-heading"}
@@ -197,6 +236,7 @@ export function TeachVoiceView({
               beginEnrollment();
             }}
           >
+            <RefreshCw className="size-4" strokeWidth={2} />
             Try again
           </PrimaryButton>
         ) : stage === "ready" ? (
@@ -210,7 +250,7 @@ export function TeachVoiceView({
           </p>
         )}
       </footer>
-    </div>
+    </motion.div>
   );
 }
 
@@ -252,6 +292,8 @@ function TakeProgress({
   want: number;
   ready: boolean;
 }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <div
       className="teach-progress mt-3 w-full max-w-[17rem]"
@@ -281,7 +323,11 @@ function TakeProgress({
                     ? { scale: [0.82, 1.08, 1], opacity: 1 }
                     : { scale: 1, opacity: 1 }
                 }
-                transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+                transition={
+                  reduceMotion
+                    ? { duration: 0 }
+                    : { duration: 0.32, ease: [0.22, 1, 0.36, 1] }
+                }
               >
                 {complete ? (
                   <Check className="size-3.5" strokeWidth={2.5} />
@@ -307,6 +353,14 @@ function TakeProgress({
   );
 }
 
+function teachPresenceState(stage: TeachStage): PresenceState {
+  if (stage === "ready") return "ready";
+  if (stage === "listening") return "hearing";
+  if (stage === "error") return "fault";
+  if (stage === "off") return "off";
+  return "starting";
+}
+
 function ListeningMark({
   stage,
   have,
@@ -316,14 +370,23 @@ function ListeningMark({
   have: number;
   want: number;
 }) {
+  const reduceMotion = useReducedMotion();
   const ready = stage === "ready";
   const listening = stage === "listening";
   const progress = want > 0 ? have / want : 0;
   const circumference = 2 * Math.PI * 68;
 
   return (
-    <div
+    <motion.div
       className="teach-listening-mark relative flex size-40 items-center justify-center sm:size-44"
+      animate={
+        reduceMotion
+          ? undefined
+          : stage === "listening"
+            ? { scale: [1, 1.015, 1] }
+            : { scale: 1 }
+      }
+      transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
       role="img"
       aria-label={
         ready
@@ -333,6 +396,18 @@ function ListeningMark({
             : "Microphone is waiting"
       }
     >
+      {stage === "listening" ? (
+        <motion.span
+          className="absolute inset-[7%] rounded-full border border-white/[0.055]"
+          animate={
+            reduceMotion
+              ? undefined
+              : { scale: [0.96, 1.12], opacity: [0.42, 0] }
+          }
+          transition={{ duration: 2.2, repeat: Infinity, ease: "easeOut" }}
+          aria-hidden
+        />
+      ) : null}
       <svg
         viewBox="0 0 160 160"
         className="absolute inset-0 size-full -rotate-90"
@@ -357,7 +432,11 @@ function ListeningMark({
           strokeDasharray={circumference}
           initial={false}
           animate={{ strokeDashoffset: circumference * (1 - progress) }}
-          transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
+          transition={
+            reduceMotion
+              ? { duration: 0 }
+              : { duration: 0.55, ease: [0.22, 1, 0.36, 1] }
+          }
         />
       </svg>
 
@@ -366,48 +445,30 @@ function ListeningMark({
           <motion.div
             key={ready ? "ready-mark" : "listen-mark"}
             className="flex flex-col items-center"
-            initial={{ opacity: 0, scale: 0.9 }}
+            initial={reduceMotion ? false : { opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.94 }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
           >
-            {ready ? (
-              <>
-                <Check
-                  className="size-7 text-emerald-100/90"
-                  strokeWidth={1.8}
-                />
-                <span className="mt-1 text-[12px] font-medium text-emerald-100/65">
-                  Saved
-                </span>
-              </>
-            ) : (
-              <>
-                <Mic className="size-5 text-white/58" strokeWidth={1.7} />
-                <span className="mt-1.5 text-[20px] font-semibold tracking-[-0.04em] text-white/94">
-                  Hey Boris
-                </span>
-                <span
-                  className="mt-1 flex h-2.5 items-center gap-0.5"
-                  aria-hidden
-                >
-                  {Array.from({ length: 5 }, (_, index) => (
-                    <span
-                      key={index}
-                      className={cn(
-                        "teach-wave-bar h-1 w-0.5 rounded-full bg-white/45",
-                        !listening &&
-                          "[animation-play-state:paused] opacity-35",
-                      )}
-                      style={{ animationDelay: `${index * 90}ms` }}
-                    />
-                  ))}
-                </span>
-              </>
-            )}
+            <GridPresence
+              state={teachPresenceState(stage)}
+              accent={
+                ready ? "#30d158" : stage === "error" ? "#ff453a" : "#64d2ff"
+              }
+              reducedMotion={Boolean(reduceMotion)}
+              size="lg"
+            />
+            <span
+              className={cn(
+                "mt-2 text-[12px] font-medium",
+                ready ? "text-emerald-100/65" : "text-white/55",
+              )}
+            >
+              {ready ? "Saved" : "Hey Boris"}
+            </span>
           </motion.div>
         </AnimatePresence>
       </div>
-    </div>
+    </motion.div>
   );
 }

@@ -13,7 +13,7 @@ Use these development-only routes:
 - `http://localhost:1420/?preview=overlay-matrix` — every canonical overlay state on one page.
 
 Fixture names are `off`, `ready`, `hearing`, `reading`, `thinking`,
-`thinking-tool`, `confirm`, `talking`, `fault`, `long-caption`,
+`thinking-tool`, `typed-input`, `confirm`, `talking`, `fault`, `long-caption`,
 `device-faults`, and `artifact-card`.
 
 For release QA, capture presence fixtures at a 380 × 120 viewport, thinking

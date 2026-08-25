@@ -28,6 +28,10 @@ describe("update channel", () => {
       "beta",
     );
     expect(normalizeSettings({}).start_with_windows).toBe(false);
+    expect(normalizeSettings({}).typed_input_submit).toBe("enter");
+    expect(normalizeSettings({ typed_input_submit: "ctrl_enter" }).typed_input_submit).toBe(
+      "ctrl_enter",
+    );
     expect(normalizeSettings({ start_with_windows: true }).start_with_windows).toBe(
       true,
     );

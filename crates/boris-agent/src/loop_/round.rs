@@ -52,6 +52,7 @@ pub(super) async fn complete_round(
     config: &AgentLoopConfig,
     at_cap: bool,
     emit: &EmitFn,
+    cancel: &Option<CancellationToken>,
 ) -> Result<Value, AgentError> {
     let tools_json = if at_cap {
         Value::Null
@@ -79,28 +80,38 @@ pub(super) async fn complete_round(
     let mut acc = String::new();
     let mut last_emit = Instant::now();
     let mut dirty = false;
-    let msg = state
+    let mut on_event = |ev: LlmStreamEvent| {
+        let LlmStreamEvent::ReasoningDelta { text } = ev else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        acc.push_str(&text);
+        dirty = true;
+        let first = acc.len() == text.len();
+        if first || last_emit.elapsed() >= REASONING_EMIT_EVERY {
+            emit(AgentEvent::Reasoning {
+                preview: reasoning_preview(&acc),
+            });
+            last_emit = Instant::now();
+            dirty = false;
+        }
+    };
+    let stream = state
         .client
-        .complete_stream(messages, tools_json, opts, &mut |ev| {
-            let LlmStreamEvent::ReasoningDelta { text } = ev else {
-                return;
-            };
-            if text.is_empty() {
-                return;
+        .complete_stream(messages, tools_json, opts, &mut on_event);
+    let msg = if let Some(ct) = cancel.as_ref() {
+        tokio::select! {
+            biased;
+            _ = ct.cancelled() => {
+                return Err(AgentError::cancelled("llm cancelled"));
             }
-            acc.push_str(&text);
-            dirty = true;
-            let first = acc.len() == text.len();
-            if first || last_emit.elapsed() >= REASONING_EMIT_EVERY {
-                emit(AgentEvent::Reasoning {
-                    preview: reasoning_preview(&acc),
-                });
-                last_emit = Instant::now();
-                dirty = false;
-            }
-        })
-        .await
-        .map_err(AgentError::from)?;
+            msg = stream => msg.map_err(AgentError::from)?,
+        }
+    } else {
+        stream.await.map_err(AgentError::from)?
+    };
     if dirty {
         emit(AgentEvent::Reasoning {
             preview: reasoning_preview(&acc),
@@ -130,10 +141,11 @@ pub(super) async fn ensure_spoken_reply_at_cap(
     at_cap: bool,
     mut reply: String,
     emit: &EmitFn,
+    cancel: &Option<CancellationToken>,
 ) -> Result<String, AgentError> {
     if reply.is_empty() && at_cap {
         state.context.push(Role::User, json!(NUDGE_SPEAK_AT_CAP));
-        let forced = complete_round(state, user_text, config, true, emit).await?;
+        let forced = complete_round(state, user_text, config, true, emit, cancel).await?;
         reply = extract_reply_text(&forced);
         if !reply.is_empty() {
             state.context.push(Role::Assistant, reply.clone());

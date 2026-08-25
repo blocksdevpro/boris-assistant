@@ -611,6 +611,7 @@ mod tests {
             permissions: &[Permission::Shell],
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
+            collects_input: false,
             kind: crate::tool::ToolKind::Execute,
             max_result_chars: None,
             read_only: Some(false),

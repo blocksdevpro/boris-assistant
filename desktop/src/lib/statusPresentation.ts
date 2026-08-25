@@ -36,9 +36,9 @@ export function isToolActivity(activity: string | null | undefined): boolean {
   ) {
     return true;
   }
-  if (a.startsWith("thinking")) {
-    return /tools?\s+next|calling tools|after\b/i.test(a);
-  }
+  // Planning a tool call is still reasoning. The indicator switches to
+  // Working only when execution actually starts.
+  if (a.startsWith("thinking")) return false;
   return (
     a.startsWith("tool") ||
     a.startsWith("done") ||
@@ -111,6 +111,11 @@ export function humanizeActivity(
       "",
     );
     return `Approve ${clip(stripped, 48)}?`;
+  }
+
+  if (lower.startsWith("input")) {
+    const rest = raw.replace(/^input\s*[·.]\s*/i, "").trim();
+    return rest ? clip(rest, 48) : "Type or paste";
   }
 
   const fail = raw.match(/^fail\s*[·.]\s*(.+)$/i);
@@ -214,7 +219,7 @@ function friendlyTool(name: string): string {
  */
 export function pickCaption(status: StatusPicture): Caption | null {
   const detail = status.detail?.trim();
-  if (detail) {
+  if (detail && status.engine !== "Starting") {
     return { kind: "error", text: detail };
   }
 
@@ -274,7 +279,15 @@ export function pickSecondary(
   status: StatusPicture,
   phaseHint: string,
 ): string {
-  if (status.detail?.trim()) return "Something went wrong";
+  // Engine lifecycle overrides the phase snapshot. During startup the last
+  // known phase can still be Off; during a fault it can still look Ready.
+  if (status.engine === "Starting") return phaseHint;
+  if (status.engine === "Fault") return "";
+  if (status.engine === "Off") return "Engine is off";
+
+  // The error caption carries the actionable detail. Repeating a generic
+  // subtitle beside "Error" weakens the hierarchy on the small island.
+  if (status.detail?.trim()) return "";
 
   const activityLine = humanizeActivity(status.activity);
   const phase = status.phase;
@@ -285,7 +298,7 @@ export function pickSecondary(
     if (activityLine && !activityLine.startsWith("Approve")) {
       return activityLine;
     }
-    return "Waiting for your yes";
+    return "Say yes or no";
   }
 
   // Tool / subagent / multi-step progress always wins during Thinking
@@ -297,16 +310,18 @@ export function pickSecondary(
 
   switch (phase) {
     case "Off":
-      return "Engine is off";
+      return phaseHint;
     case "Quiet":
     case "Armed":
       return "Say the wake word";
     case "AwaitingReply":
-      return "Answer freely — no wake word";
+      return "No wake word needed";
     case "AwaitingConfirm":
-      return "Waiting for your yes";
+      return "Say yes or no";
+    case "AwaitingInput":
+      return "Type or paste";
     case "Hearing":
-      return "Go ahead";
+      return "Speak naturally";
     case "Reading":
       // Primary is "Transcribing" — don't double it
       return "";
@@ -381,10 +396,20 @@ export function pickOverlayPresence(
   const phase = status.phase;
   let primary = toneLabel;
 
+  // Typed input wins even if the snapshot still says Thinking for a frame.
+  if (status.input) {
+    return {
+      primary: "Your turn",
+      secondary: status.input.label.trim() || "Type or paste",
+    };
+  }
+
   // Refine primary for work phases (tools vs pure LLM vs research)
   if (status.engine === "On" || status.engine === "Starting") {
     if (phase === "Thinking") {
-      if (/spawn_subagent|subagent/i.test(activity)) {
+      if (/^fail\s*[·.]/i.test(activity)) {
+        primary = "Tool failed";
+      } else if (/spawn_subagent|subagent/i.test(activity)) {
         primary = "Researching";
       } else if (
         /web_search|web_fetch/i.test(activity) ||
@@ -417,15 +442,6 @@ export function pickOverlayPresence(
   return { primary, secondary };
 }
 
-/** Whether the thin progress hairline should show. */
-export function showProgressBar(status: StatusPicture): boolean {
-  if (status.phase !== "Thinking") return false;
-  const a = status.activity?.trim() ?? "";
-  if (!a) return false;
-  // Multi-tool counts and tool chips keep the bar alive so rapid starts don't look stuck
-  return true;
-}
-
 /** Live reasoning tail for the island. Hidden once a spoken reply exists. */
 export function overlayThinkingText(status: StatusPicture): string | null {
   if (status.phase !== "Thinking") return null;
@@ -435,13 +451,24 @@ export function overlayThinkingText(status: StatusPicture): string | null {
   return text || null;
 }
 
-/** Host HWND + CSS stage must use the same mode (`overlay_win::layout_for`). */
+/** Island chrome mode. The HWND stays on the card budget; this only
+ *  changes max size / clipping of the painted pill. */
 export type OverlayStageMode = "presence" | "thought" | "card";
 
 export function overlayStageMode(status: StatusPicture): OverlayStageMode {
-  if (shouldShowOverlayCard(status)) return "card";
-  if (status.phase === "Thinking") return "thought";
+  if (shouldShowOverlayCard(status) || overlayInputUsesCard(status)) {
+    return "card";
+  }
+  if (status.input || status.phase === "Thinking") return "thought";
   return "presence";
+}
+
+/** Blob / multiline paste uses the glance card. A short exact/secret field
+ *  stays thought-sized so the island does not jump to 264px empty. */
+export function overlayInputUsesCard(status: StatusPicture): boolean {
+  const input = status.input;
+  if (!input) return false;
+  return input.multiline || input.kind.toLowerCase() === "blob";
 }
 
 // ── Main conversation panel lines ──────────────────────────────────────────
@@ -452,6 +479,7 @@ export type ConversationLine =
   | { kind: "status"; text: string }
   | { kind: "thought"; text: string }
   | { kind: "confirm"; activity: string | null; prompt: string }
+  | { kind: "input"; label: string; prompt: string }
   | { kind: "error"; text: string }
   | { kind: "placeholder"; text: string };
 
@@ -477,6 +505,15 @@ export function conversationLines(status: StatusPicture): ConversationLine[] {
 
   if (status.detail?.trim()) {
     lines.push({ kind: "error", text: status.detail.trim() });
+  }
+
+  if (status.input) {
+    lines.push({
+      kind: "input",
+      label: status.input.label,
+      prompt: said || status.input.spoken || "Type or paste on screen.",
+    });
+    return lines;
   }
 
   if (confirm) {
@@ -564,7 +601,9 @@ function isShortConfirmAnswer(text: string): boolean {
  * Thinking/Talking snapshot only has a card if this turn presented one.
  */
 export function shouldShowOverlayCard(status: StatusPicture): boolean {
-  if (!status.artifact) return false;
+  // Keep this predicate byte-for-byte equivalent in meaning to the native
+  // host's `wants_card_layout`; otherwise React can render into the wrong HWND.
+  if (!status.artifact || status.engine !== "On") return false;
   if (status.phase === "Off" || status.phase === "Hearing" || status.phase === "Reading") {
     return false;
   }
@@ -583,7 +622,8 @@ export function shouldStayExpanded(status: StatusPicture): boolean {
     p === "Thinking" ||
     p === "Talking" ||
     p === "AwaitingReply" ||
-    p === "AwaitingConfirm"
+    p === "AwaitingConfirm" ||
+    p === "AwaitingInput"
   );
 }
 

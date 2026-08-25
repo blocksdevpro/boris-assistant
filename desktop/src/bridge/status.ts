@@ -136,6 +136,26 @@ export async function startEngine(
   }
 }
 
+export async function submitInput(id: string, value: string): Promise<void> {
+  try {
+    await invoke(COMMANDS.submitInput, { id, value });
+  } catch (e) {
+    const msg = invokeErrorMessage(e);
+    logger.error("submit_input failed", msg);
+    throw new Error(msg);
+  }
+}
+
+export async function cancelInput(id: string): Promise<void> {
+  try {
+    await invoke(COMMANDS.cancelInput, { id });
+  } catch (e) {
+    const msg = invokeErrorMessage(e);
+    logger.error("cancel_input failed", msg);
+    throw new Error(msg);
+  }
+}
+
 export async function stopEngine(): Promise<void> {
   logger.info("stopEngine");
   try {

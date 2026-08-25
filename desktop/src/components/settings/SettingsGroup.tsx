@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /** Inset grouped list — header outside the card, Apple Settings style. */
@@ -11,27 +11,47 @@ export function SettingsGroup({
   action,
 }: {
   title?: string;
-  footer?: string;
+  footer?: ReactNode;
   children: ReactNode;
   className?: string;
   id?: string;
   action?: ReactNode;
 }) {
+  const generatedId = useId();
+  const headingId = title ? `${id ?? generatedId}-heading` : undefined;
+  const footerId = footer ? `${id ?? generatedId}-footer` : undefined;
+
   return (
-    <section id={id} className={cn("flex scroll-mt-4 flex-col gap-2", className)}>
+    <section
+      id={id}
+      aria-labelledby={headingId}
+      aria-describedby={footerId}
+      className={cn(
+        "settings-section flex scroll-mt-4 flex-col gap-2.5",
+        className,
+      )}
+    >
       {title ? (
-        <div className="flex min-h-8 items-center justify-between gap-3 px-4">
-          <h2 className="text-[13px] font-normal leading-none text-white/55">
+        <div className="settings-section__header flex min-h-7 items-end justify-between gap-3 px-3">
+          <h2
+            id={headingId}
+            className="text-[12px] font-medium leading-none tracking-[0.01em] text-white/48"
+          >
             {title}
           </h2>
           {action}
         </div>
       ) : null}
-      <div className="settings-group overflow-hidden rounded-[12px]">
+      <div className="settings-group settings-section__surface overflow-hidden rounded-[16px] border border-white/[0.055] shadow-[0_1px_0_rgba(255,255,255,0.025)_inset,0_14px_36px_rgba(0,0,0,0.10)]">
         {children}
       </div>
       {footer ? (
-        <p className="px-4 text-[12px] leading-snug text-white/45">{footer}</p>
+        <p
+          id={footerId}
+          className="settings-section__footer px-3 text-[12px] leading-[1.45] text-white/38"
+        >
+          {footer}
+        </p>
       ) : null}
     </section>
   );
@@ -57,17 +77,21 @@ export function SettingsRow({
   if (stacked) {
     return (
       <div
+        data-settings-row
         className={cn(
-          "flex flex-col gap-2 px-4 py-3",
+          "settings-row flex flex-col gap-2.5 px-4 py-3.5 transition-colors duration-150",
           !last && "border-b border-white/[0.06]",
         )}
       >
         <div className="min-w-0">
-          <Label htmlFor={labelFor} className="text-[15px] font-normal leading-snug tracking-[-0.01em] text-white/[0.92]">
+          <Label
+            htmlFor={labelFor}
+            className="text-[14px] font-medium leading-snug tracking-[-0.01em] text-white/[0.9]"
+          >
             {label}
           </Label>
           {subtitle ? (
-            <p className="mt-0.5 text-[12px] leading-snug text-white/35">
+            <p className="mt-1 text-[12px] leading-snug text-white/38">
               {subtitle}
             </p>
           ) : null}
@@ -79,23 +103,27 @@ export function SettingsRow({
 
   return (
     <div
+      data-settings-row
       className={cn(
-        "flex min-h-[48px] items-center gap-3 px-4 py-2.5",
+        "settings-row flex min-h-[56px] items-center gap-3 px-4 py-2.5 transition-colors duration-150",
         !last && "border-b border-white/[0.06]",
       )}
     >
       <div className="min-w-0 flex-1 pr-2">
-        <Label htmlFor={labelFor} className="text-[15px] font-normal leading-snug tracking-[-0.01em] text-white/[0.92]">
+        <Label
+          htmlFor={labelFor}
+          className="text-[14px] font-medium leading-snug tracking-[-0.01em] text-white/[0.9]"
+        >
           {label}
         </Label>
         {subtitle ? (
-          <p className="mt-0.5 text-[12px] leading-snug text-white/35">
+          <p className="mt-1 text-[12px] leading-snug text-white/38">
             {subtitle}
           </p>
         ) : null}
       </div>
       {children ? (
-        <div className="flex min-w-0 max-w-[min(100%,18rem)] shrink-0 items-center justify-end gap-2">
+        <div className="settings-row__control flex min-w-0 max-w-[min(55%,18rem)] shrink-0 items-center justify-end gap-2">
           {children}
         </div>
       ) : null}
@@ -119,19 +147,27 @@ export function SettingsField({
 }) {
   return (
     <div
+      data-settings-row
       className={cn(
-        "flex flex-col gap-2 px-4 py-3",
+        "settings-row settings-field flex flex-col gap-2.5 px-4 py-3.5",
         !last && "border-b border-white/[0.06]",
       )}
     >
       <div className="min-w-0">
         {labelFor ? (
-          <label htmlFor={labelFor} className="text-[13px] font-normal text-white/55">{label}</label>
+          <label
+            htmlFor={labelFor}
+            className="text-[13px] font-medium text-white/58"
+          >
+            {label}
+          </label>
         ) : (
-          <p className="text-[13px] font-normal text-white/55">{label}</p>
+          <p className="text-[13px] font-medium text-white/58">{label}</p>
         )}
         {subtitle ? (
-          <p className="mt-0.5 text-[12px] leading-snug text-white/35">{subtitle}</p>
+          <p className="mt-1 text-[12px] leading-snug text-white/38">
+            {subtitle}
+          </p>
         ) : null}
       </div>
       {children}

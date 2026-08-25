@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::context::Role;
-use crate::error::AgentError;
+use crate::error::{AgentError, AgentErrorKind};
 use crate::loop_::{self, LoopState};
 use crate::observe::{TurnOutcomeKind, TurnReport};
 use crate::outcome::AgentOutcome;
@@ -199,8 +199,14 @@ impl Agent {
         // does not freestyle without the multi-query playbook.
         self.maybe_inject_research_skill(user_text);
 
-        let ct = CancellationToken::new();
-        self.cancel = Some(ct.clone());
+        let ct = match self.cancel.clone() {
+            Some(existing) => existing,
+            None => {
+                let ct = CancellationToken::new();
+                self.cancel = Some(ct.clone());
+                ct
+            }
+        };
         let emit = self.make_emit();
         // Finish gate reads the session-bound todos *file* (not sandbox root).
         let todos_for_gate = self
@@ -242,14 +248,111 @@ impl Agent {
             Err(e) => {
                 self.context.messages = snapshot;
                 self.pending_turn = None;
-                self.emit(&AgentEvent::Error {
-                    message: e.to_string(),
-                });
-                error!(
-                    error = %e,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "agent turn failed"
-                );
+                if e.kind() == AgentErrorKind::Cancelled {
+                    info!(
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent turn cancelled"
+                    );
+                } else {
+                    self.emit(&AgentEvent::Error {
+                        message: e.to_string(),
+                    });
+                    error!(
+                        error = %e,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent turn failed"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Continue after the host collected typed input (or the user cancelled).
+    pub async fn resume_input(
+        &mut self,
+        pending_id: &str,
+        value: Option<String>,
+    ) -> Result<AgentOutcome, AgentError> {
+        self.resume_input_with_report(pending_id, value)
+            .await
+            .map(|(o, _)| o)
+    }
+
+    /// Same as [`Self::resume_input`] with a [`TurnReport`].
+    pub async fn resume_input_with_report(
+        &mut self,
+        pending_id: &str,
+        value: Option<String>,
+    ) -> Result<(AgentOutcome, TurnReport), AgentError> {
+        let started = Instant::now();
+        let pending_turn = self
+            .pending_turn
+            .take()
+            .ok_or_else(|| AgentError::new("no pending input to resume"))?;
+
+        if pending_turn.pending.id != pending_id {
+            let id = pending_turn.pending.id.clone();
+            self.pending_turn = Some(pending_turn);
+            return Err(AgentError::new(format!(
+                "pending id mismatch: expected `{id}`, got `{pending_id}`"
+            )));
+        }
+        if pending_turn.pending.input.is_none() {
+            self.pending_turn = Some(pending_turn);
+            return Err(AgentError::new(
+                "pending pause is a confirmation, not input",
+            ));
+        }
+
+        let user_text = pending_turn.user_text.clone();
+        let ct = match self.cancel.clone() {
+            Some(existing) => existing,
+            None => {
+                let ct = CancellationToken::new();
+                self.cancel = Some(ct.clone());
+                ct
+            }
+        };
+        let config = self.loop_config(&user_text);
+        let emit = self.make_emit();
+
+        let loop_out = {
+            let state = LoopState {
+                context: &mut self.context,
+                tools: &self.tools,
+                runtime: &self.runtime,
+                client: self.client.as_ref(),
+                activated: Some(&self.activated),
+            };
+            loop_::resume_pending_input(state, pending_turn, value, &config, Some(emit), Some(ct))
+                .await
+        };
+
+        self.cancel = None;
+
+        match loop_out {
+            Ok(loop_out) => {
+                self.pending_turn = loop_out.pending_turn.clone();
+                self.maybe_refresh_after_tools(&loop_out.tools_used);
+                self.finish_loop(started, &user_text, loop_out).await
+            }
+            Err(e) => {
+                if e.kind() == AgentErrorKind::Cancelled {
+                    info!(
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent input resume cancelled"
+                    );
+                } else {
+                    error!(
+                        error = %e,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent input resume failed"
+                    );
+                    self.emit(&AgentEvent::Error {
+                        message: e.to_string(),
+                    });
+                }
                 Err(e)
             }
         }
@@ -287,8 +390,14 @@ impl Agent {
         }
 
         let user_text = pending_turn.user_text.clone();
-        let ct = CancellationToken::new();
-        self.cancel = Some(ct.clone());
+        let ct = match self.cancel.clone() {
+            Some(existing) => existing,
+            None => {
+                let ct = CancellationToken::new();
+                self.cancel = Some(ct.clone());
+                ct
+            }
+        };
         let config = self.loop_config(&user_text);
         let emit = self.make_emit();
 
@@ -313,14 +422,21 @@ impl Agent {
                 self.finish_loop(started, &user_text, loop_out).await
             }
             Err(e) => {
-                error!(
-                    error = %e,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "agent resume failed"
-                );
-                self.emit(&AgentEvent::Error {
-                    message: e.to_string(),
-                });
+                if e.kind() == AgentErrorKind::Cancelled {
+                    info!(
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent resume cancelled"
+                    );
+                } else {
+                    error!(
+                        error = %e,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "agent resume failed"
+                    );
+                    self.emit(&AgentEvent::Error {
+                        message: e.to_string(),
+                    });
+                }
                 Err(e)
             }
         }
@@ -338,6 +454,7 @@ impl Agent {
             AgentOutcome::Speak { .. } => "speak",
             AgentOutcome::Silent => "silent",
             AgentOutcome::NeedsConfirmation { .. } => "needs_confirm",
+            AgentOutcome::NeedsInput { .. } => "needs_input",
         };
         let approx_chars_in = self
             .context
@@ -348,6 +465,7 @@ impl Agent {
             tools_used: loop_out.tools_used.clone(),
             outcome: match &loop_out.outcome {
                 AgentOutcome::NeedsConfirmation { .. } => TurnOutcomeKind::NeedsConfirm,
+                AgentOutcome::NeedsInput { .. } => TurnOutcomeKind::NeedsInput,
                 AgentOutcome::Silent => TurnOutcomeKind::Silent,
                 AgentOutcome::Speak { .. } => TurnOutcomeKind::Speak,
             },
@@ -364,11 +482,14 @@ impl Agent {
         );
 
         // Duration is captured *before* maintenance so TTS is not billed for it.
-        if !matches!(loop_out.outcome, AgentOutcome::NeedsConfirmation { .. }) {
+        if !matches!(
+            loop_out.outcome,
+            AgentOutcome::NeedsConfirmation { .. } | AgentOutcome::NeedsInput { .. }
+        ) {
             let assistant_text = match &loop_out.outcome {
                 AgentOutcome::Speak { text, .. } => text.as_str(),
                 AgentOutcome::Silent => "",
-                AgentOutcome::NeedsConfirmation { .. } => "",
+                AgentOutcome::NeedsConfirmation { .. } | AgentOutcome::NeedsInput { .. } => "",
             };
             self.enqueue_post_turn(user_text, assistant_text, &loop_out.tools_used);
         }

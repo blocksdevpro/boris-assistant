@@ -6,7 +6,7 @@ use std::time::Instant;
 use boris_core::TurnId;
 
 use crate::status::{
-    ArtifactPeek, DeviceHealth, EngineState, Phase, StatusPicture, WakeEnrollPeek,
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, Phase, StatusPicture, WakeEnrollPeek,
     DEFAULT_CONTEXT_LIMIT_TOKENS,
 };
 
@@ -26,6 +26,7 @@ pub(super) struct Picture {
     pub context_limit: Option<u32>,
     pub artifact: Option<ArtifactPeek>,
     pub wake_enroll: Option<WakeEnrollPeek>,
+    pub input: Option<InputPeek>,
     pub status_tx: Sender<StatusPicture>,
     /// When the current [`Phase`] began — used to log how long each status lasted.
     pub phase_started: Instant,
@@ -48,6 +49,7 @@ impl Picture {
             context_limit: self.context_limit,
             artifact: self.artifact.clone(),
             wake_enroll: self.wake_enroll.clone(),
+            input: self.input.clone(),
         });
     }
 
@@ -66,6 +68,9 @@ impl Picture {
             self.phase_started = Instant::now();
             if phase != Phase::Thinking {
                 self.thinking = None;
+            }
+            if phase != Phase::AwaitingInput {
+                self.input = None;
             }
         }
         self.publish();

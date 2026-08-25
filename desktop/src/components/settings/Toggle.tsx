@@ -1,3 +1,4 @@
+import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 
 /**
@@ -17,6 +18,8 @@ export function Toggle({
   id?: string;
   "aria-label"?: string;
 }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <button
       id={id}
@@ -24,23 +27,33 @@ export function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
+      aria-disabled={disabled || undefined}
+      data-state={checked ? "checked" : "unchecked"}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-[31px] w-[51px] shrink-0 rounded-full p-0 transition-colors duration-200",
+        "settings-toggle relative h-[31px] w-[51px] shrink-0 rounded-full border p-0",
+        "shadow-[0_0_0_0_rgba(255,255,255,0)] transition-[background-color,border-color,box-shadow,transform] duration-200",
+        "hover:shadow-[0_0_0_3px_rgba(255,255,255,0.045)] active:scale-[0.97]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-2 focus-visible:ring-offset-[#1c1c1e]",
-        "disabled:cursor-not-allowed disabled:opacity-45",
-        checked ? "bg-[#34c759]" : "bg-white/20",
+        "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:shadow-none disabled:active:scale-100",
+        checked
+          ? "border-[#49d66a]/80 bg-[#34c759]"
+          : "border-white/[0.08] bg-white/[0.16]",
       )}
     >
-      <span
+      <motion.span
         aria-hidden
+        initial={false}
+        animate={{ x: checked ? 20 : 0, scale: checked ? 1 : 0.96 }}
+        transition={
+          reduceMotion
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 520, damping: 34, mass: 0.7 }
+        }
         className={cn(
-          "pointer-events-none absolute top-[2px] left-[2px] block size-[27px] rounded-full",
-          "bg-white shadow-[0_1px_2px_rgba(0,0,0,0.35),0_1px_3px_rgba(0,0,0,0.15)]",
-          "transition-transform duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)]",
-          // 51 − 27 − 2 − 2 = 20px travel
-          checked && "translate-x-[20px]",
+          "pointer-events-none absolute left-[1px] top-[1px] block size-[27px] rounded-full",
+          "bg-white shadow-[0_1px_2px_rgba(0,0,0,0.42),0_2px_5px_rgba(0,0,0,0.18)]",
         )}
       />
     </button>

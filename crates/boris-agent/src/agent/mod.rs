@@ -44,6 +44,35 @@ use personal::PersonalMemory;
 /// Max characters of user text included in turn-start logs.
 const LOG_PREVIEW_CHARS: usize = 80;
 
+/// Host handle to cancel an in-flight [`Agent::prompt`]. Cheap to clone; the
+/// engine thread keeps one copy while the turn runs on the agent runtime.
+#[derive(Clone, Debug)]
+pub struct TurnCancel {
+    token: CancellationToken,
+}
+
+impl TurnCancel {
+    fn fresh() -> Self {
+        Self {
+            token: CancellationToken::new(),
+        }
+    }
+
+    /// Ask the loop and in-flight tools to stop. Cooperative: the current LLM
+    /// stream is dropped, bash/web poll the token.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    fn inner(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
+
 /// Stateful voice agent: context, tools, runtime, HITL, personal memory.
 pub struct Agent {
     client: Arc<dyn LlmClient>,
@@ -84,6 +113,16 @@ pub struct Agent {
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
     /// Background LTM / extract / index (owned by host or tests).
     maintenance: Option<crate::maintenance::MaintenanceHandle>,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn agent_and_turn_cancel_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::Agent>();
+        assert_send::<super::TurnCancel>();
+    }
 }
 
 impl Agent {
@@ -448,6 +487,14 @@ impl Agent {
         self.pending_turn.is_some()
     }
 
+    /// Install a cancel token for the next [`Self::prompt`]. The host clones
+    /// the handle and may cancel from another thread while the turn runs.
+    pub fn arm_cancel(&mut self) -> TurnCancel {
+        let handle = TurnCancel::fresh();
+        self.cancel = Some(handle.inner());
+        handle
+    }
+
     /// Drop pending HITL state and cancel in-flight loop token.
     pub fn abort(&mut self) {
         if let Some(ct) = self.cancel.take() {
@@ -570,6 +617,19 @@ impl Agent {
 
     pub fn export_messages(&self) -> Vec<Message> {
         self.context.messages().to_vec()
+    }
+
+    /// Same as [`Self::export_messages`] with secret collect_input values stripped.
+    pub fn export_messages_for_persist(&self) -> Vec<Message> {
+        self.export_messages()
+            .into_iter()
+            .map(|mut m| {
+                if matches!(m.role, Role::Tool) {
+                    m.content = crate::tools::collect_input::redact_secret_tool_content(&m.content);
+                }
+                m
+            })
+            .collect()
     }
 }
 

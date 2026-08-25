@@ -23,6 +23,8 @@ export {
   startEngine,
   startWakeEnroll,
   stopEngine,
+  submitInput,
+  cancelInput,
   wakeLivenessStatus,
   clearWakeProfile,
   switchInput,
@@ -58,4 +60,5 @@ export {
   type PreflightReport,
   type StatusPicture,
   type WakeEnrollPeek,
+  type InputPeek,
 } from "./types";

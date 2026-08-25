@@ -1,8 +1,72 @@
 //! Pending HITL tool call state for pause/resume.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tool::ToolRisk;
+
+/// What the on-screen field should collect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputKind {
+    /// Short exact string (email, path, branch). Visible.
+    Exact,
+    /// Secret (password, token). Masked. Redacted on persist.
+    Secret,
+    /// Large paste. Textarea.
+    Blob,
+}
+
+impl InputKind {
+    /// Parse `exact` / `secret` / `blob` (and a few aliases). Unknown → Exact.
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "secret" | "password" | "token" | "key" => Self::Secret,
+            "blob" | "text" | "paste" | "multiline" => Self::Blob,
+            _ => Self::Exact,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Secret => "secret",
+            Self::Blob => "blob",
+        }
+    }
+
+    pub fn is_secret(self) -> bool {
+        matches!(self, Self::Secret)
+    }
+
+    pub fn multiline(self) -> bool {
+        matches!(self, Self::Blob)
+    }
+
+    pub fn max_chars(self) -> u32 {
+        match self {
+            Self::Exact => 512,
+            Self::Secret => 2048,
+            Self::Blob => 12_000,
+        }
+    }
+
+    pub fn default_label(self) -> &'static str {
+        match self {
+            Self::Exact => "Exact text",
+            Self::Secret => "Secret",
+            Self::Blob => "Paste text",
+        }
+    }
+}
+
+/// Field spec carried on a pending collect_input pause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInput {
+    pub kind: InputKind,
+    pub label: String,
+    pub max_chars: u32,
+}
 
 /// A tool call waiting for user confirmation (not yet executed).
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +80,8 @@ pub struct PendingToolCall {
     pub risk: ToolRisk,
     /// Provider tool_call id for the observation message.
     pub call_id: String,
+    /// When set, the host collects typed input instead of yes/no.
+    pub input: Option<PendingInput>,
 }
 
 impl PendingToolCall {
@@ -34,7 +100,13 @@ impl PendingToolCall {
             args_summary: args_summary.into(),
             risk,
             call_id: call_id.into(),
+            input: None,
         }
+    }
+
+    pub fn with_input(mut self, input: PendingInput) -> Self {
+        self.input = Some(input);
+        self
     }
 }
 

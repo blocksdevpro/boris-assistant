@@ -54,6 +54,8 @@ pub fn run() {
             commands::list_output_devices,
             commands::switch_input,
             commands::switch_output,
+            commands::submit_input,
+            commands::cancel_input,
             commands::models_status,
             commands::download_models,
             commands::get_settings,

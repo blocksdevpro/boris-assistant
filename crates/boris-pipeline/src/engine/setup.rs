@@ -6,7 +6,9 @@ use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::ArcAudioBuffer;
 use boris_inference::TextToSpeech;
-use boris_sense::{init_onnx_runtime, LivekitWakeWord, SileroVad, SILERO_SPEECH_THRESHOLD};
+use boris_sense::{
+    init_onnx_runtime, LivekitWakeWord, SileroVad, SpeakerEmbedder, SILERO_SPEECH_THRESHOLD,
+};
 
 use crate::config::PipelineConfig;
 use crate::error::{PipelineError, Result};
@@ -47,7 +49,7 @@ pub(super) struct EngineRuntime {
     pub system_prompt: String,
     pub residency: super::models::ModelResidency,
     pub liveness: crate::liveness::WakeLiveness,
-    /// Wake-word barge-in while Talking (same live-mic gate as Armed).
+    /// Wake-word barge-in while Talking or Thinking.
     pub barge_in: bool,
     #[allow(dead_code)]
     pub maintenance: boris_agent::MaintenanceWorker,
@@ -61,7 +63,9 @@ pub(super) fn init_runtime(
     let init_started = std::time::Instant::now();
     tracing::info!("engine thread entered run()");
     if config.voice_barge_in {
-        tracing::info!("wake-word barge-in enabled (mixed-window wake + close-talk energy)");
+        tracing::info!(
+            "wake-word barge-in enabled (talking: mixed-window wake + close-talk; thinking: wake + live-mic gate)"
+        );
     }
     publish_starting(&status_tx, &config);
 
@@ -167,6 +171,7 @@ pub(super) fn init_runtime(
         context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
         artifact: None,
         wake_enroll: None,
+        input: None,
         status_tx,
         phase_started: std::time::Instant::now(),
     };
@@ -194,7 +199,10 @@ pub(super) fn init_runtime(
         tts_model_dir: config.tts_model_dir,
         system_prompt: config.system_prompt,
         residency: super::models::ModelResidency::parse(&config.model_residency),
-        liveness: crate::liveness::WakeLiveness::load(config.ignore_speaker_playback),
+        liveness: crate::liveness::WakeLiveness::load(
+            config.ignore_speaker_playback,
+            load_speaker_embedder(),
+        ),
         barge_in: config.voice_barge_in,
         maintenance,
     })
@@ -222,6 +230,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         context_limit: None,
         artifact: None,
         wake_enroll: None,
+        input: None,
     });
 }
 
@@ -343,6 +352,39 @@ fn load_vad(
     }
 }
 
+/// Optional CAM++ bytes from `~/.boris/models/speaker/`. Missing file is fine.
+fn load_speaker_embedder() -> Option<SpeakerEmbedder> {
+    let path = paths::speaker_embed_model_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => {
+            tracing::warn!(path = %path.display(), "speaker embed model is empty");
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(
+                path = %path.display(),
+                "no CAM++ speaker model — identity uses brightness until Install models"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "speaker embed model unreadable");
+            return None;
+        }
+    };
+    match SpeakerEmbedder::try_new(&bytes) {
+        Ok(e) => {
+            tracing::info!(bytes = bytes.len(), "CAM++ speaker embedder loaded");
+            Some(e)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "CAM++ speaker embedder failed to load");
+            None
+        }
+    }
+}
+
 /// `BORIS_VAD_THRESHOLD` in (0, 1]; default 0.5.
 fn vad_threshold_from_env() -> f32 {
     match std::env::var("BORIS_VAD_THRESHOLD") {
@@ -386,6 +428,7 @@ fn fault(
         context_limit: None,
         artifact: None,
         wake_enroll: None,
+        input: None,
     });
 }
 

@@ -46,6 +46,7 @@ export function useStatus(): StatusPicture {
   useEffect(() => {
     let active = true;
     let unsub = () => {};
+    let receivedPush = false;
 
     if (providedPreviewStatus) {
       setStatus(providedPreviewStatus);
@@ -56,14 +57,18 @@ export function useStatus(): StatusPicture {
 
     void getStatus()
       .then((s) => {
-        if (active) setStatus(s);
+        // A slower initial invoke must never overwrite a newer pushed state.
+        if (active && !receivedPush) setStatus(s);
       })
       .catch(() => {
         // Plain-browser previews do not expose the native command bridge.
       });
 
     void onStatus((s) => {
-      if (active) setStatus(s);
+      if (active) {
+        receivedPush = true;
+        setStatus(s);
+      }
     })
       .then((u) => {
         unsub = u;

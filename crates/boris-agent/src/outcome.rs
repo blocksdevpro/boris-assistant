@@ -23,6 +23,12 @@ pub enum AgentOutcome {
         text: String,
         pending: PendingToolCall,
     },
+    /// Tool loop paused for typed / pasted input. Host should speak `text`,
+    /// collect the field, then call [`crate::Agent::resume_input`].
+    NeedsInput {
+        text: String,
+        pending: PendingToolCall,
+    },
 }
 
 impl AgentOutcome {
@@ -44,7 +50,9 @@ impl AgentOutcome {
 
     pub fn text(&self) -> Option<&str> {
         match self {
-            Self::Speak { text, .. } | Self::NeedsConfirmation { text, .. } => Some(text.as_str()),
+            Self::Speak { text, .. }
+            | Self::NeedsConfirmation { text, .. }
+            | Self::NeedsInput { text, .. } => Some(text.as_str()),
             Self::Silent => None,
         }
     }
@@ -53,7 +61,7 @@ impl AgentOutcome {
         match self {
             Self::Speak { expect_reply, .. } => *expect_reply,
             // Confirm prompts always need a yes/no (or freeform) answer.
-            Self::NeedsConfirmation { .. } => true,
+            Self::NeedsConfirmation { .. } | Self::NeedsInput { .. } => true,
             Self::Silent => false,
         }
     }

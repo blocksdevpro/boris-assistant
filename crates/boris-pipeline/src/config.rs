@@ -109,7 +109,7 @@ pub struct PipelineConfig {
     pub max_confirms_per_turn: u32,
     /// STT/TTS residency: `low_memory` | `balanced` | `low_latency`.
     pub model_residency: String,
-    /// Wake-word barge-in while Talking. Same live-mic gate as Armed.
+    /// Wake-word barge-in while Talking or Thinking.
     /// Leftover speech is paused and resumes on silence / "continue".
     pub voice_barge_in: bool,
     /// Reject speaker-played wake hits (TV / Translate / TTS) when a live

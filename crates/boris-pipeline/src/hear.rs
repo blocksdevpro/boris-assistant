@@ -93,6 +93,7 @@ fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result
             Ok(EngineCommand::ClearWakeProfile) => {
                 return Err(HearBreak::ClearWakeProfile);
             }
+            Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => return Err(HearBreak::Disconnected),
         }
@@ -259,6 +260,19 @@ pub fn capture_utterance(
     running: &mut bool,
     kind: CaptureKind,
 ) -> Result<AudioBuffer, HearBreak> {
+    capture_utterance_until(mic, vad, cmd_rx, running, kind, || false)
+}
+
+/// Same as [`capture_utterance`], but `abort` is polled between frames.
+/// When it returns true, the clip so far is returned (often silence).
+pub fn capture_utterance_until(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &mut impl Vad,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    kind: CaptureKind,
+    mut abort: impl FnMut() -> bool,
+) -> Result<AudioBuffer, HearBreak> {
     let max_secs: u32 = match kind {
         CaptureKind::AwaitConfirm => 8, // short yes/no — do not hold the mic forever
         _ => 30,
@@ -300,6 +314,16 @@ pub fn capture_utterance(
     };
 
     loop {
+        if abort() {
+            let clip = record.take_audio();
+            record.set_recording(false);
+            tracing::info!(
+                samples = clip.len(),
+                ms = wall.elapsed().as_millis() as u64,
+                "capture_utterance aborted"
+            );
+            return Ok(clip);
+        }
         let frame = next_frame(mic, cmd_rx, running)?;
         record.push(&frame);
         if record.exceeded_max() {

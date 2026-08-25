@@ -106,6 +106,15 @@ pub(super) fn activity_label(
             let phrase = describe_tool(&pending.name, &pending.args_summary, Tense::Present);
             Some(format!("confirm · {phrase}"))
         }
+        AgentEvent::NeedsInput { pending } => {
+            let label = pending
+                .input
+                .as_ref()
+                .map(|i| i.label.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("on screen");
+            Some(format!("input · {label}"))
+        }
         _ => None,
     }
 }

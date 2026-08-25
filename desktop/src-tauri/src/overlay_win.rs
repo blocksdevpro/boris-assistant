@@ -25,7 +25,7 @@
 //! Tray / host can temporarily unlock input so the user can reposition.
 
 use std::{
-    sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering},
     time::Duration,
 };
 
@@ -42,22 +42,19 @@ const OVERLAY_TOP_MARGIN_FRAC: f64 = 0.02;
 /// Horizontal inset used by the left/right anchor presets.
 const OVERLAY_SIDE_MARGIN: i32 = 18;
 
-/// The React stage's logical dimensions. It contains the island itself.
-const OVERLAY_STAGE_WIDTH: f64 = 380.0;
+/// Presence-sized island, used only to park the card-budget HWND so a
+/// compact pill sits where the old 120px stage used to.
 const OVERLAY_STAGE_HEIGHT: f64 = 120.0;
-/// Thinking stage — header + heard caption + 4-line reasoning tail.
-const OVERLAY_THOUGHT_STAGE_HEIGHT: f64 = 216.0;
 
 /// Clear WebView space around the stage. CSS shadows cannot draw beyond the
 /// native window, so this gutter prevents their blurred edges being cropped
 /// into a visible rectangular slab.
 const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
 
-/// Base logical window size, including the transparent shadow gutter.
-const OVERLAY_BASE_WIDTH: f64 = OVERLAY_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
+/// Presence window height (stage + gutter). Park math keeps the island
+/// center here even though the HWND is always the card budget.
 const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
-const OVERLAY_THOUGHT_BASE_HEIGHT: f64 = OVERLAY_THOUGHT_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
-/// Glance card stage — clipped body, not a document editor.
+/// Glance card stage — the stable CSS box the island morphs inside.
 const OVERLAY_CARD_STAGE_WIDTH: f64 = 400.0;
 const OVERLAY_CARD_STAGE_HEIGHT: f64 = 300.0;
 const OVERLAY_CARD_BASE_WIDTH: f64 = OVERLAY_CARD_STAGE_WIDTH + OVERLAY_SHADOW_GUTTER * 2.0;
@@ -71,8 +68,20 @@ const READY_LINGER: Duration = Duration::from_millis(6_500);
 const CARD_LINGER: Duration = Duration::from_millis(15_000);
 const FAULT_LINGER: Duration = Duration::from_millis(8_000);
 
+/// React keeps outgoing content mounted while the island material morphs.
+/// The native viewport must not contract underneath that exit animation.
+const LAYOUT_CONTRACTION_SETTLE: Duration = Duration::from_millis(360);
+const SCALE_CONTRACTION_SETTLE: Duration = Duration::from_millis(460);
+const HIDE_EXIT_SETTLE: Duration = Duration::from_millis(220);
+
 /// Cancels stale delayed hides when another wake/status arrives.
 static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Cancels stale delayed geometry independently of visibility timers.
+static GEOMETRY_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Encoded layout/scale target waiting for a contraction timer. Zero is none.
+static PENDING_GEOMETRY: AtomicU32 = AtomicU32::new(0);
 
 /// Cached `show_overlay_on_wake` so the status mirror never re-reads
 /// `config.toml` / `auth.json` on every engine snapshot (that path ran on the
@@ -81,6 +90,9 @@ static VISIBILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Updated by [`remember_overlay_prefs`] / [`apply_preferences`]. Default
 /// matches [`AppSettings`] (off until prefs are loaded).
 static SHOW_OVERLAY_ON_WAKE: AtomicBool = AtomicBool::new(false);
+
+/// Privacy-hidden captions render presence only; native geometry must match.
+static OVERLAY_CONTENT_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 /// Set when the UI persists prefs so a deferred boot `load_settings` cannot
 /// apply stale overlay geometry over a newer save.
@@ -101,6 +113,12 @@ static OVERLAY_PAINTED: AtomicBool = AtomicBool::new(false);
 /// A wake/fault/unlock asked to show before the island's first paint.
 static OVERLAY_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Tray asked to make the island clickable (drag to reposition).
+static OVERLAY_USER_UNLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Engine is waiting for typed input on the island.
+static OVERLAY_AWAIT_INPUT: AtomicBool = AtomicBool::new(false);
+
 /// Create the HWND far off-screen so a first-frame style flash cannot appear.
 const OVERLAY_OFFSCREEN_X: f64 = -32_000.0;
 const OVERLAY_OFFSCREEN_Y: f64 = -32_000.0;
@@ -118,7 +136,7 @@ pub fn overlay_prefs_dirty() -> bool {
     OVERLAY_PREFS_DIRTY.load(Ordering::Acquire)
 }
 
-/// Last layout the host applied so prefs/scale changes keep a live card sized.
+/// Desired layout so prefs/scale changes keep a live card sized.
 /// 0 = presence, 1 = thought, 2 = card.
 static OVERLAY_LAYOUT: AtomicU8 = AtomicU8::new(0);
 
@@ -146,6 +164,9 @@ pub const EVENT_OVERLAY_PREFERENCES: &str = "overlay-preferences";
 
 /// UI → host: overlay React has painted; the HWND may be shown.
 pub const EVENT_OVERLAY_READY: &str = "overlay-ready";
+
+/// Host → UI: fade the painted island before the HWND is hidden.
+pub const EVENT_OVERLAY_WILL_HIDE: &str = "overlay-will-hide";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,7 +234,7 @@ pub fn spawn_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
     tracing::info!("building overlay window");
     let overlay = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
         .title("")
-        .inner_size(OVERLAY_BASE_WIDTH, OVERLAY_BASE_HEIGHT)
+        .inner_size(OVERLAY_CARD_BASE_WIDTH, OVERLAY_CARD_BASE_HEIGHT)
         .max_inner_size(OVERLAY_MAX_WIDTH, OVERLAY_MAX_HEIGHT)
         .decorations(false)
         .always_on_top(true)
@@ -276,6 +297,8 @@ fn ensure_overlay<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow
 
 fn hide_if_present<R: Runtime>(app: &AppHandle<R>) {
     OVERLAY_REVEAL_PENDING.store(false, Ordering::Release);
+    GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst);
+    PENDING_GEOMETRY.store(0, Ordering::Release);
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
@@ -302,6 +325,7 @@ fn overlay_is_visible<R: Runtime>(overlay: &tauri::WebviewWindow<R>) -> bool {
 /// correct without disk I/O.
 pub fn remember_overlay_prefs(settings: &AppSettings) {
     SHOW_OVERLAY_ON_WAKE.store(settings.show_overlay_on_wake, Ordering::Relaxed);
+    OVERLAY_CONTENT_HIDDEN.store(settings.overlay_caption_mode == "hidden", Ordering::Relaxed);
     OVERLAY_SCALE_PERCENT.store(
         settings.overlay_scale_percent.clamp(75, 125),
         Ordering::Relaxed,
@@ -358,12 +382,9 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
 
     if let Some(overlay) = app.get_webview_window("overlay") {
         if overlay_is_visible(&overlay) && (scale_changed || pos_changed) {
-            apply_overlay_size(
-                &overlay,
-                f64::from(scale) / 100.0,
-                OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed)),
-            );
-            if pos_changed {
+            if scale_changed {
+                coordinate_overlay_geometry(app, &overlay, scale, SCALE_CONTRACTION_SETTLE);
+            } else if pos_changed {
                 place_overlay(&overlay, cached_position());
             }
         }
@@ -389,7 +410,17 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
 
     if status.engine == EngineState::Fault {
         if let Some(overlay) = ensure_overlay(app) {
-            request_reveal(&overlay, OverlayLayout::Presence);
+            OVERLAY_LAYOUT.store(OverlayLayout::Presence as u8, Ordering::Relaxed);
+            if overlay_is_visible(&overlay) {
+                coordinate_overlay_geometry(
+                    app,
+                    &overlay,
+                    OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed),
+                    LAYOUT_CONTRACTION_SETTLE,
+                );
+            } else {
+                request_reveal(&overlay, OverlayLayout::Presence);
+            }
             schedule_hide(app.clone(), epoch, FAULT_LINGER);
         }
         return;
@@ -401,8 +432,8 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     }
 
     let layout = layout_for(status);
-    let layout_changed = OVERLAY_LAYOUT.swap(layout as u8, Ordering::Relaxed) != layout as u8;
-    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
+    OVERLAY_LAYOUT.store(layout as u8, Ordering::Relaxed);
+    let scale_percent = OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed);
 
     let active = matches!(
         status.phase,
@@ -412,16 +443,22 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
             | Phase::Talking
             | Phase::AwaitingReply
             | Phase::AwaitingConfirm
+            | Phase::AwaitingInput
     );
+    OVERLAY_AWAIT_INPUT.store(status.phase == Phase::AwaitingInput, Ordering::Release);
 
     if !active {
         // Armed/Quiet: never create or resurrect the island at startup.
         if let Some(overlay) = app.get_webview_window("overlay") {
             if overlay_is_visible(&overlay) {
-                if layout_changed {
-                    apply_overlay_size(&overlay, scale, layout);
-                    place_overlay(&overlay, cached_position());
-                }
+                // Check every snapshot, not just layout changes. A transient
+                // WebView2 resize failure therefore self-heals.
+                coordinate_overlay_geometry(
+                    app,
+                    &overlay,
+                    scale_percent,
+                    LAYOUT_CONTRACTION_SETTLE,
+                );
                 let linger = if status.artifact.is_some() {
                     CARD_LINGER
                 } else {
@@ -439,59 +476,147 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     let Some(overlay) = ensure_overlay(app) else {
         return;
     };
+    apply_cursor_passthrough(&overlay);
+    if status.phase == Phase::AwaitingInput {
+        let _ = overlay.set_focus();
+    }
     let visible = overlay_is_visible(&overlay);
     if !visible {
         // Stay off-screen until React paints. show()+park on a still-loading
         // WebView2 is the solid rectangle on first wake.
         request_reveal(&overlay, layout);
-    } else if layout_changed {
-        apply_overlay_size(&overlay, scale, layout);
+    } else {
+        coordinate_overlay_geometry(app, &overlay, scale_percent, LAYOUT_CONTRACTION_SETTLE);
         place_overlay(&overlay, cached_position());
     }
 }
 
 fn wants_card_layout(status: &StatusPicture) -> bool {
-    // `artifact` is this-turn only (cleared on the next utterance).
-    status.artifact.is_some()
-        && status.engine == EngineState::On
-        && !matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off)
+    if status.engine != EngineState::On {
+        return false;
+    }
+    if matches!(status.phase, Phase::Hearing | Phase::Reading | Phase::Off) {
+        return false;
+    }
+    status.artifact.is_some() || input_wants_card(status)
+}
+
+fn input_wants_card(status: &StatusPicture) -> bool {
+    status
+        .input
+        .as_ref()
+        .is_some_and(|input| input.multiline || input.kind.eq_ignore_ascii_case("blob"))
 }
 
 /// Must stay aligned with `overlayStageMode` in the overlay React surface.
+/// Park math is separate: [`overlay_park_y`] uses Card while typed input is
+/// up so a thought-sized field can still grow without clipping the top.
 fn layout_for(status: &StatusPicture) -> OverlayLayout {
-    if wants_card_layout(status) {
+    if OVERLAY_CONTENT_HIDDEN.load(Ordering::Relaxed) {
+        OverlayLayout::Presence
+    } else if wants_card_layout(status) {
         OverlayLayout::Card
-    } else if status.phase == Phase::Thinking {
+    } else if status.phase == Phase::Thinking || status.input.is_some() {
         OverlayLayout::Thought
     } else {
         OverlayLayout::Presence
     }
 }
 
-fn apply_overlay_size<R: Runtime>(
-    overlay: &tauri::WebviewWindow<R>,
-    scale: f64,
-    layout: OverlayLayout,
-) {
-    let (w, h) = match layout {
-        OverlayLayout::Card => (
-            OVERLAY_CARD_BASE_WIDTH * scale,
-            OVERLAY_CARD_BASE_HEIGHT * scale,
-        ),
-        OverlayLayout::Thought => (
-            OVERLAY_BASE_WIDTH * scale,
-            OVERLAY_THOUGHT_BASE_HEIGHT * scale,
-        ),
-        OverlayLayout::Presence => (OVERLAY_BASE_WIDTH * scale, OVERLAY_BASE_HEIGHT * scale),
-    };
+fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64) -> bool {
+    let (w, h) = overlay_dimensions(scale);
     // Max size is set once at spawn. Re-applying set_max_size on Windows
     // restyles the HWND and flashes a decorated transparent frame.
     if overlay_size_matches(overlay, w, h) {
-        return;
+        return true;
     }
     if let Err(e) = overlay.set_size(tauri::Size::Logical(LogicalSize::new(w, h))) {
-        tracing::warn!(error = %e, ?layout, "overlay resize failed");
+        tracing::warn!(error = %e, "overlay resize failed");
+        return false;
     }
+    true
+}
+
+/// Native viewport is always the card budget. Presence and thought paint a
+/// smaller island inside it and grow from the center, so Listening → Thinking
+/// does not call `set_size`. Windows grows a HWND from the top-left, then a
+/// later `set_position` slides it back, which is the "moves then grows" jump.
+fn overlay_dimensions(scale: f64) -> (f64, f64) {
+    (
+        OVERLAY_CARD_BASE_WIDTH * scale,
+        OVERLAY_CARD_BASE_HEIGHT * scale,
+    )
+}
+
+fn geometry_key(scale_percent: u16) -> u32 {
+    u32::from(scale_percent)
+}
+
+/// Keep the HWND on the card budget. Scale-down waits for the island's exit
+/// animation so the viewport does not clip it. Layout changes never resize.
+fn coordinate_overlay_geometry<R: Runtime>(
+    app: &AppHandle<R>,
+    overlay: &tauri::WebviewWindow<R>,
+    scale_percent: u16,
+    contraction_settle: Duration,
+) {
+    let scale_percent = scale_percent.clamp(75, 125);
+    let scale = f64::from(scale_percent) / 100.0;
+    let (target_w, target_h) = overlay_dimensions(scale);
+
+    if overlay_size_matches(overlay, target_w, target_h) {
+        if PENDING_GEOMETRY.swap(0, Ordering::AcqRel) != 0 {
+            GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst);
+        }
+        return;
+    }
+
+    let shrinking = overlay
+        .inner_size()
+        .ok()
+        .zip(overlay.scale_factor().ok())
+        .filter(|(_, factor)| *factor > 0.0)
+        .is_some_and(|(current, factor)| {
+            target_w < f64::from(current.width) / factor - 1.0
+                || target_h < f64::from(current.height) / factor - 1.0
+        });
+
+    if !shrinking {
+        GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst);
+        PENDING_GEOMETRY.store(0, Ordering::Release);
+        if apply_overlay_size(overlay, scale) {
+            place_overlay(overlay, cached_position());
+        }
+        return;
+    }
+
+    let key = geometry_key(scale_percent);
+    if PENDING_GEOMETRY.swap(key, Ordering::AcqRel) == key {
+        return;
+    }
+    let epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(contraction_settle);
+        if GEOMETRY_EPOCH.load(Ordering::SeqCst) != epoch
+            || PENDING_GEOMETRY.load(Ordering::Acquire) != key
+            || OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed) != scale_percent
+        {
+            return;
+        }
+        let Some(overlay) = app.get_webview_window("overlay") else {
+            PENDING_GEOMETRY
+                .compare_exchange(key, 0, Ordering::AcqRel, Ordering::Acquire)
+                .ok();
+            return;
+        };
+        if apply_overlay_size(&overlay, scale) {
+            place_overlay(&overlay, cached_position());
+        }
+        PENDING_GEOMETRY
+            .compare_exchange(key, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+    });
 }
 
 fn overlay_size_matches<R: Runtime>(
@@ -546,8 +671,9 @@ fn flush_pending_reveal<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
         return;
     }
     let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed)) / 100.0;
-    let layout = OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed));
-    apply_overlay_size(overlay, scale, layout);
+    GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst);
+    PENDING_GEOMETRY.store(0, Ordering::Release);
+    apply_overlay_size(overlay, scale);
     if !overlay_is_visible(overlay) {
         show_without_focus(overlay);
         place_overlay(overlay, cached_position());
@@ -561,15 +687,17 @@ fn show_without_focus<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
     if let Err(e) = overlay.show() {
         tracing::warn!(error = %e, "overlay show failed");
     }
-    // Showing a window must never turn it into a game input target.
-    if let Err(e) = overlay.set_ignore_cursor_events(true) {
-        tracing::warn!(error = %e, "overlay click-through reassert failed");
-    }
+    apply_cursor_passthrough(overlay);
 }
 
 fn schedule_hide<R: Runtime>(app: AppHandle<R>, epoch: u64, delay: Duration) {
     std::thread::spawn(move || {
-        std::thread::sleep(delay);
+        std::thread::sleep(delay.saturating_sub(HIDE_EXIT_SETTLE));
+        if VISIBILITY_EPOCH.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        let _ = app.emit(EVENT_OVERLAY_WILL_HIDE, ());
+        std::thread::sleep(HIDE_EXIT_SETTLE);
         if VISIBILITY_EPOCH.load(Ordering::SeqCst) != epoch {
             return;
         }
@@ -596,13 +724,14 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
         return;
     };
 
+    let scale = f64::from(OVERLAY_SCALE_PERCENT.load(Ordering::Relaxed).clamp(75, 125)) / 100.0;
     let screen_right = pos.x + screen.width as i32;
     let x = match position {
         "top_left" => pos.x + OVERLAY_SIDE_MARGIN,
         "top_right" => screen_right - win_size.width as i32 - OVERLAY_SIDE_MARGIN,
         _ => pos.x + (screen.width as i32 - win_size.width as i32) / 2,
     };
-    let y = pos.y + (screen.height as f64 * OVERLAY_TOP_MARGIN_FRAC) as i32;
+    let y = overlay_park_y(pos.y, screen.height, scale);
 
     if let Ok(current) = overlay.outer_position() {
         if current.x == x && current.y == y {
@@ -617,6 +746,39 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
     }
 }
 
+/// HWND top. The window is the card budget and the island is centered in it,
+/// so shift up by half the extra height. That keeps a compact pill where the
+/// old presence window sat instead of dropping it into the middle of the card.
+fn overlay_park_y(monitor_y: i32, screen_height: u32, scale: f64) -> i32 {
+    let layout = OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed));
+    // Short exact fields paint a thought-sized island, but the HWND still
+    // parks as a card so growth cannot run off the top of the monitor.
+    let park = if OVERLAY_AWAIT_INPUT.load(Ordering::Relaxed) {
+        OverlayLayout::Card
+    } else {
+        layout
+    };
+    overlay_park_y_for(monitor_y, screen_height, scale, park)
+}
+
+/// Presence/thought: keep the small island at the top margin by shifting the
+/// card-budget HWND up. Card: park the HWND on-screen so the grown island is
+/// not clipped by the top of the monitor.
+fn overlay_park_y_for(
+    monitor_y: i32,
+    screen_height: u32,
+    scale: f64,
+    layout: OverlayLayout,
+) -> i32 {
+    let margin = (f64::from(screen_height) * OVERLAY_TOP_MARGIN_FRAC) as i32;
+    if layout == OverlayLayout::Card {
+        return monitor_y + margin;
+    }
+    let presence_h = OVERLAY_BASE_HEIGHT * scale;
+    let max_h = OVERLAY_CARD_BASE_HEIGHT * scale;
+    monitor_y + margin + ((presence_h - max_h) / 2.0).round() as i32
+}
+
 /// When `locked` is true, mouse passes through to the game (default).
 /// When false, the user can click/drag the island to reposition it.
 pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) -> tauri::Result<()> {
@@ -624,7 +786,8 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
         tracing::warn!("set_overlay_input_locked: overlay window missing");
         return Ok(());
     };
-    overlay.set_ignore_cursor_events(locked)?;
+    OVERLAY_USER_UNLOCKED.store(!locked, Ordering::Release);
+    apply_cursor_passthrough(&overlay);
     if !locked {
         // Unlocking is an explicit request to position the overlay. Make the
         // otherwise wake-only window visible without focusing it.
@@ -635,6 +798,14 @@ pub fn set_overlay_input_locked<R: Runtime>(app: &AppHandle<R>, locked: bool) ->
     }
     tracing::info!(locked, "overlay input lock updated");
     Ok(())
+}
+
+fn apply_cursor_passthrough<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
+    let locked = !OVERLAY_USER_UNLOCKED.load(Ordering::Relaxed)
+        && !OVERLAY_AWAIT_INPUT.load(Ordering::Relaxed);
+    if let Err(e) = overlay.set_ignore_cursor_events(locked) {
+        tracing::debug!(error = %e, locked, "overlay cursor passthrough");
+    }
 }
 
 #[cfg(test)]
@@ -672,9 +843,78 @@ mod tests {
     }
 
     #[test]
+    fn typed_input_short_uses_thought_layout() {
+        let mut picture = on();
+        picture.phase = Phase::AwaitingInput;
+        picture.input = Some(boris_pipeline::InputPeek {
+            id: "p1".into(),
+            kind: "exact".into(),
+            label: "Your ID".into(),
+            spoken: "Type your ID.".into(),
+            multiline: false,
+            max_chars: 512,
+        });
+        assert_eq!(layout_for(&picture), OverlayLayout::Thought);
+    }
+
+    #[test]
+    fn typed_input_blob_uses_card_layout() {
+        let mut picture = on();
+        picture.phase = Phase::AwaitingInput;
+        picture.input = Some(boris_pipeline::InputPeek {
+            id: "p1".into(),
+            kind: "blob".into(),
+            label: "Log".into(),
+            spoken: "Paste the log.".into(),
+            multiline: true,
+            max_chars: 12_000,
+        });
+        assert_eq!(layout_for(&picture), OverlayLayout::Card);
+    }
+
+    #[test]
     fn hearing_stays_presence() {
         let mut picture = on();
         picture.phase = Phase::Hearing;
         assert_eq!(layout_for(&picture), OverlayLayout::Presence);
+    }
+
+    #[test]
+    fn hwnd_stays_on_the_card_budget() {
+        assert_eq!(overlay_dimensions(1.0), (464.0, 364.0));
+        assert_eq!(overlay_dimensions(1.25), (580.0, 455.0));
+    }
+
+    #[test]
+    fn geometry_targets_follow_scale_only() {
+        assert_eq!(geometry_key(100), 100);
+        assert_ne!(geometry_key(75), geometry_key(125));
+    }
+
+    #[test]
+    fn park_y_keeps_presence_center_on_a_card_hwnd() {
+        let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
+        let y = overlay_park_y_for(0, 1080, 1.0, OverlayLayout::Presence);
+        assert_eq!(y, margin - 90);
+        assert_eq!(margin + 184 / 2, y + 364 / 2);
+
+        let y125 = overlay_park_y(0, 1080, 1.25);
+        assert_eq!(
+            margin + (184.0_f64 * 1.25 / 2.0).round() as i32,
+            y125 + (364.0_f64 * 1.25 / 2.0).round() as i32
+        );
+    }
+
+    #[test]
+    fn park_y_keeps_a_card_hwnd_on_screen() {
+        let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
+        assert_eq!(
+            overlay_park_y_for(0, 1080, 1.0, OverlayLayout::Card),
+            margin
+        );
+        assert_eq!(
+            overlay_park_y_for(0, 1080, 1.25, OverlayLayout::Card),
+            margin
+        );
     }
 }

@@ -7,46 +7,53 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Further **1.2** work on `next` after [1.2.0-beta.1].
 
-### Added
-
-- Wake-word **barge-in** while Boris is talking. A lower wake threshold plus
-  close-talk energy (not Armed’s playback gate — leftover TTS in the mic
-  window looks like a speaker) pauses leftover speech. Silence, “continue”,
-  or a false hit resumes from the cut; “stop” / a new request discards leftover
-  and either re-arms or starts a turn. Settings → Speech; `BORIS_BARGE_IN=0`
-  disables. Default on.
-- Live **reasoning preview** on Home and the overlay while the strong / tool
-  route thinks. Planning and complex stages now ask OpenRouter for reasoning
-  text and stream the tail into `StatusPicture.thinking`. It is display-only
-  — never spoken and never stored in agent context. The island grows to a
-  thought stage (380 × 216) so four lines stay readable without scrollbars.
-
-## [1.2.0-beta.1] - 2026-08-17
+## [1.2.0-beta.1] - 2026-08-25
 
 First 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.
 
 ### Added
 
-- Wake **live-mic teach**: Settings → Speech → Teach walks through four
-  “Boris” takes. The profile lives at `~/.boris/speaker/live.json`.
-- After a profile exists, Armed wake hits that look like a speaker (TV,
-  Translate, TTS) or that do not match the taught takes stay Armed and do
-  not start a turn. A live person still wakes Boris.
-- Settings → Speech: **Ignore speakers and TV** (`[speech]
-  ignore_speaker_playback`, default on). The gate is a no-op until teach
-  finishes. Override with `BORIS_WAKE_LIVENESS=0`.
+- **Taught wake filtering**: Settings → Speech → Teach saves four “Boris”
+  takes at `~/.boris/speaker/live.json`. With the optional CAM++ model,
+  embeddings reject unmatched TV, Translate, and TTS wakes; re-teach profiles
+  created before CAM++ support.
+  The filter is on by default and can be disabled with `BORIS_WAKE_LIVENESS=0`.
+- A 16 kHz **audio front end** adds high-pass filtering, AGC2, and AEC3 before
+  VAD, wake, and STT. TTS is the echo reference; `BORIS_AUDIO_FRONTEND=0`
+  bypasses the processing.
+- Wake-word **barge-in** now works while Boris is speaking or thinking. A new
+  request or “stop” interrupts the turn; a false hit or “continue” resumes
+  speech. It is on by default and can be disabled with `BORIS_BARGE_IN=0`.
+- On-screen **typed input** for exact values, secrets, and large pastes.
+  `collect_input` pauses the turn and works in Home and the overlay; secrets
+  stay masked, silent, and out of session transcripts.
+- A live **reasoning preview** appears in Home and the overlay for planning
+  and complex work. It is display-only: never spoken or stored as context.
+- A 3×3 **presence grid** now shows engine state on the splash, Home, and
+  overlay, including distinct Starting, Fault, and Off states.
+- `grep` supports `-A` / `-B` / `-C` / `-i`, `type`, `glob`, `output_mode`,
+  and `head_limit`.
 
 ### Changed
 
-- `wait_for_wake` returns the 2 s window so the engine can crop speech and
-  score liveness on the same samples.
-- Empty wake crops no longer fall back to the raw buffer (that enrolled
-  room noise).
+- Overlay activity uses concise verb-object labels, such as `Reading src/lib.rs`,
+  and combines consecutive calls.
+- Simple `bash` reads and searches are routed to native file, directory, grep,
+  or speech tools. Real pipelines still use bash.
+- File and code requests are prompted to inspect local evidence before replying.
+- Typed input submits with Enter or Ctrl+Enter; Esc cancels.
 
 ### Fixed
 
-- ORT unit tests no longer deadlock: process-global `ort::init` finishes on
-  the test thread before concurrent `init_onnx_runtime` calls.
+- Failed CAM++ embeddings now reject a taught wake instead of treating it as
+  live; teaching also requires valid embeddings.
+- AEC preserves the already-playing TTS reference, keeping echo cancellation
+  aligned with audible audio.
+- Maintenance LLM timeouts no longer panic their Tokio worker.
+- Older `get_status` responses cannot overwrite newer pushed status.
+- Overlay input now submits correctly and remains correctly sized, positioned,
+  and labeled during Thinking and exit transitions.
+- ONNX Runtime tests no longer deadlock during concurrent initialization.
 
 ## [1.1.0] - 2026-08-15
 
@@ -306,6 +313,7 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.2.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1
 [1.1.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0
 [1.1.0-beta.5]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.5
 [1.1.0-beta.4]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.4

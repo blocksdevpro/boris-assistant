@@ -15,6 +15,7 @@
 //! | [`llm`] | OpenRouter model routing |
 //! | [`device_switch`] | Mic / speaker switches |
 //! | [`picture`] | Status publisher → UI |
+//! | [`think`] | Agent turn off-thread + thinking barge-in |
 //! | [`util`] | Small pure helpers |
 //!
 //! # Turn loop
@@ -23,8 +24,9 @@
 //! Start → Armed → (wake | await reply) → hear → read → think → talk → Armed → …
 //! ```
 //!
-//! Wake scoring, VAD capture, STT, agent, and TTS are **called inline** on the
-//! engine thread (or briefly block it). Status is pushed for the UI. Hosts send
+//! Wake scoring, VAD capture, STT, and TTS stay on the engine thread. The
+//! agent turn runs on a scoped thread during Thinking so the engine can still
+//! service Stop and wake barge-in. Status is pushed for the UI. Hosts send
 //! [`EngineCommand`] via [`EngineHandle`].
 //!
 //! # Shutdown contract
@@ -52,6 +54,7 @@ mod playback;
 mod session;
 mod setup;
 mod speech;
+mod think;
 mod turn_trace;
 mod util;
 
@@ -59,7 +62,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use boris_agent::session::types::SessionId;
-use boris_agent::{AgentEvent, AgentOutcome};
+use boris_agent::{AgentErrorKind, AgentEvent, AgentOutcome};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::TurnId;
 
@@ -70,7 +73,7 @@ use crate::status::{EngineState, Phase, StatusPicture};
 
 use activity::{activity_label, note_tool_start};
 use artifact::peek_current;
-use barge::{decide_barge_listen, BargeDecision, BargeWatch};
+use barge::{decide_barge_listen, thinking_takeover_text, BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
     join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
@@ -81,6 +84,7 @@ use playback::{poll_running, wait_playback_or_stop, wait_playback_started, Playb
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
+use think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
 use turn_trace::TurnTraceGuard;
 use util::{speakable_reply_units, transcript_usable};
 
@@ -109,6 +113,15 @@ pub enum EngineCommand {
     },
     /// Forget the stored live-mic profile.
     ClearWakeProfile,
+    /// Typed / pasted value for a pending collect_input pause.
+    SubmitInput {
+        id: String,
+        value: String,
+    },
+    /// User dismissed the on-screen input field.
+    CancelInput {
+        id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -145,6 +158,21 @@ impl EngineHandle {
 
     pub fn clear_wake_profile(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::ClearWakeProfile)
+    }
+
+    pub fn submit_input(
+        &self,
+        id: String,
+        value: String,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::SubmitInput { id, value })
+    }
+
+    pub fn cancel_input(
+        &self,
+        id: String,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::CancelInput { id })
     }
 }
 
@@ -464,6 +492,7 @@ fn run(
                     rt.picture.set_wake_enroll(None);
                     tracing::info!("wake liveness profile cleared");
                 }
+                Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
             }
             continue;
         }
@@ -824,6 +853,7 @@ fn run(
             context_limit: rt.picture.context_limit,
             artifact: rt.picture.artifact.clone(),
             wake_enroll: None,
+            input: None,
         }));
         let activity_tx = rt.picture.status_tx.clone();
         let base_w = activity_base.clone();
@@ -917,6 +947,7 @@ fn run(
                 AgentEvent::TurnStart { .. }
                     | AgentEvent::ToolExecutionStart { .. }
                     | AgentEvent::NeedsConfirmation { .. }
+                    | AgentEvent::NeedsInput { .. }
             ) {
                 if let Ok(mut base) = base_w.lock() {
                     base.thinking = None;
@@ -935,13 +966,72 @@ fn run(
             let _ = activity_tx.send(snap);
         });
 
-        let outcome = rt.agent_rt.block_on(rt.agent.prompt_with_report(&text));
+        let think = run_thinking(ThinkCtx {
+            agent: &mut rt.agent,
+            agent_rt: &rt.agent_rt,
+            mic: &rt.mic,
+            wake: &mut rt.wake,
+            vad: &mut rt.vad,
+            stt: &mut rt.stt,
+            liveness: &mut rt.liveness,
+            barge_in: rt.barge_in,
+            audio: &mut rt.audio,
+            output_events: &mut rt.output_events,
+            picture: &mut rt.picture,
+            cmd_rx: &cmd_rx,
+            running: &mut running,
+            work: AgentWork::Prompt(&text),
+            turn,
+        });
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         rt.tts = tts_owned;
 
-        let (outcome, report) = match outcome {
-            Ok(pair) => pair,
-            Err(e) => {
+        let (outcome, report) = match think {
+            ThinkResolve::Stopped => {
+                turn_trace.mark("thinking_stopped", None);
+                unsub();
+                rt.agent.abort();
+                go_off_session(&mut rt, &mut sess);
+                continue;
+            }
+            ThinkResolve::StopTurn => {
+                turn_trace.mark("thinking_barge_stop", None);
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                follow_up_depth = 0;
+                await_reply = false;
+                rt.picture.set_phase(Phase::Armed);
+                continue;
+            }
+            ThinkResolve::TakeTurn(next) => {
+                let next = thinking_takeover_text(rt.picture.heard.as_deref(), &next);
+                turn_trace.mark(
+                    "thinking_barge_take_turn",
+                    Some(serde_json::json!({ "text": next })),
+                );
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                pending_barge_text = Some(next);
+                follow_up_depth = 0;
+                await_reply = false;
+                continue;
+            }
+            ThinkResolve::Finished(Ok(pair)) => pair,
+            ThinkResolve::Finished(Err(e)) if e.kind() == AgentErrorKind::Cancelled => {
+                turn_trace.mark("thinking_cancelled", None);
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                follow_up_depth = 0;
+                await_reply = false;
+                rt.picture.set_phase(Phase::Armed);
+                continue;
+            }
+            ThinkResolve::Finished(Err(e)) => {
                 turn_trace.span(
                     "agent_error",
                     agent_t.elapsed().as_millis() as u64,
@@ -1000,13 +1090,17 @@ fn run(
         rt.picture.update_context_from_chars(report.approx_chars_in);
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
+        let original_heard = rt.picture.heard.clone();
         let mut confirm = ConfirmCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
             tts: &mut rt.tts,
             stt: &mut rt.stt,
             mic: &rt.mic,
+            wake: &mut rt.wake,
             vad: &mut rt.vad,
+            liveness: &mut rt.liveness,
+            barge_in: rt.barge_in,
             audio: &mut rt.audio,
             output_events: &mut rt.output_events,
             cmd_rx: &cmd_rx,
@@ -1015,6 +1109,7 @@ fn run(
             store: &rt.store,
             active_session: sess.active_session,
             transcript_len: sess.transcript_len,
+            original_heard,
             turn,
         };
         let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
@@ -1025,6 +1120,19 @@ fn run(
             OutcomeResolve::ReArm => {
                 unsub();
                 follow_up_depth = 0;
+                continue;
+            }
+            OutcomeResolve::TakeTurn(next) => {
+                turn_trace.mark(
+                    "confirm_barge_take_turn",
+                    Some(serde_json::json!({ "text": next })),
+                );
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                pending_barge_text = Some(next);
+                follow_up_depth = 0;
+                await_reply = false;
                 continue;
             }
             OutcomeResolve::Done(o) => o,
@@ -1067,6 +1175,14 @@ fn run(
                 tracing::warn!(%turn, "unresolved confirmation after resolve pass");
                 (
                     "I needed a yes or no and lost the thread. Wake me and try again.".to_string(),
+                    false,
+                )
+            }
+            AgentOutcome::NeedsInput { .. } => {
+                tracing::warn!(%turn, "unresolved input after resolve pass");
+                (
+                    "I needed you to type something and lost the thread. Wake me and try again."
+                        .to_string(),
                     false,
                 )
             }

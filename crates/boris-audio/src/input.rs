@@ -18,6 +18,7 @@ use cpal::{
 
 use boris_core::{ArcAudioBuffer, AudioBuffer, AudioSample, Error, Result};
 
+use crate::frontend::{CaptureFrontEnd, FarEnd};
 use crate::resampler::InputResampler;
 
 /// Bounded queue capacity for raw capture frames (~2–3s headroom at ~10ms callbacks).
@@ -50,9 +51,13 @@ pub(crate) struct InputPipeline {
 
 impl InputPipeline {
     /// Open `device`, start capture, and fan resampled mono frames to `subscribers`.
+    ///
+    /// `far_end` is the AEC reference (TTS at 16 kHz). Pass a disconnected
+    /// receiver only in tests that do not exercise echo cancel.
     pub(crate) fn from_device(
         device: &cpal::Device,
         subscribers: InputSubscribers,
+        far_end: crossbeam_channel::Receiver<FarEnd>,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (audio_tx, audio_rx) =
@@ -155,6 +160,7 @@ impl InputPipeline {
                 &mut resampler,
                 subscribers_worker,
                 scratch_return_tx,
+                far_end,
             );
         });
 
@@ -175,9 +181,11 @@ fn run_input_worker(
     resampler: &mut InputResampler,
     subscribers: InputSubscribers,
     scratch_return_tx: crossbeam_channel::Sender<AudioBuffer>,
+    far_end: crossbeam_channel::Receiver<FarEnd>,
 ) {
     let mut last_reported_capture_drops = 0u64;
     let mut subscriber_drops: u64 = 0;
+    let mut frontend = CaptureFrontEnd::new();
 
     while let Ok(mut audio) = audio_rx.recv() {
         if shutdown.load(Ordering::Relaxed) {
@@ -194,37 +202,19 @@ fn run_input_worker(
             last_reported_capture_drops = drops;
         }
 
+        frontend.drain_far_end(&far_end);
+
         match resampler.process(&audio) {
             Ok(resampled) if resampled.is_empty() => {
                 // Stream resampler only emits when a full FFT block is ready.
             }
             Ok(resampled) => {
-                let arc: ArcAudioBuffer = Arc::from(resampled);
-                let mut subs = match subscribers.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        tracing::error!("InputPipeline: subscriber mutex poisoned — recovering");
-                        poisoned.into_inner()
-                    }
-                };
-                // Prune disconnected senders; count full-queue drops.
-                subs.retain(|sub| match sub.try_send(arc.clone()) {
-                    Ok(()) => true,
-                    Err(crossbeam_channel::TrySendError::Full(_)) => {
-                        subscriber_drops = subscriber_drops.saturating_add(1);
-                        if subscriber_drops == 1 || subscriber_drops.is_multiple_of(50) {
-                            tracing::warn!(
-                                subscriber_drops,
-                                "InputPipeline: subscriber queue full — dropping resampled frame"
-                            );
-                        }
-                        true
-                    }
-                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                        tracing::debug!("InputPipeline: pruning disconnected subscriber");
-                        false
-                    }
-                });
+                let processed = frontend.process_capture(&resampled);
+                if processed.is_empty() {
+                    // Partial 10 ms APM frame held inside the front-end.
+                } else {
+                    fan_out_capture(&subscribers, processed, &mut subscriber_drops);
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "InputPipeline: resample failed");
@@ -237,6 +227,38 @@ fn run_input_worker(
         audio.clear();
         let _ = scratch_return_tx.try_send(audio);
     }
+}
+
+fn fan_out_capture(
+    subscribers: &InputSubscribers,
+    processed: AudioBuffer,
+    subscriber_drops: &mut u64,
+) {
+    let arc: ArcAudioBuffer = Arc::from(processed);
+    let mut subs = match subscribers.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::error!("InputPipeline: subscriber mutex poisoned — recovering");
+            poisoned.into_inner()
+        }
+    };
+    subs.retain(|sub| match sub.try_send(arc.clone()) {
+        Ok(()) => true,
+        Err(crossbeam_channel::TrySendError::Full(_)) => {
+            *subscriber_drops = subscriber_drops.saturating_add(1);
+            if *subscriber_drops == 1 || subscriber_drops.is_multiple_of(50) {
+                tracing::warn!(
+                    subscriber_drops = *subscriber_drops,
+                    "InputPipeline: subscriber queue full — dropping resampled frame"
+                );
+            }
+            true
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            tracing::debug!("InputPipeline: pruning disconnected subscriber");
+            false
+        }
+    });
 }
 
 /// Capture callback: convert device samples to interleaved f32 only.

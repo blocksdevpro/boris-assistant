@@ -102,6 +102,9 @@ pub enum AgentEvent {
     NeedsConfirmation {
         pending: PendingToolCall,
     },
+    NeedsInput {
+        pending: PendingToolCall,
+    },
     Error {
         message: String,
     },

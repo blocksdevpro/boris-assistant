@@ -85,6 +85,13 @@ pub const SUPERTONE_HF_REVISION: &str = "724fb5abbf5502583fb520898d45929e62f02c0
 pub const DEFAULT_SUPERTONE_HF_BASE: &str =
     "https://huggingface.co/Supertone/supertonic-3/resolve/724fb5abbf5502583fb520898d45929e62f02c0b";
 
+/// Pinned commit for WeSpeaker CAM++ LM ONNX.
+pub const SPEAKER_HF_REVISION: &str = "c5e01c6fcffcce160861e7e79782828320192b5c";
+
+/// Hugging Face resolve base for the pinned CAM++ LM revision.
+pub const DEFAULT_SPEAKER_HF_BASE: &str =
+    "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/c5e01c6fcffcce160861e7e79782828320192b5c";
+
 /// TCP connect budget for each model HTTP request.
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -101,6 +108,7 @@ const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub enum ModelComponent {
     Parakeet,
     Supertone,
+    Speaker,
 }
 
 impl ModelComponent {
@@ -108,6 +116,7 @@ impl ModelComponent {
         match self {
             Self::Parakeet => "parakeet",
             Self::Supertone => "supertone",
+            Self::Speaker => "speaker",
         }
     }
 }
@@ -288,6 +297,15 @@ const CATALOG: &[CatalogEntry] = &[
         min_bytes: 1_000, // ~290 KB
         default_base: DEFAULT_SUPERTONE_HF_BASE,
         sha256: "ca8eefad4fcd989c9379032ff3e50738adc547eeb5e221b82593a6d7b3bac303",
+    },
+    CatalogEntry {
+        component: ModelComponent::Speaker,
+        local_rel: "speaker/campplus_lm.onnx",
+        default_remote_rel: "voxceleb_CAM%2B%2B_LM.onnx",
+        min_bytes: 20_000_000, // ~29 MB
+        default_base: DEFAULT_SPEAKER_HF_BASE,
+        // Git-LFS SHA-256 at SPEAKER_HF_REVISION.
+        sha256: "1068e4ac3a76bb9c769e6816ef30bf89363f6e966f1d938210cb8ed4038f8e93",
     },
 ];
 
@@ -806,7 +824,10 @@ mod tests {
 
     #[test]
     fn file_size_ok_requires_min_bytes_not_hash() {
-        let entry = &CATALOG[CATALOG.len() - 1]; // M4.json, min 1_000
+        let entry = CATALOG
+            .iter()
+            .find(|e| e.local_rel.ends_with("M4.json"))
+            .expect("voice catalog entry");
         let path = temp_file_with(&vec![b'x'; 2_000], "size-ok");
         assert!(file_size_ok(&path, entry));
         let _ = fs::remove_file(&path);

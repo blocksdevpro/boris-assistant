@@ -17,3 +17,10 @@
 .env
 .env.*
 !.env.example
+
+# Grok local scratch. Keep committed rules and skills.
+.grok/*
+!.grok/rules/
+!.grok/rules/**
+!.grok/skills/
+!.grok/skills/**

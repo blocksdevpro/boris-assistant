@@ -14,7 +14,7 @@
 //! |---------|---------|---------|
 //! | `vad`     | yes     | Silero VAD (`SileroVad`, needs ORT) |
 //! | `wake`    | yes     | LiveKit wake-word + ORT init |
-//! | `speaker` | yes     | Live-vs-loudspeaker acoustics (no extra ONNX) |
+//! | `speaker` | yes     | Live-vs-loudspeaker acoustics + CAM++ embeddings (ORT) |
 //!
 //! Desktop / pipeline use the default feature set. `--features vad` without
 //! `wake` still needs native ONNX Runtime. `--no-default-features` builds
@@ -52,7 +52,8 @@ pub use vad::{
 pub use ort::init_onnx_runtime;
 #[cfg(feature = "speaker")]
 pub use speaker::{
-    compute_acoustic_feat, AcousticFeat, AcousticModel, MATCH_Z_REJECT, PLAYBACK_Z_REJECT,
+    compute_acoustic_feat, AcousticFeat, AcousticModel, SpeakerEmbedder, Voiceprint, COSINE_REJECT,
+    ENROLL_COSINE_MIN, MATCH_Z_REJECT, PLAYBACK_Z_REJECT,
 };
 #[cfg(feature = "wake")]
 pub use wake::{

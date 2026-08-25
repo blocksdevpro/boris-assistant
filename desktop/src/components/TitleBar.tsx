@@ -69,14 +69,23 @@ export function TitleBar({
     return () => unlisten?.();
   }, [appWindow, refreshMaximized]);
 
+  const onTitleBarDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (!appWindow || (event.target as HTMLElement).closest("button")) return;
+      void appWindow.toggleMaximize();
+    },
+    [appWindow],
+  );
+
   return (
     <header
       data-tauri-drag-region
-      className="flex h-12 shrink-0 select-none items-center border-b border-white/[0.06] bg-[#0b0b0c]/90 backdrop-blur-xl"
+      onDoubleClick={onTitleBarDoubleClick}
+      className="title-bar relative z-40 flex h-12 shrink-0 select-none items-center border-b border-white/[0.055] bg-[#0b0b0c]/82 shadow-[0_1px_0_rgba(255,255,255,0.015)] backdrop-blur-2xl"
     >
       <div
         data-tauri-drag-region
-        className="flex min-w-0 flex-1 items-center gap-2 px-3"
+        className="title-bar__leading flex min-w-0 flex-1 items-center gap-2 px-3"
       >
         {leading ? (
           <div className="shrink-0">{leading}</div>
@@ -93,18 +102,21 @@ export function TitleBar({
             />
           </div>
         )}
-        <p
-          data-tauri-drag-region
-          className="truncate text-[13px] font-semibold tracking-tight text-white/90"
-        >
-          {title}
-        </p>
         {trailing ? (
-          <div className="ml-auto mr-1 flex shrink-0 items-center">{trailing}</div>
+          <div className="ml-auto mr-1 flex shrink-0 items-center">
+            {trailing}
+          </div>
         ) : null}
       </div>
 
-      <div className="flex h-full shrink-0">
+      <p
+        data-tauri-drag-region
+        className="title-bar__title pointer-events-none absolute left-1/2 max-w-[38%] -translate-x-1/2 truncate text-center text-[12px] font-semibold tracking-[-0.01em] text-white/72"
+      >
+        {title}
+      </p>
+
+      <div className="title-bar__controls mr-1 flex h-8 shrink-0 items-center gap-0.5 rounded-[10px] border border-white/[0.045] bg-white/[0.025] p-0.5">
         <TitleBarButton
           aria-label="Minimize"
           onClick={() => void appWindow?.minimize()}
@@ -154,11 +166,12 @@ function TitleBarButton({
       title={title ?? ariaLabel}
       onClick={onClick}
       className={cn(
-        "inline-flex h-full w-11 items-center justify-center text-white/40 transition-colors",
-        "hover:bg-white/[0.06] hover:text-white",
-        "focus-visible:bg-white/[0.06] focus-visible:text-white focus-visible:outline-none",
+        "title-bar__button inline-flex size-7 items-center justify-center rounded-[7px] text-white/38",
+        "transition-[color,background-color,transform] duration-150 ease-out",
+        "hover:bg-white/[0.075] hover:text-white/90 active:scale-[0.94]",
+        "focus-visible:bg-white/[0.075] focus-visible:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/20",
         variant === "close" &&
-          "hover:bg-red-500/90 hover:text-white focus-visible:bg-red-500/90",
+          "hover:bg-[#ff5f57] hover:text-white focus-visible:bg-[#ff5f57]",
       )}
     >
       {children}

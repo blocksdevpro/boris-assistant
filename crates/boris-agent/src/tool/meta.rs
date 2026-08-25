@@ -123,6 +123,8 @@ pub struct ToolMeta {
     pub default_timeout: Duration,
     /// When true, runtime always pauses for HITL before execute (unless granted).
     pub requires_confirmation: bool,
+    /// Pause for typed / pasted input instead of executing.
+    pub collects_input: bool,
     /// Category for capability presets and parallel scheduling.
     pub kind: ToolKind,
     /// Override observation char cap after execute (`None` → [`MAX_TOOL_RESULT_CHARS`]).
@@ -143,6 +145,7 @@ impl ToolMeta {
             permissions: &[Permission::None],
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
+            collects_input: false,
             kind: ToolKind::Other,
             max_result_chars: None,
             read_only: None,
@@ -157,6 +160,7 @@ impl ToolMeta {
             permissions: &[Permission::None],
             default_timeout: risk.default_timeout(),
             requires_confirmation: false,
+            collects_input: false,
             kind: ToolKind::Other,
             max_result_chars: None,
             read_only: None,
@@ -179,6 +183,12 @@ impl ToolMeta {
     /// Require HITL confirmation before execute.
     pub fn confirm(mut self, requires: bool) -> Self {
         self.requires_confirmation = requires;
+        self
+    }
+
+    /// Pause the loop so the host can collect typed or pasted input.
+    pub fn collect_input(mut self, v: bool) -> Self {
+        self.collects_input = v;
         self
     }
 

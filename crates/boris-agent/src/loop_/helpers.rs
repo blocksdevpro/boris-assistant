@@ -316,7 +316,7 @@ pub(super) fn observation_text_from_invoke(result: InvokeResult) -> Option<Strin
     match result {
         InvokeResult::Observation(s) => Some(s),
         InvokeResult::Denied { reason } => Some(format!("Error: {reason}")),
-        InvokeResult::NeedsConfirmation { .. } => None,
+        InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => None,
     }
 }
 

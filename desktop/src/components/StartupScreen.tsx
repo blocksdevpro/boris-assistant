@@ -1,6 +1,4 @@
 import { useEffect, useState } from "react";
-import { useReducedMotion } from "framer-motion";
-import { GridPresence } from "@/components/presence";
 
 type StartupStage = "signal" | "presence" | "reveal" | "done";
 
@@ -18,7 +16,6 @@ export function StartupScreen({
   onComplete?: () => void;
 }) {
   const [stage, setStage] = useState<StartupStage>("signal");
-  const reduceMotion = Boolean(useReducedMotion());
 
   useEffect(() => {
     if (preview) return;
@@ -67,11 +64,17 @@ export function StartupScreen({
       <div className="startup-splash__glow" aria-hidden="true" />
       <div className="startup-splash__lockup">
         <div className="startup-splash__mark" aria-hidden="true">
-          <GridPresence
-            state={stage === "signal" ? "starting" : "ready"}
-            reducedMotion={reduceMotion}
-            size="xl"
-          />
+          <svg viewBox="0 0 64 64" fill="none">
+            <g stroke="currentColor" strokeWidth="4" strokeLinecap="round">
+              <line className="startup-splash__bar" x1="10" y1="28" x2="10" y2="36" />
+              <line className="startup-splash__bar" x1="20" y1="20" x2="20" y2="44" />
+              <line className="startup-splash__bar" x1="28" y1="13" x2="28" y2="51" />
+              <line className="startup-splash__bar" x1="36" y1="24" x2="36" y2="40" />
+              <line className="startup-splash__bar" x1="44" y1="18" x2="44" y2="46" />
+              <line className="startup-splash__bar" x1="54" y1="28" x2="54" y2="36" />
+            </g>
+          </svg>
+          <span className="startup-splash__presence" />
         </div>
         <div className="startup-splash__copy">
           <p className="startup-splash__name">Boris</p>

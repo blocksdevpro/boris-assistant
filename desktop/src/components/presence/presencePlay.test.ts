@@ -27,13 +27,37 @@ describe("LED presence playbook", () => {
     }
   });
 
-  it("keeps thinking and tool-working on different shapes", () => {
-    expect(PRESENCE_PLAY.thinking.frames).not.toEqual(
-      PRESENCE_PLAY.working.frames,
-    );
-    expect(PRESENCE_PLAY.hearing.mode).toBe("sequence");
+  it("uses a clear motion grammar for active and terminal states", () => {
+    expect(PRESENCE_PLAY.starting.mode).toBe("stagger");
+    expect(PRESENCE_PLAY.hearing.mode).toBe("stagger");
+    expect(PRESENCE_PLAY.reading.mode).toBe("stagger");
+    expect(PRESENCE_PLAY.thinking.mode).toBe("stagger");
+    expect(PRESENCE_PLAY.working.mode).toBe("stagger");
+    expect(PRESENCE_PLAY.talking.mode).toBe("stagger");
+    expect(PRESENCE_PLAY["awaiting-reply"].mode).toBe("stagger");
     expect(PRESENCE_PLAY.fault.mode).toBe("static");
     expect(PRESENCE_PLAY.ready.mode).toBe("pulse");
+    expect(PRESENCE_PLAY.hearing.frames).not.toEqual(
+      PRESENCE_PLAY.confirm.frames,
+    );
+    expect(PRESENCE_PLAY.thinking.frames).toEqual(
+      PRESENCE_PLAY.working.frames,
+    );
+    expect(PRESENCE_PLAY.thinking.speed).toBeGreaterThan(
+      PRESENCE_PLAY.working.speed,
+    );
+  });
+
+  it("gives every staggered state a complete, directed cell order", () => {
+    for (const play of Object.values(PRESENCE_PLAY)) {
+      if (play.mode !== "stagger") continue;
+
+      const lit = play.frames[0]
+        .flat()
+        .flatMap((cell, index) => (cell === 1 ? [index] : []));
+      expect(play.staggerOrder).toBeDefined();
+      expect([...play.staggerOrder!].sort((a, b) => a - b)).toEqual(lit);
+    }
   });
 
   it("maps fixtures onto the playbook", () => {

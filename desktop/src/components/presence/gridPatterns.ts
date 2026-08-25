@@ -23,163 +23,110 @@ export type PresenceState =
 export type GridPlay = {
   frames: GridMatrix[];
   mode: "pulse" | "sequence" | "stagger" | "static";
-  /** One cycle, milliseconds. */
+  /** One animation cycle, in milliseconds. */
   speed: number;
+  /**
+   * Cell indexes in the order they should animate for a staggered pattern.
+   * This lets an active state communicate direction instead of simply
+   * following the DOM's row-major order.
+   */
+  staggerOrder?: readonly number[];
 };
 
 const G = {
-  breathing: [
+  dot: [
     [0, 0, 0],
     [0, 1, 0],
     [0, 0, 0],
-  ],
-  diamond: [
-    [0, 1, 0],
-    [1, 0, 1],
-    [0, 1, 0],
-  ],
-  rippleIn: [
-    [0, 0, 0],
-    [0, 1, 0],
-    [0, 0, 0],
-  ],
-  rippleOut: [
-    [1, 1, 1],
-    [1, 0, 1],
-    [1, 1, 1],
-  ],
-  heartbeat: [
-    [0, 1, 0],
-    [1, 1, 1],
-    [0, 1, 0],
-  ],
-  rain: [
-    [0, 1, 0],
-    [0, 1, 0],
-    [0, 0, 0],
-  ],
-  waterfall: [
-    [1, 1, 0],
-    [0, 0, 0],
-    [0, 0, 0],
-  ],
-  rainRev: [
-    [0, 0, 0],
-    [0, 1, 0],
-    [0, 1, 0],
-  ],
-  snake: [
-    [1, 1, 0],
-    [0, 1, 0],
-    [0, 0, 0],
-  ],
-  snake2: [
-    [0, 1, 1],
-    [0, 0, 1],
-    [0, 0, 0],
-  ],
-  snake3: [
-    [0, 0, 1],
-    [0, 0, 1],
-    [0, 1, 1],
-  ],
-  twinkle: [
-    [1, 0, 0],
-    [0, 0, 1],
-    [0, 1, 0],
-  ],
-  sparkle: [
-    [1, 0, 1],
-    [0, 1, 0],
-    [1, 0, 1],
   ],
   cross: [
     [0, 1, 0],
     [1, 1, 1],
     [0, 1, 0],
   ],
+  scanLine: [
+    [0, 0, 0],
+    [1, 1, 1],
+    [0, 0, 0],
+  ],
+  equalizer: [
+    [0, 1, 0],
+    [1, 1, 1],
+    [1, 1, 1],
+  ],
   xShape: [
     [1, 0, 1],
     [0, 1, 0],
     [1, 0, 1],
-  ],
-  spiral1: [
-    [1, 1, 1],
-    [0, 0, 1],
-    [0, 0, 1],
-  ],
-  spiral2: [
-    [0, 0, 1],
-    [0, 0, 1],
-    [1, 1, 1],
-  ],
-  spiral3: [
-    [1, 0, 0],
-    [1, 0, 0],
-    [1, 1, 1],
-  ],
-  spiral4: [
-    [1, 1, 1],
-    [1, 0, 0],
-    [1, 0, 0],
-  ],
-  edgeTop: [
-    [1, 1, 1],
-    [0, 0, 0],
-    [0, 0, 0],
-  ],
-  edgeRight: [
-    [0, 0, 1],
-    [0, 0, 1],
-    [0, 0, 1],
-  ],
-  edgeBot: [
-    [0, 0, 0],
-    [0, 0, 0],
-    [1, 1, 1],
-  ],
-  edgeLeft: [
-    [1, 0, 0],
-    [1, 0, 0],
-    [1, 0, 0],
   ],
   frame: [
     [1, 1, 1],
     [1, 0, 1],
     [1, 1, 1],
   ],
+  ellipsis: [
+    [0, 0, 0],
+    [1, 1, 1],
+    [0, 0, 0],
+  ],
 } as const satisfies Record<string, GridMatrix>;
 
+const STAGGER_ORDER = {
+  /** Outside edge, clockwise from the upper-left. */
+  clockwiseFrame: [0, 1, 2, 5, 8, 7, 6, 3],
+  /** A text-like scan across the middle row. */
+  leftToRight: [3, 4, 5],
+  /** A bottom-aligned three-bar voice meter. */
+  equalizer: [6, 3, 7, 4, 1, 8, 5],
+  /** A quiet three-dot prompt. */
+  ellipsis: [3, 4, 5],
+} as const;
+
 export const PRESENCE_PLAY: Record<PresenceState, GridPlay> = {
-  off: { frames: [G.breathing], mode: "static", speed: 0 },
-  ready: { frames: [G.breathing], mode: "pulse", speed: 1680 },
+  off: { frames: [G.dot], mode: "static", speed: 0 },
+  ready: { frames: [G.dot], mode: "pulse", speed: 1_800 },
   starting: {
-    frames: [G.spiral1, G.spiral2, G.spiral3, G.spiral4],
-    mode: "sequence",
-    speed: 420,
+    frames: [G.frame],
+    mode: "stagger",
+    speed: 820,
+    staggerOrder: STAGGER_ORDER.clockwiseFrame,
   },
   hearing: {
-    frames: [G.rain, G.waterfall, G.rainRev],
-    mode: "sequence",
-    speed: 380,
+    frames: [G.equalizer],
+    mode: "stagger",
+    speed: 720,
+    staggerOrder: STAGGER_ORDER.equalizer,
   },
   reading: {
-    frames: [G.snake, G.snake2, G.snake3],
-    mode: "sequence",
-    speed: 360,
+    frames: [G.scanLine],
+    mode: "stagger",
+    speed: 760,
+    staggerOrder: STAGGER_ORDER.leftToRight,
   },
   thinking: {
-    frames: [G.rippleIn, G.diamond],
-    mode: "sequence",
-    speed: 1080,
+    frames: [G.frame],
+    mode: "stagger",
+    speed: 1_180,
+    staggerOrder: STAGGER_ORDER.clockwiseFrame,
   },
   working: {
-    frames: [G.edgeTop, G.edgeRight, G.edgeBot, G.edgeLeft, G.frame],
-    mode: "sequence",
-    speed: 340,
+    frames: [G.frame],
+    mode: "stagger",
+    speed: 560,
+    staggerOrder: STAGGER_ORDER.clockwiseFrame,
   },
-  talking: { frames: [G.heartbeat], mode: "pulse", speed: 620 },
-  "awaiting-reply": { frames: [G.twinkle], mode: "pulse", speed: 1320 },
+  talking: {
+    frames: [G.equalizer],
+    mode: "stagger",
+    speed: 500,
+    staggerOrder: STAGGER_ORDER.equalizer,
+  },
+  "awaiting-reply": {
+    frames: [G.ellipsis],
+    mode: "stagger",
+    speed: 1_460,
+    staggerOrder: STAGGER_ORDER.ellipsis,
+  },
   confirm: { frames: [G.cross], mode: "pulse", speed: 900 },
   fault: { frames: [G.xShape], mode: "static", speed: 0 },
 };

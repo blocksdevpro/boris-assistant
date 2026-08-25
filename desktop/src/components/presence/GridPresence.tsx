@@ -54,15 +54,16 @@ export function GridPresence({
 
   const staggerDelay = useMemo(() => {
     if (play.mode !== "stagger") return cells.map(() => 0);
-    const lit: number[] = [];
-    cells.forEach((cell, index) => {
-      if (cell === 1) lit.push(index);
-    });
-    const step = cycle / (lit.length + 2);
+    const order =
+      play.staggerOrder ??
+      cells.flatMap((cell, index) => (cell === 1 ? [index] : []));
+    const step = cycle / (order.length + 2);
+    const rankByCell = new Map(order.map((index, rank) => [index, rank]));
+
     return cells.map((cell, index) =>
-      cell === 1 ? lit.indexOf(index) * step : 0,
+      cell === 1 ? (rankByCell.get(index) ?? order.length) * step : 0,
     );
-  }, [cells, cycle, play.mode]);
+  }, [cells, cycle, play.mode, play.staggerOrder]);
 
   return (
     <span

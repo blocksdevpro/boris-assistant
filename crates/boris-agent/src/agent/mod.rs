@@ -27,7 +27,7 @@ use boris_ai::LlmClient;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::context::{Context, Message, Role};
+use crate::context::{Context, Message, RetrievedMemory, Role, TaskStateCapsule};
 use crate::memory::LongTermMemory;
 use crate::runtime::{
     new_activation_set, ActivationSet, JsonlAuditSink, NullAuditSink, PendingTurn, SandboxConfig,
@@ -152,6 +152,25 @@ mod tests {
         assert!(!exported
             .iter()
             .any(|m| m.origin == crate::MessageOrigin::HostControl));
+    }
+
+    #[test]
+    fn persistence_exports_history_that_model_pruning_removed() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.max_turns = 1;
+        agent.context.push(super::Role::User, "old question");
+        agent.context.push(super::Role::Assistant, "old answer");
+        agent.context.push(super::Role::User, "new question");
+
+        assert!(!agent
+            .context
+            .messages()
+            .iter()
+            .any(|message| message.content == serde_json::json!("old question")));
+        assert!(agent
+            .export_messages_for_persist()
+            .iter()
+            .any(|message| message.content == serde_json::json!("old question")));
     }
 }
 
@@ -623,9 +642,8 @@ impl Agent {
     pub fn reset(&mut self, system_prompt: &str) {
         self.abort();
         self.base_system_prompt = system_prompt.to_string();
-        self.context.messages.clear();
         let composed = self.composed_system_prompt();
-        self.context.push(Role::System, composed);
+        self.context.reset(composed);
     }
 
     /// Alias for [`Self::reset`].
@@ -642,11 +660,24 @@ impl Agent {
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        self.context.messages = messages;
+        self.context.replace_history(messages);
     }
 
+    /// Canonical append-only transcript, not the compacted model request view.
     pub fn export_messages(&self) -> Vec<Message> {
-        self.context.messages().to_vec()
+        self.context.history().to_vec()
+    }
+
+    pub fn task_state(&self) -> &TaskStateCapsule {
+        self.context.task_state()
+    }
+
+    pub fn set_task_state(&mut self, capsule: TaskStateCapsule) {
+        self.context.set_task_state(capsule);
+    }
+
+    pub fn retrieved_memory(&self) -> &[RetrievedMemory] {
+        self.context.retrieved_memory()
     }
 
     /// Same as [`Self::export_messages`] with secret collect_input values stripped.

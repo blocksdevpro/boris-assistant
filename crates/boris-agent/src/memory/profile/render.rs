@@ -33,15 +33,28 @@ impl UserProfile {
         if !self.ongoing.is_empty() {
             lines.push(format!("Ongoing: {}", self.ongoing.join("; ")));
         }
-        if !self.facts.is_empty() {
+        if self
+            .facts
+            .iter()
+            .any(|fact| fact.is_active() && fact.memory_key.as_deref() != Some("preferred_name"))
+        {
             lines.push("Facts:".into());
-            let mut facts = self.facts.clone();
+            let mut facts = self
+                .facts
+                .iter()
+                .filter(|fact| fact.is_active())
+                .cloned()
+                .collect::<Vec<_>>();
             facts.sort_by(|a, b| {
                 b.salience
                     .cmp(&a.salience)
                     .then_with(|| b.last_seen_at_ms.cmp(&a.last_seen_at_ms))
             });
-            for f in facts.iter().take(16) {
+            for f in facts
+                .iter()
+                .filter(|fact| fact.memory_key.as_deref() != Some("preferred_name"))
+                .take(16)
+            {
                 lines.push(format!("- ({}) {}", f.category.as_str(), f.text));
             }
         }
@@ -56,7 +69,12 @@ impl UserProfile {
     }
 
     fn render_block_budget(&self, max_chars: usize) -> String {
-        let mut facts = self.facts.clone();
+        let mut facts = self
+            .facts
+            .iter()
+            .filter(|fact| fact.is_active() && fact.memory_key.as_deref() != Some("preferred_name"))
+            .cloned()
+            .collect::<Vec<_>>();
         facts.sort_by(|a, b| {
             b.salience
                 .cmp(&a.salience)

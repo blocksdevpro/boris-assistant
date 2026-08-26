@@ -552,6 +552,8 @@ fn run_extract(
                     delta
                         .facts_remove_query
                         .extend(llm_delta.facts_remove_query);
+                    delta.forget_preferred_name |= llm_delta.forget_preferred_name;
+                    delta.forget_all |= llm_delta.forget_all;
                     delta.ongoing_add.extend(llm_delta.ongoing_add);
                     if llm_delta.ongoing_replace.is_some() {
                         delta.ongoing_replace = llm_delta.ongoing_replace;

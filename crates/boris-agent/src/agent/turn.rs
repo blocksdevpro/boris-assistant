@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::context::{ContextBudget, Role};
+use crate::context::{ContextBudget, RetrievedMemory, Role, TaskStatus};
 use crate::error::{AgentError, AgentErrorKind};
 use crate::loop_::{self, LoopState};
 use crate::observe::{TurnOutcomeKind, TurnReport};
@@ -16,6 +16,66 @@ use crate::types::{AgentEvent, AgentLoopConfig, LoopResult};
 use super::{log_preview, Agent, LOG_PREVIEW_CHARS};
 
 impl Agent {
+    /// Populate the derived context with relevant durable-memory snippets before
+    /// the first completion. Retrieval failure is deliberately non-fatal.
+    async fn retrieve_memory_for_turn(&mut self, user_text: &str) {
+        let Some(memory) = self.long_term.clone() else {
+            self.context.set_retrieved_memory(Vec::new());
+            return;
+        };
+        let raw_query = user_text.trim().to_string();
+        if raw_query.len() < 3 {
+            self.context.set_retrieved_memory(Vec::new());
+            return;
+        }
+        let lifecycle = crate::memory::extract_heuristic(&raw_query);
+        if lifecycle.forget_all
+            || lifecycle.forget_preferred_name
+            || !lifecycle.facts_remove_query.is_empty()
+        {
+            // Never re-inject the very memory the human is asking us to forget.
+            self.context.set_retrieved_memory(Vec::new());
+            return;
+        }
+        let Some(query) = proactive_memory_query(&raw_query) else {
+            self.context.set_retrieved_memory(Vec::new());
+            return;
+        };
+        let profile = self
+            .personal
+            .as_ref()
+            .and_then(|personal| personal.profile.lock().ok().map(|profile| profile.clone()));
+        let result = tokio::task::spawn_blocking(move || memory.search(&query, 4)).await;
+        match result {
+            Ok(Ok(hits)) => {
+                let memories = hits
+                    .into_iter()
+                    .filter(|hit| {
+                        !profile
+                            .as_ref()
+                            .is_some_and(|profile| profile.suppresses_retrieval_text(&hit.snippet))
+                    })
+                    .map(|hit| RetrievedMemory {
+                        snippet: hit.snippet,
+                        path: hit.path,
+                        source: hit.source,
+                        score: hit.score,
+                    })
+                    .collect::<Vec<_>>();
+                tracing::debug!(hits = memories.len(), "proactive memory retrieval complete");
+                self.context.set_retrieved_memory(memories);
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "proactive memory retrieval skipped");
+                self.context.set_retrieved_memory(Vec::new());
+            }
+            Err(error) => {
+                warn!(%error, "proactive memory retrieval task failed");
+                self.context.set_retrieved_memory(Vec::new());
+            }
+        }
+    }
+
     fn loop_config(&self, user_text: &str) -> AgentLoopConfig {
         AgentLoopConfig {
             max_tool_rounds: self.max_tool_rounds,
@@ -65,7 +125,7 @@ impl Agent {
             }
         };
         // Avoid re-injecting while a recent research playbook is still in context.
-        let already = self.context.messages.iter().rev().take(10).any(|m| {
+        let already = self.context.messages().iter().rev().take(10).any(|m| {
             m.content
                 .as_str()
                 .is_some_and(|s| s.contains("Person/profile research request"))
@@ -196,8 +256,10 @@ impl Agent {
             preview,
         });
 
-        let snapshot = self.context.messages.clone();
+        let snapshot = self.context.clone();
         self.context.push(Role::User, user_text);
+        self.context.begin_task(user_text);
+        self.retrieve_memory_for_turn(user_text).await;
 
         // Person/profile finds: auto-inject research skill body so the model
         // does not freestyle without the multi-query playbook.
@@ -250,7 +312,7 @@ impl Agent {
                 self.finish_loop(started, user_text, loop_out).await
             }
             Err(e) => {
-                self.context.messages = snapshot;
+                self.context = snapshot;
                 self.pending_turn = None;
                 if e.kind() == AgentErrorKind::Cancelled {
                     info!(
@@ -479,6 +541,17 @@ impl Agent {
             context_estimated: loop_out.token_accounting.context_is_estimated(),
             token_usage: Box::new(loop_out.token_accounting.provider_usage.clone()),
         };
+        let (task_status, assistant_task_text) = match &loop_out.outcome {
+            AgentOutcome::Speak {
+                text,
+                expect_reply: true,
+            } => (TaskStatus::WaitingForInput, text.as_str()),
+            AgentOutcome::Speak { text, .. } => (TaskStatus::Completed, text.as_str()),
+            AgentOutcome::Silent => (TaskStatus::Completed, ""),
+            AgentOutcome::NeedsConfirmation { .. } => (TaskStatus::WaitingForConfirmation, ""),
+            AgentOutcome::NeedsInput { .. } => (TaskStatus::WaitingForInput, ""),
+        };
+        self.context.finish_task(task_status, assistant_task_text);
         info!(
             outcome = outcome_label,
             duration_ms = duration.as_millis() as u64,
@@ -559,5 +632,80 @@ impl Agent {
             }
         }
         self.learn_personal_heuristic(user_text);
+    }
+}
+
+/// Remove conversational glue before an OR-based memory search. This keeps
+/// proactive recall relevant instead of matching every old turn on "please".
+fn proactive_memory_query(input: &str) -> Option<String> {
+    const STOP: &[&str] = &[
+        "about", "also", "been", "could", "from", "have", "help", "just", "make", "okay", "please",
+        "that", "then", "there", "these", "they", "think", "this", "want", "what", "when", "where",
+        "which", "with", "would", "your",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let terms = input
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .map(str::trim)
+        .filter(|term| term.chars().count() >= 3)
+        .filter(|term| !STOP.contains(&term.to_ascii_lowercase().as_str()))
+        .filter(|term| seen.insert(term.to_ascii_lowercase()))
+        .take(12)
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+#[cfg(test)]
+mod retrieval_tests {
+    use super::proactive_memory_query;
+    use async_trait::async_trait;
+    use boris_ai::{LlmClient, LlmError};
+    use serde_json::Value;
+
+    struct NoopClient;
+
+    #[async_trait]
+    impl LlmClient for NoopClient {
+        async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            Ok(serde_json::json!({"role": "assistant", "content": "ok"}))
+        }
+    }
+
+    #[test]
+    fn proactive_query_drops_conversational_noise() {
+        assert_eq!(
+            proactive_memory_query("Okay please help me remember my preferred Rust editor")
+                .as_deref(),
+            Some("remember preferred Rust editor")
+        );
+        assert!(proactive_memory_query("okay please help").is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_proactively_retrieves_hits_with_provenance() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("boris-proactive-memory-{unique}"));
+        let mut agent = super::Agent::new(Box::new(NoopClient), "sys");
+        let memory = agent.enable_long_term_memory(&root).unwrap();
+        std::fs::write(
+            memory.memory_md_path(),
+            "# Global Memory\n\nThe user prefers the Helix editor for Rust.\n",
+        )
+        .unwrap();
+        memory.refresh_curated_index().unwrap();
+
+        agent
+            .retrieve_memory_for_turn("Which Rust editor do I prefer?")
+            .await;
+        assert!(agent.retrieved_memory().iter().any(|hit| {
+            hit.path == "MEMORY.md" && hit.source == "global" && hit.snippet.contains("Helix")
+        }));
+
+        drop(memory);
+        drop(agent);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

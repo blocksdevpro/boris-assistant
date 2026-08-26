@@ -98,7 +98,7 @@ impl Context {
 
     /// Rough token estimate (chars / 4) across all messages.
     pub fn estimate_tokens(&self) -> usize {
-        self.messages
+        self.wire_messages()
             .iter()
             .map(|m| estimate_message_chars(m) / 4)
             .sum()
@@ -106,7 +106,11 @@ impl Context {
 
     /// Request-size estimate including serialized tool schemas / system content.
     pub fn estimate_request_chars(&self, tools: &Value) -> usize {
-        let msg: usize = self.messages.iter().map(estimate_message_chars).sum();
+        let msg: usize = self
+            .wire_messages()
+            .iter()
+            .map(estimate_message_chars)
+            .sum();
         let tools_chars = if tools.is_null() {
             0
         } else {

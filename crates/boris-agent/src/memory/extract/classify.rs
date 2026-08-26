@@ -17,10 +17,12 @@ pub fn should_llm_extract(
         return false;
     }
     // Explicit memory tools already ran — still extract structured profile.
-    if tools_used
-        .iter()
-        .any(|n| n == "remember_note" || n == "save_user_fact" || n == "update_user_profile")
-    {
+    if tools_used.iter().any(|n| {
+        n == "remember_note"
+            || n == "save_user_fact"
+            || n == "update_user_profile"
+            || n == "forget_user_memory"
+    }) {
         return true;
     }
     // Heuristics already got signal — optional LLM polish only every few turns.

@@ -38,8 +38,10 @@ impl ProfileStore {
         if raw.trim().is_empty() {
             return Ok(UserProfile::default());
         }
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("parse profile {}: {e}", self.path.display()))
+        let mut profile: UserProfile = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse profile {}: {e}", self.path.display()))?;
+        profile.expire_due_facts();
+        Ok(profile)
     }
 
     /// Atomic-ish write (temp + rename). Creates parent dirs.
@@ -117,7 +119,37 @@ mod tests {
         store.save(&p).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.preferred_name.as_deref(), Some("Ada"));
-        assert_eq!(loaded.facts.len(), 1);
+        assert_eq!(loaded.facts.len(), 2);
+        assert!(loaded.facts.iter().all(|fact| fact.is_active()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loads_v1_facts_with_active_lifecycle_defaults() {
+        let path = temp_path("v1");
+        let raw = serde_json::json!({
+            "version": 1,
+            "preferred_name": null,
+            "preferences": [],
+            "facts": [{
+                "id": "old-fact",
+                "text": "Uses Rust",
+                "category": "project",
+                "confidence": 0.8,
+                "source": "legacy",
+                "created_at_ms": 1,
+                "last_seen_at_ms": 1,
+                "salience": 5
+            }],
+            "ongoing": [],
+            "updated_at_ms": 1,
+            "turns_seen": 2
+        });
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+        let loaded = ProfileStore::new(&path).load().unwrap();
+        assert_eq!(loaded.facts[0].status, crate::memory::FactStatus::Active);
+        assert!(loaded.facts[0].memory_key.is_none());
         let _ = fs::remove_file(&path);
     }
 }

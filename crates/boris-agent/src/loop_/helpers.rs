@@ -300,6 +300,7 @@ pub(super) fn commit_tool_observation(
         duration_ms,
     });
     tools_used.push(call.name.clone());
+    context.record_tool_result(&call.name, &call.call_id, ok, &content);
     context.push(Role::Tool, tool_observation_json(&call.call_id, content));
 }
 

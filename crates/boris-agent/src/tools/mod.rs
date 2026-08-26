@@ -283,6 +283,10 @@ fn try_profile_tools(
                 profile.clone(),
                 paths.profile_path.clone(),
             )),
+            Box::new(profile::ForgetUserMemoryTool::with_path(
+                profile.clone(),
+                paths.profile_path.clone(),
+            )),
             Box::new(profile::GetUserContextTool::new(profile)),
         ],
         Err(e) => {

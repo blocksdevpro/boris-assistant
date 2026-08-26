@@ -17,6 +17,10 @@ pub enum MessageOrigin {
     Summary,
     /// Host-loaded skill/playbook instruction.
     Skill,
+    /// Host-maintained structured state for the active task.
+    TaskState,
+    /// Search result injected proactively from durable memory.
+    RetrievedMemory,
 }
 
 impl MessageOrigin {
@@ -35,7 +39,16 @@ impl MessageOrigin {
 
     /// Ephemeral host controls should never become transcript history.
     pub fn should_persist(self) -> bool {
-        !matches!(self, Self::HostControl | Self::Skill)
+        self.is_history_event()
+    }
+
+    /// Canonical append-only transcript events. Everything else is a derived
+    /// model aid and may be regenerated, replaced, or discarded safely.
+    pub fn is_history_event(self) -> bool {
+        matches!(
+            self,
+            Self::System | Self::Human | Self::Assistant | Self::Tool
+        )
     }
 }
 

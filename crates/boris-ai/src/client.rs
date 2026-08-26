@@ -60,4 +60,11 @@ pub trait LlmClient: Send + Sync {
     fn model(&self) -> &str {
         "unknown"
     }
+
+    /// Maximum tokens accepted by this client's configured model, including
+    /// prompt and completion tokens. Hosts should configure this from provider
+    /// model metadata when it differs from the conservative default.
+    fn context_window_tokens(&self) -> Option<u32> {
+        None
+    }
 }

@@ -851,6 +851,7 @@ fn run(
             thinking: None,
             context_used: rt.picture.context_used,
             context_limit: rt.picture.context_limit,
+            context_estimated: rt.picture.context_estimated,
             artifact: rt.picture.artifact.clone(),
             wake_enroll: None,
             input: None,
@@ -1087,7 +1088,11 @@ fn run(
         if !report.tools_used.is_empty() || rt.picture.artifact.is_some() {
             rt.picture.publish();
         }
-        rt.picture.update_context_from_chars(report.approx_chars_in);
+        rt.picture.update_context(
+            report.context_used_tokens,
+            report.context_limit_tokens,
+            report.context_estimated,
+        );
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
         let original_heard = rt.picture.heard.clone();

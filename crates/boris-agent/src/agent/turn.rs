@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::context::Role;
+use crate::context::{ContextBudget, Role};
 use crate::error::{AgentError, AgentErrorKind};
 use crate::loop_::{self, LoopState};
 use crate::observe::{TurnOutcomeKind, TurnReport};
@@ -74,10 +74,8 @@ impl Agent {
             return;
         }
         info!("injecting research skill body for person/profile find");
-        self.context.push(
-            Role::User,
-            crate::finish_gate::person_find_skill_nudge(&body),
-        );
+        self.context
+            .push_control(crate::finish_gate::person_find_skill_nudge(&body));
     }
 
     /// Summarize older turns into a compact block (Grok-lite compaction).
@@ -165,17 +163,23 @@ impl Agent {
         let config = self.loop_config(user_text);
         let tools_for_request =
             loop_::listed_tools_json(&self.tools, &config, Some(&self.activated));
+        let context_limit = self
+            .client
+            .context_window_tokens()
+            .unwrap_or(boris_ai::DEFAULT_CONTEXT_WINDOW_TOKENS);
+        let compact_budget =
+            ContextBudget::for_request(context_limit, boris_ai::DEFAULT_MAX_TOKENS);
         // LLM summary compact when context is large (P0).
         if self
             .context
-            .needs_llm_compact_for_request(&tools_for_request)
+            .needs_llm_compact_for_request_with_budget(&tools_for_request, compact_budget)
         {
             if let Err(e) = self.maybe_llm_compact().await {
                 warn!(error = %e, "llm compact skipped");
             }
         }
         self.context
-            .compact_mechanical_for_request(&tools_for_request);
+            .compact_mechanical_for_request_with_budget(&tools_for_request, compact_budget);
         // Todo + research re-entry budget (each re-enter costs one).
         self.finish_gate_remaining = 3;
 
@@ -470,6 +474,10 @@ impl Agent {
                 AgentOutcome::Speak { .. } => TurnOutcomeKind::Speak,
             },
             approx_chars_in,
+            context_used_tokens: loop_out.token_accounting.context_used_tokens(),
+            context_limit_tokens: loop_out.token_accounting.context_limit_tokens,
+            context_estimated: loop_out.token_accounting.context_is_estimated(),
+            token_usage: Box::new(loop_out.token_accounting.provider_usage.clone()),
         };
         info!(
             outcome = outcome_label,
@@ -478,6 +486,11 @@ impl Agent {
             tools_count = loop_out.tools_used.len(),
             tools = ?loop_out.tools_used,
             approx_chars_in,
+            context_used_tokens = report.context_used_tokens,
+            context_limit_tokens = ?report.context_limit_tokens,
+            context_estimated = report.context_estimated,
+            prompt_tokens = report.token_usage.prompt_tokens,
+            completion_tokens = report.token_usage.completion_tokens,
             "agent turn end"
         );
 

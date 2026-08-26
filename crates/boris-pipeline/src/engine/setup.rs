@@ -13,9 +13,7 @@ use boris_sense::{
 use crate::config::PipelineConfig;
 use crate::error::{PipelineError, Result};
 use crate::paths;
-use crate::status::{
-    DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
-};
+use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture};
 
 use super::llm::{
     build_openrouter_client, looks_like_non_agent_model, resolve_model_and_provider,
@@ -168,7 +166,8 @@ pub(super) fn init_runtime(
         activity: None,
         thinking: None,
         context_used: None,
-        context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
+        context_limit: Some(config.context_window_tokens),
+        context_estimated: true,
         artifact: None,
         wake_enroll: None,
         input: None,
@@ -228,6 +227,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         thinking: None,
         context_used: None,
         context_limit: None,
+        context_estimated: false,
         artifact: None,
         wake_enroll: None,
         input: None,
@@ -426,6 +426,7 @@ fn fault(
         thinking: None,
         context_used: None,
         context_limit: None,
+        context_estimated: false,
         artifact: None,
         wake_enroll: None,
         input: None,
@@ -473,6 +474,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         pin,
         &session_id,
         true, // high reasoning for multi-step / tools
+        config.context_window_tokens,
     );
     let fast = build_openrouter_client(
         &config.openrouter_api_key,
@@ -481,6 +483,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         pin,
         &session_id,
         false, // medium reasoning for simple facts
+        config.context_window_tokens,
     );
     let client: Box<dyn boris_agent::LlmClient> =
         if fast_model == strong_model && strong_provider_raw == fast_provider_raw {

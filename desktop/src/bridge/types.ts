@@ -76,10 +76,12 @@ export type StatusPicture = {
   activity?: string | null;
   /** Live model reasoning tail while Thinking. Display-only. */
   thinking?: string | null;
-  /** Estimated context tokens used (chars/4). */
+  /** Provider-reported context tokens, or a local estimate when flagged below. */
   context_used?: number | null;
-  /** Soft context window for the meter. */
+  /** Configured combined prompt + completion model window. */
   context_limit?: number | null;
+  /** True when context_used is the chars/4 fallback estimate. */
+  context_estimated?: boolean;
   /** This-turn overlay glance (cleared on the next utterance). Body is separate. */
   artifact?: ArtifactPeek | null;
   /** Live-mic teach progress (dedicated teach page). */
@@ -330,6 +332,7 @@ export const OFF_STATUS: StatusPicture = {
   thinking: null,
   context_used: null,
   context_limit: null,
+  context_estimated: false,
   artifact: null,
   wake_enroll: null,
   input: null,
@@ -353,6 +356,7 @@ export function normalizeStatus(
     thinking: raw.thinking ?? null,
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
+    context_estimated: raw.context_estimated ?? false,
     artifact: raw.artifact ?? null,
     wake_enroll: raw.wake_enroll ?? null,
     input: raw.input ?? null,
@@ -433,10 +437,11 @@ export function settingsToWire(settings: AppSettings): AppSettings {
   return normalizeSettings(settings);
 }
 
-/** Format token counts for the overlay meter: `233K / 500K`. */
+/** Format token counts for the overlay meter; estimated usage is prefixed with `~`. */
 export function formatContextMeter(
   used: number | null | undefined,
   limit: number | null | undefined,
+  estimated = false,
 ): string | null {
   if (used == null || limit == null || limit <= 0) return null;
   const fmt = (n: number) => {
@@ -444,5 +449,5 @@ export function formatContextMeter(
     if (n >= 1000) return `${Math.round(n / 1000)}K`;
     return `${n}`;
   };
-  return `${fmt(used)} / ${fmt(limit)}`;
+  return `${estimated ? "~" : ""}${fmt(used)} / ${fmt(limit)}`;
 }

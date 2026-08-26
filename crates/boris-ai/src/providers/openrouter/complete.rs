@@ -100,6 +100,10 @@ impl LlmClient for OpenRouterClient {
     fn model(&self) -> &str {
         OpenRouterClient::model(self)
     }
+
+    fn context_window_tokens(&self) -> Option<u32> {
+        Some(OpenRouterClient::context_window_tokens(self))
+    }
 }
 
 impl OpenRouterClient {

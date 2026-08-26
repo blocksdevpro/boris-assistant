@@ -76,6 +76,9 @@ pub struct StatusPicture {
     /// Soft context window for the meter (tokens).
     #[serde(default)]
     pub context_limit: Option<u32>,
+    /// Whether context usage is a local estimate rather than provider-reported.
+    #[serde(default)]
+    pub context_estimated: bool,
     /// Overlay glance for the card presented this turn (or the Ready linger
     /// after it). Cleared when the next utterance starts. Body is fetched
     /// separately; the session catalog is the source of truth for Home.
@@ -113,9 +116,6 @@ pub struct WakeEnrollPeek {
     pub hint: Option<String>,
 }
 
-/// Default soft context window for the overlay meter (token estimate).
-pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 500_000;
-
 impl StatusPicture {
     pub fn off() -> Self {
         Self {
@@ -137,6 +137,7 @@ impl StatusPicture {
             thinking: None,
             context_used: None,
             context_limit: None,
+            context_estimated: false,
             artifact: None,
             wake_enroll: None,
             input: None,

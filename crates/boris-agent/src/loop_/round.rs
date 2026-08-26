@@ -6,9 +6,9 @@ use boris_ai::LlmStreamEvent;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::context::Role;
+use crate::context::{ContextBudget, Role};
 use crate::error::AgentError;
-use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
+use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, TokenAccounting};
 
 use super::message_parse::extract_reply_text;
 use super::{listed_tools_json, LoopState};
@@ -53,36 +53,55 @@ pub(super) async fn complete_round(
     at_cap: bool,
     emit: &EmitFn,
     cancel: &Option<CancellationToken>,
+    accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
     let tools_json = if at_cap {
         Value::Null
     } else {
         listed_tools_json(state.tools, config, state.activated)
     };
-    // Tool definitions are part of the provider request and must participate
-    // in the same soft/hard compaction thresholds as message content.
-    state.context.compact_mechanical_for_request(&tools_json);
-    let request_chars = state.context.estimate_request_chars(&tools_json);
-    tracing::debug!(
-        request_chars,
-        request_tokens_est = request_chars / 4,
-        tools = tools_json.as_array().map(|a| a.len()).unwrap_or(0),
-        "llm request token accounting"
-    );
     let task = config
         .task
         .unwrap_or_else(|| crate::task::classify_task(user_text));
-    let messages = state.context.as_json();
-    let round = crate::routing::round_traits_for_task(&messages, task);
+    let round = crate::routing::round_traits_for_task(&state.context.as_json(), task);
     let stage = crate::routing::request_stage_for(task, round);
     let opts = boris_ai::CompleteOptions::for_stage(stage);
+    let context_limit = state
+        .client
+        .context_window_tokens()
+        .unwrap_or(boris_ai::DEFAULT_CONTEXT_WINDOW_TOKENS);
+    let output_reserve = opts.max_tokens.unwrap_or(boris_ai::DEFAULT_MAX_TOKENS);
+    let budget = ContextBudget::for_request(context_limit, output_reserve);
+    // Tool definitions are part of the provider request and participate in
+    // the same model-aware budget as message content.
+    state
+        .context
+        .compact_mechanical_for_request_with_budget(&tools_json, budget);
+    let request_chars = state.context.estimate_request_chars(&tools_json);
+    let request_tokens_est = request_chars / 4;
+    accounting.record_request_estimate(request_tokens_est, context_limit);
+    tracing::debug!(
+        request_chars,
+        request_tokens_est,
+        context_limit,
+        output_reserve,
+        input_hard_limit = budget.hard_input_tokens,
+        tools = tools_json.as_array().map(|a| a.len()).unwrap_or(0),
+        "llm request token accounting"
+    );
+    let messages = state.context.as_json();
     let emit = emit.clone();
     let mut acc = String::new();
     let mut last_emit = Instant::now();
     let mut dirty = false;
     let mut on_event = |ev: LlmStreamEvent| {
-        let LlmStreamEvent::ReasoningDelta { text } = ev else {
-            return;
+        let text = match ev {
+            LlmStreamEvent::Usage(usage) => {
+                accounting.record_provider_usage(&usage);
+                return;
+            }
+            LlmStreamEvent::ReasoningDelta { text } => text,
+            _ => return,
         };
         if text.is_empty() {
             return;
@@ -134,6 +153,7 @@ pub(super) fn tool_calls_if_runnable(response: &Value, at_cap: bool) -> Option<&
 }
 
 /// At cap with empty content: force one more speak attempt (no tools).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_spoken_reply_at_cap(
     state: &mut LoopState<'_>,
     user_text: &str,
@@ -142,10 +162,12 @@ pub(super) async fn ensure_spoken_reply_at_cap(
     mut reply: String,
     emit: &EmitFn,
     cancel: &Option<CancellationToken>,
+    accounting: &mut TokenAccounting,
 ) -> Result<String, AgentError> {
     if reply.is_empty() && at_cap {
-        state.context.push(Role::User, json!(NUDGE_SPEAK_AT_CAP));
-        let forced = complete_round(state, user_text, config, true, emit, cancel).await?;
+        state.context.push_control(json!(NUDGE_SPEAK_AT_CAP));
+        let forced =
+            complete_round(state, user_text, config, true, emit, cancel, accounting).await?;
         reply = extract_reply_text(&forced);
         if !reply.is_empty() {
             state.context.push(Role::Assistant, reply.clone());

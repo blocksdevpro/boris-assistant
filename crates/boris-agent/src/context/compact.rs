@@ -11,7 +11,49 @@
 use serde_json::Value;
 
 use super::turns::{body_start, user_turn_starts};
-use super::{Context, Message, Role};
+use super::{Context, Message, MessageOrigin, Role};
+
+/// Input-side budget derived from a model's combined context window.
+///
+/// The output reservation is request-specific. A small safety margin covers
+/// provider framing/tokenizer differences in the chars/4 fallback estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    pub context_window_tokens: u32,
+    pub output_reserve_tokens: u32,
+    pub soft_input_tokens: usize,
+    pub hard_input_tokens: usize,
+}
+
+impl ContextBudget {
+    pub fn for_request(context_window_tokens: u32, output_reserve_tokens: u32) -> Self {
+        let context_window_tokens = context_window_tokens.max(4_096);
+        let output_reserve_tokens = output_reserve_tokens
+            .max(1)
+            .min(context_window_tokens.saturating_sub(2_048));
+        let safety = (context_window_tokens / 20).max(2_048);
+        let hard = context_window_tokens
+            .saturating_sub(output_reserve_tokens)
+            .saturating_sub(safety)
+            .max(1_024) as usize;
+        let soft = hard.saturating_mul(3) / 4;
+        Self {
+            context_window_tokens,
+            output_reserve_tokens,
+            soft_input_tokens: soft,
+            hard_input_tokens: hard,
+        }
+    }
+
+    fn legacy() -> Self {
+        Self {
+            context_window_tokens: 0,
+            output_reserve_tokens: 0,
+            soft_input_tokens: Context::COMPACT_TOKEN_SOFT,
+            hard_input_tokens: Context::COMPACT_TOKEN_HARD,
+        }
+    }
+}
 
 /// Collapse a large tool observation to head + tail with a compact marker.
 pub(super) fn truncate_tool_text(s: &str, max_chars: usize) -> String {
@@ -98,16 +140,25 @@ impl Context {
     /// Apply mechanical reduction using the size of the complete provider
     /// request, including serialized tool definitions.
     pub fn compact_mechanical_for_request(&mut self, tools: &Value) {
+        self.compact_mechanical_for_request_with_budget(tools, ContextBudget::legacy());
+    }
+
+    /// Apply mechanical reduction against a model/request-specific budget.
+    pub fn compact_mechanical_for_request_with_budget(
+        &mut self,
+        tools: &Value,
+        budget: ContextBudget,
+    ) {
         let tokens = self.estimate_request_tokens(tools);
-        let (recent_cap, older_cap) = if tokens > Self::COMPACT_TOKEN_HARD {
+        let (recent_cap, older_cap) = if tokens > budget.hard_input_tokens {
             (12_000, 3_000)
-        } else if tokens > Self::COMPACT_TOKEN_SOFT {
+        } else if tokens > budget.soft_input_tokens {
             (20_000, 6_000)
         } else {
             // Comfortable: barely touch recent tools; older can still be large.
             (32_000, 12_000)
         };
-        let keep_tool_turns = if tokens > Self::COMPACT_TOKEN_HARD {
+        let keep_tool_turns = if tokens > budget.hard_input_tokens {
             Self::KEEP_RECENT_TOOL_TURNS_HARD
         } else {
             Self::KEEP_RECENT_TOOL_TURNS
@@ -142,7 +193,7 @@ impl Context {
 
         // Tier 2: collapse old tool chains **only under hard budget**.
         // Soft budget prefers keeping structure so follow-ups still see research.
-        if tokens <= Self::COMPACT_TOKEN_HARD {
+        if tokens <= budget.hard_input_tokens {
             return;
         }
         if turn_starts.len() <= keep_tool_turns {
@@ -177,8 +228,17 @@ impl Context {
     /// Summary-compaction decision for the complete provider request,
     /// including serialized tool definitions.
     pub fn needs_llm_compact_for_request(&self, tools: &Value) -> bool {
+        self.needs_llm_compact_for_request_with_budget(tools, ContextBudget::legacy())
+    }
+
+    /// Summary-compaction decision using the configured model/request budget.
+    pub fn needs_llm_compact_for_request_with_budget(
+        &self,
+        tools: &Value,
+        budget: ContextBudget,
+    ) -> bool {
         // Need real multi-turn history AND soft budget pressure.
-        self.estimate_request_tokens(tools) > Self::COMPACT_TOKEN_SOFT
+        self.estimate_request_tokens(tools) > budget.soft_input_tokens
             && self.user_turn_count() >= 5
     }
 
@@ -209,12 +269,14 @@ impl Context {
         }
         self.messages.push(Message {
             role: Role::User,
+            origin: MessageOrigin::Summary,
             content: Value::String(format!(
                 "<conversation_summary>\n{summary}\n</conversation_summary>"
             )),
         });
         self.messages.push(Message {
             role: Role::Assistant,
+            origin: MessageOrigin::HostControl,
             content: Value::String(
                 "Got it — I'll use that summary as prior context and keep going.".into(),
             ),
@@ -322,11 +384,13 @@ mod tests {
     fn estimate_message_chars_string_and_object() {
         let m = Message {
             role: Role::User,
+            origin: MessageOrigin::Human,
             content: Value::String("abcd".into()),
         };
         assert_eq!(estimate_message_chars(&m), 4);
         let m2 = Message {
             role: Role::Assistant,
+            origin: MessageOrigin::Assistant,
             content: json!({"a": 1}),
         };
         assert_eq!(estimate_message_chars(&m2), m2.content.to_string().len());
@@ -631,5 +695,14 @@ mod tests {
             .unwrap();
         assert!(content.contains("…[compacted]…"));
         assert!(content.chars().count() < body.len());
+    }
+
+    #[test]
+    fn request_budget_reserves_output_and_safety_margin() {
+        let budget = ContextBudget::for_request(128_000, 24_576);
+        assert_eq!(budget.context_window_tokens, 128_000);
+        assert_eq!(budget.output_reserve_tokens, 24_576);
+        assert!(budget.hard_input_tokens < 128_000 - 24_576);
+        assert_eq!(budget.soft_input_tokens, budget.hard_input_tokens * 3 / 4);
     }
 }

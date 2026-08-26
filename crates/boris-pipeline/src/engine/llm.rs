@@ -54,6 +54,7 @@ pub(super) fn build_openrouter_client(
     pin: bool,
     session_id: &str,
     strong: bool,
+    context_window_tokens: u32,
 ) -> OpenRouterClient {
     let reasoning = if strong {
         ReasoningConfig::high()
@@ -62,7 +63,8 @@ pub(super) fn build_openrouter_client(
     };
     let mut client = OpenRouterClient::new(api_key.to_string(), Some(model.to_string()))
         .with_session_id(session_id)
-        .with_reasoning(reasoning);
+        .with_reasoning(reasoning)
+        .with_context_window_tokens(context_window_tokens);
     if let Some(pref) = provider_pref {
         if !pref.trim().is_empty() {
             client = client.with_provider_pref(pref).with_allow_fallbacks(!pin);
@@ -78,6 +80,7 @@ pub(super) fn build_openrouter_client(
         model = %model,
         effort = client.reasoning().effort.as_str(),
         max_tokens = client.max_tokens(),
+        context_window_tokens = client.context_window_tokens(),
         "OpenRouter reasoning configured"
     );
     client

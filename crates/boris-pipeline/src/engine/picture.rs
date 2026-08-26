@@ -7,7 +7,6 @@ use boris_core::TurnId;
 
 use crate::status::{
     ArtifactPeek, DeviceHealth, EngineState, InputPeek, Phase, StatusPicture, WakeEnrollPeek,
-    DEFAULT_CONTEXT_LIMIT_TOKENS,
 };
 
 /// Mutable engine-side status that publishes a full [`StatusPicture`] on change.
@@ -24,6 +23,7 @@ pub(super) struct Picture {
     pub thinking: Option<String>,
     pub context_used: Option<u32>,
     pub context_limit: Option<u32>,
+    pub context_estimated: bool,
     pub artifact: Option<ArtifactPeek>,
     pub wake_enroll: Option<WakeEnrollPeek>,
     pub input: Option<InputPeek>,
@@ -47,6 +47,7 @@ impl Picture {
             thinking: self.thinking.clone(),
             context_used: self.context_used,
             context_limit: self.context_limit,
+            context_estimated: self.context_estimated,
             artifact: self.artifact.clone(),
             wake_enroll: self.wake_enroll.clone(),
             input: self.input.clone(),
@@ -88,7 +89,16 @@ impl Picture {
     pub fn update_context_from_chars(&mut self, approx_chars: usize) {
         let used = (approx_chars as u32 / 4).max(1);
         self.context_used = Some(used);
-        self.context_limit = Some(DEFAULT_CONTEXT_LIMIT_TOKENS);
+        self.context_estimated = true;
+        self.publish();
+    }
+
+    pub fn update_context(&mut self, used: u32, limit: Option<u32>, estimated: bool) {
+        self.context_used = Some(used.max(1));
+        if limit.is_some() {
+            self.context_limit = limit;
+        }
+        self.context_estimated = estimated;
         self.publish();
     }
 }

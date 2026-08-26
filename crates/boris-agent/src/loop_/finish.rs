@@ -6,7 +6,7 @@ use crate::context::Role;
 use crate::error::AgentError;
 use crate::outcome::AgentOutcome;
 use crate::runtime::PendingTurn;
-use crate::types::{AgentEvent, EmitFn, LoopResult};
+use crate::types::{AgentEvent, EmitFn, LoopResult, TokenAccounting};
 
 use super::message_parse::log_preview;
 
@@ -21,6 +21,7 @@ pub(super) fn finish_paused(
     tool_rounds: u32,
     tools_used: Vec<String>,
     pending_turn: PendingTurn,
+    token_accounting: TokenAccounting,
 ) -> Result<LoopResult, AgentError> {
     match &outcome {
         AgentOutcome::NeedsInput { pending, .. } => {
@@ -43,6 +44,7 @@ pub(super) fn finish_paused(
         tool_rounds,
         tools_used,
         pending_turn: Some(pending_turn),
+        token_accounting,
     })
 }
 
@@ -52,6 +54,7 @@ pub(super) fn finish_with_speech(
     reply: String,
     tool_rounds: u32,
     tools_used: Vec<String>,
+    token_accounting: TokenAccounting,
 ) -> Result<LoopResult, AgentError> {
     emit(AgentEvent::MessageEnd {
         role: Role::Assistant,
@@ -79,5 +82,6 @@ pub(super) fn finish_with_speech(
         tool_rounds,
         tools_used,
         pending_turn: None,
+        token_accounting,
     })
 }

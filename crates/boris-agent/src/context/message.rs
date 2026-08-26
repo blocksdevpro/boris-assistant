@@ -4,13 +4,67 @@ use serde_json::{json, Value};
 
 use super::Role;
 
+/// Provenance of a context message, independent of its provider wire role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MessageOrigin {
+    System,
+    Human,
+    Assistant,
+    Tool,
+    /// Harness instruction encoded as a user-role message for provider compatibility.
+    HostControl,
+    /// LLM-written compacted history; context, but never a human turn.
+    Summary,
+    /// Host-loaded skill/playbook instruction.
+    Skill,
+}
+
+impl MessageOrigin {
+    pub fn for_role(role: Role) -> Self {
+        match role {
+            Role::System => Self::System,
+            Role::User => Self::Human,
+            Role::Assistant => Self::Assistant,
+            Role::Tool => Self::Tool,
+        }
+    }
+
+    pub fn is_human(self) -> bool {
+        matches!(self, Self::Human)
+    }
+
+    /// Ephemeral host controls should never become transcript history.
+    pub fn should_persist(self) -> bool {
+        !matches!(self, Self::HostControl | Self::Skill)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
+    pub origin: MessageOrigin,
     /// For User/System/Assistant: a plain string or content array.
     /// For Tool: a JSON object `{ tool_call_id, content }`.
     /// For Assistant with tool_calls: the raw message object from the LLM.
     pub content: Value,
+}
+
+impl Message {
+    pub fn new(role: Role, content: impl Into<Value>) -> Self {
+        Self {
+            origin: MessageOrigin::for_role(role.clone()),
+            role,
+            content: content.into(),
+        }
+    }
+
+    pub fn with_origin(role: Role, origin: MessageOrigin, content: impl Into<Value>) -> Self {
+        Self {
+            role,
+            origin,
+            content: content.into(),
+        }
+    }
 }
 
 impl Message {
@@ -127,6 +181,7 @@ mod tests {
         // double-wrap it (OpenRouter: messages.N.content Invalid input).
         let msg = Message {
             role: Role::Assistant,
+            origin: MessageOrigin::Assistant,
             content: json!({
                 "role": "assistant",
                 "content": "[prior tool batch: 2 call(s) — details omitted]"
@@ -149,6 +204,7 @@ mod tests {
     fn dump_tool_calls_uses_empty_string_not_null() {
         let msg = Message {
             role: Role::Assistant,
+            origin: MessageOrigin::Assistant,
             content: json!({
                 "role": "assistant",
                 "content": null,
@@ -168,6 +224,7 @@ mod tests {
     fn dump_tool_surfaces_tool_call_id() {
         let msg = Message {
             role: Role::Tool,
+            origin: MessageOrigin::Tool,
             content: json!({ "tool_call_id": "call_9", "content": "ok" }),
         };
         let dumped = msg.dump();

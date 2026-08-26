@@ -35,7 +35,7 @@ use crate::runtime::{
     ActivationSet, InvokeOptions, InvokeResult, PendingTurn, RawToolCall, ToolRuntime,
 };
 use crate::tool::Tool;
-use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult};
+use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult, TokenAccounting};
 
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
@@ -92,6 +92,7 @@ pub async fn agent_loop(
     let mut tools_used = tools_used;
     let mut tool_rounds = tool_rounds;
     let mut confirms_used = confirms_used;
+    let mut token_accounting = TokenAccounting::default();
     let max_rounds = config.max_tool_rounds as usize;
     // Full path to todos.json (session-bound or sandbox fallback).
     let todos_file = todos_file
@@ -113,8 +114,16 @@ pub async fn agent_loop(
 
         // On the final allowed round, withhold tools so the model must speak.
         let at_cap = round >= max_rounds;
-        let response =
-            complete_round(&mut state, user_text, config, at_cap, &emit, &cancel).await?;
+        let response = complete_round(
+            &mut state,
+            user_text,
+            config,
+            at_cap,
+            &emit,
+            &cancel,
+            &mut token_accounting,
+        )
+        .await?;
 
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
             // One round before cap: run tools, then inject a finish nudge and
@@ -162,7 +171,7 @@ pub async fn agent_loop(
             match batch_result {
                 ToolBatchResult::Continue => {
                     if force_finish_next {
-                        state.context.push(Role::User, json!(NUDGE_NEAR_TOOL_CAP));
+                        state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
                     }
                     emit(AgentEvent::TurnEnd {
                         round: round as u32,
@@ -180,6 +189,7 @@ pub async fn agent_loop(
                         tool_rounds,
                         tools_used,
                         pending_turn,
+                        token_accounting,
                     );
                 }
             }
@@ -204,7 +214,7 @@ pub async fn agent_loop(
                 );
                 state
                     .context
-                    .push(Role::User, crate::speech_sanitize::TOOL_PROTOCOL_REMINDER);
+                    .push_control(crate::speech_sanitize::TOOL_PROTOCOL_REMINDER);
                 emit(AgentEvent::TurnEnd {
                     round: round as u32,
                 });
@@ -214,7 +224,14 @@ pub async fn agent_loop(
         }
 
         reply = ensure_spoken_reply_at_cap(
-            &mut state, user_text, config, at_cap, reply, &emit, &cancel,
+            &mut state,
+            user_text,
+            config,
+            at_cap,
+            reply,
+            &emit,
+            &cancel,
+            &mut token_accounting,
         )
         .await?;
 
@@ -262,7 +279,7 @@ pub async fn agent_loop(
                 );
                 crate::finish_gate::todo_gate_reminder(pending)
             };
-            state.context.push(Role::User, reminder);
+            state.context.push_control(reminder);
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
             });
@@ -276,7 +293,14 @@ pub async fn agent_loop(
             }
         }
 
-        return finish_with_speech(&emit, round as u32, reply, tool_rounds, tools_used);
+        return finish_with_speech(
+            &emit,
+            round as u32,
+            reply,
+            tool_rounds,
+            tools_used,
+            token_accounting,
+        );
     }
 
     // Unreachable with 0..=max_rounds + return inside, but keep a soft landing.
@@ -285,6 +309,7 @@ pub async fn agent_loop(
         tool_rounds,
         tools_used,
         pending_turn: None,
+        token_accounting,
     })
 }
 
@@ -368,6 +393,7 @@ pub async fn resume_pending_input(
                 tool_rounds,
                 tools_used,
                 pending_turn,
+                TokenAccounting::default(),
             );
         }
     }
@@ -584,6 +610,7 @@ pub async fn resume_pending_tool(
                 tool_rounds,
                 tools_used,
                 pending_turn: Some(pending_turn),
+                token_accounting: TokenAccounting::default(),
             });
         }
     }
@@ -613,6 +640,41 @@ mod tests {
 
     struct ScriptedClient {
         responses: Mutex<Vec<serde_json::Value>>,
+    }
+
+    struct UsageClient;
+
+    #[async_trait]
+    impl LlmClient for UsageClient {
+        async fn complete(
+            &self,
+            _messages: serde_json::Value,
+            _tools: serde_json::Value,
+        ) -> Result<serde_json::Value, LlmError> {
+            Ok(json!({"role":"assistant","content":"measured"}))
+        }
+
+        async fn complete_stream(
+            &self,
+            _messages: serde_json::Value,
+            _tools: serde_json::Value,
+            _opts: boris_ai::CompleteOptions,
+            on_event: &mut (dyn FnMut(boris_ai::LlmStreamEvent) + Send),
+        ) -> Result<serde_json::Value, LlmError> {
+            let message = json!({"role":"assistant","content":"measured"});
+            on_event(boris_ai::LlmStreamEvent::Usage(boris_ai::TokenUsage {
+                prompt_tokens: 321,
+                completion_tokens: 7,
+                total_tokens: 328,
+                ..Default::default()
+            }));
+            on_event(boris_ai::LlmStreamEvent::FinalMessage(message.clone()));
+            Ok(message)
+        }
+
+        fn context_window_tokens(&self) -> Option<u32> {
+            Some(64_000)
+        }
     }
 
     #[async_trait]
@@ -665,6 +727,42 @@ mod tests {
         }
         assert_eq!(result.tool_rounds, 0);
         assert!(result.pending_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn loop_prefers_provider_usage_and_reports_client_window() {
+        let client = UsageClient;
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "hi");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![];
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+
+        let result = agent_loop(
+            state,
+            "hi",
+            &AgentLoopConfig::default(),
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.token_accounting.context_used_tokens(), 321);
+        assert!(!result.token_accounting.context_is_estimated());
+        assert_eq!(result.token_accounting.context_limit_tokens, Some(64_000));
     }
 
     #[tokio::test]

@@ -117,11 +117,41 @@ pub struct Agent {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use boris_ai::{LlmClient, LlmError};
+    use serde_json::Value;
+
+    struct DummyClient;
+
+    #[async_trait]
+    impl LlmClient for DummyClient {
+        async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            Ok(serde_json::json!({"role":"assistant","content":"ok"}))
+        }
+    }
+
     #[test]
     fn agent_and_turn_cancel_are_send() {
         fn assert_send<T: Send>() {}
         assert_send::<super::Agent>();
         assert_send::<super::TurnCancel>();
+    }
+
+    #[test]
+    fn persistence_excludes_ephemeral_host_controls() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push(super::Role::User, "hello");
+        agent
+            .context
+            .push_control("<system-reminder>finish</system-reminder>");
+
+        let exported = agent.export_messages_for_persist();
+        assert!(exported
+            .iter()
+            .any(|m| m.origin == crate::MessageOrigin::Human));
+        assert!(!exported
+            .iter()
+            .any(|m| m.origin == crate::MessageOrigin::HostControl));
     }
 }
 
@@ -623,6 +653,7 @@ impl Agent {
     pub fn export_messages_for_persist(&self) -> Vec<Message> {
         self.export_messages()
             .into_iter()
+            .filter(|m| m.origin.should_persist())
             .map(|mut m| {
                 if matches!(m.role, Role::Tool) {
                     m.content = crate::tools::collect_input::redact_secret_tool_content(&m.content);

@@ -1,9 +1,9 @@
-//! User-turn partitioning and history pruning.
+//! Human-turn partitioning and history pruning.
 //!
-//! Prune is by **user turns**, not raw message count, so assistant `tool_calls`
+//! Prune is by real **human turns**, not user-role rows or raw message count, so assistant `tool_calls`
 //! stay paired with their following `Role::Tool` results.
 
-use super::{Context, Message, Role};
+use super::{Context, Message, MessageOrigin, Role};
 
 /// Index of the first non-system message (0 or 1).
 pub(super) fn body_start(messages: &[Message]) -> usize {
@@ -17,24 +17,24 @@ pub(super) fn body_start(messages: &[Message]) -> usize {
     }
 }
 
-/// Message indices where each user-turn group begins (assistant/tool traffic follows).
+/// Message indices where each real human-turn group begins.
 pub(super) fn user_turn_starts(messages: &[Message], body_start: usize) -> Vec<usize> {
     messages
         .iter()
         .enumerate()
         .skip(body_start)
-        .filter_map(|(i, msg)| matches!(msg.role, Role::User).then_some(i))
+        .filter_map(|(i, msg)| msg.origin.is_human().then_some(i))
         .collect()
 }
 
 impl Context {
-    /// Prune conversation history by **user turns**, not raw message count.
+    /// Prune conversation history by real **human turns**, not raw message count.
     ///
     /// Algorithm:
     /// 1. Optionally keep index-0 `Role::System` forever.
     /// 2. Partition remaining messages into turn groups; each group starts at
-    ///    a `Role::User` and includes all following assistant/tool traffic
-    ///    until the next user message.
+    ///    a `MessageOrigin::Human` and includes all following control,
+    ///    assistant, and tool traffic until the next human message.
     /// 3. Keep only the last `max_turns` groups (oldest turns dropped first).
     /// 4. Rebuild: `[system?] + kept groups`.
     ///
@@ -46,13 +46,23 @@ impl Context {
         }
 
         let body = body_start(&self.messages);
-        let has_system = body == 1;
         let turn_starts = user_turn_starts(&self.messages, body);
         let max = self.max_turns as usize;
+        let prefix_end = turn_starts.first().copied().unwrap_or(self.messages.len());
 
-        // max_turns == 0: drop every user turn; keep only the system prompt (if any).
+        // max_turns == 0: drop every human turn; preserve system/summary prefix.
         if max == 0 {
-            self.messages.truncate(body);
+            let metadata_prefix_end = self
+                .messages
+                .iter()
+                .position(|m| {
+                    matches!(
+                        m.origin,
+                        MessageOrigin::Human | MessageOrigin::Assistant | MessageOrigin::Tool
+                    )
+                })
+                .unwrap_or(self.messages.len());
+            self.messages.truncate(metadata_prefix_end);
             return;
         }
 
@@ -64,24 +74,16 @@ impl Context {
         // First message index of the oldest turn we still keep.
         let keep_from = turn_starts[turn_starts.len() - max];
 
-        if has_system {
-            // Retain system at index 0, then only the kept turn groups.
-            let system = self.messages[0].clone();
-            let kept: Vec<Message> = self.messages.drain(keep_from..).collect();
-            self.messages.clear();
-            self.messages.push(system);
-            self.messages.extend(kept);
-        } else {
-            self.messages.drain(0..keep_from);
-        }
+        let prefix = self.messages[..prefix_end].to_vec();
+        let kept = self.messages[keep_from..].to_vec();
+        self.messages.clear();
+        self.messages.extend(prefix);
+        self.messages.extend(kept);
     }
 
-    /// Count user turns (excludes system).
+    /// Count real human turns (excludes summary and host-control user-role rows).
     pub fn user_turn_count(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|m| matches!(m.role, Role::User))
-            .count()
+        self.messages.iter().filter(|m| m.origin.is_human()).count()
     }
 }
 
@@ -115,6 +117,7 @@ mod tests {
         assert_eq!(
             body_start(&[Message {
                 role: Role::User,
+                origin: MessageOrigin::Human,
                 content: json!("u"),
             }]),
             0
@@ -122,6 +125,7 @@ mod tests {
         assert_eq!(
             body_start(&[Message {
                 role: Role::System,
+                origin: MessageOrigin::System,
                 content: json!("s"),
             }]),
             1
@@ -133,18 +137,22 @@ mod tests {
         let msgs = vec![
             Message {
                 role: Role::System,
+                origin: MessageOrigin::System,
                 content: json!("s"),
             },
             Message {
                 role: Role::User,
+                origin: MessageOrigin::Human,
                 content: json!("u1"),
             },
             Message {
                 role: Role::Assistant,
+                origin: MessageOrigin::Assistant,
                 content: json!("a1"),
             },
             Message {
                 role: Role::User,
+                origin: MessageOrigin::Human,
                 content: json!("u2"),
             },
         ];
@@ -272,5 +280,43 @@ mod tests {
         ctx.push(Role::Assistant, "a1");
         ctx.push(Role::User, "u2");
         assert_eq!(ctx.user_turn_count(), 2);
+    }
+
+    #[test]
+    fn host_controls_do_not_create_or_displace_human_turns() {
+        let mut ctx = Context::new(1);
+        ctx.push(Role::System, "sys");
+        ctx.push(Role::User, "u1");
+        ctx.push(Role::Assistant, "a1");
+        ctx.push_control("<system-reminder>continue</system-reminder>");
+        assert_eq!(ctx.user_turn_count(), 1);
+
+        ctx.push(Role::User, "u2");
+        ctx.push_control("<system-reminder>finish</system-reminder>");
+        assert_eq!(ctx.user_turn_count(), 1);
+        assert!(ctx.messages.iter().any(|m| m.content == json!("u2")));
+        assert!(!ctx.messages.iter().any(|m| m.content == json!("u1")));
+        assert!(ctx
+            .messages
+            .iter()
+            .any(|m| m.origin == MessageOrigin::HostControl));
+    }
+
+    #[test]
+    fn summary_prefix_is_preserved_but_not_counted_as_human() {
+        let mut ctx = Context::new(1);
+        ctx.push(Role::System, "sys");
+        ctx.messages.push(Message::with_origin(
+            Role::User,
+            MessageOrigin::Summary,
+            "<conversation_summary>prior facts</conversation_summary>",
+        ));
+        ctx.push(Role::User, "u1");
+        ctx.push(Role::Assistant, "a1");
+        ctx.push(Role::User, "u2");
+
+        assert_eq!(ctx.user_turn_count(), 1);
+        assert_eq!(ctx.messages[1].origin, MessageOrigin::Summary);
+        assert!(ctx.messages.iter().any(|m| m.content == json!("u2")));
     }
 }

@@ -1,27 +1,49 @@
-//! Load / save [`UserProfile`] under a host-supplied path (typically
-//! `~/.boris/memory/profile.json`).
+//! Load / save the extraction [`UserProfile`] working set.
 //!
-//! # On-disk format
+//! # Persistence
 //!
-//! Pretty-printed JSON matching the serde shape of [`UserProfile`]. Missing or
-//! empty files load as [`UserProfile::default`]. Writes are temp+rename
-//! (atomic-ish) so a crash mid-write does not leave a half JSON file.
+//! Normal runtime uses the canonical [`MemoryStore`] SQLite metadata plane.
+//! The JSON implementation remains only to read legacy profile files during
+//! migration and for embedded hosts that have not selected a memory store.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::profile::UserProfile;
+use super::{MemoryStore, UserProfile};
 
-/// File-backed personal profile store.
+/// Profile extraction working-set store.
 #[derive(Debug, Clone)]
 pub struct ProfileStore {
     path: PathBuf,
+    backing: ProfileBacking,
+}
+
+#[derive(Debug, Clone)]
+enum ProfileBacking {
+    /// Used only to read legacy profile.json during migration and for API
+    /// compatibility with embedded hosts that have not enabled memory yet.
+    File,
+    /// The normal runtime path: profile extraction state lives in the same
+    /// SQLite database as the retrievable memory records.
+    Canonical(Arc<MemoryStore>),
 }
 
 impl ProfileStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            backing: ProfileBacking::File,
+        }
+    }
+
+    /// Use the canonical memory database instead of a standalone JSON file.
+    pub fn canonical(memory: Arc<MemoryStore>) -> Self {
+        Self {
+            path: memory.path().to_path_buf(),
+            backing: ProfileBacking::Canonical(memory),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -30,6 +52,9 @@ impl ProfileStore {
 
     /// Missing / empty file → default profile. Corrupt JSON → error.
     pub fn load(&self) -> Result<UserProfile, String> {
+        if let ProfileBacking::Canonical(memory) = &self.backing {
+            return memory.load_profile_snapshot();
+        }
         if !self.path.is_file() {
             return Ok(UserProfile::default());
         }
@@ -46,6 +71,9 @@ impl ProfileStore {
 
     /// Atomic-ish write (temp + rename). Creates parent dirs.
     pub fn save(&self, profile: &UserProfile) -> Result<(), String> {
+        if let ProfileBacking::Canonical(memory) = &self.backing {
+            return memory.save_profile_snapshot(profile);
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create profile dir {}: {e}", parent.display()))?;
@@ -55,6 +83,13 @@ impl ProfileStore {
         write_atomic(&self.path, json.as_bytes())
             .map_err(|e| format!("write profile {}: {e}", self.path.display()))?;
         Ok(())
+    }
+
+    pub fn memory_store(&self) -> Option<Arc<MemoryStore>> {
+        match &self.backing {
+            ProfileBacking::File => None,
+            ProfileBacking::Canonical(memory) => Some(Arc::clone(memory)),
+        }
     }
 }
 

@@ -515,6 +515,19 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         tracing::warn!(error = %e, "ensure agent workspace/audit dirs failed");
     }
 
+    // Enable the canonical store before personal tools are constructed. This
+    // makes their profile/extraction state live in memory.sqlite instead of
+    // creating or updating legacy profile.json.
+    if config.long_term_memory {
+        match agent.enable_memory_store(paths::memory_store_path()) {
+            Ok(_) => tracing::info!(
+                store = %paths::memory_store_path().display(),
+                "canonical memory store enabled"
+            ),
+            Err(e) => tracing::warn!(error = %e, "canonical memory enable failed"),
+        }
+    }
+
     let preset = config.capability_preset;
     // One shared roots config for runtime policy and BuiltinToolPaths so sandbox
     // / data roots never diverge (Grok layout: state/workspace + memory/sessions).
@@ -567,15 +580,16 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     agent.enable_skills(loaded);
 
     if config.long_term_memory {
-        match agent
-            .enable_long_term_memory_with_sessions(paths::memory_dir(), Some(paths::sessions_dir()))
-        {
-            Ok(_) => tracing::info!(
-                memory_md = %paths::memory_md_path().display(),
-                sessions = %paths::sessions_dir().display(),
-                "long-term markdown memory enabled (global MEMORY + per-session memory.md)"
-            ),
-            Err(e) => tracing::warn!(error = %e, "long-term memory enable failed"),
+        let legacy_paths = boris_agent::LegacyMemoryPaths {
+            profile_path: paths::profile_path(),
+            memory_root: paths::memory_dir(),
+            sessions_root: paths::sessions_dir(),
+        };
+        if let Err(e) = agent.migrate_legacy_memory(legacy_paths) {
+            tracing::warn!(
+                error = %e,
+                "legacy memory migration was not queued; legacy files remain untouched"
+            );
         }
     }
 

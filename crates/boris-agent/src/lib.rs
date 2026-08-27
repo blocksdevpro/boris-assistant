@@ -79,7 +79,7 @@ pub use activity::{
     describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
     Tense, VerbKind,
 };
-pub use agent::{Agent, AgentOptions, TurnCancel};
+pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{
     Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
@@ -89,8 +89,11 @@ pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};
 pub use memory::{
-    FactCategory, FactStatus, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact,
-    UserProfile, PERSONAL_CONTEXT_MAX_CHARS,
+    discover_legacy_memory, merge_legacy_profile, retire_legacy_files, FactCategory, FactStatus,
+    LegacyMemoryPaths, LegacyMemorySource, LegacyMigrationPlan, LongTermMemory, MemoryEvent,
+    MemoryHit, MemoryIndex, MemoryKind, MemoryPrivacy, MemoryRecord, MemoryScope, MemorySearchHit,
+    MemoryStore, NewMemory, ProfileStore, StoredMemoryStatus, UserFact, UserProfile,
+    PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
 pub use outcome::AgentOutcome;

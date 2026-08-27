@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -31,6 +32,10 @@ const REJECT_DRAIN_MS: u64 = 150;
 
 enum AgentJob {
     Prompt(String),
+    Replacement {
+        user_text: String,
+        interrupted_text: Option<String>,
+    },
     Resume {
         pending_id: String,
         approved: bool,
@@ -51,6 +56,10 @@ pub(super) enum ThinkResolve {
 /// What the scoped agent thread should run while the engine watches the mic.
 pub(super) enum AgentWork<'a> {
     Prompt(&'a str),
+    Replacement {
+        user_text: &'a str,
+        interrupted_text: Option<&'a str>,
+    },
     Resume {
         pending_id: &'a str,
         approved: bool,
@@ -73,6 +82,9 @@ pub(super) struct ThinkCtx<'a> {
     pub audio: &'a mut AudioService,
     pub output_events: &'a mut crossbeam_channel::Receiver<OutputEvent>,
     pub picture: &'a mut Picture,
+    /// Agent events publish frozen Thinking snapshots directly. Disable them
+    /// while interruption capture owns the foreground UI.
+    pub activity_events_enabled: Arc<AtomicBool>,
     pub cmd_rx: &'a Receiver<EngineCommand>,
     pub running: &'a mut bool,
     pub work: AgentWork<'a>,
@@ -92,6 +104,7 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
         audio,
         output_events,
         picture,
+        activity_events_enabled,
         cmd_rx,
         running,
         work,
@@ -102,6 +115,13 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
     let cancel = agent.arm_cancel();
     let job = match work {
         AgentWork::Prompt(text) => AgentJob::Prompt(text.to_string()),
+        AgentWork::Replacement {
+            user_text,
+            interrupted_text,
+        } => AgentJob::Replacement {
+            user_text: user_text.to_string(),
+            interrupted_text: interrupted_text.map(ToOwned::to_owned),
+        },
         AgentWork::Resume {
             pending_id,
             approved,
@@ -123,6 +143,14 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
             let result = handle.block_on(async move {
                 match job {
                     AgentJob::Prompt(text) => agent.prompt_with_report(&text).await,
+                    AgentJob::Replacement {
+                        user_text,
+                        interrupted_text,
+                    } => {
+                        agent
+                            .prompt_replacement_with_report(&user_text, interrupted_text.as_deref())
+                            .await
+                    }
                     AgentJob::Resume {
                         pending_id,
                         approved,
@@ -166,19 +194,17 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
             if let Some(watch) = watch.as_mut() {
                 if let Some(window) = watch.poll_wake_only() {
                     watch.reset();
-                    match on_thinking_wake(
-                        &window,
-                        &agent_done,
-                        mic,
-                        vad,
-                        stt,
-                        liveness,
-                        cmd_rx,
-                        running,
-                        picture,
-                        turn,
-                    ) {
-                        Ok(BargeDecision::Resume) => {}
+                    // From this point until classification, the microphone is
+                    // the foreground interaction. Frozen tool/thought events
+                    // from the old agent turn must not repaint Thinking over it.
+                    activity_events_enabled.store(false, Ordering::Release);
+                    let heard = on_thinking_wake(
+                        &window, mic, vad, stt, liveness, cmd_rx, running, picture, turn,
+                    );
+                    match heard {
+                        Ok(BargeDecision::Resume) => {
+                            activity_events_enabled.store(true, Ordering::Release);
+                        }
                         Ok(BargeDecision::StopTalking) => {
                             tracing::info!(%turn, "thinking barge-in stop");
                             cancel.cancel();
@@ -208,11 +234,15 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                         }
                         Err(HearBreak::SwitchInput { device_id }) => {
                             apply_input_switch(audio, picture, &device_id);
+                            activity_events_enabled.store(true, Ordering::Release);
                         }
                         Err(HearBreak::SwitchOutput { device_id }) => {
                             apply_output_switch(audio, output_events, picture, &device_id);
+                            activity_events_enabled.store(true, Ordering::Release);
                         }
-                        Err(HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile) => {}
+                        Err(HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile) => {
+                            activity_events_enabled.store(true, Ordering::Release);
+                        }
                     }
                 }
             }
@@ -232,7 +262,6 @@ fn recv_done(
 
 fn on_thinking_wake(
     window: &[f32],
-    agent_done: &AtomicBool,
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     vad: &mut SileroVad,
     stt: &mut SttBox,
@@ -254,59 +283,67 @@ fn on_thinking_wake(
     }
 
     let prev_activity = picture.activity.clone();
+    let prev_thinking = picture.thinking.clone();
     picture.activity = Some("barge-in · listening".into());
-    picture.publish();
+    picture.set_phase(Phase::Hearing);
+
+    // Match talking barge-in semantics: the detection window is only for wake
+    // and liveness. Drain its tail, then record a fresh clip so "Hey Boris"
+    // never becomes part of the replacement request sent to STT.
+    if let Err(error) = hear::settle_after_barge(mic, cmd_rx, running) {
+        restore_thinking_picture(picture, prev_activity, prev_thinking);
+        return Err(error);
+    }
+
+    // Once the wake is accepted, finish listening even if the old agent job
+    // completes. Its result is held by run_thinking until this utterance says
+    // resume, stop, or replace; cutting capture here loses the user's redirect.
+    let clip = match hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::BargeIn) {
+        Ok(clip) => clip,
+        Err(error) => {
+            restore_thinking_picture(picture, prev_activity, prev_thinking);
+            return Err(error);
+        }
+    };
+    let follow = hear::crop_speech(vad, &clip);
 
     if let Err(e) = stt.load() {
         tracing::warn!(error = %e, %turn, "thinking barge-in stt load failed — resume");
+        restore_thinking_picture(picture, prev_activity, prev_thinking);
         return Ok(BargeDecision::Resume);
     }
 
-    let mut pcm = if crop.pcm.is_empty() {
-        window.to_vec()
-    } else {
-        crop.pcm.clone()
-    };
-    let mut hops = crop.speech_hops;
-
-    if !agent_done.load(Ordering::Acquire) {
-        let clip = hear::capture_utterance_until(
-            mic,
-            vad,
-            cmd_rx,
-            running,
-            CaptureKind::AfterWake,
-            || agent_done.load(Ordering::Acquire),
-        )?;
-        let follow = hear::crop_speech(vad, &clip);
-        if follow.speech_hops > 0 {
-            pcm.extend_from_slice(&follow.pcm);
-            hops = hops.saturating_add(follow.speech_hops);
+    picture.activity = Some("barge-in · transcribing".into());
+    picture.set_phase(Phase::Reading);
+    let text = transcribe_or_empty(stt, &follow.pcm, turn);
+    let decision = decide_thinking_barge_listen(follow.speech_hops, &text);
+    match &decision {
+        BargeDecision::Resume => {
+            restore_thinking_picture(picture, prev_activity, prev_thinking);
+        }
+        BargeDecision::StopTalking => {
+            picture.activity = Some("barge-in · stopping".into());
+            picture.set_phase(Phase::Thinking);
+        }
+        BargeDecision::TakeTurn(_) => {
+            picture.activity = Some("barge-in · switching".into());
+            picture.set_phase(Phase::Thinking);
         }
     }
-
-    let text = transcribe_or_empty(stt, &pcm, turn);
-
-    if picture
-        .activity
-        .as_deref()
-        .is_some_and(|a| a.starts_with("barge-in"))
-    {
-        picture.activity = prev_activity
-            .filter(|a| !a.starts_with("barge-in"))
-            .or_else(|| {
-                if picture.phase == Phase::Thinking {
-                    Some("thinking…".into())
-                } else {
-                    None
-                }
-            });
-        picture.publish();
-    }
-
-    let decision = decide_thinking_barge_listen(hops, &text);
     tracing::info!(%turn, %text, ?decision, "thinking barge-in heard");
     Ok(decision)
+}
+
+fn restore_thinking_picture(
+    picture: &mut Picture,
+    previous_activity: Option<String>,
+    previous_thinking: Option<String>,
+) {
+    picture.activity = previous_activity
+        .filter(|activity| !activity.starts_with("barge-in"))
+        .or_else(|| Some("thinking…".into()));
+    picture.thinking = previous_thinking;
+    picture.set_phase(Phase::Thinking);
 }
 
 fn transcribe_or_empty(stt: &mut SttBox, pcm: &[f32], turn: TurnId) -> String {

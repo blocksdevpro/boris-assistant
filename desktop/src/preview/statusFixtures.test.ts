@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { toneFor } from "@/lib/phaseVisual";
 import {
+  bargeInPresence,
+  bargeInStage,
+  conversationLines,
   isConfirmContext,
   isToolActivity,
   overlayInputUsesCard,
@@ -28,6 +31,10 @@ describe("overlay preview fixtures", () => {
       "thinking-long",
       "thinking-tool",
       "tool-failure",
+      "barge-listening",
+      "barge-transcribing",
+      "barge-switching",
+      "barge-stopping",
       "typed-input",
       "confirm",
       "talking",
@@ -117,6 +124,59 @@ describe("overlay preview fixtures", () => {
       }),
     ).toBe(true);
   });
+
+  it.each([
+    [
+      "barge-listening",
+      "listening",
+      "Listening",
+      "Interrupting current task",
+      "placeholder",
+      "Listening to your change…",
+    ],
+    [
+      "barge-transcribing",
+      "transcribing",
+      "Transcribing",
+      "Your change",
+      "placeholder",
+      "Transcribing your change…",
+    ],
+    [
+      "barge-switching",
+      "switching",
+      "Switching tasks",
+      "",
+      "status",
+      "Switching tasks…",
+    ],
+    [
+      "barge-stopping",
+      "stopping",
+      "Stopping",
+      "Cancelling current task",
+      "status",
+      "Stopping current task…",
+    ],
+  ] as const)(
+    "makes %s an authoritative foreground state",
+    (name, stage, primary, secondary, lineKind, lineText) => {
+      const status = getStatusFixture(name)!;
+      const tone = toneFor(status.phase, status.engine);
+
+      expect(bargeInStage(status.activity)).toBe(stage);
+      expect(bargeInPresence(status.activity)).toEqual({ primary, secondary });
+      expect(pickOverlayPresence(status, tone.label, tone.hint)).toEqual({
+        primary,
+        secondary,
+      });
+      expect(pickCaption(status)).toBeNull();
+      expect(overlayThinkingText(status)).toBeNull();
+      expect(conversationLines(status)).toEqual([
+        { kind: lineKind, text: lineText },
+      ]);
+    },
+  );
 
   it("shows a card only for this turn and the Ready linger", () => {
     const card = getStatusFixture("artifact-card")!;

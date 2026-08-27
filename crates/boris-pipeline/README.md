@@ -99,7 +99,7 @@ Override root with `BORIS_HOME`.
     supertone/voices/  # M4.json
     silero/            # optional seed of embedded Silero VAD ONNX
   sessions/desktop/    # voice session transcripts + artifacts/
-  memory/              # long-term markdown memory
+  memory/              # memory.sqlite canonical store + optional notes.jsonl
   skills/              # skill playbooks
   logs/                # boris-desktop.*.log
   workspace/           # sandboxed agent workspace
@@ -112,6 +112,19 @@ unknown keys outside those managed sections are preserved on save (see `save_set
 `apply_config_file` in `src/settings.rs`). There is currently no genuinely hand-edit-only
 managed table in `config.toml` — anything the desktop settings UI can persist ends up in one
 of the sections above.
+
+## Boris memory
+
+When `BORIS_MEMORY` is enabled, the engine opens
+`~/.boris/memory/memory.sqlite` before it registers personal-memory tools.
+Every completed turn is durably ingested as evidence, and proactive recall plus
+memory tools use active records from that store.
+
+On beta.2's first launch, the engine queues a background import of legacy
+`profile.json`, `MEMORY.md`, workspace memory, and session `memory.md` files.
+The configured LLM refines each source into canonical records. Legacy files are
+deleted only after all sources are refined and verified; a failed migration
+leaves them in place for a later retry.
 
 ## Model downloads (`download.rs`)
 
@@ -135,7 +148,7 @@ still match the catalog hash.
 | `BORIS_FAST_PROVIDER` | Fast host order |
 | `BORIS_PIN_PROVIDER` | `1` = no host fallback |
 | `BORIS_CAPABILITY` | `voice_safe` \| `local_power` \| `full` |
-| `BORIS_MEMORY` | `0` disables long-term memory |
+| `BORIS_MEMORY` | `0` disables canonical Boris memory and legacy migration |
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate tools |
 | `BORIS_MODEL_BASE_URL` | Mirror base for `install_models` |
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |

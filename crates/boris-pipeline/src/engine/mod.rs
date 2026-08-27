@@ -73,7 +73,7 @@ use crate::status::{EngineState, Phase, StatusPicture};
 
 use activity::{activity_label, note_tool_start};
 use artifact::peek_current;
-use barge::{decide_barge_listen, thinking_takeover_text, BargeDecision, BargeWatch};
+use barge::{decide_barge_listen, BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
     join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
@@ -95,6 +95,13 @@ pub(super) const MIC_QUEUE: usize = 256;
 /// Max freeform follow-ups without re-wake (name, choice, full sentence, yes/no, …).
 /// Multi-step voice chores need more than a couple of back-and-forths.
 const MAX_FOLLOW_UPS: u32 = 24;
+
+/// A barge-in starts a fresh user turn. Thinking replacements additionally
+/// carry the cancelled objective as host-only reference, never as user text.
+struct PendingBargeTurn {
+    user_text: String,
+    interrupted_text: Option<String>,
+}
 
 #[derive(Debug)]
 pub enum EngineCommand {
@@ -414,8 +421,8 @@ fn run(
     // How many agent messages are already on disk for `active_session`.
     let mut transcript_len: usize = 0;
     let mut enroll_left: u32 = 0;
-    // Transcript from a confirmed barge-in; next loop starts a turn without wake.
-    let mut pending_barge_text: Option<String> = None;
+    // Confirmed barge-in; next loop starts a clean turn without another wake.
+    let mut pending_barge_turn: Option<PendingBargeTurn> = None;
 
     loop {
         let mut sess = SessionRefs {
@@ -500,8 +507,8 @@ fn run(
         // ── Entry: wake OR freeform follow-up (no second wake) ─────────────
         // Keep last `heard` + `said` while idle so Conversation shows the full
         // last turn (not just Boris). Clear both only when a new utterance starts.
-        let barge_text = pending_barge_text.take();
-        let capture_kind = if barge_text.is_some() {
+        let barge_turn = pending_barge_turn.take();
+        let capture_kind = if barge_turn.is_some() {
             follow_up_depth = 0;
             await_reply = false;
             rt.picture.detail = None;
@@ -699,12 +706,13 @@ fn run(
         // still keep the last card; a new utterance must not resurrect it.
         rt.picture.artifact = None;
 
-        let (text, stt_ms) = if let Some(text) = barge_text {
+        let (text, stt_ms, interrupted_text) = if let Some(barge) = barge_turn {
+            let text = barge.user_text;
             turn_trace.mark("barge_in_turn", None);
             tracing::info!(%turn, %text, "turn begin — barge-in transcript");
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
-            (text, 0u64)
+            (text, 0u64, barge.interrupted_text)
         } else {
             // Hearing only while the mic is actually recording (not during STT).
             // Preload STT in parallel — should be ready by the time capture ends.
@@ -782,7 +790,7 @@ fn run(
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
             tracing::info!(%turn, %text, "heard");
-            (text, stt_ms)
+            (text, stt_ms, None)
         };
 
         // Host guard: skip agent on empty / whitespace / junk transcripts.
@@ -858,6 +866,8 @@ fn run(
         }));
         let activity_tx = rt.picture.status_tx.clone();
         let base_w = activity_base.clone();
+        let activity_events_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let activity_events_enabled_w = activity_events_enabled.clone();
         // Recent tool names (for "thinking · after web_search" style labels).
         let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let recent_w = recent_tools.clone();
@@ -870,6 +880,9 @@ fn run(
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
+            if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             // Track tools for post-tool thinking labels + same-kind collapse.
             if let AgentEvent::ToolExecutionStart {
                 tool_name,
@@ -967,6 +980,17 @@ fn run(
             let _ = activity_tx.send(snap);
         });
 
+        let work = match interrupted_text.as_deref() {
+            Some(previous) => AgentWork::Replacement {
+                user_text: &text,
+                interrupted_text: Some(previous),
+            },
+            None => AgentWork::Prompt(&text),
+        };
+        // Cancellation is cooperative. If the old turn finishes while the user
+        // is still dictating an interruption, restore this pre-turn state so the
+        // discarded answer cannot leak into the next model request.
+        let turn_checkpoint = rt.agent.checkpoint();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -979,9 +1003,10 @@ fn run(
             audio: &mut rt.audio,
             output_events: &mut rt.output_events,
             picture: &mut rt.picture,
+            activity_events_enabled: activity_events_enabled.clone(),
             cmd_rx: &cmd_rx,
             running: &mut running,
-            work: AgentWork::Prompt(&text),
+            work,
             turn,
         });
         let (tts_owned, tts_load) = join_tts_load(tts_job);
@@ -998,7 +1023,7 @@ fn run(
             ThinkResolve::StopTurn => {
                 turn_trace.mark("thinking_barge_stop", None);
                 unsub();
-                rt.agent.abort();
+                rt.agent.restore_checkpoint(turn_checkpoint.clone());
                 rt.picture.clear_activity();
                 maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
                 follow_up_depth = 0;
@@ -1007,15 +1032,18 @@ fn run(
                 continue;
             }
             ThinkResolve::TakeTurn(next) => {
-                let next = thinking_takeover_text(rt.picture.heard.as_deref(), &next);
+                let interrupted_text = rt.picture.heard.clone();
                 turn_trace.mark(
                     "thinking_barge_take_turn",
                     Some(serde_json::json!({ "text": next })),
                 );
                 unsub();
-                rt.agent.abort();
+                rt.agent.restore_checkpoint(turn_checkpoint.clone());
                 rt.picture.clear_activity();
-                pending_barge_text = Some(next);
+                pending_barge_turn = Some(PendingBargeTurn {
+                    user_text: next,
+                    interrupted_text,
+                });
                 follow_up_depth = 0;
                 await_reply = false;
                 continue;
@@ -1115,6 +1143,8 @@ fn run(
             active_session: sess.active_session,
             transcript_len: sess.transcript_len,
             original_heard,
+            activity_events_enabled: activity_events_enabled.clone(),
+            turn_checkpoint,
             turn,
         };
         let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
@@ -1127,15 +1157,21 @@ fn run(
                 follow_up_depth = 0;
                 continue;
             }
-            OutcomeResolve::TakeTurn(next) => {
+            OutcomeResolve::TakeTurn {
+                user_text,
+                interrupted_text,
+            } => {
                 turn_trace.mark(
                     "confirm_barge_take_turn",
-                    Some(serde_json::json!({ "text": next })),
+                    Some(serde_json::json!({ "text": user_text })),
                 );
                 unsub();
                 rt.agent.abort();
                 rt.picture.clear_activity();
-                pending_barge_text = Some(next);
+                pending_barge_turn = Some(PendingBargeTurn {
+                    user_text,
+                    interrupted_text,
+                });
                 follow_up_depth = 0;
                 await_reply = false;
                 continue;
@@ -1313,7 +1349,10 @@ fn run(
                     turn_trace.mark("barge_in_take_turn", None);
                     rt.audio.stop();
                     maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
-                    pending_barge_text = Some(text);
+                    pending_barge_turn = Some(PendingBargeTurn {
+                        user_text: text,
+                        interrupted_text: None,
+                    });
                     follow_up_depth = 0;
                     await_reply = false;
                     rt.picture.clear_activity();
@@ -1368,7 +1407,7 @@ fn run(
             queued_samples = speech.queued_samples,
             "streamed speech complete"
         );
-        if pending_barge_text.is_some() || barge_terminal {
+        if pending_barge_turn.is_some() || barge_terminal {
             continue;
         }
         match speech.wait {

@@ -109,7 +109,7 @@ pub struct PipelineConfig {
     pub tts_voice_id: String,
     /// Tool surface preset (VoiceSafe / LocalPower / Full).
     pub capability_preset: CapabilityPreset,
-    /// Enable markdown long-term memory tools + session logs.
+    /// Enable canonical evidence-backed memory (legacy config key retained).
     pub long_term_memory: bool,
     /// Auto-allow moderate tools + trusted sandbox file writes.
     /// Shell and open URL still need yes (Dangerous/Critical HITL).
@@ -317,7 +317,7 @@ fn resolve_capability_preset(saved: &AppSettings) -> CapabilityPreset {
     CapabilityPreset::Full
 }
 
-/// `BORIS_MEMORY` env overrides `config.toml` `[agent].long_term_memory`.
+/// `BORIS_MEMORY` env overrides the legacy-compatible memory enable flag.
 fn resolve_long_term_memory_flag(saved: &AppSettings) -> bool {
     env_truthy("BORIS_MEMORY").unwrap_or(saved.long_term_memory)
 }

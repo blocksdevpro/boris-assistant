@@ -133,11 +133,12 @@ pub struct ForgetUserMemoryTool {
 }
 
 impl ForgetUserMemoryTool {
+    pub fn new(profile: SharedProfile, store: ProfileStore) -> Self {
+        Self { profile, store }
+    }
+
     pub fn with_path(profile: SharedProfile, path: impl Into<PathBuf>) -> Self {
-        Self {
-            profile,
-            store: ProfileStore::new(path),
-        }
+        Self::new(profile, ProfileStore::new(path))
     }
 }
 
@@ -180,6 +181,15 @@ impl Tool for ForgetUserMemoryTool {
         let query = optional_string(obj, "query").unwrap_or_default();
         if !all && query.trim().is_empty() {
             return Err(ToolError::invalid_args("provide query or all=true"));
+        }
+        // Profile JSON used tombstones. The canonical store is the runtime
+        // source of truth, so an explicit forget must erase it there first.
+        if let Some(memory) = self.store.memory_store() {
+            if all {
+                memory.forget_all().map_err(ToolError::failed)?;
+            } else {
+                let _ = memory.forget_matching(&query).map_err(ToolError::failed)?;
+            }
         }
         let changed = with_profile(&self.profile, &self.store, |profile| {
             if all {

@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.2.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) — NSIS |
-| **This tree** | **1.2.0-beta.1** | `next` branch — NSIS only |
+| **Beta** | [1.2.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) — NSIS |
+| **This tree** | **1.2.0-beta.2** | `next` branch — NSIS only |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -50,7 +50,7 @@ Workspace crates are `publish = false`. They ship inside the desktop app, not on
 Windows 10 or 11, x64, with a working mic and speakers.
 
 1. Download **`Boris_*_x64-setup.exe`** (or the MSI) from [Releases](https://github.com/blocksdevpro/boris-assistant/releases).
-2. Run the installer (you can install 1.2.0-beta.1 over 1.1.0 or an earlier beta).
+2. Run the installer (you can install 1.2.0-beta.2 over 1.1.0 or an earlier beta).
 3. On first launch, finish **model install** and set an [OpenRouter](https://openrouter.ai/) API key in Settings.
 
 Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
@@ -62,6 +62,9 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 ---
 
 ## Features
+
+- **Boris memory** — a local SQLite evidence ledger for facts, preferences,
+  projects, past events, lifecycle-aware recall, and explicit forgetting *(1.2 beta.2)*
 
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback
 - **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
@@ -251,7 +254,7 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
 | `BORIS_FAST_MODEL` | Fast model id |
 | `BORIS_CAPABILITY` | `voice_safe` \| `local_power` \| `full` |
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate-risk tools |
-| `BORIS_MEMORY` | `0` disables long-term memory |
+| `BORIS_MEMORY` | `0` disables canonical Boris memory and migration |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |
 
 ### User data (`~/.boris`)
@@ -262,13 +265,32 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
   auth.json        # secrets (plaintext)
   models/          # STT / TTS weights
   sessions/        # transcripts + per-session artifacts/
-  memory/          # long-term notes
+  memory/          # memory.sqlite canonical store + optional notes.jsonl
   skills/          # skill playbooks
   logs/            # boris-desktop.*.log
   workspace/       # sandboxed agent workspace
 ```
 
 ---
+
+## Boris memory (1.2.0-beta.2)
+
+When memory is enabled, Boris uses
+`~/.boris/memory/memory.sqlite` as its single local source of truth. It keeps
+conversation evidence separate from small retrievable facts, preferences,
+projects, and past events. `memory_search` retrieves active evidence-backed
+records; `forget_memory` permanently removes explicitly requested memory.
+
+On the first beta.2 launch, Boris imports the old `profile.json`, global and
+workspace `MEMORY.md`, and legacy session `memory.md` files. Each excerpt is
+refined with your configured LLM and written into the SQLite store. Only after
+every source has been refined and verified does Boris delete those obsolete
+files and the old derived `search.sqlite` index. A failed or timed-out
+refinement leaves all legacy files untouched for a later retry.
+
+The one-time refinement sends historical memory to the LLM provider you have
+configured for Boris. Set `BORIS_MEMORY=0` before the first beta.2 launch to
+skip both canonical memory and migration.
 
 ## Security
 
@@ -298,6 +320,6 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
 | Current stable | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
-| Current beta | [1.2.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) — taught wake filtering, audio front end, barge-in, typed input, and live reasoning |
+| Current beta | [1.2.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) — canonical Boris memory with verified legacy import and AI refinement |
 | Git `main` | Stable line (`1.1.x`) |
-| Git `next` | Beta line — this tree is `1.2.0-beta.1` |
+| Git `next` | Beta line — this tree is `1.2.0-beta.2` |

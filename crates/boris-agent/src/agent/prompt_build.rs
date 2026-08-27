@@ -20,13 +20,23 @@ impl Agent {
 
     /// Build the inspectable prompt profile (Grok-style `PromptContext`).
     pub fn prompt_context(&self) -> PromptContext {
-        let personal = self.personal.as_ref().and_then(|mem| {
-            mem.profile
-                .lock()
-                .ok()
-                .map(|p| p.render_block(PERSONAL_CONTEXT_MAX_CHARS))
-                .filter(|s| !s.is_empty())
-        });
+        // The SQLite record plane is authoritative. The profile snapshot is
+        // retained only to guide extraction cadence, never as a competing
+        // prompt source.
+        let personal = self
+            .memory_store
+            .as_ref()
+            .and_then(|store| store.personal_context(PERSONAL_CONTEXT_MAX_CHARS).ok())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.personal.as_ref().and_then(|mem| {
+                    mem.profile
+                        .lock()
+                        .ok()
+                        .map(|p| p.render_block(PERSONAL_CONTEXT_MAX_CHARS))
+                        .filter(|s| !s.is_empty())
+                })
+            });
         let skills_catalog = self.skills.as_ref().and_then(|shared| {
             shared
                 .lock()
@@ -34,7 +44,11 @@ impl Agent {
                 .map(|g| skills::format_skills_catalog(&g.skills))
                 .filter(|s| !s.is_empty())
         });
-        let memory_hint = self.long_term.as_ref().map(|m| m.prompt_hint());
+        let memory_hint = self
+            .memory_store
+            .as_ref()
+            .map(|m| m.prompt_hint())
+            .or_else(|| self.long_term.as_ref().map(|m| m.prompt_hint()));
         let mut ctx = PromptContext::new(self.base_system_prompt.clone())
             .with_personal(personal)
             .with_skills(skills_catalog)

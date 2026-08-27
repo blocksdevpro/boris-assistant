@@ -14,6 +14,52 @@ export type Caption = {
   text: string;
 };
 
+export type BargeInStage =
+  | "listening"
+  | "transcribing"
+  | "switching"
+  | "stopping";
+
+/**
+ * Foreground barge-in state encoded by the pipeline in `activity`.
+ * Keep this centralized: the snapshot can intentionally retain fields from
+ * the interrupted turn while the replacement is being captured.
+ */
+export function bargeInStage(
+  activity: string | null | undefined,
+): BargeInStage | null {
+  const match = activity
+    ?.trim()
+    .match(/^barge-in\s*[·.]\s*(listening|transcribing|switching|stopping)\b/i);
+  return (match?.[1]?.toLowerCase() as BargeInStage | undefined) ?? null;
+}
+
+export function bargeInPresence(
+  activity: string | null | undefined,
+): OverlayPresence | null {
+  switch (bargeInStage(activity)) {
+    case "listening":
+      return {
+        primary: "Listening",
+        secondary: "Interrupting current task",
+      };
+    case "transcribing":
+      return {
+        primary: "Transcribing",
+        secondary: "Your change",
+      };
+    case "switching":
+      return { primary: "Switching tasks", secondary: "" };
+    case "stopping":
+      return {
+        primary: "Stopping",
+        secondary: "Cancelling current task",
+      };
+    default:
+      return null;
+  }
+}
+
 /** Confirm path: phase or activity string from pipeline (`confirm · …`). */
 export function isConfirmContext(status: StatusPicture): boolean {
   if (status.phase === "AwaitingConfirm") return true;
@@ -56,6 +102,9 @@ export function humanizeActivity(
 ): string | null {
   const raw = activity?.trim();
   if (!raw) return null;
+
+  const barge = bargeInPresence(raw);
+  if (barge) return barge.secondary || barge.primary;
 
   // Already a Grok-style summary ("Read 4 files, Searched 1 pattern")
   if (looksLikeVerbPhrase(raw) && !/^(tool|done|fail|thinking|confirm)\s*[·.]/i.test(raw)) {
@@ -223,6 +272,10 @@ export function pickCaption(status: StatusPicture): Caption | null {
     return { kind: "error", text: detail };
   }
 
+  // During a barge-in these fields may still describe the interrupted turn.
+  // The activity marker is authoritative until the replacement turn starts.
+  if (bargeInStage(status.activity)) return null;
+
   const heard = status.heard?.trim() || "";
   const said = status.said?.trim() || "";
   const phase = status.phase;
@@ -288,6 +341,9 @@ export function pickSecondary(
   // The error caption carries the actionable detail. Repeating a generic
   // subtitle beside "Error" weakens the hierarchy on the small island.
   if (status.detail?.trim()) return "";
+
+  const barge = bargeInPresence(status.activity);
+  if (barge) return barge.secondary;
 
   const activityLine = humanizeActivity(status.activity);
   const phase = status.phase;
@@ -396,6 +452,12 @@ export function pickOverlayPresence(
   const phase = status.phase;
   let primary = toneLabel;
 
+  // Barge-in is a foreground interaction, even when the phase is still
+  // Thinking for the interrupted work. Never let its old tool label win.
+  const barge =
+    status.engine === "On" ? bargeInPresence(status.activity) : null;
+  if (barge) return barge;
+
   // Typed input wins even if the snapshot still says Thinking for a frame.
   if (status.input) {
     return {
@@ -444,6 +506,7 @@ export function pickOverlayPresence(
 
 /** Live reasoning tail for the island. Hidden once a spoken reply exists. */
 export function overlayThinkingText(status: StatusPicture): string | null {
+  if (bargeInStage(status.activity)) return null;
   if (status.phase !== "Thinking") return null;
   if (isConfirmContext(status)) return null;
   if (status.said?.trim()) return null;
@@ -505,6 +568,21 @@ export function conversationLines(status: StatusPicture): ConversationLine[] {
 
   if (status.detail?.trim()) {
     lines.push({ kind: "error", text: status.detail.trim() });
+  }
+
+  const barge = bargeInStage(status.activity);
+  if (barge) {
+    const text: Record<BargeInStage, string> = {
+      listening: "Listening to your change…",
+      transcribing: "Transcribing your change…",
+      switching: "Switching tasks…",
+      stopping: "Stopping current task…",
+    };
+    lines.push({
+      kind: barge === "switching" || barge === "stopping" ? "status" : "placeholder",
+      text: text[barge],
+    });
+    return lines;
   }
 
   if (status.input) {

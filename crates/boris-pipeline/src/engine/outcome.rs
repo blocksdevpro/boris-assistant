@@ -4,10 +4,11 @@
 //! [`AgentOutcome::NeedsConfirmation`]. Nested confirms are capped (also in agent policy).
 
 use std::sync::mpsc::Receiver;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use boris_agent::session::store::SessionStore;
 use boris_agent::session::types::SessionId;
-use boris_agent::{Agent, AgentErrorKind, AgentOutcome, PendingToolCall};
+use boris_agent::{Agent, AgentCheckpoint, AgentErrorKind, AgentOutcome, PendingToolCall};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::{ArcAudioBuffer, TurnId};
@@ -17,7 +18,6 @@ use crate::hear::{self, CaptureKind, HearBreak};
 use crate::liveness::WakeLiveness;
 use crate::status::{InputPeek, Phase};
 
-use super::barge::thinking_takeover_text;
 use super::confirm::interpret_yes_no;
 use super::models::{release_voice_models, SttBox, TtsBox};
 use super::picture::Picture;
@@ -30,7 +30,10 @@ pub(super) enum OutcomeResolve {
     Done(AgentOutcome),
     ReArm,
     Stopped,
-    TakeTurn(String),
+    TakeTurn {
+        user_text: String,
+        interrupted_text: Option<String>,
+    },
 }
 
 /// Mutable + shared context for the confirm resolution loop (avoids 18-param functions).
@@ -49,10 +52,12 @@ pub(super) struct ConfirmCtx<'a> {
     pub cmd_rx: &'a Receiver<EngineCommand>,
     pub running: &'a mut bool,
     pub picture: &'a mut Picture,
+    pub activity_events_enabled: Arc<AtomicBool>,
     pub store: &'a SessionStore,
     pub active_session: &'a mut Option<SessionId>,
     pub transcript_len: &'a mut usize,
     pub original_heard: Option<String>,
+    pub turn_checkpoint: AgentCheckpoint,
     pub turn: TurnId,
 }
 
@@ -450,6 +455,7 @@ fn collect_typed_input(
         audio: ctx.audio,
         output_events: ctx.output_events,
         picture: ctx.picture,
+        activity_events_enabled: ctx.activity_events_enabled.clone(),
         cmd_rx: ctx.cmd_rx,
         running: ctx.running,
         work: AgentWork::ResumeInput {
@@ -473,18 +479,18 @@ fn collect_typed_input(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.abort();
+            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.abort();
+            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
-            Err(OutcomeResolve::TakeTurn(thinking_takeover_text(
-                ctx.original_heard.as_deref(),
-                &text,
-            )))
+            Err(OutcomeResolve::TakeTurn {
+                user_text: text,
+                interrupted_text: ctx.original_heard.clone(),
+            })
         }
         ThinkResolve::Stopped => {
             ctx.agent.abort();
@@ -566,6 +572,7 @@ fn resume_after_confirm(
         audio: ctx.audio,
         output_events: ctx.output_events,
         picture: ctx.picture,
+        activity_events_enabled: ctx.activity_events_enabled.clone(),
         cmd_rx: ctx.cmd_rx,
         running: ctx.running,
         work: AgentWork::Resume {
@@ -589,18 +596,18 @@ fn resume_after_confirm(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.abort();
+            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.abort();
+            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
-            Err(OutcomeResolve::TakeTurn(thinking_takeover_text(
-                ctx.original_heard.as_deref(),
-                &text,
-            )))
+            Err(OutcomeResolve::TakeTurn {
+                user_text: text,
+                interrupted_text: ctx.original_heard.clone(),
+            })
         }
         ThinkResolve::Stopped => {
             ctx.agent.abort();

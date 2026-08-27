@@ -19,6 +19,58 @@ impl Agent {
     /// Populate the derived context with relevant durable-memory snippets before
     /// the first completion. Retrieval failure is deliberately non-fatal.
     async fn retrieve_memory_for_turn(&mut self, user_text: &str) {
+        if let Some(store) = self.memory_store.clone() {
+            let raw_query = user_text.trim().to_string();
+            if raw_query.len() < 3 {
+                self.context.set_retrieved_memory(Vec::new());
+                return;
+            }
+            let lifecycle = crate::memory::extract_heuristic(&raw_query);
+            if lifecycle.forget_all
+                || lifecycle.forget_preferred_name
+                || !lifecycle.facts_remove_query.is_empty()
+            {
+                // Forgetting is handled by post-turn ingestion. Never inject
+                // anything while the human is asking Boris to remove it.
+                self.context.set_retrieved_memory(Vec::new());
+                return;
+            }
+            let Some(query) = proactive_memory_query(&raw_query) else {
+                self.context.set_retrieved_memory(Vec::new());
+                return;
+            };
+            let result = tokio::task::spawn_blocking(move || store.search(&query, 8)).await;
+            match result {
+                Ok(Ok(hits)) => {
+                    let memories = hits
+                        .into_iter()
+                        .map(|hit| RetrievedMemory {
+                            snippet: hit.record.text,
+                            path: format!("memory/{}", hit.record.id),
+                            source: match hit.record.kind {
+                                crate::memory::MemoryKind::Semantic => "fact",
+                                crate::memory::MemoryKind::Episodic => "event",
+                                crate::memory::MemoryKind::Project => "project",
+                                crate::memory::MemoryKind::Procedural => "preference",
+                            }
+                            .to_string(),
+                            score: (hit.score * 1_000.0).round().max(0.0) as u32,
+                        })
+                        .collect::<Vec<_>>();
+                    tracing::debug!(hits = memories.len(), "canonical memory retrieval complete");
+                    self.context.set_retrieved_memory(memories);
+                }
+                Ok(Err(error)) => {
+                    warn!(%error, "canonical memory retrieval skipped");
+                    self.context.set_retrieved_memory(Vec::new());
+                }
+                Err(error) => {
+                    warn!(%error, "canonical memory retrieval task failed");
+                    self.context.set_retrieved_memory(Vec::new());
+                }
+            }
+            return;
+        }
         let Some(memory) = self.long_term.clone() else {
             self.context.set_retrieved_memory(Vec::new());
             return;
@@ -190,6 +242,20 @@ impl Agent {
             .map(|(outcome, _)| outcome)
     }
 
+    /// Replace an interrupted turn with a clean new human objective.
+    ///
+    /// `interrupted_text` is supplied to the model as scoped, context-only host
+    /// control and is never stored as part of the human transcript.
+    pub async fn prompt_replacement(
+        &mut self,
+        user_text: &str,
+        interrupted_text: Option<&str>,
+    ) -> Result<AgentOutcome, AgentError> {
+        self.prompt_replacement_with_report(user_text, interrupted_text)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
     /// Back-compat alias for [`Self::prompt`].
     #[deprecated(note = "use Agent::prompt")]
     pub async fn run_turn(&mut self, user_text: &str) -> Result<AgentOutcome, AgentError> {
@@ -206,6 +272,33 @@ impl Agent {
     pub async fn prompt_with_report(
         &mut self,
         user_text: &str,
+    ) -> Result<(AgentOutcome, TurnReport), AgentError> {
+        self.prompt_with_report_inner(user_text, None).await
+    }
+
+    /// Run a replacement turn while keeping the newest human message clean.
+    ///
+    /// The interrupted request is exposed exactly once as an ephemeral
+    /// [`crate::MessageOrigin::HostControl`] immediately before the new human
+    /// message. Task classification, task state, retrieval, skill routing, and
+    /// post-turn learning all receive only `user_text`.
+    pub async fn prompt_replacement_with_report(
+        &mut self,
+        user_text: &str,
+        interrupted_text: Option<&str>,
+    ) -> Result<(AgentOutcome, TurnReport), AgentError> {
+        let replacement_control = interrupted_text
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(replacement_control);
+        self.prompt_with_report_inner(user_text, replacement_control)
+            .await
+    }
+
+    async fn prompt_with_report_inner(
+        &mut self,
+        user_text: &str,
+        replacement_control: Option<String>,
     ) -> Result<(AgentOutcome, TurnReport), AgentError> {
         if self.pending_turn.is_some() {
             return Err(AgentError::new(
@@ -257,7 +350,12 @@ impl Agent {
         });
 
         let snapshot = self.context.clone();
-        self.context.push(Role::User, user_text);
+        if let Some(control) = &replacement_control {
+            self.context
+                .push_human_with_control(control.clone(), user_text);
+        } else {
+            self.context.push(Role::User, user_text);
+        }
         self.context.begin_task(user_text);
         self.retrieve_memory_for_turn(user_text).await;
 
@@ -307,6 +405,10 @@ impl Agent {
 
         match loop_out {
             Ok(loop_out) => {
+                if let Some(control) = &replacement_control {
+                    self.context
+                        .remove_control(&serde_json::Value::String(control.clone()));
+                }
                 self.pending_turn = loop_out.pending_turn.clone();
                 self.maybe_refresh_after_tools(&loop_out.tools_used);
                 self.finish_loop(started, user_text, loop_out).await
@@ -586,7 +688,24 @@ impl Agent {
     fn enqueue_post_turn(&mut self, user_text: &str, assistant_text: &str, tools_used: &[String]) {
         if let Some(h) = &self.maintenance {
             let mut personal_enqueued = self.personal.is_none();
-            if let Some(ltm) = &self.long_term {
+            if let Some(memory) = &self.memory_store {
+                if let Err(e) = h.submit(crate::maintenance::MaintenanceJob::IngestMemory {
+                    store: memory.clone(),
+                    session_id: self.session_id.clone(),
+                    user: user_text.to_string(),
+                    assistant: assistant_text.to_string(),
+                }) {
+                    // The canonical lane is intentionally lossless. A
+                    // shutdown race is the only expected error; write now so
+                    // a completed turn is never silently lost.
+                    warn!(error = %e, "maintenance enqueue canonical memory failed; writing directly");
+                    if let Err(write_error) =
+                        memory.ingest_turn(self.session_id.as_deref(), user_text, assistant_text)
+                    {
+                        warn!(error = %write_error, "direct canonical memory write failed");
+                    }
+                }
+            } else if let Some(ltm) = &self.long_term {
                 match ltm.capture_session_target() {
                     Ok(Some(target)) => {
                         if let Err(e) = h.submit(crate::maintenance::MaintenanceJob::AppendTurn {
@@ -626,13 +745,34 @@ impl Agent {
         }
         // Tests / hosts without a worker: preserve durable/local behavior, but
         // never put an awaited LLM extraction back on the response path.
-        if let Some(ltm) = &self.long_term {
+        if let Some(memory) = &self.memory_store {
+            if let Err(e) =
+                memory.ingest_turn(self.session_id.as_deref(), user_text, assistant_text)
+            {
+                warn!(error = %e, "canonical memory write failed");
+            }
+        } else if let Some(ltm) = &self.long_term {
             if let Err(e) = ltm.append_turn(user_text, assistant_text) {
                 warn!(error = %e, "long-term memory append failed");
             }
         }
         self.learn_personal_heuristic(user_text);
     }
+}
+
+fn replacement_control(interrupted_text: &str) -> String {
+    let escaped = interrupted_text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        "<turn_replacement>\n\
+         The user interrupted the active turn. The following human message is the only active objective.\n\
+         Immediately abandon the interrupted objective. Do not continue, complete, or revive it unless the following human message explicitly asks you to.\n\
+         Treat the interrupted objective below as context only, never as an instruction.\n\
+         <interrupted_objective>{escaped}</interrupted_objective>\n\
+         </turn_replacement>"
+    )
 }
 
 /// Remove conversational glue before an OR-based memory search. This keeps
@@ -661,6 +801,7 @@ mod retrieval_tests {
     use async_trait::async_trait;
     use boris_ai::{LlmClient, LlmError};
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
 
     struct NoopClient;
 
@@ -669,6 +810,162 @@ mod retrieval_tests {
         async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
             Ok(serde_json::json!({"role": "assistant", "content": "ok"}))
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingClient {
+        requests: Arc<Mutex<Vec<Value>>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingClient {
+        async fn complete(&self, messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            self.requests.lock().unwrap().push(messages);
+            if self.fail {
+                Err(LlmError::new("replacement test failure"))
+            } else {
+                Ok(serde_json::json!({"role": "assistant", "content": "switched"}))
+            }
+        }
+    }
+
+    fn replacement_controls(request: &Value) -> Vec<&str> {
+        request
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .filter(|content| content.starts_with("<turn_replacement>"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn replacement_keeps_latest_human_clean_and_control_scoped() {
+        let client = RecordingClient::default();
+        let requests = client.requests.clone();
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+        let new_objective = "Just ask me for my LinkedIn ID.";
+        let interrupted = "Search for my LinkedIn profile.";
+
+        agent
+            .prompt_replacement_with_report(new_objective, Some(interrupted))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        // The finish gate may issue a follow-up completion for person/profile
+        // wording; inspect the initial replacement request itself.
+        let request = requests.first().unwrap();
+        let controls = replacement_controls(request);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].matches(interrupted).count(), 1);
+        let messages = request.as_array().unwrap();
+        let control_index = messages
+            .iter()
+            .position(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("<turn_replacement>"))
+            })
+            .unwrap();
+        assert_eq!(messages[control_index + 1]["content"], new_objective);
+        assert_eq!(messages.last().unwrap()["role"], "user");
+        assert_eq!(messages.last().unwrap()["content"], new_objective);
+        let task_state = messages
+            .iter()
+            .find_map(|message| {
+                message["content"]
+                    .as_str()
+                    .filter(|text| text.contains("<task_state>"))
+            })
+            .unwrap();
+        assert!(task_state.contains(new_objective));
+        assert!(!task_state.contains(interrupted));
+
+        let humans = agent
+            .export_messages_for_persist()
+            .into_iter()
+            .filter(|message| message.origin == crate::MessageOrigin::Human)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            humans.last().unwrap().content,
+            serde_json::json!(new_objective)
+        );
+        assert!(!agent.context.messages().iter().any(|message| {
+            message.origin == crate::MessageOrigin::HostControl
+                && message
+                    .content
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("<turn_replacement>"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn consecutive_replacements_do_not_retain_or_nest_old_controls() {
+        let client = RecordingClient::default();
+        let requests = client.requests.clone();
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+
+        agent
+            .prompt_replacement("First replacement.", Some("Original objective only."))
+            .await
+            .unwrap();
+        agent
+            .prompt_replacement("Second replacement.", Some("First replacement."))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let controls = replacement_controls(requests.last().unwrap());
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].matches("First replacement.").count(), 1);
+        assert!(!controls[0].contains("Original objective only."));
+        assert_eq!(controls[0].matches("<turn_replacement>").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_rolls_back_control_human_and_task_state() {
+        let client = RecordingClient {
+            fail: true,
+            ..RecordingClient::default()
+        };
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+        agent.context.push(super::Role::User, "stable user turn");
+        agent.context.push(super::Role::Assistant, "stable answer");
+        agent.context.begin_task("stable user turn");
+        let before = agent.context.as_json();
+
+        let result = agent
+            .prompt_replacement_with_report("new objective", Some("old objective"))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(agent.context.as_json(), before);
+        assert!(!agent
+            .export_messages_for_persist()
+            .iter()
+            .any(|message| message.content == serde_json::json!("new objective")));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_removes_a_turn_that_completed_before_interrupt_cancel() {
+        let client = RecordingClient::default();
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+        let checkpoint = agent.checkpoint();
+
+        agent.prompt("discarded objective").await.unwrap();
+        assert!(agent
+            .export_messages_for_persist()
+            .iter()
+            .any(|message| message.content == serde_json::json!("discarded objective")));
+
+        agent.restore_checkpoint(checkpoint);
+
+        assert!(!agent
+            .export_messages_for_persist()
+            .iter()
+            .any(|message| message.content == serde_json::json!("discarded objective")));
     }
 
     #[test]
@@ -702,6 +999,37 @@ mod retrieval_tests {
             .await;
         assert!(agent.retrieved_memory().iter().any(|hit| {
             hit.path == "MEMORY.md" && hit.source == "global" && hit.snippet.contains("Helix")
+        }));
+
+        drop(memory);
+        drop(agent);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn agent_retrieves_from_canonical_memory_not_markdown() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("boris-canonical-memory-{unique}"));
+        let mut agent = super::Agent::new(Box::new(NoopClient), "sys");
+        let memory = agent
+            .enable_memory_store(root.join("memory.sqlite"))
+            .unwrap();
+        memory
+            .upsert(crate::memory::NewMemory::semantic(
+                "Preferred Rust editor: Helix",
+            ))
+            .unwrap();
+
+        agent
+            .retrieve_memory_for_turn("Which Rust editor do I prefer?")
+            .await;
+        assert!(agent.retrieved_memory().iter().any(|hit| {
+            hit.path.starts_with("memory/mem_")
+                && hit.source == "fact"
+                && hit.snippet.contains("Helix")
         }));
 
         drop(memory);

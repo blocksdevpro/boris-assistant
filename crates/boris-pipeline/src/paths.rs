@@ -21,8 +21,9 @@
 //!         artifacts/         # visual cards: index.json + `{slug}-{id}.{ext}`
 //!         subagents/         # child subagent artifacts
 //!   memory/
-//!     MEMORY.md              # single global curated knowledge
-//!     profile.json
+//!     memory.sqlite          # canonical evidence + record store
+//!     MEMORY.md              # legacy migration input, removed after verification
+//!     profile.json           # legacy migration input, removed after verification
 //!     notes.jsonl
 //!     desktop/               # workspace bucket when no project cwd
 //!       MEMORY.md            # workspace-scoped curated notes (not per-chat logs)
@@ -197,6 +198,12 @@ pub fn audit_path() -> PathBuf {
 
 pub fn memory_dir() -> PathBuf {
     boris_home().join("memory")
+}
+
+/// Canonical local-first memory database. It replaces the Markdown/profile
+/// files as Boris's runtime memory source of truth.
+pub fn memory_store_path() -> PathBuf {
+    memory_dir().join("memory.sqlite")
 }
 
 pub fn notes_path() -> PathBuf {

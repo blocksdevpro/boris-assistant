@@ -11,7 +11,7 @@
 //! | [`files`] / [`glob`] / [`grep`] | filesystem |
 //! | [`web`] | web_search, web_fetch |
 //! | [`bash`] | shell |
-//! | [`skills_tools`] / [`memory_tools`] / [`subagent`] / [`tool_search`] | advanced |
+//! | [`skills_tools`] / [`memory`] / [`subagent`] / [`tool_search`] | advanced |
 //!
 //! Hosts (pipeline / desktop) should call [`register_builtin_tools`] once after
 //! constructing [`crate::Agent`] with a [`BuiltinToolPaths`] pointing at `~/.boris`.
@@ -24,6 +24,7 @@ pub mod files;
 pub mod fs_common;
 pub mod glob;
 pub mod grep;
+pub mod memory;
 pub mod memory_tools;
 pub mod notes;
 pub mod open_tool;
@@ -52,7 +53,7 @@ use crate::tools::files::FsRoots;
 pub struct BuiltinToolPaths {
     /// Notes file path.
     pub notes_path: PathBuf,
-    /// Durable personal profile JSON (`~/.boris/memory/profile.json`).
+    /// Legacy profile input used only if a canonical memory store is unavailable.
     pub profile_path: PathBuf,
     /// Default write sandbox (`~/.boris/sandbox`).
     pub sandbox_root: PathBuf,
@@ -273,19 +274,25 @@ fn try_profile_tools(
     paths: &BuiltinToolPaths,
     llm_extract: bool,
 ) -> Vec<Box<dyn Tool>> {
-    match agent.enable_personal_context(&paths.profile_path, llm_extract) {
+    // Once a canonical memory store is active, profile extraction state is
+    // persisted inside it. `profile.json` is therefore legacy input only.
+    let profile_store = agent
+        .memory_store()
+        .map(crate::memory::ProfileStore::canonical)
+        .unwrap_or_else(|| crate::memory::ProfileStore::new(paths.profile_path.clone()));
+    match agent.enable_personal_context_with_store(profile_store.clone(), llm_extract) {
         Ok(profile) => vec![
-            Box::new(profile::SaveUserFactTool::with_path(
+            Box::new(profile::SaveUserFactTool::new(
                 profile.clone(),
-                paths.profile_path.clone(),
+                profile_store.clone(),
             )),
-            Box::new(profile::UpdateUserProfileTool::with_path(
+            Box::new(profile::UpdateUserProfileTool::new(
                 profile.clone(),
-                paths.profile_path.clone(),
+                profile_store.clone(),
             )),
-            Box::new(profile::ForgetUserMemoryTool::with_path(
+            Box::new(profile::ForgetUserMemoryTool::new(
                 profile.clone(),
-                paths.profile_path.clone(),
+                profile_store,
             )),
             Box::new(profile::GetUserContextTool::new(profile)),
         ],

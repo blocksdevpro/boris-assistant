@@ -275,24 +275,24 @@ pub(super) fn decide_barge_listen(
     if speech_hops < MIN_BARGE_SPEECH_HOPS {
         return BargeDecision::Resume;
     }
-    let normalized = normalize_utterance(transcript);
+    let user_text = strip_raw_wake_prefix(transcript).trim();
+    let normalized = normalize_utterance(user_text);
     if normalized.is_empty() {
         return BargeDecision::Resume;
     }
-    let rest = strip_wake_prefix(&normalized);
-    if rest.is_empty() || is_continue_phrase(rest) {
+    if is_continue_phrase(&normalized) {
         return BargeDecision::Resume;
     }
-    if is_stop_phrase(rest) {
+    if is_stop_phrase(&normalized) {
         return BargeDecision::StopTalking;
     }
     if expect_reply {
-        return BargeDecision::TakeTurn(transcript.trim().to_string());
+        return BargeDecision::TakeTurn(user_text.to_string());
     }
-    if is_short_ack(rest) {
+    if is_short_ack(&normalized) {
         return BargeDecision::Resume;
     }
-    BargeDecision::TakeTurn(transcript.trim().to_string())
+    BargeDecision::TakeTurn(user_text.to_string())
 }
 
 /// Classify a barge-in while the agent is still working.
@@ -304,42 +304,25 @@ pub(super) fn decide_thinking_barge_listen(speech_hops: u32, transcript: &str) -
     if speech_hops < MIN_BARGE_SPEECH_HOPS {
         return BargeDecision::Resume;
     }
-    let normalized = normalize_utterance(transcript);
+    let user_text = strip_raw_wake_prefix(transcript).trim();
+    let normalized = normalize_utterance(user_text);
     if normalized.is_empty() {
         return BargeDecision::Resume;
     }
-    let rest = strip_wake_prefix(&normalized);
-    if rest.is_empty() || is_thinking_continue_phrase(rest) || is_short_ack(rest) {
+    if is_thinking_continue_phrase(&normalized) || is_short_ack(&normalized) {
         return BargeDecision::Resume;
     }
-    if is_thinking_stop_only(rest) {
+    if is_thinking_stop_only(&normalized) {
         return BargeDecision::StopTalking;
     }
-    BargeDecision::TakeTurn(transcript.trim().to_string())
-}
-
-/// New user text after interrupting in-flight work. Keeps the original request
-/// as context so "do the python one instead" still makes sense.
-pub(super) fn thinking_takeover_text(previous: Option<&str>, barge: &str) -> String {
-    let barge = barge.trim();
-    let prev = previous
-        .map(str::trim)
-        .filter(|p| !p.is_empty() && *p != barge);
-    match prev {
-        None => barge.to_string(),
-        Some(prev) => format!("{barge}\n\n(Interrupted previous request: {prev})"),
-    }
+    BargeDecision::TakeTurn(user_text.to_string())
 }
 
 /// True when the utterance is only the wake word, so we should wait for a
 /// follow-up ("Boris" … "stop") instead of treating it as resume immediately.
 #[cfg(test)]
 pub(super) fn thinking_needs_followup(transcript: &str) -> bool {
-    let normalized = normalize_utterance(transcript);
-    if normalized.is_empty() {
-        return true;
-    }
-    strip_wake_prefix(&normalized).is_empty()
+    normalize_utterance(strip_raw_wake_prefix(transcript)).is_empty()
 }
 
 fn normalize_utterance(text: &str) -> String {
@@ -363,26 +346,70 @@ fn normalize_utterance(text: &str) -> String {
     out
 }
 
-fn strip_wake_prefix(text: &str) -> &str {
-    const PREFIXES: &[&str] = &[
-        "hey boris ",
-        "hi boris ",
-        "ok boris ",
-        "okay boris ",
-        "boris ",
-    ];
-    for prefix in PREFIXES {
-        if let Some(rest) = text.strip_prefix(prefix) {
-            return rest;
-        }
+/// Remove wake syntax while preserving the exact words and punctuation of the
+/// user's request. Only a leading wake phrase is control syntax; a later
+/// mention such as "tell Boris to stop" belongs to the objective.
+fn strip_raw_wake_prefix(text: &str) -> &str {
+    let text = text.trim_start();
+    let Some((first, first_end)) = leading_word(text) else {
+        return text;
+    };
+
+    if first.eq_ignore_ascii_case("boris") {
+        return strip_after_wake_word(text, first_end).unwrap_or(text);
     }
-    if matches!(
-        text,
-        "boris" | "hey boris" | "hi boris" | "ok boris" | "okay boris"
-    ) {
-        return "";
+    if !matches_ignore_ascii_case(first, &["hey", "hi", "ok", "okay"]) {
+        return text;
     }
-    text
+
+    let after_first = &text[first_end..];
+    let between = after_first.trim_start_matches(is_wake_separator);
+    if between.len() == after_first.len() {
+        return text;
+    }
+    let second_start = text.len() - between.len();
+    let Some((second, second_end)) = leading_word(between) else {
+        return text;
+    };
+    if !second.eq_ignore_ascii_case("boris") {
+        return text;
+    }
+    strip_after_wake_word(text, second_start + second_end).unwrap_or(text)
+}
+
+fn leading_word(text: &str) -> Option<(&str, usize)> {
+    let end = text
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_alphanumeric())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()?;
+    Some((&text[..end], end))
+}
+
+fn strip_after_wake_word(text: &str, word_end: usize) -> Option<&str> {
+    let rest = &text[word_end..];
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    if rest.starts_with('\'') || rest.starts_with('\u{2019}') {
+        return None;
+    }
+    let stripped = rest.trim_start_matches(is_wake_separator);
+    (stripped.len() < rest.len()).then_some(stripped)
+}
+
+fn is_wake_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | '.' | '!' | '?' | ';' | ':' | '-' | '\u{2013}' | '\u{2014}'
+        )
+}
+
+fn matches_ignore_ascii_case(value: &str, choices: &[&str]) -> bool {
+    choices
+        .iter()
+        .any(|choice| value.eq_ignore_ascii_case(choice))
 }
 
 fn is_continue_phrase(text: &str) -> bool {
@@ -605,7 +632,41 @@ mod tests {
         );
         assert_eq!(
             decide_barge_listen(12, "Boris, open notes", false),
-            BargeDecision::TakeTurn("Boris, open notes".into())
+            BargeDecision::TakeTurn("open notes".into())
+        );
+    }
+
+    #[test]
+    fn wake_prefix_is_removed_from_new_user_objective() {
+        let cases = [
+            ("Boris, open notes", "open notes"),
+            ("hey Boris, open notes", "open notes"),
+            ("Hey, Boris! open notes", "open notes"),
+            ("Hi Boris: Open Notes", "Open Notes"),
+            (
+                "okay Boris -- don't search; just ask me",
+                "don't search; just ask me",
+            ),
+        ];
+
+        for (transcript, expected) in cases {
+            assert_eq!(
+                decide_thinking_barge_listen(12, transcript),
+                BargeDecision::TakeTurn(expected.into()),
+                "wake prefix should be control syntax, not part of the objective: {transcript}"
+            );
+        }
+    }
+
+    #[test]
+    fn boris_away_from_the_prefix_is_preserved() {
+        assert_eq!(
+            decide_thinking_barge_listen(12, "tell Boris to open notes"),
+            BargeDecision::TakeTurn("tell Boris to open notes".into())
+        );
+        assert_eq!(
+            decide_thinking_barge_listen(12, "Boris's notes are stale"),
+            BargeDecision::TakeTurn("Boris's notes are stale".into())
         );
     }
 
@@ -752,12 +813,14 @@ mod tests {
         );
         assert_eq!(
             decide_thinking_barge_listen(12, "Boris open notes",),
-            BargeDecision::TakeTurn("Boris open notes".into())
+            BargeDecision::TakeTurn("open notes".into())
         );
         let redirect = "hey boris, no i dont think thats the right approach please just do xyz";
         assert_eq!(
             decide_thinking_barge_listen(12, redirect),
-            BargeDecision::TakeTurn(redirect.into())
+            BargeDecision::TakeTurn(
+                "no i dont think thats the right approach please just do xyz".into()
+            )
         );
         assert_eq!(
             decide_thinking_barge_listen(12, "wait search rust docs instead"),
@@ -770,15 +833,6 @@ mod tests {
         assert_eq!(
             decide_thinking_barge_listen(12, "that's not what I said, grep the other folder"),
             BargeDecision::TakeTurn("that's not what I said, grep the other folder".into())
-        );
-    }
-
-    #[test]
-    fn thinking_takeover_keeps_previous_request() {
-        assert_eq!(thinking_takeover_text(None, " do xyz "), "do xyz");
-        assert_eq!(
-            thinking_takeover_text(Some("write a rust parser"), "do python instead"),
-            "do python instead\n\n(Interrupted previous request: write a rust parser)"
         );
     }
 

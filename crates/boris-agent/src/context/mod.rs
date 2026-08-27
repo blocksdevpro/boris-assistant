@@ -78,6 +78,42 @@ impl Context {
         self.prune();
     }
 
+    /// Start a real human turn with a host instruction immediately before it.
+    ///
+    /// The human message is appended and pruned first so the leading control is
+    /// retained with the new turn even when adding that turn crosses the history
+    /// budget. Only the human message enters canonical history.
+    pub(crate) fn push_human_with_control(
+        &mut self,
+        control: impl Into<Value>,
+        human: impl Into<Value>,
+    ) {
+        let human = Message::new(Role::User, human);
+        self.history.push(human.clone());
+        self.messages.push(human);
+        self.prune();
+
+        if let Some(human_index) = self
+            .messages
+            .iter()
+            .rposition(|message| message.origin == MessageOrigin::Human)
+        {
+            self.messages.insert(
+                human_index,
+                Message::with_origin(Role::User, MessageOrigin::HostControl, control),
+            );
+        }
+    }
+
+    /// Remove one exact ephemeral host instruction from the model view.
+    pub(crate) fn remove_control(&mut self, content: &Value) {
+        if let Some(index) = self.messages.iter().rposition(|message| {
+            message.origin == MessageOrigin::HostControl && &message.content == content
+        }) {
+            self.messages.remove(index);
+        }
+    }
+
     /// Replace or insert the leading system message (used when personal context refreshes).
     pub fn set_system(&mut self, content: impl Into<Value>) {
         let content = content.into();

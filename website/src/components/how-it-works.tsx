@@ -44,7 +44,7 @@ const steps = [
     label: "Remember",
     short: "Local memory",
     title: "Useful context survives the conversation.",
-    copy: "Notes, sessions, preferences, and long-term memory live in your Boris home so future requests can pick up where you left off.",
+    copy: "Notes, sessions, preferences, and Boris's evidence-backed memory live in your Boris home so future requests can pick up where you left off.",
     location: "On your PC",
     note: "Memory is optional",
     icon: MemoryStick,

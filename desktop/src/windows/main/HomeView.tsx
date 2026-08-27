@@ -19,6 +19,7 @@ import type {
 import { GridPresence, presenceStateFromStatus } from "@/components/presence";
 import { toneFor } from "@/lib/phaseVisual";
 import {
+  bargeInPresence,
   conversationLines,
   humanizeActivity,
 } from "@/lib/statusPresentation";
@@ -82,8 +83,12 @@ export function HomeView({
 }) {
   const reduceMotion = useReducedMotion();
   const act = humanizeActivity(status.activity);
+  const barge =
+    status.engine === "On" ? bargeInPresence(status.activity) : null;
+  const statusLabel = barge?.primary ?? tone.label;
+  const statusHint = barge?.secondary ?? tone.hint;
   const showActivity =
-    act &&
+    !barge && act &&
       (status.phase === "Thinking" || status.phase === "AwaitingConfirm");
   const stopAvailable = engineOn || engineFault;
   const showUpdateBanner =
@@ -116,11 +121,11 @@ export function HomeView({
                 size="md"
               />
               <h1 className="text-[25px] font-semibold tracking-[-0.035em] text-white sm:text-[27px]">
-                {tone.label}
+                {statusLabel}
               </h1>
             </div>
             <p className="mt-1.5 text-[13px] leading-relaxed text-white/46">
-              {tone.hint}
+              {statusHint}
             </p>
             {showActivity ? (
               <motion.p
@@ -139,7 +144,7 @@ export function HomeView({
                 {contextMeter ? `Context ${contextMeter}` : ""}
               </p>
             ) : null}
-            {status.phase === "Thinking" && status.thinking?.trim() ? (
+            {!barge && status.phase === "Thinking" && status.thinking?.trim() ? (
               <p className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-white/42">
                 {status.thinking.trim()}
               </p>

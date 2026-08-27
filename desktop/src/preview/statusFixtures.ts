@@ -11,6 +11,10 @@ export type StatusFixtureName =
   | "thinking-long"
   | "thinking-tool"
   | "tool-failure"
+  | "barge-listening"
+  | "barge-transcribing"
+  | "barge-switching"
+  | "barge-stopping"
   | "typed-input"
   | "confirm"
   | "talking"
@@ -107,6 +111,42 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     heard: "Check the latest train times.",
     activity: "fail · web_search",
     turn: "preview-tool-failure",
+  }),
+  fixture("barge-listening", "Barge-in · listening", {
+    engine: "On",
+    phase: "Hearing",
+    activity: "barge-in · listening",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-listening",
+  }),
+  fixture("barge-transcribing", "Barge-in · transcribing", {
+    engine: "On",
+    phase: "Reading",
+    activity: "barge-in · transcribing",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-transcribing",
+  }),
+  fixture("barge-switching", "Barge-in · switching", {
+    engine: "On",
+    phase: "Thinking",
+    activity: "barge-in · switching",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-switching",
+  }),
+  fixture("barge-stopping", "Barge-in · stopping", {
+    engine: "On",
+    phase: "Thinking",
+    activity: "barge-in · stopping",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-stopping",
   }),
   fixture("typed-input", "Typed input", {
     engine: "On",

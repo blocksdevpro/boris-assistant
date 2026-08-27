@@ -89,14 +89,14 @@ export function GeneralSettings({
           />
         </SettingsRow>
         <SettingsRow
-          label="Long-term memory"
-          subtitle="Remember notes across sessions"
+          label="Boris memory"
+          subtitle="Builds evidence-backed context across conversations"
         >
           <Toggle
             checked={settings.long_term_memory}
             disabled={locked}
             onChange={(v) => onPatch({ long_term_memory: v })}
-            aria-label="Long-term memory"
+            aria-label="Boris memory"
           />
         </SettingsRow>
         <SettingsRow label="Tool access" labelFor="capability-preset" last>

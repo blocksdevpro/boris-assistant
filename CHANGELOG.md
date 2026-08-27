@@ -5,7 +5,46 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Further **1.2** work on `next` after [1.2.0-beta.1].
+Further work on `next` after [1.2.0-beta.2].
+
+## [1.2.0-beta.2] - 2026-08-26
+
+Second 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.
+
+### Added
+
+- **Canonical Boris memory**: `~/.boris/memory/memory.sqlite` is now the
+  local source of truth for conversation evidence, durable facts,
+  preferences, projects, lifecycle state, and full-text retrieval.
+- `memory_search`, `memory_get`, and `forget_memory` now operate on
+  evidence-backed records. Completed turns are durably ingested without
+  writing a Markdown session-memory log.
+- A verified legacy-memory migration imports `profile.json`, global and
+  workspace `MEMORY.md`, and old session `memory.md` files. Each archived
+  excerpt is refined by Boris's configured LLM before it becomes a canonical
+  record.
+
+### Changed
+
+- **Boris memory** replaces the old Markdown memory runtime in Desktop. The
+  Settings toggle keeps its existing saved config key for compatibility, but
+  now controls the canonical store.
+- Personal-context extraction state is stored in `memory.sqlite`; it no
+  longer creates or updates `profile.json` after migration.
+- Personal context injected into the model prompt now comes from canonical
+  active records, so corrections, expiry, and explicit forgetting affect both
+  retrieval and prompt context.
+
+### Migration and privacy
+
+- Legacy files are deleted only after every discovered source has been staged,
+  successfully AI-refined, and verified in the canonical store. If the LLM
+  call fails, times out, or the import cannot be verified, the old files stay
+  untouched and Boris retries on a later launch.
+- A successful migration retires the obsolete `profile.json`, `MEMORY.md`,
+  session `memory.md`, and derived `search.sqlite` files. Historical content
+  is sent only to the LLM already configured for Boris during this one-time
+  refinement pass.
 
 ## [1.2.0-beta.1] - 2026-08-25
 
@@ -316,6 +355,7 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.2.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2
 [1.2.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1
 [1.1.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0
 [1.1.0-beta.5]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0-beta.5

@@ -146,7 +146,7 @@ pub struct AppSettings {
     /// Ignore TV / Translate / TTS coming out of a speaker after enroll.
     #[serde(default = "default_true")]
     pub ignore_speaker_playback: bool,
-    /// Markdown long-term memory tools + session logs.
+    /// Canonical evidence-backed memory (legacy config key retained for compatibility).
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
     /// Auto-allow moderate tools + trusted sandbox file writes.

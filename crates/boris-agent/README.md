@@ -28,6 +28,7 @@ let mut sandbox = SandboxConfig::for_desktop_mvp(&home)
     .with_trusted_auto_moderate(true);
 
 let mut agent = Agent::new(Box::new(client), "You are Boris, a concise voice assistant.");
+agent.enable_memory_store(home.join("memory/memory.sqlite"))?;
 
 // Register tools BEFORE configure_runtime: register_builtin_tools_with_preset
 // mutates `sandbox` in place via `CapabilityPreset::apply_to_sandbox` (network/shell
@@ -36,6 +37,8 @@ register_builtin_tools_with_preset(
     &mut agent,
     BuiltinToolPaths {
         notes_path: home.join("memory/notes.jsonl"),
+        // Legacy input for one-time migration; canonical runtime state is in
+        // memory.sqlite because enable_memory_store was called above.
         profile_path: home.join("memory/profile.json"),
         sandbox_root: home.join("sandbox"),
         data_roots: vec![home.join("memory"), home.join("sessions")],
@@ -69,6 +72,18 @@ Prefer crate-root re-exports (`Agent`, `SandboxConfig`, `register_builtin_tools`
 Nested modules are public for the pipeline but are not a stability guarantee.
 
 LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
+
+## Canonical memory
+
+Hosts should call `enable_memory_store` before registering built-in tools. It
+creates the local `memory.sqlite` store and makes the profile/extraction
+working set, turn evidence, retrieved records, and memory tools use that one
+database. The Desktop host also queues the verified migration of legacy
+`profile.json`, `MEMORY.md`, and session `memory.md` inputs.
+
+Migration first stages each source and refines it with the configured LLM. It
+only deletes a legacy source after all of its excerpts are refined and verified
+in SQLite. Failure leaves the old files in place for retry.
 
 ## Security model
 
@@ -116,7 +131,7 @@ src/
   tool/                Tool trait, ToolMeta, arg helpers, truncation
   tools/               builtin tools (files, web, bash, notes, …)
   session/             SessionStore + transcript + artifacts/
-  memory/              profile + long-term MEMORY.md
+  memory/              canonical ledger + legacy migration support
   skills/              load, catalog, defaults
   …
 ```

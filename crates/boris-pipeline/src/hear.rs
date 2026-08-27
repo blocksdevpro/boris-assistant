@@ -68,6 +68,10 @@ pub enum CaptureKind {
     AwaitReply,
     /// Yes/no after tool confirmation — short answers, careful VAD settle.
     AwaitConfirm,
+    /// Replacement request after a thinking barge-in. Redirects commonly have
+    /// a short hesitation ("don't do that… instead…"), so endpoint them less
+    /// aggressively than an ordinary wake capture.
+    BargeIn,
 }
 
 /// Poll host commands while blocking on audio.
@@ -301,10 +305,13 @@ pub fn capture_utterance_until(
         CaptureKind::AwaitConfirm => {
             duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).max(VAD_WINDOW_SIZE)
         }
+        CaptureKind::BargeIn => {
+            duration_to_samples(Duration::from_millis(850), AUDIO_TARGET_RATE).max(VAD_WINDOW_SIZE)
+        }
         _ => vad_silence_samples(),
     };
     let silence_before = match kind {
-        CaptureKind::AfterWake => vad_initial_timeout_samples(),
+        CaptureKind::AfterWake | CaptureKind::BargeIn => vad_initial_timeout_samples(),
         CaptureKind::AwaitReply => {
             duration_to_samples(AWAIT_REPLY_START_TIMEOUT, AUDIO_TARGET_RATE)
         }
@@ -542,6 +549,42 @@ mod tests {
         assert_eq!(confirm.len(), (confirm_trailing + 1) * VAD_WINDOW_SIZE);
         assert_eq!(reply.len(), (freeform_trailing + 1) * VAD_WINDOW_SIZE);
         assert!(confirm.len() < reply.len());
+    }
+
+    #[test]
+    fn barge_in_allows_a_redirect_pause_longer_than_normal_capture() {
+        let normal_trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let barge_trailing = duration_to_samples(Duration::from_millis(850), AUDIO_TARGET_RATE)
+            .div_ceil(VAD_WINDOW_SIZE);
+        assert!(
+            barge_trailing > normal_trailing,
+            "replacement speech needs room for 'don't do that … instead …' pauses"
+        );
+
+        let hops = barge_trailing + 4;
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+
+        let (normal, _) = run_capture(CaptureKind::AfterWake, answers.clone(), hops);
+        let (barge, _) = run_capture(CaptureKind::BargeIn, answers, hops);
+        assert_eq!(normal.len(), (normal_trailing + 1) * VAD_WINDOW_SIZE);
+        assert_eq!(barge.len(), (barge_trailing + 1) * VAD_WINDOW_SIZE);
+        assert!(barge.len() > normal.len());
+    }
+
+    #[test]
+    fn barge_settle_discards_queued_wake_audio() {
+        let (mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        mic_tx
+            .send(Arc::from(vec![0.25f32; VAD_WINDOW_SIZE]))
+            .expect("queue wake audio");
+        let mut running = true;
+
+        settle_after_playback_for(&mic_rx, &cmd_rx, &mut running, Duration::from_millis(1))
+            .expect("settle should drain the wake tail");
+
+        assert!(mic_rx.try_recv().is_err());
     }
 
     #[test]

@@ -28,14 +28,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::context::{Context, Message, RetrievedMemory, Role, TaskStateCapsule};
-use crate::memory::LongTermMemory;
+use crate::memory::{LegacyMemoryPaths, LongTermMemory, MemoryStore};
 use crate::runtime::{
     new_activation_set, ActivationSet, JsonlAuditSink, NullAuditSink, PendingTurn, SandboxConfig,
     ToolRuntime, ToolRuntimeFeatures,
 };
 use crate::skills::{self, LoadedSkills};
 use crate::tool::Tool;
-use crate::tools::memory_tools::{memory_tools, SharedLongTermMemory};
+use crate::tools::memory::{memory_tools as canonical_memory_tools, SharedMemoryStore};
+use crate::tools::memory_tools::{memory_tools as legacy_memory_tools, SharedLongTermMemory};
 use crate::tools::skills_tools::{skill_tools, SharedSkills};
 use crate::types::{AgentEvent, EventListener, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS};
 
@@ -49,6 +50,16 @@ const LOG_PREVIEW_CHARS: usize = 80;
 #[derive(Clone, Debug)]
 pub struct TurnCancel {
     token: CancellationToken,
+}
+
+/// Opaque snapshot of the model-visible conversation state before a turn.
+///
+/// Hosts can restore this when an interruption wins a race with a turn that
+/// has already completed. External tool side effects are intentionally not
+/// rolled back.
+#[derive(Clone)]
+pub struct AgentCheckpoint {
+    context: Context,
 }
 
 impl TurnCancel {
@@ -99,7 +110,10 @@ pub struct Agent {
     cancel: Option<CancellationToken>,
     /// Shared skill registry (catalog + load_skill tool).
     skills: Option<SharedSkills>,
-    /// Cross-session markdown memory (MEMORY.md + session logs).
+    /// Canonical SQLite memory store. This is the only memory path used by the
+    /// desktop host; `long_term` remains only for temporary legacy migration.
+    memory_store: Option<SharedMemoryStore>,
+    /// Legacy Markdown memory retained only for migration/backward compatibility.
     long_term: Option<SharedLongTermMemory>,
     /// Todo finish-gate fires remaining (cap).
     finish_gate_remaining: u32,
@@ -225,6 +239,7 @@ impl Agent {
             next_listener_id: AtomicU64::new(1),
             cancel: None,
             skills: None,
+            memory_store: None,
             long_term: None,
             finish_gate_remaining: 3,
             sandbox_snapshot,
@@ -346,7 +361,7 @@ impl Agent {
         let shared: SharedLongTermMemory = Arc::new(ltm);
         let already = self.tools.iter().any(|t| t.name() == "memory_search");
         if !already {
-            self.register_tools(memory_tools(shared.clone()));
+            self.register_tools(legacy_memory_tools(shared.clone()));
         }
         self.long_term = Some(shared.clone());
         self.sync_shared_tools();
@@ -361,6 +376,54 @@ impl Agent {
 
     pub fn long_term_memory(&self) -> Option<SharedLongTermMemory> {
         self.long_term.clone()
+    }
+
+    /// Enable Boris's canonical durable memory store.  It replaces the legacy
+    /// Markdown search tools by name, so callers cannot accidentally run both
+    /// retrieval systems in the same turn.
+    pub fn enable_memory_store(
+        &mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<SharedMemoryStore, String> {
+        let store = Arc::new(MemoryStore::open(path)?);
+        // `register_tools` deduplicates by name, replacing legacy
+        // `memory_search` / `memory_get` if the host enabled them earlier.
+        self.register_tools(canonical_memory_tools(store.clone()));
+        self.memory_store = Some(store.clone());
+        self.long_term = None;
+        self.sync_shared_tools();
+        self.refresh_system_prompt();
+        info!(path = %store.path().display(), "canonical memory enabled");
+        Ok(store)
+    }
+
+    pub fn memory_store(&self) -> Option<SharedMemoryStore> {
+        self.memory_store.clone()
+    }
+
+    /// Queue a verified one-time import of the retired Markdown/profile
+    /// memory layout. The maintenance worker keeps the source files unless
+    /// AI refinement and the final database verification both succeed.
+    pub fn migrate_legacy_memory(&self, paths: LegacyMemoryPaths) -> Result<(), String> {
+        let memory = self
+            .memory_store
+            .clone()
+            .ok_or_else(|| "canonical memory store is not enabled".to_string())?;
+        let personal = self
+            .personal
+            .as_ref()
+            .ok_or_else(|| "personal extraction context is not enabled".to_string())?;
+        let maintenance = self
+            .maintenance
+            .as_ref()
+            .ok_or_else(|| "maintenance worker is not enabled".to_string())?;
+        maintenance.submit(crate::maintenance::MaintenanceJob::MigrateLegacyMemory {
+            memory,
+            profile_store: personal.store.clone(),
+            profile: personal.profile.clone(),
+            paths,
+            client: Arc::clone(&self.client),
+        })
     }
 
     /// Install discovered skills: inject catalog into system prompt, register
@@ -542,6 +605,19 @@ impl Agent {
         let handle = TurnCancel::fresh();
         self.cancel = Some(handle.inner());
         handle
+    }
+
+    /// Snapshot conversation, task, and retrieval state before starting work.
+    pub fn checkpoint(&self) -> AgentCheckpoint {
+        AgentCheckpoint {
+            context: self.context.clone(),
+        }
+    }
+
+    /// Abandon the current turn and restore a previously captured checkpoint.
+    pub fn restore_checkpoint(&mut self, checkpoint: AgentCheckpoint) {
+        self.abort();
+        self.context = checkpoint.context;
     }
 
     /// Drop pending HITL state and cancel in-flight loop token.

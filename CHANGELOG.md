@@ -7,7 +7,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Further work on `next` after [1.2.0-beta.2].
 
-## [1.2.0-beta.2] - 2026-08-26
+## [1.2.0-beta.2] - 2026-08-28
 
 Second 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.
 

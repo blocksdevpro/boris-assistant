@@ -141,7 +141,7 @@ and put the same version in `latest.json`.
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-This **`next`** tree is **`1.2.0-beta.1`** (NSIS only). `main` holds
+This **`next`** tree is **`1.2.0-beta.2`** (NSIS only). `main` holds
 the **`1.1.0`** stable (NSIS + MSI). Do **not** uncheck Pre-release on
 `v1.1.0-beta.5` — that would offer Stable 1.0.0 installs a build still
 labeled `1.1.0-beta.5` (NSIS only, no MSI).

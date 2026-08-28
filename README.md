@@ -267,7 +267,7 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
   sessions/        # transcripts + per-session artifacts/
   memory/          # memory.sqlite canonical store + optional notes.jsonl
   skills/          # skill playbooks
-  logs/            # boris-desktop.*.log
+  logs/            # boris.YYYY-MM-DD.log
   workspace/       # sandboxed agent workspace
 ```
 

@@ -101,7 +101,7 @@ Override root with `BORIS_HOME`.
   sessions/desktop/    # voice session transcripts + artifacts/
   memory/              # memory.sqlite canonical store + optional notes.jsonl
   skills/              # skill playbooks
-  logs/                # boris-desktop.*.log
+  logs/                # boris.YYYY-MM-DD.log
   workspace/           # sandboxed agent workspace
 ```
 

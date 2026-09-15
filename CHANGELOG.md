@@ -7,6 +7,24 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Further work on `next` after [1.2.0-beta.2].
 
+### Added
+
+- **Bundled agent playbooks** for code changes, root-cause debugging, code
+  explanation, design, change review, technical writing, mentoring, and skill
+  creation. The playbooks are installed under `~/.boris/skills` and are
+  available through progressive skill discovery.
+- Coverage that installs and loads every bundled playbook, including its
+  frontmatter and full-body envelope.
+
+### Changed
+
+- Existing task-execution and research playbooks now follow the user's intent
+  and scope. Todos, extra research, artifacts, and fixed search quotas are
+  optional and driven by the work required.
+- Skill catalogs, load results, and post-tool reminders now reinforce matching
+  a skill by its full description and stopping when the requested result is
+  complete.
+
 ## [1.2.0-beta.2] - 2026-08-28
 
 Second 1.2 beta. Stable **1.1.x** stays on `main`. NSIS only.

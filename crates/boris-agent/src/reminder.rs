@@ -9,8 +9,7 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
     match tool_name {
         "load_skill" if !err => Some(load_skill_reminder(observation)),
         "list_skills" if !err && observation.contains("skill(s)") => Some(
-            "When a skill matches the user request, call load_skill before freestyling."
-                .into(),
+            "Load a skill only when its full description matches the user's intent.".into(),
         ),
         "bash" if err => Some(
             "Shell failed. Read the error, fix the command or cwd, and retry with a different command. \
@@ -32,7 +31,7 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
                 .into(),
         ),
         "todo_write" if !err => Some(
-            "Continue executing remaining open todos until done or you need a real user decision."
+            "Use the list as working memory. User intent controls scope, and optional todos may be removed."
                 .into(),
         ),
         "present_artifact" if !err => Some(
@@ -74,13 +73,12 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
 }
 
 fn load_skill_reminder(observation: &str) -> String {
-    let base = "Follow this skill's steps with tools. Track multi-step work with todo_write. \
-                Keep spoken replies short.";
+    let base = "Apply only the skill guidance relevant to the request. Use todo_write only when it helps track real work. \
+                Keep spoken replies short and stop when the requested result is complete.";
     // Research skill body (heading / name) -> multi-query nudge.
     if observation_looks_like_research_skill(observation) {
         format!(
-            "{base} Research: wave 1 multi web_search (3-5 angles), fetch candidates, \
-             wave 2 if needed. Parent verifies critical hits with web_fetch."
+            "{base} Research depth follows uncertainty and stakes. Verify critical claims with primary sources."
         )
     } else {
         base.into()
@@ -137,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn load_research_skill_gets_multi_query_reminder() {
+    fn load_research_skill_gets_evidence_reminder() {
         let out = with_reminder(
             "load_skill",
             "---\nname: research\nversion: 3\n---\n# Research\n\nwave 1 searches\n".into(),
@@ -145,8 +143,8 @@ mod tests {
         assert!(out.contains("<system-reminder>"));
         assert!(out.contains("todo_write"));
         assert!(
-            out.contains("web_search") || out.contains("wave 1") || out.contains("multi"),
-            "expected research multi-query nudge, got {out}"
+            out.contains("primary sources") || out.contains("uncertainty"),
+            "expected evidence-quality nudge, got {out}"
         );
     }
 

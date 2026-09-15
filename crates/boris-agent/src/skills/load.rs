@@ -88,7 +88,7 @@ pub fn user_skills_dir(boris_home: &Path) -> PathBuf {
     boris_home.join("skills")
 }
 
-/// Discover skills. First name wins (project → user → extras → bundled path).
+/// Discover skills. First name wins (project → user → extras).
 pub fn load_skills(
     cwd: Option<&Path>,
     boris_home: &Path,
@@ -163,8 +163,9 @@ pub fn load_skill_body(skill: &Skill) -> Result<String, String> {
          Source: {:?}\n\n\
          {}\n\
          </skill>\n\n\
-         Follow this skill's steps using your tools. Keep spoken replies short (1–2 sentences). \
-         Work autonomously until the skill goal is done or you need a real user decision.",
+         Apply the guidance that matches the user's request. The user's intent and scope override \
+         optional workflow steps. Do not create todos, research, or artifacts unless they help produce \
+         the requested result. Keep spoken replies short and stop when that result is complete.",
         skill.name,
         skill.description.replace('"', "'"),
         skill.file_path.display(),

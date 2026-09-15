@@ -71,6 +71,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
 - **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
+- **Scoped skill playbooks** — bundled playbooks for coding, debugging, design, review, research, writing, mentoring, and skill authoring, loaded only when a request matches
 - **Async research** — background subagents with poll/join/cancel and read-only tool isolation
 - **Capability presets** — `voice_safe` / `local_power` / `full` plus path policy and human approval for risky work
 - **Local models** — LiveKit-style wake, Silero VAD, NVIDIA Parakeet STT, and Supertone TTS
@@ -291,6 +292,20 @@ refinement leaves all legacy files untouched for a later retry.
 The one-time refinement sends historical memory to the LLM provider you have
 configured for Boris. Set `BORIS_MEMORY=0` before the first beta.2 launch to
 skip both canonical memory and migration.
+
+## Agent skills
+
+Boris installs bundled starter playbooks in `~/.boris/skills` and loads their
+short descriptions into the agent catalog. It loads a full `SKILL.md` only when
+the user's intent matches that skill; mentioning a related keyword alone is not
+enough. Project skills under `.boris/skills/<name>/SKILL.md` take precedence
+over same-named user skills.
+
+The bundled playbooks cover `get-things-done`, `research`, `daily-brief`,
+`remember-this`, `build-code`, `debug-root-cause`, `explain-code`,
+`investigate-why`, `design-change`, `review-change`, `technical-writing`,
+`mentor`, and `create-skill`. Bundled files carry frontmatter versions so stock
+playbooks can receive updates while versioned customizations are preserved.
 
 ## Security
 

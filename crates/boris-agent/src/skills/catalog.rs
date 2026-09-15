@@ -9,17 +9,17 @@ pub fn format_skills_catalog(skills: &[Skill]) -> String {
     }
     let mut out = String::from(
         "<skills>\n\
-         You have reusable skill playbooks for multi-step work. Each skill is a workflow: \
-         load it when the user's request matches its description, then follow its steps with tools.\n\
-         Do not invent skills that are not listed. Prefer loading a skill over freestyling complex work.\n\n\
+         You have reusable skill playbooks for specialized work. Load one only when the user's \
+         intent matches its description. A mentioned keyword alone is not a match.\n\
+         Do not invent skills that are not listed. User intent and scope remain authoritative.\n\n\
          Available skills:\n",
     );
     for s in skills {
         out.push_str(&format!("- **{}**: {}\n", s.name, s.description));
     }
     out.push_str(
-        "\nWhen a skill applies: call load_skill with its name first, then execute the steps. \
-         Use todo_write for multi-step tracking when the skill is long.\n\
+        "\nWhen a skill applies, call load_skill with its name and use only the relevant guidance. \
+         Loading a skill does not require todos, research, artifacts, or extra work.\n\
          </skills>",
     );
     out

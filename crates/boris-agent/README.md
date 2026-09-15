@@ -85,6 +85,23 @@ Migration first stages each source and refines it with the configured LLM. It
 only deletes a legacy source after all of its excerpts are refined and verified
 in SQLite. Failure leaves the old files in place for retry.
 
+## Skills
+
+Skills are `SKILL.md` playbooks with `name` and `description` frontmatter.
+`ensure_default_skills` installs the bundled starter set under
+`<boris_home>/skills` and upgrades a stock file when its frontmatter version is
+behind the bundled version. `load_skills` discovers project skills from
+`.boris/skills`, then user skills from `<boris_home>/skills`, followed by any
+explicit extra paths; the first skill with a given name wins.
+
+Only skill names and descriptions enter the system prompt. `load_skill` reads a
+full body on demand, so specialized guidance does not expand every turn. The
+bundled set includes task execution, research, daily briefs, remembering,
+coding, root-cause debugging, code explanation, design, change review,
+technical writing, mentoring, and skill creation. User intent controls whether
+a matching playbook is loaded, and optional steps such as todos, research, or
+artifacts are used only when they help produce the requested result.
+
 ## Security model
 
 | Layer | What it does |

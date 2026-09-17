@@ -46,6 +46,27 @@ pub(super) struct ToolDelta {
 }
 
 impl ToolCallAcc {
+    fn from_message(tc: &Value) -> Self {
+        let function = tc.get("function");
+        Self {
+            id: tc
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: function
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            arguments: function
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+
     fn apply_delta(&mut self, tc: &Value) -> ToolDelta {
         let mut id_out = None;
         let mut name_out = None;
@@ -126,6 +147,12 @@ pub(super) struct StreamAssembler {
     tools: BTreeMap<u32, ToolCallAcc>,
     role: String,
     last_usage: Option<TokenUsage>,
+    /// Whether each payload kind has already been exposed as an incremental
+    /// event. A later full `message` is a canonical snapshot, not another
+    /// delta, so it must not be emitted as duplicate content/tool fragments.
+    emitted_content: bool,
+    emitted_reasoning: bool,
+    emitted_tools: bool,
     /// Set when an event carries a top-level `error` object instead of a
     /// normal delta (e.g. a mid-stream provider error). Callers should check
     /// this after each ingested chunk and abort the stream if set.
@@ -156,6 +183,9 @@ impl StreamAssembler {
     }
 
     /// Same as [`Self::ingest_event`] but returns newly appended fragments.
+    /// A provider-supplied full `message` replaces the assembled snapshot; it
+    /// is only surfaced as an incremental event when no earlier delta of that
+    /// payload kind was emitted.
     pub(super) fn ingest_event_delta(&mut self, event: &Value) -> StreamDelta {
         let mut delta = StreamDelta::default();
         // A well-formed SSE payload can carry a top-level `error` object
@@ -177,38 +207,34 @@ impl StreamAssembler {
             return delta;
         };
 
-        // Prefer incremental delta; some providers also emit a full `message`.
-        let Some(piece) = choice.get("delta").or_else(|| choice.get("message")) else {
-            return delta;
-        };
+        // Some OpenAI-compatible providers finish a delta stream with a full
+        // `message` snapshot. Treat that snapshot as canonical. Appending it
+        // after prior deltas glues two answer drafts together (for example,
+        // `first answer?Second answer`).
+        if let Some(piece) = choice.get("delta") {
+            self.ingest_incremental_piece(piece, &mut delta);
+        } else if let Some(message) = choice.get("message") {
+            self.ingest_message_snapshot(message, &mut delta);
+        }
+        delta
+    }
 
+    fn ingest_incremental_piece(&mut self, piece: &Value, delta: &mut StreamDelta) {
         if let Some(r) = piece.get("role").and_then(|r| r.as_str()) {
             self.role = r.to_string();
         }
 
         append_reasoning_delta(&mut delta.reasoning, piece);
+        if !delta.reasoning.is_empty() {
+            self.emitted_reasoning = true;
+        }
 
         if let Some(c) = piece.get("content") {
             let before = self.content.len();
-            // Full `message` objects sometimes carry trimmed-friendly content;
-            // streaming `delta` strings must preserve raw spaces.
-            if choice.get("delta").is_some() {
-                append_stream_content_delta(&mut self.content, c);
-            } else if let Some(s) = c.as_str() {
-                // Non-delta full message: replace/set content once.
-                if self.content.is_empty() {
-                    self.content = s.to_string();
-                } else {
-                    append_stream_content_delta(&mut self.content, c);
-                }
-            } else {
-                let text = extract_text_content(c);
-                if !text.is_empty() {
-                    self.content.push_str(&text);
-                }
-            }
+            append_stream_content_delta(&mut self.content, c);
             if self.content.len() > before {
                 delta.content = self.content[before..].to_string();
+                self.emitted_content = true;
             }
         }
 
@@ -219,8 +245,65 @@ impl StreamAssembler {
                 td.index = idx;
                 delta.tool_deltas.push(td);
             }
+            if !delta.tool_deltas.is_empty() {
+                self.emitted_tools = true;
+            }
         }
-        delta
+    }
+
+    fn ingest_message_snapshot(&mut self, message: &Value, delta: &mut StreamDelta) {
+        if let Some(r) = message.get("role").and_then(|r| r.as_str()) {
+            self.role = r.to_string();
+        }
+
+        let mut reasoning = String::new();
+        append_reasoning_delta(&mut reasoning, message);
+        if !self.emitted_reasoning && !reasoning.is_empty() {
+            delta.reasoning = reasoning;
+            self.emitted_reasoning = true;
+        }
+
+        // `message.content` is the provider's complete canonical value. It
+        // replaces any draft assembled from `delta.content` chunks.
+        self.content = message
+            .get("content")
+            .map(|content| {
+                content
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| extract_text_content(content))
+            })
+            .unwrap_or_default();
+        if !self.emitted_content && !self.content.is_empty() {
+            delta.content = self.content.clone();
+            self.emitted_content = true;
+        }
+
+        // Full assistant messages do not carry streaming indexes reliably, so
+        // rebuild tool state by array position instead of applying them as
+        // fragments to previously accumulated calls.
+        self.tools.clear();
+        if let Some(tcs) = message.get("tool_calls").and_then(|t| t.as_array()) {
+            for (position, tc) in tcs.iter().enumerate() {
+                let idx = tc
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(position as u64) as u32;
+                let call = ToolCallAcc::from_message(tc);
+                if !self.emitted_tools {
+                    delta.tool_deltas.push(ToolDelta {
+                        index: idx,
+                        id: (!call.id.is_empty()).then(|| call.id.clone()),
+                        name: (!call.name.is_empty()).then(|| call.name.clone()),
+                        arguments_delta: call.arguments.clone(),
+                    });
+                }
+                self.tools.insert(idx, call);
+            }
+            if !delta.tool_deltas.is_empty() {
+                self.emitted_tools = true;
+            }
+        }
     }
 
     /// Snapshot completed tool calls (id + name + full arguments string).
@@ -381,6 +464,91 @@ mod tests {
             msg["tool_calls"][0]["function"]["arguments"],
             "{\"c\":\"ls\"}"
         );
+    }
+
+    #[test]
+    fn full_message_replaces_streamed_draft_instead_of_concatenating() {
+        let mut a = StreamAssembler::new();
+        let first = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "role": "assistant", "content": "First answer?" } }]
+        }));
+        assert_eq!(first.content, "First answer?");
+
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Final answer."
+                }
+            }]
+        }));
+
+        assert!(
+            snapshot.content.is_empty(),
+            "a canonical snapshot must not be replayed as another delta"
+        );
+        assert_eq!(a.finish()["content"], "Final answer.");
+    }
+
+    #[test]
+    fn full_message_without_prior_deltas_is_exposed_once() {
+        let mut a = StreamAssembler::new();
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Only answer."
+                }
+            }]
+        }));
+        assert_eq!(snapshot.content, "Only answer.");
+
+        let repeated = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Only answer."
+                }
+            }]
+        }));
+        assert!(repeated.content.is_empty());
+        assert_eq!(a.finish()["content"], "Only answer.");
+    }
+
+    #[test]
+    fn full_message_replaces_streamed_tool_fragments() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "draft-call",
+                        "function": { "name": "todo_", "arguments": "{\"draft\":" }
+                    }]
+                }
+            }]
+        }));
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "final-call",
+                        "type": "function",
+                        "function": { "name": "todo_read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        }));
+
+        assert!(snapshot.tool_deltas.is_empty());
+        let msg = a.finish();
+        assert_eq!(msg["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(msg["tool_calls"][0]["id"], "final-call");
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "todo_read");
+        assert_eq!(msg["tool_calls"][0]["function"]["arguments"], "{}");
     }
 
     #[test]

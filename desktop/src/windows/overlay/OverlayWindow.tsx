@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "framer-motion";
 import { CollectInputField } from "@/components/CollectInputField";
 import { OverlayArtifactCard } from "@/components/artifacts";
 import {
@@ -13,6 +13,8 @@ import {
 import { isTauriRuntime } from "@/lib/runtime";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
+import { overlayContentMotion, overlayFade, overlaySpring } from "@/lib/overlayMotion";
+import { OverlayText } from "./OverlayText";
 import {
   isConfirmContext,
   overlayInputUsesCard,
@@ -31,17 +33,10 @@ import {
   OverlayThoughts,
 } from "./OverlayPrimitives";
 import {
-  PresenceIndicator,
-  presenceStateFromStatus,
+  BorisOrb,
+  orbStateFromStatus,
 } from "@/components/presence";
 
-const soft = [0.22, 1, 0.36, 1] as const;
-const islandSpring = {
-  type: "spring",
-  stiffness: 460,
-  damping: 42,
-  mass: 0.78,
-} as const;
 const READY_CAPTION_MS = 5_000;
 const OVERLAY_PREFERENCES_EVENT = "overlay-preferences";
 const OVERLAY_WILL_HIDE_EVENT = "overlay-will-hide";
@@ -65,11 +60,11 @@ function initialOverlayPreferences(): OverlayPreferences {
   if (!import.meta.env.DEV || isTauriRuntime()) return DEFAULT_PREFERENCES;
   const params = new URLSearchParams(window.location.search);
   const requestedMode = params.get("captions");
-  const requestedScale = Number(params.get("scale"));
+  const requestedScale = params.has("scale") ? Number(params.get("scale")) : 100;
   const overlay_caption_mode =
     requestedMode === "hidden" ||
-    requestedMode === "assistant" ||
-    requestedMode === "full"
+      requestedMode === "assistant" ||
+      requestedMode === "full"
       ? requestedMode
       : DEFAULT_PREFERENCES.overlay_caption_mode;
   const overlay_scale_percent = Number.isFinite(requestedScale)
@@ -150,7 +145,7 @@ export function OverlayWindow() {
   useEffect(() => {
     if (!tauriRuntime) return;
     let active = true;
-    let unlisten = () => {};
+    let unlisten = () => { };
     let receivedLivePreferences = false;
 
     void getSettings()
@@ -196,7 +191,7 @@ export function OverlayWindow() {
   useEffect(() => {
     if (!tauriRuntime) return;
     let active = true;
-    let unlisten = () => {};
+    let unlisten = () => { };
     void listen(OVERLAY_WILL_HIDE_EVENT, () => {
       if (active) setHostHiding(true);
     })
@@ -264,214 +259,184 @@ export function OverlayWindow() {
   }, [surfaceReady, tauriRuntime]);
 
   return (
-    <div className="overlay-surface relative flex h-full w-full items-center justify-center bg-transparent">
-      <div
-        className={cn(
-          "overlay-stage flex justify-center bg-transparent",
-          status.input ? "items-start" : "items-center",
-        )}
-        data-mode={stageMode}
-        style={{
-          ["--overlay-scale" as string]: scale,
-          opacity: surfaceReady ? 1 : 0,
-        } as CSSProperties}
-      >
-        <motion.div
-          data-tauri-drag-region
-          data-phase={status.phase.toLowerCase()}
-          data-state={visualState}
-          layout={reduceMotion ? false : true} // size + position, so the pill grows from its midpoint
-          className={cn(
-            "overlay-island overlay-island--premium relative flex select-none",
-            overlayIslandClass({
-              orbOnly,
-              status,
-              stageMode,
-              displayCard,
-            }),
-          )}
-          style={
-            {
-              ["--overlay-accent" as string]: tone.accent,
-              ["--overlay-glow" as string]: tone.glow,
-            } as CSSProperties
-          }
-          initial={reduceMotion ? false : { opacity: 0 }}
-          animate={{
-            opacity: hostHiding ? 0 : 1,
-            borderRadius: 20,
-          }}
-          transition={
-            reduceMotion
-              ? { duration: 0 }
-              : {
-                  opacity: { duration: 0.18, ease: soft },
-                  borderRadius: islandSpring,
-                  layout: islandSpring,
-                }
-          }
-          aria-hidden="true"
+    <MotionConfig reducedMotion="user" transition={reduceMotion ? { duration: 0 } : { ...overlaySpring, opacity: overlayFade }}>
+      <div className="overlay-surface relative flex h-full w-full items-center justify-center bg-transparent">
+        <div
+          className="overlay-stage flex items-start justify-center bg-transparent"
+          data-mode={stageMode}
+          style={{
+            ["--overlay-scale" as string]: scale,
+            opacity: surfaceReady ? 1 : 0,
+          } as CSSProperties}
         >
-          <AnimatePresence mode="popLayout" initial={false}>
-            {orbOnly ? (
+          <motion.div
+            data-tauri-drag-region
+            data-phase={status.phase.toLowerCase()}
+            data-state={visualState}
+            layout={!reduceMotion}
+            className={cn(
+              "overlay-island overlay-island--premium relative flex select-none overflow-hidden",
+              overlayIslandClass({
+                orbOnly,
+                status,
+                stageMode,
+                displayCard,
+              }),
+            )}
+            style={
+              {
+                ["--overlay-accent" as string]: tone.accent,
+                ["--overlay-glow" as string]: tone.glow,
+                transformOrigin: "50% 0%",
+              } as CSSProperties
+            }
+            initial={reduceMotion ? false : { opacity: 0, scale: 0.94, y: -8 }}
+            animate={{
+              opacity: hostHiding || !surfaceReady ? 0 : 1,
+              scale: (hostHiding || !surfaceReady) && !reduceMotion ? 0.96 : 1,
+              y: (hostHiding || !surfaceReady) && !reduceMotion ? -6 : 0,
+              borderRadius: orbOnly ? 24 : 20,
+            }}
+            transition={
+              reduceMotion
+                ? { duration: 0 }
+                : {
+                  default: hostHiding ? overlayFade : overlaySpring,
+                  opacity: overlayFade,
+                  borderRadius: overlaySpring,
+                  layout: overlaySpring,
+                }
+            }
+            aria-hidden={!surfaceReady || hostHiding ? true : undefined}
+            inert={!surfaceReady || hostHiding}
+          >
+            <motion.div
+              layout={reduceMotion ? false : "position"}
+              data-tauri-drag-region
+              className={cn(
+                "overlay-details flex min-h-0 w-full min-w-0 flex-col",
+                (displayCard || overlayInputUsesCard(status)) && "h-full",
+              )}
+            >
               <motion.div
-                key="ready-chip"
+                layout={reduceMotion ? false : "position"}
                 data-tauri-drag-region
-                className="overlay-ready-orb flex items-center gap-2"
-                initial={reduceMotion ? false : { opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={reduceMotion ? undefined : { opacity: 0 }}
-                transition={{ duration: reduceMotion ? 0 : 0.22, ease: soft }}
+                className="overlay-status-row flex min-h-8 items-center gap-2"
               >
-                <PresenceIndicator
-                  state={presenceStateFromStatus(status)}
-                  accent={tone.accent}
-                  reducedMotion={reduceMotion}
-                  size="md"
-                />
-                <span
-                  data-tauri-drag-region
-                  className="text-[13px] font-semibold tracking-[-0.025em] text-white/92"
-                >
-                  Ready
-                </span>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="overlay-details"
-                data-tauri-drag-region
-                className={cn(
-                  "overlay-details flex min-h-0 w-full min-w-0 flex-col",
-                  (displayCard || overlayInputUsesCard(status)) && "h-full",
-                )}
-                initial={reduceMotion ? false : { opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={reduceMotion ? undefined : { opacity: 0 }}
-                transition={{ duration: reduceMotion ? 0 : 0.22, ease: soft }}
-              >
-                <div
-                  data-tauri-drag-region
-                  className="overlay-status-row flex min-h-8 items-center gap-2"
-                >
-                  <PresenceIndicator
-                    state={presenceStateFromStatus(status)}
+                <motion.div layout={reduceMotion ? false : "position"} className="flex shrink-0 items-center">
+                  <BorisOrb
+                    state={orbStateFromStatus(status)}
+                    active={surfaceReady && !hostHiding}
                     accent={tone.accent}
                     reducedMotion={reduceMotion}
                   />
+                </motion.div>
 
+                <div
+                  data-tauri-drag-region
+                  className="flex min-w-0 flex-1 items-center"
+                >
                   <div
                     data-tauri-drag-region
-                    className="flex min-w-0 flex-1 items-center"
+                    className="relative flex min-w-0 flex-1 items-baseline gap-2"
                   >
-                    <div
+                    <motion.span
+                      layout={reduceMotion ? false : "position"}
                       data-tauri-drag-region
-                      className="flex min-w-0 flex-1 items-baseline gap-2"
+                      className="overlay-status-primary shrink-0 truncate text-[13px] font-semibold leading-[1.15] tracking-[-0.025em] text-white/95"
                     >
-                      <AnimatePresence mode="popLayout" initial={false}>
+                      <OverlayText text={orbOnly ? "Ready" : primary} />
+                    </motion.span>
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      {!orbOnly && secondary ? (
                         <motion.span
-                          key={primary}
+                          key="activity-detail"
                           data-tauri-drag-region
-                          className="overlay-status-primary shrink-0 truncate text-[13px] font-semibold leading-[1.15] tracking-[-0.025em] text-white/95"
-                          initial={reduceMotion ? false : { opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          exit={reduceMotion ? undefined : { opacity: 0 }}
-                          transition={{ duration: reduceMotion ? 0 : 0.14, ease: soft }}
+                          className="overlay-status-secondary min-w-0 flex-1 truncate text-[11px] font-medium leading-[1.15] tracking-[-0.01em] text-white/62"
+                          layout={reduceMotion ? false : "position"}
+                          {...overlayContentMotion(reduceMotion)}
                         >
-                          {primary}
+                          <OverlayText text={secondary} />
                         </motion.span>
-                      </AnimatePresence>
-                      <AnimatePresence mode="popLayout" initial={false}>
-                        {secondary ? (
-                          <motion.span
-                            key="activity-detail"
-                            data-tauri-drag-region
-                            className="overlay-status-secondary min-w-0 flex-1 truncate text-[11px] font-medium leading-[1.15] tracking-[-0.01em] text-white/62"
-                            initial={reduceMotion ? false : { opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={reduceMotion ? undefined : { opacity: 0 }}
-                            transition={{ duration: reduceMotion ? 0 : 0.14, ease: soft }}
-                          >
-                            {secondary}
-                          </motion.span>
-                        ) : null}
-                      </AnimatePresence>
-                    </div>
+                      ) : null}
+                    </AnimatePresence>
                   </div>
-
-                  <AnimatePresence mode="wait" initial={false}>
-                    {faultKey ? (
-                      <DeviceFaultBadge
-                        key={faultKey}
-                        status={status}
-                        reducedMotion={reduceMotion}
-                      />
-                    ) : null}
-                  </AnimatePresence>
                 </div>
 
-                <AnimatePresence mode="popLayout" initial={false}>
-                  {status.input ? (
-                    <CollectInputField
-                      key={status.input.id}
-                      input={status.input}
-                      compact
-                    />
-                  ) : displayCard && status.artifact ? (
-                    <OverlayArtifactCard
-                      key={status.artifact.id}
-                      peek={status.artifact}
-                    />
-                  ) : caption ? (
-                    <motion.div
-                      key={caption.kind}
-                      data-tauri-drag-region
-                      className={cn(
-                        "overlay-caption mt-2 min-w-0 max-w-[324px] overflow-hidden rounded-[12px] px-2.5 py-2",
-                        confirm && "overlay-caption--confirm",
-                        caption.kind === "error" && "overlay-caption--error",
-                      )}
-                      data-kind={caption.kind}
-                      initial={reduceMotion ? false : { opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={reduceMotion ? undefined : { opacity: 0 }}
-                      transition={{ duration: reduceMotion ? 0 : 0.18, ease: soft }}
-                    >
-                      <CaptionBody
-                        caption={caption}
-                        expanded={confirm || caption.kind === "error"}
-                      />
-                    </motion.div>
-                  ) : null}
-                </AnimatePresence>
-
-                <AnimatePresence initial={false}>
-                  {displayThought ? (
-                    <OverlayThoughts
-                      key="thought"
-                      text={displayThought}
+                <AnimatePresence mode="wait" initial={false}>
+                  {faultKey ? (
+                    <DeviceFaultBadge
+                      key={faultKey}
+                      status={status}
                       reducedMotion={reduceMotion}
                     />
                   ) : null}
                 </AnimatePresence>
               </motion.div>
-            )}
-          </AnimatePresence>
-        </motion.div>
-        <p
-          className="sr-only"
-          role={status.engine === "Fault" ? "alert" : "status"}
-          aria-live={status.engine === "Fault" ? "assertive" : "polite"}
-          aria-atomic="true"
-        >
-          {surfaceReady ? accessibleSummary : ""}
-        </p>
-        {surfaceReady && thought ? (
-          <p className="sr-only" aria-live="off">
-            Live reasoning: {thought}
+
+              <AnimatePresence mode="popLayout" initial={false}>
+                {status.input ? (
+                  <motion.div key={`input-${status.input.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                    <CollectInputField
+                      input={status.input}
+                      compact
+                    />
+                  </motion.div>
+                ) : displayCard && status.artifact ? (
+                  <motion.div key={`card-${status.artifact.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                    <OverlayArtifactCard
+                      peek={status.artifact}
+                    />
+                  </motion.div>
+                ) : !orbOnly && caption ? (
+                  <motion.div
+                    key={`caption-${status.turn}-${caption.kind}`}
+                    layout={reduceMotion ? false : "position"}
+                    data-tauri-drag-region
+                    className={cn(
+                      "overlay-caption mt-2 min-w-0 max-w-[324px] overflow-hidden rounded-[12px] px-2.5 py-2",
+                      confirm && "overlay-caption--confirm",
+                      caption.kind === "error" && "overlay-caption--error",
+                    )}
+                    data-kind={caption.kind}
+                    {...overlayContentMotion(reduceMotion)}
+                  >
+                    <CaptionBody
+                      caption={caption}
+                      expanded={confirm || caption.kind === "error"}
+                    />
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+
+              <AnimatePresence mode="popLayout" initial={false}>
+                {!orbOnly && displayThought ? (
+                  <motion.div key={`thought-${status.turn}`} className="relative min-w-0" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                    <OverlayThoughts
+                      text={displayThought}
+                      reducedMotion={reduceMotion}
+                    />
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </motion.div>
+          </motion.div>
+          <p
+            className="sr-only"
+            role={status.engine === "Fault" ? "alert" : "status"}
+            aria-live={status.engine === "Fault" ? "assertive" : "polite"}
+            aria-atomic="true"
+          >
+            {surfaceReady ? accessibleSummary : ""}
           </p>
-        ) : null}
+          {surfaceReady && thought ? (
+            <p className="sr-only" aria-live="off">
+              Live reasoning: {thought}
+            </p>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </MotionConfig>
   );
 }
 
@@ -486,7 +451,7 @@ function overlayIslandClass({
   stageMode: OverlayStageMode;
   displayCard: boolean;
 }): string {
-  if (orbOnly) return "items-center justify-center gap-2 px-3 py-2.5";
+  if (orbOnly) return "w-max flex-col px-3 py-2";
   if (overlayInputUsesCard(status) || (stageMode === "card" && displayCard)) {
     return "h-[264px] max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3";
   }

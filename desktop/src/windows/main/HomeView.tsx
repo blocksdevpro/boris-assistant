@@ -16,7 +16,8 @@ import type {
   ModelsStatus,
   StatusPicture,
 } from "@/bridge";
-import { GridPresence, presenceStateFromStatus } from "@/components/presence";
+import { BorisOrb } from "@/components/presence/BorisOrb";
+import { orbStateFromStatus } from "@/components/presence/orbState";
 import { toneFor } from "@/lib/phaseVisual";
 import {
   bargeInPresence,
@@ -97,34 +98,31 @@ export function HomeView({
     (updateUi === "available" || updateUi === "downloading");
 
   return (
-    <div className="home-view mx-auto flex min-h-full w-full max-w-4xl flex-col gap-5 px-6 py-7 sm:px-8 sm:py-8">
+    <div className="home-view mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4 px-6 py-6 sm:px-8 sm:py-7">
       <section
+        data-state={orbStateFromStatus(status)}
         aria-live="polite"
         aria-atomic="true"
         className="home-status-panel relative overflow-hidden rounded-[22px] border border-white/[0.065] bg-white/[0.04] px-5 py-5 shadow-[0_1px_0_rgba(255,255,255,0.035)_inset,0_20px_55px_rgba(0,0,0,0.14)] sm:px-6"
       >
-        <div
-          className="pointer-events-none absolute -right-16 -top-24 size-64 rounded-full opacity-[0.08] blur-3xl"
-          style={{ background: tone.accent }}
-          aria-hidden
-        />
-        <div className="relative flex items-start justify-between gap-5">
+        <div className="home-status-layout relative flex items-center justify-between gap-5">
           <div className="min-w-0 flex-1">
-            <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-white/30">
+            <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--boris-label-tertiary)]">
               Assistant status
             </p>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-              <GridPresence
-                state={presenceStateFromStatus(status)}
+            <div className="home-status-heading flex items-center gap-4">
+              <BorisOrb
+                state={orbStateFromStatus(status)}
                 accent={tone.accent}
                 reducedMotion={Boolean(reduceMotion)}
-                size="md"
+                size="lg"
               />
               <h1 className="text-[25px] font-semibold tracking-[-0.035em] text-white sm:text-[27px]">
+                {engineFault ? <AlertCircle className="mr-2 inline size-5 text-red-200" aria-hidden="true" /> : null}
                 {statusLabel}
               </h1>
             </div>
-            <p className="mt-1.5 text-[13px] leading-relaxed text-white/46">
+            <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--boris-label-secondary)]">
               {statusHint}
             </p>
             {showActivity ? (
@@ -138,32 +136,32 @@ export function HomeView({
               </motion.p>
             ) : null}
             {engineOn && (status.turn || contextMeter) ? (
-              <p className="mt-2.5 text-[11px] text-white/29">
+              <p className="mt-2.5 text-[11px] text-[var(--boris-label-tertiary)]">
                 {status.turn ? `Current turn ${status.turn}` : ""}
                 {status.turn && contextMeter ? " · " : ""}
                 {contextMeter ? `Context ${contextMeter}` : ""}
               </p>
             ) : null}
             {!barge && status.phase === "Thinking" && status.thinking?.trim() ? (
-              <p className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-white/42">
+              <p className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-[var(--boris-label-secondary)]">
                 {status.thinking.trim()}
               </p>
             ) : null}
           </div>
 
-          <div className="flex shrink-0 gap-2 pt-1">
+          <div className="home-engine-action flex shrink-0 gap-2">
             <Button
               type="button"
               size="lg"
               disabled={busy}
               onClick={stopAvailable ? onStop : onStart}
               className={cn(
-                "h-10 gap-2 rounded-full px-5 text-[13px] font-semibold shadow-sm",
+                "h-10 gap-2 rounded-lg px-5 text-[13px] font-semibold shadow-sm",
                 "transition-[background-color,color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.97]",
                 stopAvailable
                   ? "border border-white/10 bg-white/[0.035] text-white/72 shadow-none hover:bg-white/[0.08] hover:text-white"
                   : "border border-white/90 bg-white text-[#0b0b0c] shadow-[0_8px_24px_rgba(0,0,0,0.2)] hover:bg-white/92 hover:shadow-[0_10px_28px_rgba(0,0,0,0.26)]",
-                "disabled:bg-white/15 disabled:text-white/35 disabled:shadow-none",
+                "disabled:bg-white/15 disabled:text-[var(--boris-label-tertiary)] disabled:shadow-none",
               )}
               title={
                 !stopAvailable && !modelsReady
@@ -188,8 +186,8 @@ export function HomeView({
                 : engineFault
                   ? "Reset"
                   : engineOn
-                    ? "Stop"
-                    : "Start"}
+                    ? "Stop Boris"
+                    : "Start Boris"}
             </Button>
           </div>
         </div>
@@ -201,7 +199,7 @@ export function HomeView({
           className="flex items-start gap-2.5 rounded-[14px] border border-red-400/10 bg-red-500/[0.08] px-4 py-3 text-[13px] leading-relaxed text-red-200/85 shadow-[0_12px_32px_rgba(0,0,0,0.1)]"
         >
           <AlertCircle className="mt-0.5 size-4 shrink-0 text-red-300/80" />
-          <span>{error}</span>
+          <span className="min-w-0 break-words">{error}</span>
         </p>
       ) : null}
       {engineFault && !error && !status.detail ? (
@@ -298,7 +296,7 @@ function ModelsBanner({
       <p className="text-[15px] font-medium tracking-[-0.01em] text-white/90">
         Download speech models to start
       </p>
-      <p className="mt-1 text-[12px] leading-snug text-white/40">
+      <p className="mt-1 text-[12px] leading-snug text-[var(--boris-label-tertiary)]">
         About 900 MB, stored on this computer.
         {models?.missing?.length
           ? ` ${models.missing.length} files missing.`
@@ -319,7 +317,7 @@ function ModelsBanner({
               style={{ width: `${pct ?? 4}%` }}
             />
           </div>
-          <p className="mt-1.5 truncate text-[12px] text-white/40">
+          <p className="mt-1.5 truncate text-[12px] text-[var(--boris-label-tertiary)]">
             {progress?.file_name ?? "Preparing…"}
             {pct != null ? ` · ${pct}%` : ""}
           </p>
@@ -339,7 +337,7 @@ function ModelsBanner({
         <button
           type="button"
           onClick={onOpenSettings}
-          className="h-8 rounded-full px-3 text-[13px] text-white/45 hover:text-white/70"
+          className="h-8 rounded-full px-3 text-[13px] text-[var(--boris-label-secondary)] hover:text-white/70"
         >
           Details
         </button>
@@ -372,12 +370,12 @@ function LiveThoughts({
         className,
       )}
     >
-      <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-white/28">
+      <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--boris-label-tertiary)]">
         Thinking
       </p>
       <p
         className={cn(
-          "mt-1 whitespace-pre-wrap text-white/52",
+          "mt-1 whitespace-pre-wrap text-[var(--boris-label-secondary)]",
           compact ? "text-[12px] leading-snug" : "text-[13px] leading-relaxed",
         )}
       >
@@ -395,17 +393,17 @@ function ConversationView({ status }: { status: StatusPicture }) {
     <section
       aria-labelledby="current-turn-heading"
       aria-live="polite"
-      className="conversation-panel settings-group flex min-h-[240px] flex-col gap-4 rounded-[18px] border border-white/[0.055] px-5 py-4.5 shadow-[0_1px_0_rgba(255,255,255,0.025)_inset,0_18px_46px_rgba(0,0,0,0.1)]"
+      className="conversation-panel settings-group flex min-h-[184px] flex-col gap-4 rounded-[18px] border border-white/[0.055] px-5 py-4.5 shadow-[0_1px_0_rgba(255,255,255,0.025)_inset,0_18px_46px_rgba(0,0,0,0.1)]"
     >
       <div className="flex items-center justify-between gap-3">
         <h2
           id="current-turn-heading"
-          className="text-[12px] font-medium tracking-[0.01em] text-white/45"
+          className="text-[12px] font-medium tracking-[0.01em] text-[var(--boris-label-secondary)]"
         >
           Current turn
         </h2>
         {status.phase === "Thinking" ? (
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-white/30">
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-[var(--boris-label-tertiary)]">
             <span className="size-1.5 animate-pulse rounded-full bg-white/45" />
             Working
           </span>
@@ -421,10 +419,10 @@ function ConversationView({ status }: { status: StatusPicture }) {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex flex-1 flex-col items-center justify-center py-5 text-center"
               >
-                <div className="flex size-11 items-center justify-center rounded-2xl border border-white/[0.055] bg-white/[0.035] text-white/28">
+                <div className="flex size-11 items-center justify-center rounded-2xl border border-white/[0.055] bg-white/[0.035] text-[var(--boris-label-tertiary)]">
                   <MessageCircle className="size-[18px]" strokeWidth={1.6} />
                 </div>
-                <p className="mt-3 max-w-sm text-[14px] leading-relaxed text-white/32">
+                <p className="mt-3 max-w-sm text-[14px] leading-relaxed text-[var(--boris-label-tertiary)]">
                   {line.text}
                 </p>
               </motion.div>
@@ -442,7 +440,7 @@ function ConversationView({ status }: { status: StatusPicture }) {
             );
           case "status":
             return (
-              <p key={`s-${i}`} className="text-[13px] text-white/40">
+              <p key={`s-${i}`} className="text-[13px] text-[var(--boris-label-tertiary)]">
                 {line.text}
               </p>
             );
@@ -521,7 +519,7 @@ function Bubble({
 }) {
   return (
     <div className={cn("flex flex-col gap-1", muted && "opacity-50")}>
-      <span className="text-[12px] text-white/35">{who}</span>
+      <span className="text-[12px] text-[var(--boris-label-tertiary)]">{who}</span>
       <p
         className={cn(
           "max-w-[95%] break-words text-[15px] leading-relaxed tracking-[-0.01em]",
@@ -559,7 +557,7 @@ function UpdateBanner({
 
   return (
     <div className="settings-group rounded-[12px] px-4 py-3.5" role="status">
-      <div className="flex items-start justify-between gap-3">
+      <div className="home-banner-layout flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[14px] font-medium text-white/90">
             Update available · v{update.version}
@@ -612,7 +610,7 @@ function UpdateBanner({
         <button
           type="button"
           onClick={onOpenSettings}
-          className="mt-2 text-[12px] text-white/45 hover:text-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+          className="mt-2 text-[12px] text-[var(--boris-label-secondary)] hover:text-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
         >
           Details in Settings
         </button>

@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-/** Inset grouped list — header outside the card, Apple Settings style. */
+/** Shared settings sections with a readable heading, surface and supporting copy. */
 export function SettingsGroup({
   title,
   footer,
@@ -35,7 +35,7 @@ export function SettingsGroup({
         <div className="settings-section__header flex min-h-7 items-end justify-between gap-3 px-3">
           <h2
             id={headingId}
-            className="text-[12px] font-medium leading-none tracking-[0.01em] text-white/48"
+            className="text-[12px] font-medium leading-none tracking-[0.01em] text-[var(--boris-label-secondary)]"
           >
             {title}
           </h2>
@@ -48,7 +48,7 @@ export function SettingsGroup({
       {footer ? (
         <p
           id={footerId}
-          className="settings-section__footer px-3 text-[12px] leading-[1.45] text-white/38"
+          className="settings-section__footer px-3 text-[12px] leading-[1.45] text-[var(--boris-label-tertiary)]"
         >
           {footer}
         </p>
@@ -91,7 +91,7 @@ export function SettingsRow({
             {label}
           </Label>
           {subtitle ? (
-            <p className="mt-1 text-[12px] leading-snug text-white/38">
+            <p className="mt-1 text-[12px] leading-snug text-[var(--boris-label-tertiary)]">
               {subtitle}
             </p>
           ) : null}
@@ -117,13 +117,13 @@ export function SettingsRow({
           {label}
         </Label>
         {subtitle ? (
-          <p className="mt-1 text-[12px] leading-snug text-white/38">
+          <p className="mt-1 text-[12px] leading-snug text-[var(--boris-label-tertiary)]">
             {subtitle}
           </p>
         ) : null}
       </div>
       {children ? (
-        <div className="settings-row__control flex min-w-0 max-w-[min(55%,18rem)] shrink-0 items-center justify-end gap-2">
+        <div className="settings-row__control flex min-w-0 max-w-[min(52%,18rem)] shrink-0 items-center justify-end gap-2">
           {children}
         </div>
       ) : null}
@@ -157,15 +157,15 @@ export function SettingsField({
         {labelFor ? (
           <label
             htmlFor={labelFor}
-            className="text-[13px] font-medium text-white/58"
+            className="text-[13px] font-medium text-[var(--boris-label-secondary)]"
           >
             {label}
           </label>
         ) : (
-          <p className="text-[13px] font-medium text-white/58">{label}</p>
+          <p className="text-[13px] font-medium text-[var(--boris-label-secondary)]">{label}</p>
         )}
         {subtitle ? (
-          <p className="mt-1 text-[12px] leading-snug text-white/38">
+          <p className="mt-1 text-[12px] leading-snug text-[var(--boris-label-tertiary)]">
             {subtitle}
           </p>
         ) : null}

@@ -14,7 +14,7 @@ import {
   shouldShowOverlayCard,
 } from "@/lib/statusPresentation";
 import { STATUS_FIXTURES, getStatusFixture } from "./statusFixtures";
-import { presenceStateFromStatus } from "@/windows/overlay/PresenceIndicator";
+import { orbStateFromStatus } from "@/components/presence/orbState";
 
 describe("overlay preview fixtures", () => {
   it("keeps fixture names unique and required states present", () => {
@@ -190,18 +190,18 @@ describe("overlay preview fixtures", () => {
   });
 
   it("gives reasoning and tool execution distinct presence shapes", () => {
-    expect(presenceStateFromStatus(getStatusFixture("thinking")!)).toBe(
+    expect(orbStateFromStatus(getStatusFixture("thinking")!)).toBe(
       "thinking",
     );
-    expect(presenceStateFromStatus(getStatusFixture("thinking-tool")!)).toBe(
-      "working",
+    expect(orbStateFromStatus(getStatusFixture("thinking-tool")!)).toBe(
+      "searching",
     );
-    expect(presenceStateFromStatus(getStatusFixture("hearing")!)).toBe(
+    expect(orbStateFromStatus(getStatusFixture("hearing")!)).toBe(
       "hearing",
     );
-    expect(presenceStateFromStatus(getStatusFixture("confirm")!)).toBe(
+    expect(orbStateFromStatus(getStatusFixture("confirm")!)).toBe(
       "confirm",
     );
-    expect(presenceStateFromStatus(getStatusFixture("fault")!)).toBe("fault");
+    expect(orbStateFromStatus(getStatusFixture("fault")!)).toBe("fault");
   });
 });

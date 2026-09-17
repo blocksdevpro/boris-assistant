@@ -42,18 +42,11 @@ const OVERLAY_TOP_MARGIN_FRAC: f64 = 0.02;
 /// Horizontal inset used by the left/right anchor presets.
 const OVERLAY_SIDE_MARGIN: i32 = 18;
 
-/// Presence-sized island, used only to park the card-budget HWND so a
-/// compact pill sits where the old 120px stage used to.
-const OVERLAY_STAGE_HEIGHT: f64 = 120.0;
-
 /// Clear WebView space around the stage. CSS shadows cannot draw beyond the
 /// native window, so this gutter prevents their blurred edges being cropped
 /// into a visible rectangular slab.
 const OVERLAY_SHADOW_GUTTER: f64 = 32.0;
 
-/// Presence window height (stage + gutter). Park math keeps the island
-/// center here even though the HWND is always the card budget.
-const OVERLAY_BASE_HEIGHT: f64 = OVERLAY_STAGE_HEIGHT + OVERLAY_SHADOW_GUTTER * 2.0;
 /// Glance card stage — the stable CSS box the island morphs inside.
 const OVERLAY_CARD_STAGE_WIDTH: f64 = 400.0;
 const OVERLAY_CARD_STAGE_HEIGHT: f64 = 300.0;
@@ -509,8 +502,7 @@ fn input_wants_card(status: &StatusPicture) -> bool {
 }
 
 /// Must stay aligned with `overlayStageMode` in the overlay React surface.
-/// Park math is separate: [`overlay_park_y`] uses Card while typed input is
-/// up so a thought-sized field can still grow without clipping the top.
+/// All modes share the same native viewport and top anchor.
 fn layout_for(status: &StatusPicture) -> OverlayLayout {
     if OVERLAY_CONTENT_HIDDEN.load(Ordering::Relaxed) {
         OverlayLayout::Presence
@@ -538,7 +530,7 @@ fn apply_overlay_size<R: Runtime>(overlay: &tauri::WebviewWindow<R>, scale: f64)
 }
 
 /// Native viewport is always the card budget. Presence and thought paint a
-/// smaller island inside it and grow from the center, so Listening → Thinking
+/// smaller island inside it and grow from a stable top edge, so Listening → Thinking
 /// does not call `set_size`. Windows grows a HWND from the top-left, then a
 /// later `set_position` slides it back, which is the "moves then grows" jump.
 fn overlay_dimensions(scale: f64) -> (f64, f64) {
@@ -746,37 +738,22 @@ fn place_overlay<R: Runtime>(overlay: &tauri::WebviewWindow<R>, position: &str) 
     }
 }
 
-/// HWND top. The window is the card budget and the island is centered in it,
-/// so shift up by half the extra height. That keeps a compact pill where the
-/// old presence window sat instead of dropping it into the middle of the card.
+/// Keep the native anchor fixed across phases. React grows the island down
+/// from the stage's top edge; moving the HWND would bypass its layout spring.
 fn overlay_park_y(monitor_y: i32, screen_height: u32, scale: f64) -> i32 {
     let layout = OverlayLayout::from_u8(OVERLAY_LAYOUT.load(Ordering::Relaxed));
-    // Short exact fields paint a thought-sized island, but the HWND still
-    // parks as a card so growth cannot run off the top of the monitor.
-    let park = if OVERLAY_AWAIT_INPUT.load(Ordering::Relaxed) {
-        OverlayLayout::Card
-    } else {
-        layout
-    };
-    overlay_park_y_for(monitor_y, screen_height, scale, park)
+    overlay_park_y_for(monitor_y, screen_height, scale, layout)
 }
 
-/// Presence/thought: keep the small island at the top margin by shifting the
-/// card-budget HWND up. Card: park the HWND on-screen so the grown island is
-/// not clipped by the top of the monitor.
+/// All content sizes share the same on-screen card-budget viewport.
 fn overlay_park_y_for(
     monitor_y: i32,
     screen_height: u32,
-    scale: f64,
-    layout: OverlayLayout,
+    _scale: f64,
+    _layout: OverlayLayout,
 ) -> i32 {
     let margin = (f64::from(screen_height) * OVERLAY_TOP_MARGIN_FRAC) as i32;
-    if layout == OverlayLayout::Card {
-        return monitor_y + margin;
-    }
-    let presence_h = OVERLAY_BASE_HEIGHT * scale;
-    let max_h = OVERLAY_CARD_BASE_HEIGHT * scale;
-    monitor_y + margin + ((presence_h - max_h) / 2.0).round() as i32
+    monitor_y + margin
 }
 
 /// When `locked` is true, mouse passes through to the game (default).
@@ -892,17 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn park_y_keeps_presence_center_on_a_card_hwnd() {
+    fn park_y_does_not_jump_between_content_sizes() {
         let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
-        let y = overlay_park_y_for(0, 1080, 1.0, OverlayLayout::Presence);
-        assert_eq!(y, margin - 90);
-        assert_eq!(margin + 184 / 2, y + 364 / 2);
-
-        let y125 = overlay_park_y(0, 1080, 1.25);
-        assert_eq!(
-            margin + (184.0_f64 * 1.25 / 2.0).round() as i32,
-            y125 + (364.0_f64 * 1.25 / 2.0).round() as i32
-        );
+        for scale in [0.75, 1.0, 1.25] {
+            for layout in [OverlayLayout::Presence, OverlayLayout::Thought, OverlayLayout::Card] {
+                assert_eq!(overlay_park_y_for(0, 1080, scale, layout), margin);
+                assert_eq!(overlay_park_y_for(-1080, 1080, scale, layout), -1080 + margin);
+            }
+        }
     }
 
     #[test]

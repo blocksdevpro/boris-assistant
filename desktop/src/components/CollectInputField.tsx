@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { cancelInput, getSettings, submitInput, type InputPeek } from "@/bridge";
 import { cn } from "@/lib/utils";
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "framer-motion";
+import { overlayContentMotion } from "@/lib/overlayMotion";
+import { OverlayText } from "@/windows/overlay/OverlayText";
 
 const GROW_CHARS = 80;
 
@@ -17,6 +20,8 @@ export function CollectInputField({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitWith, setSubmitWith] = useState<"enter" | "ctrl_enter">("enter");
+  const reduced = Boolean(useReducedMotion());
+  const present = useIsPresent();
 
   useEffect(() => {
     setValue("");
@@ -41,7 +46,7 @@ export function CollectInputField({
   const secret = input.kind === "secret";
   const blob = input.kind === "blob";
   const multiline =
-    blob || value.includes("\n") || value.length > GROW_CHARS;
+    !secret && (input.multiline || blob || value.includes("\n") || value.length > GROW_CHARS);
   const max = Math.max(1, input.max_chars || 512);
   const remaining = max - [...value].length;
   const ctrlEnter = submitWith === "ctrl_enter";
@@ -109,7 +114,9 @@ export function CollectInputField({
   );
 
   return (
-    <div
+    <motion.div
+      inert={!present}
+      layout={compact && !reduced ? "position" : false}
       data-tauri-drag-region="false"
       className={cn(
         "flex min-h-0 w-full flex-col gap-2",
@@ -124,41 +131,45 @@ export function CollectInputField({
           {secret ? " · hidden" : null}
         </p>
       )}
-      {multiline ? (
-        <textarea
-          autoFocus
-          disabled={busy}
-          value={value}
-          maxLength={max}
-          rows={compact ? 5 : 8}
-          placeholder={placeholder}
-          className={cn(
-            fieldClass,
-            compact ? "min-h-[96px] flex-1" : "min-h-[140px]",
-          )}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={onKeyDown}
-        />
-      ) : (
-        <input
-          autoFocus
-          disabled={busy}
-          type={secret ? "password" : "text"}
-          value={value}
-          maxLength={max}
-          placeholder={placeholder}
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-          className={cn(fieldClass, "h-9")}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={onKeyDown}
-        />
-      )}
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-white/28">{hint}</span>
-      </div>
-      {error ? <p className="text-[11px] text-red-300/80">{error}</p> : null}
-    </div>
+      <motion.div layout={compact && !reduced ? true : false} className={cn("relative flex min-h-0 flex-col", compact && multiline && "flex-1")}>
+        {multiline ? (
+          <textarea
+            autoFocus
+            disabled={busy}
+            value={value}
+            maxLength={max}
+            rows={compact ? 5 : 8}
+            placeholder={placeholder}
+            className={cn(
+              fieldClass,
+              compact ? "min-h-[96px] flex-1" : "min-h-[140px]",
+            )}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+        ) : (
+          <input
+            autoFocus
+            disabled={busy}
+            type={secret ? "password" : "text"}
+            value={value}
+            maxLength={max}
+            placeholder={placeholder}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            className={cn(fieldClass, "h-9")}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+        )}
+      </motion.div>
+      <motion.div layout={compact && !reduced ? "position" : false} className="flex items-center gap-1.5">
+        <span className="text-[10px] text-white/28">{compact ? <OverlayText text={hint} /> : hint}</span>
+      </motion.div>
+      <AnimatePresence initial={false}>
+        {error ? <motion.p key="error" className="text-[11px] text-red-300/80" {...overlayContentMotion(!compact || reduced)}>{compact ? <OverlayText text={error} /> : error}</motion.p> : null}
+      </AnimatePresence>
+    </motion.div>
   );
 }

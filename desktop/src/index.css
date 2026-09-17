@@ -107,8 +107,19 @@
   --boris-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --boris-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --boris-duration-fast: 140ms;
-  --boris-duration-normal: 240ms;
-  --boris-duration-slow: 440ms;
+  --boris-duration-normal: 180ms;
+  --boris-duration-slow: 300ms;
+  --boris-space-1: 4px;
+  --boris-space-2: 8px;
+  --boris-space-3: 12px;
+  --boris-space-4: 16px;
+  --boris-space-5: 24px;
+  --boris-space-6: 32px;
+  --boris-radius-control: 8px;
+  --boris-radius-panel: 16px;
+  --boris-text-caption: 12px;
+  --boris-text-body: 13px;
+  --boris-text-title: 28px;
 }
 
 .dark {
@@ -147,13 +158,13 @@
   --boris-green: #30d158;
   --boris-orange: #ff9f0a;
   --boris-red: #ff453a;
-  --boris-surface-canvas: #0b0b0e;
-  --boris-surface-1: rgba(29, 29, 33, 0.78);
-  --boris-surface-2: rgba(38, 38, 43, 0.92);
+  --boris-surface-canvas: #101216;
+  --boris-surface-1: #191c22;
+  --boris-surface-2: #232730;
   --boris-separator: rgba(255, 255, 255, 0.09);
   --boris-label-primary: rgba(255, 255, 255, 0.94);
-  --boris-label-secondary: rgba(235, 235, 245, 0.62);
-  --boris-label-tertiary: rgba(235, 235, 245, 0.34);
+  --boris-label-secondary: #b2bac8;
+  --boris-label-tertiary: #929cad;
   --boris-focus: rgba(64, 156, 255, 0.82);
   --boris-shadow-card:
     0 0.5px 0 rgba(255, 255, 255, 0.08) inset,
@@ -240,13 +251,36 @@
 }
 
 .overlay-stage {
-  /* HWND is always the card budget. This box stays 400×300, flex-centered,
-     with no CSS transform. Listening → Thinking then grows the island from
-     the midpoint. A transform here would break Framer layout projection,
-     and a HWND resize would grow from Win32's top-left then recenter. */
+  /* Stable native anchor and top edge: only the island changes its geometry.
+     The native 32px gutter protects the shadow at every content height. */
   width: 400px;
   height: 300px;
   zoom: var(--overlay-scale, 1);
+}
+
+.overlay-text { position: relative; }
+.overlay-text__value {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+  overflow: hidden;
+  text-overflow: inherit;
+}
+.overlay-text[data-stream] .overlay-text__value {
+  display: inline;
+  overflow: visible;
+}
+.overlay-island .boris-orb {
+  transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.overlay-island :is(input, textarea) {
+  transition: border-color 180ms ease, background-color 180ms ease, opacity 180ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .overlay-surface *, .overlay-surface *::before, .overlay-surface *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 /* Island must stay inside the stage. A tall card used to grow the pill
@@ -318,7 +352,7 @@
   content: "";
   opacity: 0;
   pointer-events: none;
-  transition: opacity 180ms var(--boris-ease-out);
+  transition: opacity 180ms var(--boris-ease-out), background-color 180ms var(--boris-ease-out);
 }
 
 .overlay-details,
@@ -448,7 +482,81 @@
   color: #f44747;
 }
 
-/* Continuous presence loops — single ring, no rotate carnival */
+/* Desktop composition */
+.home-status-panel {
+  border-radius: var(--boris-radius-panel);
+  background: var(--boris-surface-1);
+  border-color: var(--boris-separator);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 6px 22px rgb(0 0 0 / 12%);
+}
+.home-status-panel > .home-status-layout > div:first-child > p:first-child {
+  margin-bottom: var(--boris-space-3);
+  font-size: var(--boris-text-caption);
+  letter-spacing: 0.08em;
+}
+.home-status-heading + p { margin-left: 80px; margin-top: -7px; }
+.home-status-panel[data-state="confirm"] { border-color: #8d6b39; background: #29251e; }
+.home-status-panel[data-state="fault"] { border-color: #99504c; background: #2b2023; }
+.conversation-panel { box-shadow: none; border-radius: var(--boris-radius-panel); }
+.conversation-panel p, [role="alert"], .teach-status { overflow-wrap: anywhere; }
+.main-scroll { scrollbar-gutter: stable; }
+.settings-view { gap: var(--boris-space-5); }
+.settings-sidebar__list { background: transparent; border: 0; box-shadow: none; padding: 0; }
+.settings-sidebar__item { border-radius: var(--boris-radius-control); min-height: 40px; }
+.settings-sidebar__item[aria-selected="true"] { color: #d7edff; }
+.settings-sidebar__item[aria-selected="true"]::before {
+  content: ""; position: absolute; left: 0; height: 16px; width: 3px;
+  border-radius: 2px; background: #92ccf5; z-index: 1;
+}
+.settings-section__header { padding-inline: 2px; }
+.settings-section__header h2 { font-size: 13px; font-weight: 600; }
+.settings-section__footer { padding-inline: 2px; }
+.settings-row { overflow-wrap: anywhere; }
+.settings-row:hover { background-color: rgb(255 255 255 / 1.5%); }
+.settings-row__control :is(select, input, button) { max-width: 100%; }
+.settings-content select, .settings-content input, .settings-content textarea {
+  border-radius: var(--boris-radius-control);
+  background-color: #12151b;
+  color: var(--boris-label-primary);
+  font-size: var(--boris-text-body);
+}
+.settings-content :is(select, input, textarea):disabled { opacity: 0.6; }
+.main-console :is(button, input, select, textarea, a):focus-visible {
+  outline: 2px solid #9bd3fc; outline-offset: 2px;
+}
+.settings-sidebar__item:focus-visible { outline-offset: -2px; }
+.main-console button:disabled { cursor: not-allowed; }
+.title-bar { height: 44px; background: #14171d; backdrop-filter: none; }
+.title-bar__controls { height: 100%; margin: 0; padding: 0; gap: 0; border: 0; border-radius: 0; background: none; }
+.title-bar__button { width: 44px; height: 100%; border-radius: 0; color: #a9b2c2; }
+.main-console .title-bar__button:focus-visible { outline-offset: -3px; }
+.title-bar__title { color: #c9d0dc; font-weight: 500; }
+.teach-view { gap: 12px; }
+.teach-stage { flex-grow: 0; padding-block: 20px; }
+.teach-description, .teach-status p { color: var(--boris-label-secondary); }
+.teach-listening-mark { width: 144px; height: 144px; }
+.overlay-island {
+  box-shadow: 0 6px 16px rgb(0 0 0 / 32%), 0 1px 4px rgb(0 0 0 / 24%), inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+@media (max-width: 700px) {
+  .home-view { padding: 20px; }
+  .home-status-panel { padding: 18px; }
+  .home-status-heading h1 { font-size: 25px; }
+  .home-engine-action button { padding-inline: 14px; }
+  .settings-view { padding: 20px 18px 32px; gap: 18px; }
+  .settings-row { padding-inline: 12px; }
+  .settings-row__control { max-width: 48%; }
+  .settings-content__header { margin-bottom: 14px; }
+}
+@media (max-height: 560px) {
+  .home-view { padding-top: 18px; gap: 14px; }
+  .conversation-panel { min-height: 152px; }
+  .conversation-panel > div:nth-child(2) { padding-block: 8px; }
+  .teach-stage { padding-block: 4px; }
+  .teach-listening-mark { width: 112px; height: 112px; }
+  .teach-listening-mark .boris-orb { --orb-size: 48px; }
+  .settings-loading-state { min-height: 260px; }
+}
 /* ── Main window (Home + Settings) ────────────────────────────────────────── */
 
 .main-console {
@@ -532,8 +640,8 @@
   }
 
   .teach-listening-mark {
-    width: 8.5rem;
-    height: 8.5rem;
+    width: 7rem;
+    height: 7rem;
   }
 
   .teach-status {
@@ -552,19 +660,17 @@
   }
 }
 
-/* Apple-style inset group */
+/* One opaque material keeps nested settings readable and inexpensive to paint. */
 .settings-group {
   border: 1px solid var(--boris-separator);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 45%),
     var(--boris-surface-1);
   box-shadow: var(--boris-shadow-card);
-  backdrop-filter: blur(22px) saturate(1.08);
-  -webkit-backdrop-filter: blur(22px) saturate(1.08);
 }
 
 .main-progress-track {
-  height: 3px;
+  height: 4px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.09);
   box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.22);
@@ -575,7 +681,7 @@
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--boris-blue), #64d2ff);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--boris-blue) 38%, transparent);
+  box-shadow: none;
   transition: width var(--boris-duration-normal) var(--boris-ease-out);
 }
 

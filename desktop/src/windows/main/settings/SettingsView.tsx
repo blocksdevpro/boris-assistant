@@ -150,10 +150,10 @@ export function SettingsView({
   };
 
   return (
-    <div className="settings-view mx-auto grid w-full max-w-5xl gap-6 px-5 py-5 pb-12 sm:grid-cols-[11.5rem_minmax(0,1fr)] sm:px-6 sm:py-6">
+    <div className="settings-view mx-auto grid w-full max-w-5xl gap-6 px-5 py-5 pb-12 sm:grid-cols-[9.5rem_minmax(0,1fr)] sm:px-6 sm:py-6">
       <aside className="settings-sidebar sm:sticky sm:top-5 sm:self-start">
         <div className="mb-4 hidden px-2 sm:block">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-white/28">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--boris-label-tertiary)]">
             Preferences
           </p>
         </div>
@@ -201,7 +201,7 @@ export function SettingsView({
                   "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/20",
                   active
                     ? "text-white"
-                    : "text-white/48 hover:bg-white/[0.045] hover:text-white/78",
+                    : "text-[var(--boris-label-secondary)] hover:bg-white/[0.045] hover:text-white/78",
                 )}
               >
                 {active ? (
@@ -232,7 +232,7 @@ export function SettingsView({
         <div
           role="status"
           aria-live="polite"
-          className="settings-save-state mt-3 flex min-h-7 items-center gap-1.5 px-2 text-[11px] text-white/38"
+          className="settings-save-state mt-3 flex min-h-7 items-center gap-1.5 px-2 text-[11px] text-[var(--boris-label-tertiary)]"
         >
           {saveState === "saving" ? (
             <>
@@ -258,7 +258,7 @@ export function SettingsView({
             <h1 className="text-[24px] font-semibold tracking-[-0.035em] text-white/94">
               {activeCategory.label}
             </h1>
-            <p className="mt-1 text-[12px] leading-relaxed text-white/36">
+            <p className="mt-1 text-[12px] leading-relaxed text-[var(--boris-label-secondary)]">
               {activeCategory.description}
             </p>
           </div>
@@ -280,13 +280,13 @@ export function SettingsView({
             id="settings-panel"
             role="tabpanel"
             aria-labelledby={`settings-tab-${category}`}
-            initial={reduceMotion ? false : { opacity: 0, x: 8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={reduceMotion ? { opacity: 1 } : { opacity: 0, x: -5 }}
+            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: reduceMotion ? 1 : 0 }}
             transition={
               reduceMotion
                 ? { duration: 0 }
-                : { duration: 0.22, ease: [0.22, 1, 0.36, 1] }
+                : { duration: 0.14, ease: [0.22, 1, 0.36, 1] }
             }
           >
             {category === "general" ? (

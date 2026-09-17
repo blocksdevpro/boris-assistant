@@ -538,7 +538,7 @@ export function MainWindow() {
         }
       />
 
-      <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+      <main ref={mainScrollRef} className="main-scroll min-h-0 flex-1 overflow-y-auto">
         <AnimatePresence
           mode="wait"
           initial={false}
@@ -548,18 +548,18 @@ export function MainWindow() {
             key={view}
             className="min-h-full"
             initial={
-              reduceMotion ? false : { opacity: 0, y: 10, scale: 0.995 }
+              reduceMotion ? false : { opacity: 0, y: 5 }
             }
-            animate={{ opacity: 1, y: 0, scale: 1 }}
+            animate={{ opacity: 1, y: 0 }}
             exit={
               reduceMotion
                 ? { opacity: 1 }
-                : { opacity: 0, y: -6, scale: 0.997 }
+                : { opacity: 0, y: -3 }
             }
             transition={
               reduceMotion
                 ? { duration: 0 }
-                : { duration: 0.3, ease: [0.22, 1, 0.36, 1] }
+                : { duration: 0.16, ease: [0.22, 1, 0.36, 1] }
             }
           >
             {view === "home" ? (

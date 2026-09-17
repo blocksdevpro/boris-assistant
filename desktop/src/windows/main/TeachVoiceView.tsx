@@ -13,7 +13,7 @@ import {
   startWakeEnroll,
   type StatusPicture,
 } from "@/bridge";
-import { GridPresence, type PresenceState } from "@/components/presence";
+import { BorisOrb, type BorisOrbState } from "@/components/presence";
 import { cn } from "@/lib/utils";
 
 const WANT = 4;
@@ -113,19 +113,6 @@ export function TeachVoiceView({
       animate={{ opacity: 1, scale: 1 }}
       transition={transition}
     >
-      <motion.div
-        className={cn(
-          "pointer-events-none absolute left-1/2 top-[46%] size-96 -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl",
-          ready ? "bg-emerald-300/[0.035]" : "bg-sky-200/[0.025]",
-        )}
-        animate={
-          reduceMotion
-            ? undefined
-            : { opacity: [0.55, 1, 0.55], scale: [0.96, 1.04, 0.96] }
-        }
-        transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
-        aria-hidden
-      />
 
       <header className="teach-header relative mx-auto max-w-md text-center">
         <motion.div
@@ -160,7 +147,7 @@ export function TeachVoiceView({
             <h1 className="teach-heading text-[28px] font-semibold tracking-[-0.035em] text-white sm:text-[30px]">
               {ready ? "You’re all set" : "Teach Boris your voice"}
             </h1>
-            <p className="teach-description mx-auto mt-2 max-w-sm text-[14px] leading-relaxed text-white/48 sm:text-[15px]">
+            <p className="teach-description mx-auto mt-2 max-w-sm text-[14px] leading-relaxed text-[var(--boris-label-secondary)] sm:text-[15px]">
               {ready
                 ? "Boris can now better tell your voice apart from nearby speakers."
                 : "Say “Hey Boris” four times in your normal voice. Pause briefly between each one."}
@@ -194,13 +181,13 @@ export function TeachVoiceView({
                       ? "text-emerald-200/80"
                       : stage === "listening"
                         ? "text-white/78"
-                        : "text-white/48",
+                        : "text-[var(--boris-label-secondary)]",
                 )}
               >
                 {statusCopy}
               </p>
               {stage === "listening" ? (
-                <p className="mt-1 text-[12px] text-white/35">
+                <p className="mt-1 text-[12px] text-[var(--boris-label-tertiary)]">
                   Speak from your usual distance
                 </p>
               ) : null}
@@ -316,7 +303,7 @@ function TakeProgress({
                   "flex size-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold",
                   complete
                     ? "border-white bg-white text-[#111113]"
-                    : "border-white/12 bg-white/[0.035] text-white/35",
+                    : "border-white/12 bg-white/[0.035] text-[var(--boris-label-tertiary)]",
                 )}
                 animate={
                   complete
@@ -353,7 +340,7 @@ function TakeProgress({
   );
 }
 
-function teachPresenceState(stage: TeachStage): PresenceState {
+function teachPresenceState(stage: TeachStage): BorisOrbState {
   if (stage === "ready") return "ready";
   if (stage === "listening") return "hearing";
   if (stage === "error") return "fault";
@@ -379,14 +366,6 @@ function ListeningMark({
   return (
     <motion.div
       className="teach-listening-mark relative flex size-40 items-center justify-center sm:size-44"
-      animate={
-        reduceMotion
-          ? undefined
-          : stage === "listening"
-            ? { scale: [1, 1.015, 1] }
-            : { scale: 1 }
-      }
-      transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
       role="img"
       aria-label={
         ready
@@ -396,18 +375,6 @@ function ListeningMark({
             : "Microphone is waiting"
       }
     >
-      {stage === "listening" ? (
-        <motion.span
-          className="absolute inset-[7%] rounded-full border border-white/[0.055]"
-          animate={
-            reduceMotion
-              ? undefined
-              : { scale: [0.96, 1.12], opacity: [0.42, 0] }
-          }
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeOut" }}
-          aria-hidden
-        />
-      ) : null}
       <svg
         viewBox="0 0 160 160"
         className="absolute inset-0 size-full -rotate-90"
@@ -450,7 +417,7 @@ function ListeningMark({
             exit={{ opacity: 0, scale: 0.94 }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
           >
-            <GridPresence
+            <BorisOrb
               state={teachPresenceState(stage)}
               accent={
                 ready ? "#30d158" : stage === "error" ? "#ff453a" : "#64d2ff"

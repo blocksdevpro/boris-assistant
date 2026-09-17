@@ -6,8 +6,8 @@ import { artifactKindOf, clipArtifactBody } from "@/lib/artifactGlance";
 import { isTauriRuntime } from "@/lib/runtime";
 import { ArtifactCode } from "./ArtifactCode";
 import { ArtifactMarkdown } from "./ArtifactMarkdown";
-
-const soft = [0.22, 1, 0.36, 1] as const;
+import { overlayContentMotion } from "@/lib/overlayMotion";
+import { OverlayText } from "@/windows/overlay/OverlayText";
 
 const FIXTURE_MARKDOWN = `# Weekly meal plan
 
@@ -78,10 +78,7 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
       data-tauri-drag-region
       aria-labelledby={`overlay-artifact-${peek.id}`}
       className="overlay-card overlay-caption mt-2 flex min-h-0 min-w-0 w-full flex-col overflow-hidden rounded-[12px] border-white/[0.07] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]"
-      initial={reduceMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={reduceMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.22, ease: soft }}
+      layout={reduceMotion ? false : "position"}
     >
       <div
         data-tauri-drag-region
@@ -106,23 +103,21 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
             data-tauri-drag-region
             className="mt-1 truncate text-[12px] font-semibold leading-none tracking-[-0.015em] text-white/90"
           >
-            {peek.title}
+            <OverlayText text={peek.title} />
           </h2>
         </div>
       </div>
 
       <div
         data-tauri-drag-region
-        className="overlay-card__body min-h-0 min-w-0 flex-1 overflow-hidden break-words"
+        className="overlay-card__body relative min-h-0 min-w-0 flex-1 overflow-hidden break-words"
       >
-        <AnimatePresence mode="wait" initial={false}>
+        <AnimatePresence mode="popLayout" initial={false}>
           {clip ? (
             <motion.div
               key="content"
               data-tauri-drag-region
-              initial={reduceMotion ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: reduceMotion ? 0 : 0.24, ease: soft }}
+              {...overlayContentMotion(reduceMotion)}
             >
               {kind === "code" ? (
                 <ArtifactCode source={clip.text} language={peek.language} compact />
@@ -134,8 +129,7 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
             <motion.p
               key="unavailable"
               className="py-2 text-[11px] leading-relaxed text-white/48"
-              initial={reduceMotion ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
+              {...overlayContentMotion(reduceMotion)}
             >
               Preview unavailable. Open Boris to view this card.
             </motion.p>
@@ -145,8 +139,7 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
               role="status"
               aria-label="Loading card preview"
               className="space-y-1.5 py-1"
-              initial={reduceMotion ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
+              {...overlayContentMotion(reduceMotion)}
             >
               <span className="block h-2 w-4/5 animate-pulse rounded-full bg-white/[0.07]" />
               <span className="block h-2 w-3/5 animate-pulse rounded-full bg-white/[0.05]" />
@@ -159,11 +152,11 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
         data-tauri-drag-region
         className="mt-1.5 h-3 shrink-0 text-[9px] font-medium leading-tight text-white/38"
       >
-        {clip?.clipped
+        <OverlayText text={clip?.clipped
           ? `+${clip.hiddenLines} more · Open Boris for the full card`
           : clip || loadState === "unavailable"
             ? "Open Boris for the full card"
-            : "\u00a0"}
+            : "\u00a0"} />
       </p>
     </motion.article>
   );

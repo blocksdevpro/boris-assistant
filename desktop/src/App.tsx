@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StatusPreviewProvider } from "@/bridge/useStatus";
 import { OFF_STATUS, type StatusPicture } from "@/bridge";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
-import { GridPresence } from "@/components/presence";
+import { BorisOrb } from "@/components/presence";
 import { StartupScreen } from "@/components/StartupScreen";
 import { logger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -33,7 +33,7 @@ function SurfaceFallback({
       aria-live="polite"
       aria-label={label}
     >
-      <GridPresence state="starting" reducedMotion={false} size="md" />
+      <BorisOrb state="starting" size="md" />
       <span className="surface-loader__label">{label}</span>
     </div>
   );
@@ -195,6 +195,7 @@ function App() {
           <div
             className="startup-app-shell"
             data-revealed={startupRevealed || startupComplete}
+            inert={!startupRevealed && !startupComplete}
           >
             {surfaceContent}
           </div>

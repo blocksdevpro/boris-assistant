@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import { Mic, Volume2 } from "lucide-react";
+import { animate, motion } from "framer-motion";
+import { AlertCircle, Mic, Volume2 } from "lucide-react";
 import type { StatusPicture } from "@/bridge";
 import type { Caption } from "@/lib/statusPresentation";
 import { cn } from "@/lib/utils";
-
-const soft = [0.22, 1, 0.36, 1] as const;
+import { overlayContentMotion, overlayFade } from "@/lib/overlayMotion";
+import { OverlayText } from "./OverlayText";
 
 export function OverlayThoughts({
   text,
@@ -21,12 +21,22 @@ export function OverlayThoughts({
     const element = scroller.current;
     if (!element) return;
 
+    let stopScroll: (() => void) | undefined;
     const followTail = () => {
       const nextOverflowing = element.scrollHeight > element.clientHeight + 1;
       setOverflowing((current) =>
         current === nextOverflowing ? current : nextOverflowing,
       );
-      element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      const target = Math.max(0, element.scrollHeight - element.clientHeight);
+      stopScroll?.();
+      if (reducedMotion) element.scrollTop = target;
+      else {
+        const animation = animate(element.scrollTop, target, {
+          ...overlayFade,
+          onUpdate: (value) => { element.scrollTop = value; },
+        });
+        stopScroll = () => animation.stop();
+      }
     };
 
     followTail();
@@ -37,17 +47,14 @@ export function OverlayThoughts({
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
+      stopScroll?.();
     };
-  }, [text]);
+  }, [text, reducedMotion]);
 
   return (
     <motion.div
       data-tauri-drag-region
       className="overlay-caption overlay-thought mt-2 h-[104px] min-w-0 max-w-[324px] overflow-hidden rounded-[12px] px-2.5 py-2"
-      initial={reducedMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={reducedMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: reducedMotion ? 0 : 0.18, ease: soft }}
     >
       <p
         data-tauri-drag-region
@@ -65,7 +72,7 @@ export function OverlayThoughts({
           data-tauri-drag-region
           className="whitespace-pre-wrap text-[12px] leading-[1.4] tracking-[-0.012em] text-white/78"
         >
-          {text}
+          <OverlayText text={text} stream />
         </p>
       </div>
     </motion.div>
@@ -95,12 +102,14 @@ export function CaptionBody({
         color,
       )}
     >
-      {caption.kind !== "error" ? (
+      {caption.kind === "error" ? (
+        <AlertCircle className="mr-1 inline size-3.5 align-text-bottom" aria-hidden="true" />
+      ) : (
         <span className="mr-1.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-white/42">
           {caption.kind === "said" ? "Boris" : "You"}
         </span>
-      ) : null}
-      {caption.text}
+      )}
+      <OverlayText text={caption.text} stream />
     </p>
   );
 }
@@ -142,10 +151,7 @@ export function DeviceFaultBadge({
       title={detail}
       className="overlay-device-fault flex h-6 shrink-0 items-center gap-1 rounded-full border border-amber-200/25 bg-amber-300/10 px-2 text-[9px] font-semibold text-amber-50/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
       aria-label={`${label} unavailable: ${detail}`}
-      initial={reducedMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={reducedMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: reducedMotion ? 0 : 0.18, ease: soft }}
+      {...overlayContentMotion(reducedMotion)}
     >
       {speakerBad && !micBad ? (
         <Volume2 className="size-3" strokeWidth={2} aria-hidden="true" />

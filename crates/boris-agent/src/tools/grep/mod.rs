@@ -373,7 +373,8 @@ mod tests {
             "head_limit": "20",
             "multiline": "true"
         });
-        validate_args(&schema, &args, &args.to_string()).expect("lenient fields must pass validator");
+        validate_args(&schema, &args, &args.to_string())
+            .expect("lenient fields must pass validator");
         // And they must reach the coerce path with expected values.
         // NOTE: `head_limit` is canonical and wins over the `limit` alias;
         // pass only one of them here (see `limit_alias_falls_back_to_limit`).

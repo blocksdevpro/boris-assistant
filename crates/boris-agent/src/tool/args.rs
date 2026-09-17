@@ -46,10 +46,7 @@ pub fn optional_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
 ///
 /// Use for strict `integer` schema fields (`offset`/`limit`/`timeout`/…).
 /// Lenient grep aliases (`-B`/`-A`/`-C`/…) keep [`coerce_u64`].
-pub fn optional_u64_strict(
-    obj: &Map<String, Value>,
-    key: &str,
-) -> Result<Option<u64>, ToolError> {
+pub fn optional_u64_strict(obj: &Map<String, Value>, key: &str) -> Result<Option<u64>, ToolError> {
     match obj.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => strict_u64(v, key).map(Some),

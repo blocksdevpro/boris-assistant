@@ -440,7 +440,9 @@ fn collect_confirm_batch(
                 // Budget-aware split: each batched sibling counts against
                 // `max_confirms_per_turn` even though the UI shows one prompt.
                 // `confirms_used` already includes `pending`.
-                if confirms_used.saturating_add(batch_with.len() as u32).saturating_add(1)
+                if confirms_used
+                    .saturating_add(batch_with.len() as u32)
+                    .saturating_add(1)
                     > max_confirms.max(1)
                 {
                     let mut rest = vec![call];
@@ -595,10 +597,12 @@ async fn run_tool_batch_parallel(
         results.extend(chunk_results);
     }
 
-    if results.iter().any(|(_, r)| matches!(
-        r,
-        InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
-    )) {
+    if results.iter().any(|(_, r)| {
+        matches!(
+            r,
+            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
+        )
+    }) {
         tracing::warn!(
             batch = calls.len(),
             "parallel batch hit unexpected HITL; falling back to sequential"
@@ -716,10 +720,12 @@ async fn run_tool_batch_waves(
         .into_iter()
         .map(|o| o.expect("every call should have a result"))
         .collect();
-    if results.iter().any(|(_, r)| matches!(
-        r,
-        InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
-    )) {
+    if results.iter().any(|(_, r)| {
+        matches!(
+            r,
+            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
+        )
+    }) {
         tracing::warn!(
             batch = calls.len(),
             "wave batch hit unexpected HITL; falling back to sequential"
@@ -1248,8 +1254,7 @@ mod tests {
             max_confirms_per_turn: 2,
             ..Default::default()
         };
-        let runtime =
-            ToolRuntime::new(policy, Box::new(crate::runtime::NullAuditSink));
+        let runtime = ToolRuntime::new(policy, Box::new(crate::runtime::NullAuditSink));
         let mut context = Context::new(20);
         let client = NoopClient;
         let config = AgentLoopConfig::default();
@@ -1332,10 +1337,8 @@ mod tests {
                 Ok("ok".into())
             }
         }
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Safe),
-            Arc::new(DangerWrite { name: "danger" }),
-        ];
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(Safe), Arc::new(DangerWrite { name: "danger" })];
         let runtime = ToolRuntime::null();
         let mut context = Context::new(20);
         let client = NoopClient;
@@ -1400,9 +1403,8 @@ mod tests {
     async fn waves_fall_back_to_sequential_on_unexpected_input() {
         // B12 wave path: a collect_input call smuggled into the wave batch
         // must also fall back to sequential and pause for input.
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(crate::tools::collect_input::CollectInputTool),
-        ];
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(crate::tools::collect_input::CollectInputTool)];
         let runtime = ToolRuntime::null();
         let mut context = Context::new(20);
         let client = NoopClient;

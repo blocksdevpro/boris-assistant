@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 
+use super::barge::BargeWatch;
 use super::device_switch::{apply_input_switch, apply_output_switch};
 use super::picture::Picture;
 use super::EngineCommand;
@@ -97,13 +98,40 @@ pub(super) fn poll_running(
     }
 }
 
+/// Drain stale speaker events before a new Play.
+///
+/// Returns `true` when the event channel itself is dead (audio worker gone).
+/// Callers must not swallow that: without the worker, the following `play`
+/// fails and the wait below reports `Stopped`, which ends in `go_off`.
+/// Previously every call site used `while try_recv().is_ok() {}` and a dead
+/// worker looked identical to an empty queue until the play error.
+pub(super) fn drain_output_events(
+    output_events: &crossbeam_channel::Receiver<OutputEvent>,
+) -> bool {
+    loop {
+        match output_events.try_recv() {
+            Ok(_) => {}
+            Err(crossbeam_channel::TryRecvError::Empty) => return false,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                tracing::warn!("output event channel disconnected while draining");
+                return true;
+            }
+        }
+    }
+}
 /// Wait until the output worker has resampled + queued samples (about to be audible).
+///
+/// `barge` (when `Some`) scores the live mic for the wake word while waiting;
+/// a hit stops playback and reports [`PlaybackWait::BargedIn`] so the caller
+/// can listen instead of finishing a prompt nobody hears. Pass `None` for
+/// fire-and-forget recovery lines where no listener follows.
 pub(super) fn wait_playback_started(
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
     audio: &mut AudioService,
     picture: &mut Picture,
+    mut barge: Option<&mut BargeWatch>,
 ) -> PlaybackWait {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -115,6 +143,16 @@ pub(super) fn wait_playback_started(
         if poll.output_rebuilt {
             tracing::info!("speaker switched before playback Started — aborting play wait");
             return PlaybackWait::Aborted;
+        }
+        // Wake barge-in while the prompt is still queuing: stop and let the
+        // caller listen — the user is already speaking their answer.
+        if let Some(watch) = barge.as_mut() {
+            if watch.poll_wake_only().is_some() {
+                tracing::info!("wake barge-in during prompt playback — stopping to listen");
+                watch.reset();
+                audio.stop();
+                return PlaybackWait::BargedIn;
+            }
         }
         if std::time::Instant::now() > deadline {
             tracing::warn!("playback Started timeout — aborting silent job");
@@ -140,6 +178,7 @@ pub(super) fn wait_playback_or_stop(
     running: &mut bool,
     audio: &mut AudioService,
     picture: &mut Picture,
+    mut barge: Option<&mut BargeWatch>,
 ) -> PlaybackWait {
     let deadline = std::time::Instant::now() + MAX_ONE_SHOT_PLAYBACK;
     loop {
@@ -152,6 +191,14 @@ pub(super) fn wait_playback_or_stop(
             // Old pipeline (and its Drained event) is gone with the device rebuild.
             tracing::info!("speaker switched mid-playback — ending Talking wait");
             return PlaybackWait::Aborted;
+        }
+        if let Some(watch) = barge.as_mut() {
+            if watch.poll_wake_only().is_some() {
+                tracing::info!("wake barge-in during prompt playback — stopping to listen");
+                watch.reset();
+                audio.stop();
+                return PlaybackWait::BargedIn;
+            }
         }
         if std::time::Instant::now() >= deadline {
             tracing::warn!("playback drain deadline exceeded — flushing stuck job");

@@ -93,6 +93,9 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
 
     // Single-token vocabulary (whole-word only).
     // Ultra-short tokens ("y", "n") only count as the *entire* utterance.
+    // NOTE: bare "please" is deliberately NOT an approval — polite filler
+    // ("please?", "hmm, please…") must not auto-approve a Dangerous tool.
+    // "yes please" / "please go ahead" still approve via YES_PHRASES above.
     const YES: &[&str] = &[
         "yes",
         "yeah",
@@ -101,7 +104,6 @@ pub(super) fn interpret_yes_no(text: &str) -> Option<bool> {
         "sure",
         "ok",
         "okay",
-        "please",
         "affirmative",
         "yea",
         "confirmed",
@@ -216,6 +218,17 @@ mod tests {
         assert_eq!(interpret_yes_no("cancel that now"), Some(false));
         // Partial phrase fragments should not match.
         assert_eq!(interpret_yes_no("ahead"), None);
+    }
+
+    #[test]
+    fn bare_please_is_not_approval() {
+        // Polite filler alone must stay ambiguous (→ re-ask → deny-by-default),
+        // never an implicit yes to a Dangerous tool.
+        assert_eq!(interpret_yes_no("please"), None);
+        assert_eq!(interpret_yes_no("please?"), None);
+        // Explicit forms still approve.
+        assert_eq!(interpret_yes_no("yes please"), Some(true));
+        assert_eq!(interpret_yes_no("please go ahead"), Some(true));
     }
 
     #[test]

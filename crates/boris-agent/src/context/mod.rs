@@ -52,8 +52,7 @@ pub(crate) const MAX_COMPACTED_PREFIX_DIGESTS: usize = 5;
 pub(crate) const MAX_COMPACTED_PREFIX_CHARS: usize = 16_000;
 /// Max prefix messages preserved before the first human turn
 /// (system + summary + digests).
-pub(crate) const MAX_PREFIX_MESSAGES: usize =
-    MAX_COMPACTED_PREFIX_DIGESTS + 2;
+pub(crate) const MAX_PREFIX_MESSAGES: usize = MAX_COMPACTED_PREFIX_DIGESTS + 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -456,9 +455,8 @@ impl Context {
         let mut sections: Vec<(&str, String)> = Vec::new();
 
         if let Some(personal) = &self.personal_context {
-            let json = escape_envelope(
-                &serde_json::to_string(personal).unwrap_or_else(|_| "\"\"".into()),
-            );
+            let json =
+                escape_envelope(&serde_json::to_string(personal).unwrap_or_else(|_| "\"\"".into()));
             sections.push((
                 "personal_context",
                 format!(
@@ -792,7 +790,10 @@ mod tests {
             text.find("## retrieved_memory").unwrap(),
             text.find("## task_state").unwrap(),
         ];
-        assert!(order.windows(2).all(|w| w[0] < w[1]), "wrong order: {order:?}");
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "wrong order: {order:?}"
+        );
 
         // wire inserts at most one derived message.
         let wire = ctx.wire_messages();
@@ -827,9 +828,10 @@ mod tests {
         ctx.set_personal_context(Some("facts".into()));
         let merged = ctx.derived_context_message().unwrap();
         let merged_chars = merged.dump().to_string().len();
-        assert!(ctx.estimate_tokens() >= crate::context::estimate_serialized_tokens(
-            &merged.dump().to_string()
-        ));
+        assert!(
+            ctx.estimate_tokens()
+                >= crate::context::estimate_serialized_tokens(&merged.dump().to_string())
+        );
         assert!(merged_chars > 0);
         // as_json is valid OpenAI shape with only known roles.
         for m in ctx.as_json().as_array().unwrap() {

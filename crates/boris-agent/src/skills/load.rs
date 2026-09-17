@@ -186,10 +186,7 @@ pub fn check_skill_path(skill: &Skill) -> Result<std::path::PathBuf, String> {
         .and_then(|n| n.to_str())
         .is_none_or(|n| n != "SKILL.md")
     {
-        return Err(format!(
-            "skill '{}' path must end in SKILL.md",
-            skill.name
-        ));
+        return Err(format!("skill '{}' path must end in SKILL.md", skill.name));
     }
     let canonical_file = std::fs::canonicalize(&skill.file_path)
         .map_err(|e| format!("skill '{}' resolve failed: {e}", skill.name))?;
@@ -308,10 +305,8 @@ mod tests {
 
     #[test]
     fn skill_path_traversal_rejected() {
-        let dir = std::env::temp_dir().join(format!(
-            "boris-skill-traversal-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("boris-skill-traversal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let real = dir.join("real").join("SKILL.md");

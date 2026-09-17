@@ -872,9 +872,16 @@ mod tests {
     fn park_y_does_not_jump_between_content_sizes() {
         let margin = (1080.0 * OVERLAY_TOP_MARGIN_FRAC) as i32;
         for scale in [0.75, 1.0, 1.25] {
-            for layout in [OverlayLayout::Presence, OverlayLayout::Thought, OverlayLayout::Card] {
+            for layout in [
+                OverlayLayout::Presence,
+                OverlayLayout::Thought,
+                OverlayLayout::Card,
+            ] {
                 assert_eq!(overlay_park_y_for(0, 1080, scale, layout), margin);
-                assert_eq!(overlay_park_y_for(-1080, 1080, scale, layout), -1080 + margin);
+                assert_eq!(
+                    overlay_park_y_for(-1080, 1080, scale, layout),
+                    -1080 + margin
+                );
             }
         }
     }

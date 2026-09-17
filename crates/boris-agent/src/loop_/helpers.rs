@@ -217,6 +217,10 @@ pub(super) fn build_tool_invocation(
 }
 
 /// Context message content for a tool observation.
+///
+/// Test-only helper for building `Role::Tool` message payloads; production
+/// observations go through [`Context::push_tool_result`].
+#[cfg(test)]
 pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -> Value {
     json!({ "tool_call_id": call_id, "content": content.into() })
 }
@@ -450,7 +454,10 @@ mod tests {
             "actual-use activation must outrank an unselected tool"
         );
         assert!(!names.contains(&"low_priority_tool"));
-        assert_eq!(pruned, 1, "one low-priority definition must be reported pruned");
+        assert_eq!(
+            pruned, 1,
+            "one low-priority definition must be reported pruned"
+        );
     }
 
     #[test]
@@ -610,8 +617,7 @@ mod tests {
                 description: "x".repeat(20_000),
             }));
         }
-        let (payload, pruned) =
-            tools_json_for_llm(&tools, &ListToolsContext::default());
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(pruned >= 1, "expected at least one prune, got {pruned}");
         let names = payload
             .as_array()
@@ -638,8 +644,7 @@ mod tests {
             name: "get_time".into(),
             description: "core".into(),
         })];
-        let (payload, pruned) =
-            tools_json_for_llm(&tools, &ListToolsContext::default());
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert_eq!(pruned, 0);
         assert!(payload.is_array());
     }

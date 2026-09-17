@@ -426,7 +426,10 @@ fn sanitize_optional_header(field: &'static str, raw: String) -> Option<String> 
 /// Returns [`LlmError`] instead of panicking so constructors can degrade
 /// gracefully (notably on malformed proxy env vars, which reqwest surfaces
 /// as a builder error).
-pub(super) fn try_build_http_client(connect: Duration, total: Duration) -> Result<Client, LlmError> {
+pub(super) fn try_build_http_client(
+    connect: Duration,
+    total: Duration,
+) -> Result<Client, LlmError> {
     Client::builder()
         .connect_timeout(connect)
         .timeout(total)
@@ -537,17 +540,21 @@ mod tests {
 
         let c = OpenRouterClient::new("k".into(), Some("m".into()))
             .with_base_url("https://example.com/v1/chat/completions///");
-        assert_eq!(
-            c.endpoint_url(),
-            "https://example.com/v1/chat/completions"
-        );
+        assert_eq!(c.endpoint_url(), "https://example.com/v1/chat/completions");
     }
 
     #[test]
     fn provider_order_is_trimmed_and_lowercased() {
-        let c = OpenRouterClient::new("k".into(), Some("m".into()))
-            .with_provider_order(["Baseten ", "  COREWEAVE", "", "   "]);
-        assert_eq!(c.provider_order(), &["baseten".to_string(), "coreweave".to_string()]);
+        let c = OpenRouterClient::new("k".into(), Some("m".into())).with_provider_order([
+            "Baseten ",
+            "  COREWEAVE",
+            "",
+            "   ",
+        ]);
+        assert_eq!(
+            c.provider_order(),
+            &["baseten".to_string(), "coreweave".to_string()]
+        );
     }
 
     #[test]

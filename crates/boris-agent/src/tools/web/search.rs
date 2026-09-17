@@ -119,7 +119,7 @@ impl Tool for WebSearchTool {
         if query.trim().is_empty() {
             return Err(ToolError::invalid_args("query is empty"));
         }
-        let limit = parse_search_limit_opt(obj.get("limit"))?;
+        let limit = parse_search_limit(obj.get("limit"))?;
         let query = query.trim();
 
         // Optional Exa upgrade. Failures (including bad keys) fall through so a
@@ -354,10 +354,6 @@ fn format_results(query: &str, results: &[SearchHit]) -> String {
 /// instead of silently falling back to the default. Numeric strings (`"3"`)
 /// are accepted.
 pub(crate) fn parse_search_limit(v: Option<&Value>) -> Result<usize, ToolError> {
-    parse_search_limit_opt(v)
-}
-
-pub(crate) fn parse_search_limit_opt(v: Option<&Value>) -> Result<usize, ToolError> {
     match v {
         None | Some(Value::Null) => Ok(MAX_SEARCH),
         Some(val) => {
@@ -394,7 +390,11 @@ mod tests {
         for v in [json!(2.5), json!(8.0), json!("nope"), json!(true)] {
             let err = parse_search_limit(Some(&v)).unwrap_err();
             assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
-            assert!(err.message.contains("limit") || err.message.contains("integer"), "got: {}", err.message);
+            assert!(
+                err.message.contains("limit") || err.message.contains("integer"),
+                "got: {}",
+                err.message
+            );
         }
     }
 
@@ -403,8 +403,16 @@ mod tests {
         let t = WebSearchTool::default();
         assert_eq!(t.parameters()["properties"]["limit"]["type"], "integer");
         let hits = vec![
-            SearchHit { title: "A".into(), url: "https://a.example".into(), snippet: "s".into() },
-            SearchHit { title: "B".into(), url: "https://b.example".into(), snippet: "s".into() },
+            SearchHit {
+                title: "A".into(),
+                url: "https://a.example".into(),
+                snippet: "s".into(),
+            },
+            SearchHit {
+                title: "B".into(),
+                url: "https://b.example".into(),
+                snippet: "s".into(),
+            },
         ];
         let out = format_results("q", &hits);
         assert!(out.contains("showing 2 of up to"));

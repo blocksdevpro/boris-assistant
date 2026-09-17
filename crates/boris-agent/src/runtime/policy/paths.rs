@@ -549,11 +549,7 @@ mod tests {
             "symlink escape must deny, got Ok for probe {probe:?}"
         );
         // The hardened wrapper must deny too.
-        let hardened = resolve_under_roots(
-            &cfg,
-            probe.to_str().unwrap_or(""),
-            false,
-        );
+        let hardened = resolve_under_roots(&cfg, probe.to_str().unwrap_or(""), false);
         assert!(
             hardened.is_err(),
             "resolve_under_roots must deny symlink escape, got {hardened:?}"
@@ -585,8 +581,7 @@ mod tests {
             result.is_err(),
             "symlink escape must deny, got Ok for probe {probe:?}"
         );
-        let hardened =
-            resolve_under_roots(&cfg, probe.to_str().unwrap_or(""), false);
+        let hardened = resolve_under_roots(&cfg, probe.to_str().unwrap_or(""), false);
         assert!(
             hardened.is_err(),
             "resolve_under_roots must deny symlink escape, got {hardened:?}"
@@ -626,8 +621,7 @@ mod tests {
 
     #[test]
     fn resolve_under_roots_allows_inside_and_denies_outside() {
-        let dir =
-            std::env::temp_dir().join(format!("boris-under-roots-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("boris-under-roots-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sandbox")).unwrap();
         let sandbox = dir.join("sandbox");
@@ -647,8 +641,7 @@ mod tests {
 
     #[test]
     fn re_resolve_after_open_recanonicalizes_parent() {
-        let dir =
-            std::env::temp_dir().join(format!("boris-reresolve-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("boris-reresolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sandbox")).unwrap();
         let file = dir.join("sandbox").join("note.txt");

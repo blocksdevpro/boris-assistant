@@ -509,8 +509,7 @@ impl MemoryStore {
         // stay Active/verified. Retrieval prefers verified; personal_context
         // only includes verified.
         if let Some(name) = delta.preferred_name {
-            let mut memory =
-                NewMemory::unverified_heuristic(format!("Preferred name: {name}"));
+            let mut memory = NewMemory::unverified_heuristic(format!("Preferred name: {name}"));
             memory.memory_key = Some("preferred_name".into());
             memory.importance = 10;
             memory.source_event_id = Some(event.id.clone());
@@ -526,8 +525,7 @@ impl MemoryStore {
             self.upsert(memory)?;
         }
         for preference in delta.preferences_add {
-            let mut memory =
-                NewMemory::unverified_heuristic(format!("Preference: {preference}"));
+            let mut memory = NewMemory::unverified_heuristic(format!("Preference: {preference}"));
             memory.kind = MemoryKind::Procedural;
             memory.importance = 8;
             memory.source_event_id = Some(event.id.clone());
@@ -542,8 +540,7 @@ impl MemoryStore {
             self.upsert(m)?;
         }
         for ongoing in delta.ongoing_add {
-            let mut memory =
-                NewMemory::unverified_heuristic(format!("Current project: {ongoing}"));
+            let mut memory = NewMemory::unverified_heuristic(format!("Current project: {ongoing}"));
             memory.kind = MemoryKind::Project;
             memory.memory_key = Some(format!("project:{}", normalize_key(&ongoing)));
             memory.importance = 7;
@@ -1155,12 +1152,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         confidence: row.get(8)?,
         importance: row.get::<_, i64>(9)?.clamp(0, 10) as u8,
         privacy: MemoryPrivacy::parse(&privacy),
-        status: match status.as_str() {
-            "unverified" => MemoryStatus::Unverified,
-            "superseded" => MemoryStatus::Superseded,
-            "expired" => MemoryStatus::Expired,
-            _ => MemoryStatus::Active,
-        },
+        status: MemoryStatus::parse(&status),
         source_event_id: row.get(12)?,
         provenance: row.get::<_, Option<String>>(18).unwrap_or(None),
         valid_from_ms: row.get::<_, i64>(13)?.max(0) as u64,

@@ -6,9 +6,8 @@
 use std::sync::mpsc::Receiver;
 use std::sync::{atomic::AtomicBool, Arc};
 
-use boris_agent::session::store::SessionStore;
-use boris_agent::session::types::SessionId;
 use boris_agent::{Agent, AgentCheckpoint, AgentErrorKind, AgentOutcome, PendingToolCall};
+use boris_agent::{SessionId, SessionStore, TurnReport};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::{ArcAudioBuffer, TurnId};
@@ -18,22 +17,35 @@ use crate::hear::{self, CaptureKind, HearBreak};
 use crate::liveness::WakeLiveness;
 use crate::status::{InputPeek, Phase};
 
+use super::barge::BargeWatch;
 use super::confirm::interpret_yes_no;
-use super::models::{release_voice_models, SttBox, TtsBox};
+use super::device_switch::{apply_input_switch, apply_output_switch};
+use super::models::{maybe_unload_stt, release_voice_models, ModelResidency, SttBox, TtsBox};
 use super::picture::Picture;
-use super::playback::{wait_playback_or_stop, wait_playback_started, PlaybackWait};
+use super::playback::{
+    drain_output_events, wait_playback_or_stop, wait_playback_started, PlaybackWait,
+};
 use super::session::{end_session, go_off};
 use super::think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
 use super::EngineCommand;
 
 pub(super) enum OutcomeResolve {
-    Done(AgentOutcome),
+    /// Boxed: `AgentOutcome` carries pending-call batches (~200B+) and this
+    /// enum crosses several `Result` boundaries per turn.
+    Done(Box<ResolveDone>),
     ReArm,
     Stopped,
     TakeTurn {
         user_text: String,
         interrupted_text: Option<String>,
     },
+}
+
+/// Resolved turn payload: final outcome plus the latest HITL-resume report
+/// (if any confirm/input round ran) for the context meter + turn trace.
+pub(super) struct ResolveDone {
+    pub outcome: AgentOutcome,
+    pub resume_report: Option<TurnReport>,
 }
 
 /// Mutable + shared context for the confirm resolution loop (avoids 18-param functions).
@@ -59,6 +71,18 @@ pub(super) struct ConfirmCtx<'a> {
     pub original_heard: Option<String>,
     pub turn_checkpoint: AgentCheckpoint,
     pub turn: TurnId,
+    /// STT eviction policy for confirm captures (mirrors the turn loop:
+    /// `LowMemory` unloads after each transcribe, otherwise models stay warm
+    /// across the re-prompt / re-ask rounds).
+    pub residency: ModelResidency,
+    /// Voice HITL budget for this turn — mirrors the agent policy
+    /// (`SandboxConfig::max_confirms_per_turn`, default 12). The loop must not
+    /// cap below the policy or budgeted confirms become unreachable by voice.
+    pub max_confirms: u32,
+    /// Latest `(outcome, report)` from a HITL resume this turn, if any. The
+    /// caller merges it into the context meter + turn trace — without this the
+    /// post-confirm tool rounds are invisible to the UI meter.
+    pub last_resume_report: Option<TurnReport>,
 }
 
 impl ConfirmCtx<'_> {
@@ -83,7 +107,11 @@ pub(super) fn resolve_agent_outcome(
     mut outcome: AgentOutcome,
     ctx: &mut ConfirmCtx<'_>,
 ) -> OutcomeResolve {
-    for _ in 0..8 {
+    // Mirror the agent policy budget (default 12). A hardcoded cap below the
+    // policy would strand budgeted confirms: the agent would allow them but
+    // voice would abort first with "too many confirmations".
+    let budget = ctx.max_confirms.max(1);
+    for _ in 0..budget {
         if let AgentOutcome::NeedsInput { text, pending } = outcome {
             outcome = match collect_typed_input(ctx, text, pending) {
                 Ok(o) => o,
@@ -96,7 +124,10 @@ pub(super) fn resolve_agent_outcome(
             pending,
         } = outcome
         else {
-            return OutcomeResolve::Done(outcome);
+            return OutcomeResolve::Done(Box::new(ResolveDone {
+                outcome,
+                resume_report: ctx.last_resume_report.take(),
+            }));
         };
 
         tracing::info!(
@@ -107,7 +138,10 @@ pub(super) fn resolve_agent_outcome(
         );
         // Never put confirm text in `detail` (overlay treats detail as error).
         // Drop prior-turn `heard` so the UI does not show the last STT line as
-        // “You” while waiting for yes/no (fresh answer is written after STT).
+        // "You" while waiting for yes/no. Showing the spoken "yes" as `heard`
+        // afterwards is intended; the ORIGINAL utterance is preserved
+        // separately in `ConfirmCtx.original_heard` for barge `TakeTurn`
+        // replacement, so the next turn still quotes the real request.
         ctx.picture.detail = None;
         ctx.picture.heard = None;
         ctx.picture.activity = Some(confirm_activity(&pending.name, &pending.args_summary));
@@ -137,52 +171,84 @@ pub(super) fn resolve_agent_outcome(
             Err(e) => {
                 tracing::error!(error = %e, "tts synth failed for confirm");
                 ctx.agent.abort();
-                let _ = ctx.tts.unload();
+                // Eager evict: a failed synth may mean a wedged model — force
+                // reload next turn instead of reusing it.
+                if let Err(e) = ctx.tts.unload() {
+                    tracing::warn!(error = %e, "confirm tts unload after synth failure failed");
+                }
                 ctx.picture.detail = Some(format!("tts: {e}"));
                 ctx.picture.set_phase(Phase::Armed);
                 return OutcomeResolve::ReArm;
             }
         };
-        while ctx.output_events.try_recv().is_ok() {}
+        if drain_output_events(ctx.output_events) {
+            // Audio worker is gone: `play` below fails and the wait reports
+            // Stopped, which ends in `go_off`. Fall through rather than
+            // special-casing here.
+            tracing::warn!(turn = %ctx.turn, "output channel dead before confirm prompt");
+        }
         // UI: show confirm context while Boris is speaking so the user knows
         // a yes/no is coming (not a freeform reply).
         ctx.picture.set_phase(Phase::AwaitingConfirm);
         if let Err(e) = ctx.audio.play(pcm) {
             tracing::error!(error = %e, "confirm prompt play failed");
         }
-        match wait_playback_started(
-            ctx.output_events,
-            ctx.cmd_rx,
-            ctx.running,
-            ctx.audio,
-            ctx.picture,
-        ) {
+        // Barge-in owns this prompt: a wake word mid-prompt stops speaking and
+        // falls through to listening — the user's live speech becomes the
+        // confirm answer instead of an auto-deny. The watch is scoped per wait
+        // so its `&mut` borrow of wake ends before the `go_off` arms below.
+        let started = {
+            let mut watch = ctx.barge_in.then(|| BargeWatch::new(ctx.mic, ctx.wake));
+            wait_playback_started(
+                ctx.output_events,
+                ctx.cmd_rx,
+                ctx.running,
+                ctx.audio,
+                ctx.picture,
+                watch.as_mut(),
+            )
+        };
+        match started {
             PlaybackWait::Stopped => {
                 ctx.agent.abort();
                 ctx.go_off();
                 return OutcomeResolve::Stopped;
             }
-            PlaybackWait::Aborted | PlaybackWait::BargedIn => {}
+            // Barged in: skip the rest of the prompt — listen now.
+            PlaybackWait::BargedIn => {}
+            PlaybackWait::Aborted => {}
             PlaybackWait::Finished => {
                 ctx.picture.set_phase(Phase::Talking);
                 // Keep activity as confirm so overlay still reads as yes/no.
                 ctx.picture.activity = Some(confirm_activity(&pending.name, &pending.args_summary));
-                match wait_playback_or_stop(
-                    ctx.output_events,
-                    ctx.cmd_rx,
-                    ctx.running,
-                    ctx.audio,
-                    ctx.picture,
-                ) {
-                    PlaybackWait::Finished => {}
+                let drained = {
+                    let mut watch = ctx.barge_in.then(|| BargeWatch::new(ctx.mic, ctx.wake));
+                    wait_playback_or_stop(
+                        ctx.output_events,
+                        ctx.cmd_rx,
+                        ctx.running,
+                        ctx.audio,
+                        ctx.picture,
+                        watch.as_mut(),
+                    )
+                };
+                match drained {
+                    PlaybackWait::Finished | PlaybackWait::BargedIn => {}
                     PlaybackWait::Stopped => {
                         ctx.agent.abort();
                         ctx.go_off();
                         return OutcomeResolve::Stopped;
                     }
-                    PlaybackWait::Aborted | PlaybackWait::BargedIn => {
+                    PlaybackWait::Aborted => {
+                        // Speaker switched mid-prompt (or a stuck-job flush):
+                        // the user never heard the question. `abort()` resolves
+                        // the pending tool as cancelled inside the agent, so
+                        // nothing dangles — re-arm and let them wake again.
+                        // Hint goes to `activity`, not `detail`: the overlay
+                        // renders `detail` as an error and this is transient.
                         ctx.agent.abort();
-                        ctx.picture.detail = Some("confirmation playback interrupted".into());
+                        ctx.picture.activity =
+                            Some("confirmation interrupted — wake me and try again".into());
                         ctx.picture.set_phase(Phase::Armed);
                         return OutcomeResolve::ReArm;
                     }
@@ -210,10 +276,39 @@ pub(super) fn resolve_agent_outcome(
                 HearBreak::Disconnected => {
                     end_session(ctx.store, ctx.active_session, ctx.transcript_len, ctx.agent);
                     release_voice_models(ctx.stt.as_mut(), ctx.tts.as_mut(), "disconnected");
+                    ctx.picture.mark_devices_dead();
                     ctx.picture.set_phase(Phase::Off);
                     OutcomeResolve::Stopped
                 }
-                _ => {
+                // Device switch mid-confirm: apply, then re-enter this budget
+                // iteration so the prompt is re-spoken on the new device
+                // instead of capturing on a stale mic. (`prompt`/`pending`
+                // were moved out of `outcome` above, so rebuild it — a plain
+                // `continue` would use a moved value.)
+                HearBreak::SwitchInput { device_id } => {
+                    apply_input_switch(ctx.audio, ctx.picture, &device_id);
+                    outcome = AgentOutcome::NeedsConfirmation {
+                        text: prompt,
+                        pending,
+                    };
+                    continue;
+                }
+                HearBreak::SwitchOutput { device_id } => {
+                    apply_output_switch(ctx.audio, ctx.output_events, ctx.picture, &device_id);
+                    outcome = AgentOutcome::NeedsConfirmation {
+                        text: prompt,
+                        pending,
+                    };
+                    continue;
+                }
+                // Teach page stole the mic mid-confirm: yield. `abort()`
+                // cancels the pending tool inside the agent — nothing dangles.
+                HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile => {
+                    tracing::info!(turn = %ctx.turn, "wake enroll during confirm — yielding turn");
+                    ctx.picture.set_phase(Phase::Armed);
+                    OutcomeResolve::ReArm
+                }
+                HearBreak::Stopped => {
                     ctx.picture.set_phase(Phase::Armed);
                     OutcomeResolve::ReArm
                 }
@@ -236,7 +331,37 @@ pub(super) fn resolve_agent_outcome(
                 ctx.go_off();
                 return OutcomeResolve::Stopped;
             }
-            Err(_) => {
+            Err(HearBreak::Disconnected) => {
+                ctx.agent.abort();
+                end_session(ctx.store, ctx.active_session, ctx.transcript_len, ctx.agent);
+                release_voice_models(ctx.stt.as_mut(), ctx.tts.as_mut(), "disconnected");
+                ctx.picture.mark_devices_dead();
+                ctx.picture.set_phase(Phase::Off);
+                return OutcomeResolve::Stopped;
+            }
+            Err(HearBreak::SwitchInput { device_id }) => {
+                apply_input_switch(ctx.audio, ctx.picture, &device_id);
+                outcome = AgentOutcome::NeedsConfirmation {
+                    text: prompt,
+                    pending,
+                };
+                continue;
+            }
+            Err(HearBreak::SwitchOutput { device_id }) => {
+                apply_output_switch(ctx.audio, ctx.output_events, ctx.picture, &device_id);
+                outcome = AgentOutcome::NeedsConfirmation {
+                    text: prompt,
+                    pending,
+                };
+                continue;
+            }
+            Err(HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile) => {
+                tracing::info!(turn = %ctx.turn, "wake enroll during confirm — yielding turn");
+                ctx.agent.abort();
+                ctx.picture.set_phase(Phase::Armed);
+                return OutcomeResolve::ReArm;
+            }
+            Err(HearBreak::Stopped) => {
                 // Silence: re-prompt once instead of silently rejecting.
                 tracing::info!(turn = %ctx.turn, "confirm capture empty — re-prompt");
                 let reask = "I need a yes or no on that.";
@@ -244,16 +369,21 @@ pub(super) fn resolve_agent_outcome(
                 ctx.picture.activity = Some("confirm · say yes or no".into());
                 ctx.picture.publish();
                 if let Ok(pcm) = ctx.tts.synthesize(reask) {
-                    while ctx.output_events.try_recv().is_ok() {}
+                    drain_output_events(ctx.output_events);
                     if let Err(e) = ctx.audio.play(pcm) {
                         tracing::warn!(error = %e, "confirm reask play failed");
                     }
+                    // Barge watch included: a wake hit stops the re-ask and
+                    // falls through to capture (returns are intentionally
+                    // ignored — any outcome proceeds to listening).
+                    let mut watch = ctx.barge_in.then(|| BargeWatch::new(ctx.mic, ctx.wake));
                     let _ = wait_playback_started(
                         ctx.output_events,
                         ctx.cmd_rx,
                         ctx.running,
                         ctx.audio,
                         ctx.picture,
+                        watch.as_mut(),
                     );
                     wait_playback_or_stop(
                         ctx.output_events,
@@ -261,6 +391,7 @@ pub(super) fn resolve_agent_outcome(
                         ctx.running,
                         ctx.audio,
                         ctx.picture,
+                        watch.as_mut(),
                     );
                 }
                 if !*ctx.running {
@@ -268,7 +399,9 @@ pub(super) fn resolve_agent_outcome(
                     ctx.go_off();
                     return OutcomeResolve::Stopped;
                 }
-                let _ = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running);
+                if let Err(e) = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running) {
+                    tracing::warn!(error = ?e, turn = %ctx.turn, "confirm re-prompt settle failed");
+                }
                 ctx.picture.set_phase(Phase::Hearing);
                 ctx.picture.activity = Some("confirm · listening".into());
                 ctx.picture.publish();
@@ -282,12 +415,42 @@ pub(super) fn resolve_agent_outcome(
                     Ok(c) => c,
                     Err(_) => {
                         tracing::info!(turn = %ctx.turn, "confirm second capture failed — reject");
-                        outcome = match ctx
-                            .agent_rt
-                            .block_on(ctx.agent.resume_confirmation(&pending.id, false))
-                        {
-                            Ok(o) => o,
-                            Err(e) => {
+                        // Resume via the same barge-aware `run_thinking` path as
+                        // every other agent call (not a bare `block_on`), so
+                        // Stop/wake barge-in and `TurnCancel` apply uniformly
+                        // while the reject round runs.
+                        let pending_id = pending.id.clone();
+                        match run_thinking(ThinkCtx {
+                            agent: ctx.agent,
+                            agent_rt: ctx.agent_rt,
+                            mic: ctx.mic,
+                            wake: ctx.wake,
+                            vad: ctx.vad,
+                            stt: ctx.stt,
+                            liveness: ctx.liveness,
+                            barge_in: ctx.barge_in,
+                            audio: ctx.audio,
+                            output_events: ctx.output_events,
+                            picture: ctx.picture,
+                            activity_events_enabled: ctx.activity_events_enabled.clone(),
+                            cmd_rx: ctx.cmd_rx,
+                            running: ctx.running,
+                            work: AgentWork::Resume {
+                                pending_id: &pending_id,
+                                approved: false,
+                            },
+                            turn: ctx.turn,
+                        }) {
+                            ThinkResolve::Finished(Ok((o, report))) => {
+                                ctx.picture.update_context(
+                                    report.context_used_tokens,
+                                    report.context_limit_tokens,
+                                    report.context_estimated,
+                                );
+                                ctx.last_resume_report = Some(report);
+                                outcome = o;
+                            }
+                            ThinkResolve::Finished(Err(e)) => {
                                 tracing::error!(error = %e, "resume reject failed");
                                 ctx.agent.abort();
                                 ctx.picture.detail = Some(format!("agent: {e}"));
@@ -295,7 +458,26 @@ pub(super) fn resolve_agent_outcome(
                                 ctx.picture.set_phase(Phase::Armed);
                                 return OutcomeResolve::ReArm;
                             }
-                        };
+                            ThinkResolve::StopTurn => {
+                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.picture.clear_activity();
+                                ctx.picture.set_phase(Phase::Armed);
+                                return OutcomeResolve::ReArm;
+                            }
+                            ThinkResolve::TakeTurn(text) => {
+                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.picture.clear_activity();
+                                return OutcomeResolve::TakeTurn {
+                                    user_text: text,
+                                    interrupted_text: ctx.original_heard.clone(),
+                                };
+                            }
+                            ThinkResolve::Stopped => {
+                                ctx.agent.abort();
+                                ctx.go_off();
+                                return OutcomeResolve::Stopped;
+                            }
+                        }
                         ctx.picture.activity = Some("thinking…".into());
                         ctx.picture.set_phase(Phase::Thinking);
                         continue;
@@ -312,7 +494,9 @@ pub(super) fn resolve_agent_outcome(
                 String::new()
             }
         };
-        let _ = ctx.stt.unload();
+        // Residency-aware: `LowMemory` evicts here, otherwise the model stays
+        // warm across the re-prompt / re-ask rounds below.
+        maybe_unload_stt(ctx.stt.as_mut(), ctx.turn, ctx.residency);
         ctx.picture.heard = Some(heard.clone());
         ctx.picture.publish();
 
@@ -325,16 +509,21 @@ pub(super) fn resolve_agent_outcome(
                 ctx.picture.activity = Some("confirm · yes or no".into());
                 ctx.picture.publish();
                 if let Ok(pcm) = ctx.tts.synthesize(reask) {
-                    while ctx.output_events.try_recv().is_ok() {}
+                    drain_output_events(ctx.output_events);
                     if let Err(e) = ctx.audio.play(pcm) {
                         tracing::warn!(error = %e, "confirm reask play failed");
                     }
+                    // Barge watch included: a wake hit stops the re-ask and
+                    // falls through to capture (returns are intentionally
+                    // ignored — any outcome proceeds to listening).
+                    let mut watch = ctx.barge_in.then(|| BargeWatch::new(ctx.mic, ctx.wake));
                     let _ = wait_playback_started(
                         ctx.output_events,
                         ctx.cmd_rx,
                         ctx.running,
                         ctx.audio,
                         ctx.picture,
+                        watch.as_mut(),
                     );
                     wait_playback_or_stop(
                         ctx.output_events,
@@ -342,6 +531,7 @@ pub(super) fn resolve_agent_outcome(
                         ctx.running,
                         ctx.audio,
                         ctx.picture,
+                        watch.as_mut(),
                     );
                 }
                 if !*ctx.running {
@@ -350,22 +540,37 @@ pub(super) fn resolve_agent_outcome(
                     return OutcomeResolve::Stopped;
                 }
                 ctx.picture.set_phase(Phase::AwaitingConfirm);
-                let _ = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running);
-                let _ = ctx.stt.load();
+                if let Err(e) = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running) {
+                    tracing::warn!(error = ?e, turn = %ctx.turn, "confirm re-ask settle failed");
+                }
+                if let Err(e) = ctx.stt.load() {
+                    tracing::warn!(error = %e, turn = %ctx.turn, "confirm re-ask stt load failed");
+                }
                 ctx.picture.set_phase(Phase::Hearing);
                 ctx.picture.activity = Some("confirm · listening".into());
                 ctx.picture.publish();
-                let second = hear::capture_utterance(
+                // Deny-by-default on failure, but log the cause instead of
+                // silently swallowing device + STT errors into "".
+                let second = match hear::capture_utterance(
                     ctx.mic,
                     ctx.vad,
                     ctx.cmd_rx,
                     ctx.running,
                     CaptureKind::AwaitConfirm,
-                )
-                .ok()
-                .and_then(|c| ctx.stt.transcribe(&c).ok())
-                .unwrap_or_default();
-                let _ = ctx.stt.unload();
+                ) {
+                    Ok(c) => match ctx.stt.transcribe(&c) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!(error = %e, turn = %ctx.turn, "confirm re-ask STT failed — deny");
+                            String::new()
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = ?e, turn = %ctx.turn, "confirm re-ask capture failed — deny");
+                        String::new()
+                    }
+                };
+                maybe_unload_stt(ctx.stt.as_mut(), ctx.turn, ctx.residency);
                 ctx.picture.heard = Some(second.clone());
                 ctx.picture.publish();
                 interpret_yes_no(&second).unwrap_or(false)
@@ -423,7 +628,7 @@ fn collect_typed_input(
 
     if ctx.tts.load().is_ok() {
         if let Ok(pcm) = ctx.tts.synthesize(&prompt) {
-            while ctx.output_events.try_recv().is_ok() {}
+            drain_output_events(ctx.output_events);
             if let Err(e) = ctx.audio.play(pcm) {
                 tracing::error!(error = %e, "typed-input prompt play failed");
             }
@@ -437,7 +642,7 @@ fn collect_typed_input(
 
     let submitted = wait_typed_input(ctx, &pending.id)?;
     ctx.audio.stop();
-    while ctx.output_events.try_recv().is_ok() {}
+    drain_output_events(ctx.output_events);
     ctx.picture.input = None;
     ctx.picture.activity = Some("thinking…".into());
     ctx.picture.set_phase(Phase::Thinking);
@@ -464,7 +669,15 @@ fn collect_typed_input(
         },
         turn: ctx.turn,
     }) {
-        ThinkResolve::Finished(Ok((outcome, _))) => Ok(outcome),
+        ThinkResolve::Finished(Ok((outcome, report))) => {
+            ctx.picture.update_context(
+                report.context_used_tokens,
+                report.context_limit_tokens,
+                report.context_estimated,
+            );
+            ctx.last_resume_report = Some(report);
+            Ok(outcome)
+        }
         ThinkResolve::Finished(Err(e)) if e.kind() == AgentErrorKind::Cancelled => {
             ctx.agent.abort();
             ctx.picture.clear_activity();
@@ -520,7 +733,11 @@ fn wait_typed_input(
             Ok(EngineCommand::CancelInput { id }) if id == pending_id => {
                 return Ok(None);
             }
-            Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
+            // Stale submit/cancel for a previous turn's pending id: drop with
+            // a log, never apply to this turn's pending call.
+            Ok(EngineCommand::SubmitInput { id, .. } | EngineCommand::CancelInput { id }) => {
+                tracing::debug!(got = %id, want = %pending_id, "typed input for stale pending id — dropped");
+            }
             Ok(EngineCommand::Stop) | Ok(EngineCommand::Shutdown) => {
                 *ctx.running = false;
                 ctx.agent.abort();
@@ -539,11 +756,14 @@ fn wait_typed_input(
                     &device_id,
                 );
             }
-            Ok(EngineCommand::StartWakeEnroll { .. } | EngineCommand::ClearWakeProfile) => {}
+            Ok(EngineCommand::StartWakeEnroll { .. } | EngineCommand::ClearWakeProfile) => {
+                tracing::debug!("wake enroll command ignored while waiting for typed input");
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 *ctx.running = false;
                 ctx.agent.abort();
+                ctx.picture.mark_devices_dead();
                 ctx.go_off();
                 return Err(OutcomeResolve::Stopped);
             }
@@ -581,7 +801,15 @@ fn resume_after_confirm(
         },
         turn: ctx.turn,
     }) {
-        ThinkResolve::Finished(Ok((outcome, _))) => Ok(outcome),
+        ThinkResolve::Finished(Ok((outcome, report))) => {
+            ctx.picture.update_context(
+                report.context_used_tokens,
+                report.context_limit_tokens,
+                report.context_estimated,
+            );
+            ctx.last_resume_report = Some(report);
+            Ok(outcome)
+        }
         ThinkResolve::Finished(Err(e)) if e.kind() == AgentErrorKind::Cancelled => {
             ctx.agent.abort();
             ctx.picture.clear_activity();

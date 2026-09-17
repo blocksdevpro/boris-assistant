@@ -91,9 +91,7 @@ fn ceil_nl(s: &str, mut at: usize) -> usize {
 /// Strict integers only: floats and non-numeric strings return
 /// `invalid_args` instead of silently falling back to the default. Numeric
 /// strings (`"30"`) are accepted via [`optional_u64_keys_strict`].
-pub(crate) fn parse_timeout_secs(
-    obj: &serde_json::Map<String, Value>,
-) -> Result<u64, ToolError> {
+pub(crate) fn parse_timeout_secs(obj: &serde_json::Map<String, Value>) -> Result<u64, ToolError> {
     let raw = optional_u64_keys_strict(obj, &["timeout", "timeout_secs"])?;
     Ok(raw.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 300))
 }
@@ -110,12 +108,18 @@ mod tests {
     #[test]
     fn parse_timeout_defaults_and_clamps() {
         assert_eq!(parse_timeout_secs(&map(json!({}))).unwrap(), 120);
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 30 }))).unwrap(), 30);
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout": 30 }))).unwrap(),
+            30
+        );
         assert_eq!(
             parse_timeout_secs(&map(json!({ "timeout_secs": 45 }))).unwrap(),
             45
         );
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 0 }))).unwrap(), 1);
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout": 0 }))).unwrap(),
+            1
+        );
         assert_eq!(
             parse_timeout_secs(&map(json!({ "timeout": 999 }))).unwrap(),
             300

@@ -138,8 +138,8 @@ impl AgentStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::ToolRisk;
     use crate::runtime::PendingToolCall;
+    use crate::tool::ToolRisk;
 
     fn pending(name: &str) -> PendingToolCall {
         PendingToolCall::new(

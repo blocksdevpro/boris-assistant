@@ -107,8 +107,7 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
             if role == "tool" {
                 has_tool_results = true;
                 if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
-                    max_tool_result_chars =
-                        max_tool_result_chars.max(c.chars().count());
+                    max_tool_result_chars = max_tool_result_chars.max(c.chars().count());
                     if tool_content_is_error(c) {
                         has_error_evidence = true;
                     }
@@ -138,7 +137,10 @@ fn tool_content_is_error(content: &str) -> bool {
         return true;
     }
     let lower = t.to_ascii_lowercase();
-    lower.starts_with("error:") || lower.starts_with("error [") || lower.contains("invalid arguments") || lower.contains("failed")
+    lower.starts_with("error:")
+        || lower.starts_with("error [")
+        || lower.contains("invalid arguments")
+        || lower.contains("failed")
 }
 
 /// True when any current-turn tool observation looks like a failure.
@@ -153,8 +155,7 @@ pub fn round_has_error(messages: &Value) -> bool {
     let turn_start = current_turn_start(arr).map_or(0, |i| i.saturating_add(1));
     arr[turn_start..].iter().any(|m| {
         m.get("role").and_then(|r| r.as_str()) == Some("tool")
-            && m
-                .get("content")
+            && m.get("content")
                 .and_then(|c| c.as_str())
                 .is_some_and(tool_content_is_error)
     })
@@ -778,10 +779,8 @@ mod tests {
             { "role": "user", "content": "research the latest Rust async runtimes" },
             { "role": "tool", "content": "short hit" },
         ]);
-        let round = round_traits_from_messages(
-            &messages,
-            "research the latest Rust async runtimes",
-        );
+        let round =
+            round_traits_from_messages(&messages, "research the latest Rust async runtimes");
         assert_eq!(round.tool_rounds, 0);
         assert_eq!(
             request_stage_for(round.task, round),
@@ -793,7 +792,9 @@ mod tests {
     fn round_has_error_detects_helper_conventions() {
         // Helper prefixes, exact and case-insensitive.
         assert!(tool_content_is_error("Error: user declined this action"));
-        assert!(tool_content_is_error("Error [missing_required]: missing command"));
+        assert!(tool_content_is_error(
+            "Error [missing_required]: missing command"
+        ));
         assert!(tool_content_is_error("error: something broke"));
         assert!(tool_content_is_error("error [invalid_args]: fix it"));
         // Invalid-args / failed observations, case-insensitive.

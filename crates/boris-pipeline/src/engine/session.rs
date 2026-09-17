@@ -2,10 +2,7 @@
 //!
 //! Soft-fails on store I/O — the voice loop continues without persistence.
 
-use boris_agent::context::Context;
-use boris_agent::session::store::{SessionStore, SyncCursor};
-use boris_agent::session::types::SessionId;
-use boris_agent::{Agent, MaintenanceJob};
+use boris_agent::{Agent, Context, MaintenanceJob, SessionId, SessionStore, SyncCursor};
 use boris_audio::service::AudioService;
 use boris_inference::{SpeechToText, TextToSpeech};
 
@@ -77,6 +74,10 @@ pub(super) fn begin_session(
     *active_session = None;
     *transcript_len = 0;
     let started = std::time::Instant::now();
+    // Blocking flush with a timeout: a previous session's sync must be durable
+    // before this session reuses the store cursor, otherwise two sessions'
+    // snapshots interleave. Timeout degrades to a memoryless turn (logged),
+    // never to a hung engine.
     if let Some(maintenance) = agent.maintenance() {
         if !maintenance.flush_durable(DURABLE_FLUSH_TIMEOUT) {
             tracing::warn!(
@@ -188,6 +189,9 @@ pub(super) fn end_session(
         }
     } else {
         tracing::warn!("session end deferred because durable transcript sync timed out");
+        // The disk `current` pointer intentionally still names this session,
+        // so the next `begin_session` resumes (rather than orphans) it once
+        // the worker drains. The in-memory pointer below is always cleared.
         Ok(None)
     };
     match ended {
@@ -225,8 +229,16 @@ pub(super) fn go_off(
     end_session(store, active_session, transcript_len, agent);
     audio.stop();
     release_voice_models(stt, tts, "engine stop");
+    // Deliberate stop (not a disconnect): devices are fine, but no caption
+    // from the previous turn may linger — the next Start begins blank.
     picture.engine = EngineState::Off;
     picture.turn = None;
     picture.artifact = None;
+    picture.detail = None;
+    picture.heard = None;
+    picture.said = None;
+    picture.clear_activity();
+    picture.wake_enroll = None;
+    picture.input = None;
     picture.set_phase(Phase::Off);
 }

@@ -244,7 +244,12 @@ mod tests {
     fn truncate_multibyte_is_char_safe_and_never_panics() {
         // Emoji are 4 bytes / 1 char: byte-len vs char-count mix would
         // mislabel the cursor and risk splitting UTF-8.
-        let s = format!("{}\n{}\n{}", "🎉".repeat(2_000), "line-🎉-mid", "🚀".repeat(2_000));
+        let s = format!(
+            "{}\n{}\n{}",
+            "🎉".repeat(2_000),
+            "line-🎉-mid",
+            "🚀".repeat(2_000)
+        );
         let out = truncate_tool_result_to(s.clone(), 1_000);
         assert!(out.chars().count() <= 1_000);
         assert!(out.contains("[truncated"));
@@ -260,7 +265,10 @@ mod tests {
                     .unwrap_or(usize::MAX)
             })
             .unwrap();
-        assert!(cursor_off <= 1_000, "cursor {cursor_off} must be char-based");
+        assert!(
+            cursor_off <= 1_000,
+            "cursor {cursor_off} must be char-based"
+        );
         // line_span on a split-UTF-8 boundary must not panic.
         let (ls, le) = super::line_span(&s, 1);
         assert!(ls >= 1 && le >= ls);

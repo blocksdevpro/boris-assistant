@@ -61,8 +61,7 @@ mod util;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use boris_agent::session::types::SessionId;
-use boris_agent::{AgentErrorKind, AgentEvent, AgentOutcome};
+use boris_agent::{AgentErrorKind, AgentEvent, AgentOutcome, SessionId};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::TurnId;
 
@@ -71,7 +70,7 @@ use crate::error::{PipelineError, Result};
 use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::{EngineState, Phase, StatusPicture};
 
-use activity::{activity_label, note_tool_start};
+use activity::{activity_label, is_tool_chip, note_tool_start};
 use artifact::peek_current;
 use barge::{decide_barge_listen, BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
@@ -79,8 +78,10 @@ use models::{
     join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
     release_voice_models,
 };
-use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve};
-use playback::{poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait};
+use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve, ResolveDone};
+use playback::{
+    drain_output_events, poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait,
+};
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
@@ -337,6 +338,7 @@ fn on_hear_break(
                 &mut rt.agent,
             );
             release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
+            rt.picture.mark_devices_dead();
             rt.picture.set_phase(Phase::Off);
             LoopReact::Exit
         }
@@ -444,6 +446,10 @@ fn run(
                     rt.picture.detail = None;
                     rt.picture.activity = None;
                     rt.picture.artifact = None;
+                    // A fresh Start re-marks devices alive: a prior
+                    // disconnect-dead flag must not linger once the host
+                    // restarts the engine on (possibly fixed) devices.
+                    rt.picture.mark_devices_alive();
 
                     // STT/TTS stay unloaded until a turn needs them (preloaded one
                     // step ahead during capture / agent — never kept for Armed idle).
@@ -802,7 +808,9 @@ fn run(
                 alnum = text.chars().filter(|c| c.is_alphanumeric()).count(),
                 "skipping empty/junk transcript — not calling agent"
             );
-            rt.picture.detail = Some("didn't catch that".into());
+            rt.picture.activity = Some("didn't catch that — wake me and try again".into());
+            // Hint goes to `activity`, not `detail`: the overlay renders
+            // `detail` as an error and a missed utterance is transient.
             // If we were in a follow-up, one soft retry is enough; then re-arm.
             if matches!(capture_kind, CaptureKind::AwaitReply) && follow_up_depth < MAX_FOLLOW_UPS {
                 await_reply = true;
@@ -846,7 +854,11 @@ fn run(
 
         // Live tool activity → overlay. Snapshot freezes non-activity fields so
         // mid-turn events do not clobber heard/said with a stale full rebuild.
+        // `wake_enroll` is preserved (not blanked): a teach session and a
+        // voice turn never overlap, but blanking here would stall the teach
+        // page if one ever does.
         let activity_base = std::sync::Arc::new(std::sync::Mutex::new(StatusPicture {
+            seq: rt.picture.next_seq(),
             engine: rt.picture.engine,
             phase: rt.picture.phase,
             detail: rt.picture.detail.clone(),
@@ -861,10 +873,11 @@ fn run(
             context_limit: rt.picture.context_limit,
             context_estimated: rt.picture.context_estimated,
             artifact: rt.picture.artifact.clone(),
-            wake_enroll: None,
+            wake_enroll: rt.picture.wake_enroll.clone(),
             input: None,
         }));
         let activity_tx = rt.picture.status_tx.clone();
+        let activity_seq = rt.picture.seq.clone();
         let base_w = activity_base.clone();
         let activity_events_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let activity_events_enabled_w = activity_events_enabled.clone();
@@ -933,7 +946,16 @@ fn run(
                 let Ok(mut base) = base_w.lock() else {
                     return;
                 };
-                base.thinking = Some(preview.clone());
+                // Bound the wire tail; the engine keeps nothing (preview is
+                // display-only) and `Picture::publish` truncates as well.
+                const MAX_REASONING_PREVIEW: usize = 512;
+                let preview = if preview.chars().count() > MAX_REASONING_PREVIEW {
+                    let head: String = preview.chars().take(MAX_REASONING_PREVIEW - 1).collect();
+                    format!("{head}…")
+                } else {
+                    preview.clone()
+                };
+                base.thinking = Some(preview);
                 let mut snap = base.clone();
                 let elapsed = thought_w
                     .lock()
@@ -942,15 +964,13 @@ fn run(
                     .unwrap_or_default();
                 let thought = boris_agent::describe_thought(elapsed);
                 // Don't clobber a live tool chip with the think timer.
-                let busy_tool = snap
-                    .activity
-                    .as_deref()
-                    .is_some_and(|a| a.starts_with("tool ·") || a.starts_with("done ·"));
+                let busy_tool = snap.activity.as_deref().is_some_and(is_tool_chip);
                 if !busy_tool {
                     snap.activity = Some(format!("thinking · {thought}"));
                 } else if snap.activity.is_none() {
                     snap.activity = Some("thinking…".into());
                 }
+                snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let _ = activity_tx.send(snap);
                 return;
             }
@@ -977,6 +997,7 @@ fn run(
             };
             let mut snap = base.clone();
             snap.activity = Some(label);
+            snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = activity_tx.send(snap);
         });
 
@@ -1078,16 +1099,20 @@ fn run(
                 rt.picture.publish();
                 if rt.tts.load().is_ok() {
                     if let Ok(pcm) = rt.tts.synthesize(recovery) {
-                        while rt.output_events.try_recv().is_ok() {}
+                        drain_output_events(&rt.output_events);
                         if let Err(e) = rt.audio.play(pcm) {
                             tracing::error!(error = %e, "recovery play failed");
                         }
+                        // No barge watch: this is a fire-and-forget error line
+                        // with no listener following — a wake word during it
+                        // is caught by the next Armed wait.
                         let _ = wait_playback_started(
                             &mut rt.output_events,
                             &cmd_rx,
                             &mut running,
                             &mut rt.audio,
                             &mut rt.picture,
+                            None,
                         );
                         wait_playback_or_stop(
                             &mut rt.output_events,
@@ -1095,6 +1120,7 @@ fn run(
                             &mut running,
                             &mut rt.audio,
                             &mut rt.picture,
+                            None,
                         );
                     }
                     let _ = rt.tts.unload();
@@ -1110,7 +1136,13 @@ fn run(
         }
         if report.tools_used.iter().any(|n| n == "present_artifact") {
             if let Some(sid) = sess.active_session.as_ref() {
-                rt.picture.artifact = peek_current(&rt.store, sid);
+                match peek_current(&rt.store, sid) {
+                    Some(peek) => rt.picture.artifact = Some(peek),
+                    None => tracing::debug!(
+                        %turn,
+                        "present_artifact ran but index peek missed (flush race?)"
+                    ),
+                }
             }
         }
         if !report.tools_used.is_empty() || rt.picture.artifact.is_some() {
@@ -1124,6 +1156,7 @@ fn run(
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
         let original_heard = rt.picture.heard.clone();
+        let max_confirms = rt.max_confirms_per_turn;
         let mut confirm = ConfirmCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -1146,6 +1179,9 @@ fn run(
             activity_events_enabled: activity_events_enabled.clone(),
             turn_checkpoint,
             turn,
+            max_confirms,
+            residency: rt.residency,
+            last_resume_report: None,
         };
         let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
             OutcomeResolve::Stopped => {
@@ -1176,7 +1212,45 @@ fn run(
                 await_reply = false;
                 continue;
             }
-            OutcomeResolve::Done(o) => o,
+            OutcomeResolve::Done(done) => {
+                let ResolveDone {
+                    outcome,
+                    resume_report,
+                } = *done;
+                // A confirm/input resume ran more tool rounds after the initial
+                // report: refresh the meter (already updated inside the resume)
+                // and fold the resume rounds into the trace so they are not
+                // invisible to latency/tool accounting.
+                if let Some(resume) = resume_report {
+                    rt.picture.update_context(
+                        resume.context_used_tokens,
+                        resume.context_limit_tokens,
+                        resume.context_estimated,
+                    );
+                    // A card presented during the resume must reach the overlay
+                    // too — the pre-confirm peek above predates those tools.
+                    if resume.tools_used.iter().any(|n| n == "present_artifact") {
+                        if let Some(sid) = sess.active_session.as_ref() {
+                            match peek_current(&rt.store, sid) {
+                                Some(peek) => rt.picture.artifact = Some(peek),
+                                None => tracing::debug!(
+                                    %turn,
+                                    "resume presented artifact but index peek missed"
+                                ),
+                            }
+                        }
+                    }
+                    turn_trace.span(
+                        "agent_resume",
+                        resume.duration.as_millis() as u64,
+                        Some(serde_json::json!({
+                            "tool_rounds": resume.tool_rounds,
+                            "tools": resume.tools_used,
+                        })),
+                    );
+                }
+                outcome
+            }
         };
         unsub(); // full turn finished (or speech path next)
 
@@ -1264,6 +1338,10 @@ fn run(
             tracing::error!(error = %e, %turn, "tts load failed");
             crate::diagnostics::log_model_load_failure("supertone", &rt.tts_model_dir, &e);
             let _ = rt.tts.unload();
+            // The reply was already published as `said` above, but it will
+            // never be spoken — clear it so the overlay doesn't show text
+            // the user never heard.
+            rt.picture.said = None;
             rt.picture.detail = Some(format!("tts load: {e}"));
             follow_up_depth = 0;
             rt.picture.set_phase(Phase::Armed);
@@ -1349,9 +1427,13 @@ fn run(
                     turn_trace.mark("barge_in_take_turn", None);
                     rt.audio.stop();
                     maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                    // `heard` still holds this turn's original utterance:
+                    // speech never overwrites it. Carry it so the next turn's
+                    // replacement quotes the real request, not nothing.
+                    let interrupted_text = rt.picture.heard.clone();
                     pending_barge_turn = Some(PendingBargeTurn {
                         user_text: text,
-                        interrupted_text: None,
+                        interrupted_text,
                     });
                     follow_up_depth = 0;
                     await_reply = false;
@@ -1416,20 +1498,16 @@ fn run(
                 go_off_session(&mut rt, &mut sess);
                 continue;
             }
-            PlaybackWait::Aborted => {
+            PlaybackWait::Aborted | PlaybackWait::BargedIn => {
+                // `BargedIn` is consumed inside the speak loop above and never
+                // reaches here; the joint arm keeps the match total without a
+                // production `unreachable!` if that ever changes.
                 turn_trace.mark("audio_aborted", None);
                 let detail = speech
                     .error
                     .unwrap_or_else(|| "playback interrupted by speaker change".into());
                 tracing::warn!(%turn, played = speech.played, %detail, "streamed speech aborted");
                 rt.picture.detail = Some(detail);
-                follow_up_depth = 0;
-                await_reply = false;
-                rt.picture.set_phase(Phase::Armed);
-                continue;
-            }
-            PlaybackWait::BargedIn => {
-                // Handled inside the speak loop; should not reach here.
                 follow_up_depth = 0;
                 await_reply = false;
                 rt.picture.set_phase(Phase::Armed);

@@ -6,6 +6,17 @@
 
 use boris_agent::{describe_batch, describe_tool, ActivityWave, AgentEvent, Role, Tense};
 
+/// Wire prefixes for the overlay chip. The UI parses on these — `mod.rs` must
+/// use [`is_tool_chip`] instead of re-stating string prefixes.
+pub(super) const TOOL_PREFIX: &str = "tool · ";
+pub(super) const DONE_PREFIX: &str = "done · ";
+
+/// True while the chip shows live tool work (not thinking/confirm/input).
+/// Used to avoid clobbering a tool label with the think timer.
+pub(super) fn is_tool_chip(activity: &str) -> bool {
+    activity.starts_with(TOOL_PREFIX) || activity.starts_with(DONE_PREFIX)
+}
+
 /// Compact tool-activity label for the overlay chip.
 ///
 /// `recent_tools` (most recent last) enriches post-tool thinking labels.

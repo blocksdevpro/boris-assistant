@@ -135,7 +135,11 @@ fn emit_default_stream_events(
             .to_string();
         on_event(LlmStreamEvent::ToolCallDelta {
             index: index as u32,
-            id: if id.is_empty() { None } else { Some(id.clone()) },
+            id: if id.is_empty() {
+                None
+            } else {
+                Some(id.clone())
+            },
             name: if name.is_empty() {
                 None
             } else {
@@ -232,7 +236,12 @@ mod tests {
         let mut events = Vec::new();
         let mut sink = |e: LlmStreamEvent| events.push(e);
         let msg = mock
-            .complete_stream(json!([]), Value::Null, CompleteOptions::default(), &mut sink)
+            .complete_stream(
+                json!([]),
+                Value::Null,
+                CompleteOptions::default(),
+                &mut sink,
+            )
             .await
             .unwrap();
         assert_eq!(msg["content"], "hello");
@@ -262,9 +271,14 @@ mod tests {
         };
         let mut events = Vec::new();
         let mut sink = |e: LlmStreamEvent| events.push(e);
-        mock.complete_stream(json!([]), Value::Null, CompleteOptions::default(), &mut sink)
-            .await
-            .unwrap();
+        mock.complete_stream(
+            json!([]),
+            Value::Null,
+            CompleteOptions::default(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         let delta = events
             .iter()
             .position(|e| matches!(e, LlmStreamEvent::ToolCallDelta { .. }))
@@ -292,13 +306,21 @@ mod tests {
         };
         let mut events = Vec::new();
         let mut sink = |e: LlmStreamEvent| events.push(e);
-        mock.complete_stream(json!([]), Value::Null, CompleteOptions::default(), &mut sink)
-            .await
-            .unwrap();
+        mock.complete_stream(
+            json!([]),
+            Value::Null,
+            CompleteOptions::default(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(
             events.as_slice(),
-            [LlmStreamEvent::ModelSend { .. }, LlmStreamEvent::FinalMessage(_)]
+            [
+                LlmStreamEvent::ModelSend { .. },
+                LlmStreamEvent::FinalMessage(_)
+            ]
         ));
     }
 
@@ -322,11 +344,7 @@ mod tests {
         assert!(validate_messages_tools(&json!([]), &json!({})).is_err());
         assert!(validate_messages_tools(&json!([]), &json!("x")).is_err());
         // entries must be type=function objects with a named function
-        assert!(validate_messages_tools(
-            &json!([]),
-            &json!([{"type": "function"}])
-        )
-        .is_err());
+        assert!(validate_messages_tools(&json!([]), &json!([{"type": "function"}])).is_err());
         assert!(validate_messages_tools(
             &json!([]),
             &json!([{"type": "other", "function": {"name": "x"}}])

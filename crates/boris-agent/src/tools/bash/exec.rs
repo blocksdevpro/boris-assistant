@@ -407,7 +407,9 @@ impl Tool for BashTool {
 
         let obj = require_object(&args)?;
         let command = optional_string_keys(obj, &["command", "cmd", "shell"]).ok_or_else(|| {
-            ToolError::invalid_args("missing required string argument `command` (aliases: cmd, shell)")
+            ToolError::invalid_args(
+                "missing required string argument `command` (aliases: cmd, shell)",
+            )
         })?;
         let command = command.trim();
         validate_command(command)?;

@@ -16,6 +16,8 @@ pub enum EngineState {
 #[serde(rename_all = "PascalCase")]
 pub enum Phase {
     Off,
+    /// Boot-transient only (`Starting/Quiet` splash). Never re-entered; idle
+    /// voice listens in `On/Armed`. Kept on the wire for old builds.
     Quiet,
     Armed,
     /// Waiting for a freeform user reply without another wake word.
@@ -51,6 +53,11 @@ pub struct ArtifactPeek {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusPicture {
+    /// Monotonic snapshot counter shared by all publishers on the channel.
+    /// Latest-wins + dedupe key: ignore snapshots with `seq <= last_seen`.
+    /// `#[serde(default)]` keeps old recordings/deserializers working.
+    #[serde(default)]
+    pub seq: u64,
     pub engine: EngineState,
     pub phase: Phase,
     /// Error / fault text only (not confirm prompts — those use `activity`).
@@ -62,6 +69,9 @@ pub struct StatusPicture {
     pub said: Option<String>,
     pub mic: DeviceHealth,
     pub speaker: DeviceHealth,
+    /// Display-only turn counter (`TurnId` rendered as decimal). The UI must
+    /// never parse it back or send it anywhere — typed-input correlation uses
+    /// `InputPeek.id` (the agent pending id), not this.
     #[serde(default)]
     pub turn: Option<String>,
     /// Compact progressive status (tool name, confirm summary) for the overlay.
@@ -119,6 +129,7 @@ pub struct WakeEnrollPeek {
 impl StatusPicture {
     pub fn off() -> Self {
         Self {
+            seq: 0,
             engine: EngineState::Off,
             phase: Phase::Off,
             detail: None,

@@ -66,7 +66,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Boris memory** — a local SQLite evidence ledger for facts, preferences,
   projects, past events, lifecycle-aware recall, and explicit forgetting *(1.2 beta.2)*
 
-- **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback
+- **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback, with wake barge-in while talking, thinking, or confirming
 - **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
@@ -97,7 +97,11 @@ Armed  →  wake  →  Hearing  →  Reading  →  Thinking  →  Talking  →  
 The engine thread owns voice state and turn ordering. Reusable loader threads
 preload STT/TTS, final speech is produced sentence-by-sentence while playback
 continues, and durable memory/trace work runs on maintenance lanes (the
-transcript append stays in the turn path).
+transcript append stays in the turn path). Voice confirmations follow the same
+HITL budget as the agent (`max_confirms_per_turn`, default 12), support wake
+barge-in mid-prompt, and feed post-confirm tool rounds back into the context
+meter, turn trace, and artifact peek. Status snapshots carry a monotonic `seq`
+for latest-wins UI ordering.
 This keeps Stop and device-switch commands responsive without turning the
 pipeline into an unbounded worker mesh.
 

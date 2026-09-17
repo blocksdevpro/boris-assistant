@@ -111,7 +111,7 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 
 ### `boris-pipeline` engine phases
 
-`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides). Status snapshots (`StatusPicture`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
+`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
 
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 
@@ -146,7 +146,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
 | `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
-| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking or Thinking |
+| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |

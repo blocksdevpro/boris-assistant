@@ -54,10 +54,7 @@ impl LlmClient for OpenRouterClient {
                 // streams intentionally still fall back (reasoning is display
                 // text, not a speakable answer or tool call).
                 if !delta.content.is_empty()
-                    || delta
-                        .tool_deltas
-                        .iter()
-                        .any(|t| !tool_delta_is_empty(t))
+                    || delta.tool_deltas.iter().any(|t| !tool_delta_is_empty(t))
                 {
                     saw_payload_delta = true;
                 }
@@ -446,7 +443,9 @@ fn emit_blocking_fallback_events(
 ) {
     if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
         if !content.is_empty() {
-            on_event(LlmStreamEvent::FirstDelta { ttfb_ms: elapsed_ms });
+            on_event(LlmStreamEvent::FirstDelta {
+                ttfb_ms: elapsed_ms,
+            });
             on_event(LlmStreamEvent::ContentDelta {
                 text: content.to_string(),
             });
@@ -628,10 +627,13 @@ mod tests {
 
     #[test]
     fn provider_errors_do_not_fall_back() {
-        assert!(!should_fallback_for_error(&LlmError::provider("rate limited")));
-        assert!(!should_fallback_for_error(
-            &LlmError::from_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down")
-        ));
+        assert!(!should_fallback_for_error(&LlmError::provider(
+            "rate limited"
+        )));
+        assert!(!should_fallback_for_error(&LlmError::from_http_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "slow down"
+        )));
         assert!(should_fallback_for_error(&LlmError::http("conn reset")));
         assert!(should_fallback_for_error(&LlmError::timeout("deadline")));
         assert!(should_fallback_for_error(&LlmError::parse("bad json")));
@@ -705,10 +707,9 @@ mod tests {
                 LlmStreamEvent::ToolCallComplete { .. },
             ]
         ));
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            LlmStreamEvent::ModelSend { .. }
-        )));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, LlmStreamEvent::ModelSend { .. })));
         assert!(matches!(
             events.get(1),
             Some(LlmStreamEvent::ContentDelta { text }) if text == "fallback text"

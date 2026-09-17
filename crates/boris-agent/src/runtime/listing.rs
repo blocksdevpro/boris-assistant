@@ -521,9 +521,6 @@ mod tests {
             name: "a",
             list: false,
         })];
-        assert_eq!(
-            pruned_tool_count(&small, &ListToolsContext::default()),
-            0
-        );
+        assert_eq!(pruned_tool_count(&small, &ListToolsContext::default()), 0);
     }
 }

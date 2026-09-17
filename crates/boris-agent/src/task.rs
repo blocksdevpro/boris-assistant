@@ -212,19 +212,67 @@ const LOCAL_WORK_WEAK_NEEDLES: &[&str] = &[
 /// coding request. Matched on word tokens (not substrings) so "prefix" does
 /// not match "fix" and "credit" does not match "edit".
 const CODING_ACTION_VERBS: &[&str] = &[
-    "edit", "edits", "edited", "editing", "write", "writes", "wrote", "writing", "refactor",
-    "refactors", "refactored", "refactoring", "create", "creates", "created", "creating",
-    "fix", "fixes", "fixed", "fixing", "debug", "debugs", "debugged", "debugging", "review",
-    "reviews", "reviewed", "reviewing", "implement", "implements", "implemented",
-    "implementing", "compile", "compiles", "compiled", "compiling",
+    "edit",
+    "edits",
+    "edited",
+    "editing",
+    "write",
+    "writes",
+    "wrote",
+    "writing",
+    "refactor",
+    "refactors",
+    "refactored",
+    "refactoring",
+    "create",
+    "creates",
+    "created",
+    "creating",
+    "fix",
+    "fixes",
+    "fixed",
+    "fixing",
+    "debug",
+    "debugs",
+    "debugged",
+    "debugging",
+    "review",
+    "reviews",
+    "reviewed",
+    "reviewing",
+    "implement",
+    "implements",
+    "implemented",
+    "implementing",
+    "compile",
+    "compiles",
+    "compiled",
+    "compiling",
 ];
 
 /// Extra task verbs that mark a comma-separated clause as another step
 /// ("…, then verify it", "…, and send it to me").
 const STEP_CLAUSE_VERBS: &[&str] = &[
-    "run", "runs", "check", "checks", "verify", "verifies", "update", "updates", "send",
-    "sends", "delete", "deletes", "install", "installs", "test", "tests", "build", "builds",
-    "summarize", "summarizes",
+    "run",
+    "runs",
+    "check",
+    "checks",
+    "verify",
+    "verifies",
+    "update",
+    "updates",
+    "send",
+    "sends",
+    "delete",
+    "deletes",
+    "install",
+    "installs",
+    "test",
+    "tests",
+    "build",
+    "builds",
+    "summarize",
+    "summarizes",
 ];
 
 const SIDE_EFFECT_NEEDLES: &[&str] = &[
@@ -282,9 +330,9 @@ const GREETING_NEEDLES: &[&str] = &[
 /// instead. The input is already lowercased; punctuation is stripped per
 /// token, so "hi", "Hi!", "(hi)" all match while "history" does not.
 fn has_bare_hi(lower_trimmed: &str) -> bool {
-    lower_trimmed.split_whitespace().any(|w| {
-        w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '…' || c == '`') == "hi"
-    })
+    lower_trimmed
+        .split_whitespace()
+        .any(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '…' || c == '`') == "hi")
 }
 
 const TIME_DATE_NEEDLES: &[&str] = &[
@@ -410,8 +458,7 @@ pub fn classify_task(user_text: &str) -> TaskTraits {
     // Length alone never implies complexity either: a long request without
     // step markers is Moderate at most (via research/coding/side-effects if
     // present), so verbose greetings stay fast.
-    let complexity = if person || (coding && multi_step) || (words > COMPLEX_WORDS && multi_step)
-    {
+    let complexity = if person || (coding && multi_step) || (words > COMPLEX_WORDS && multi_step) {
         TaskComplexity::Complex
     } else if research || coding || side_effects || multi_step {
         TaskComplexity::Moderate

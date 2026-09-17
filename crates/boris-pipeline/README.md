@@ -37,15 +37,25 @@ the engine remains the sole owner of phases and playback state. Bounded helpers
 (a 2-worker Tokio runtime, a maintenance worker, two reusable model loaders)
 stay off the speech-critical path. While Talking,
 a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
-liveness is not used — leftover TTS in the mic looks like a speaker); silence
-or “continue” resumes from the cut. While Thinking, the same toggle uses wake
-plus the Armed live-mic gate; work keeps running until STT decides. Silence
-or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
-request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Reusable STT
-and TTS loader threads live for the engine lifetime instead of being recreated
-per turn. Status is pushed for the UI.
+ liveness is not used — leftover TTS in the mic looks like a speaker); silence
+ or “continue” resumes from the cut. While Thinking, the same toggle uses wake
+ plus the Armed live-mic gate; work keeps running until STT decides. Silence
+ or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
+ request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Confirm prompts
+ and re-asks use the same barge watch: a wake word mid-prompt stops playback
+ and listens for the yes/no instead of auto-denying. Voice confirms follow
+ the agent HITL budget (`max_confirms_per_turn`, default 12 via
+ `BORIS_MAX_CONFIRMS`); post-confirm tool rounds update the context meter,
+ the turn trace, and the artifact peek. Mid-confirm device switches re-speak
+ the prompt on the new device, wake-enroll yields the turn, and disconnects
+ mark devices dead until the next Start. Reusable STT
+ and TTS loader threads live for the engine lifetime instead of being recreated
+ per turn. Status is pushed for the UI (latest-wins by monotonic `seq`;
+ activity is capped at 160 chars, the reasoning tail at 512, and the thinking
+ tail is kept across Hearing/Reading so the overlay does not flicker).
 
-`low_memory` releases the outgoing model at each STT→TTS handoff. `balanced`
+ `low_memory` releases the outgoing model at each STT→TTS handoff (including
+ confirm captures). `balanced`
 keeps models warm through an active turn or follow-up chain, then releases both
 when Boris returns to idle. `low_latency` may keep both loaded for the powered-on
 session.
@@ -61,7 +71,7 @@ directly for local p50/p95 summaries.
 | [`Engine`](src/engine/mod.rs) | Owns the engine thread join handle |
 | [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch / wake enroll / typed input) |
 | [`PipelineConfig`](src/config.rs) / [`LlmPrefs`](src/config.rs) | Host spawn configuration |
-| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail) |
+| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail; `seq` is the latest-wins order key) |
 | [`AppSettings`](src/settings.rs) | Prefs + API key (`config.toml` + `auth.json`) |
 | [`PipelineError`](src/error.rs) | Typed errors (settings / install / init / IO / other) |
 
@@ -169,7 +179,7 @@ still match the catalog hash.
 | `BORIS_MODEL_BASE_URL` | Mirror base for `install_models` |
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
-| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking or Thinking |
+| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_LOG` / `RUST_LOG` | Logging filters (host) |
 

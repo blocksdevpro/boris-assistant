@@ -64,6 +64,8 @@ export type ArtifactCard = {
 
 /** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
+  /** Monotonic snapshot counter. Latest-wins + dedupe key: ignore `seq <= last_seen`. */
+  seq?: number;
   engine: EngineState;
   phase: Phase;
   detail?: string | null;
@@ -320,6 +322,7 @@ export const PROVIDER_PRESETS: { id: string; label: string }[] = [
 
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {
+  seq: 0,
   engine: "Off",
   phase: "Off",
   detail: null,
@@ -344,6 +347,7 @@ export function normalizeStatus(
 ): StatusPicture {
   if (!raw) return { ...OFF_STATUS };
   return {
+    seq: typeof raw.seq === "number" && Number.isFinite(raw.seq) ? raw.seq : 0,
     engine: raw.engine ?? "Off",
     phase: raw.phase ?? "Off",
     detail: raw.detail ?? null,

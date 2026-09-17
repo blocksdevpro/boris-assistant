@@ -467,8 +467,7 @@ fn append_reasoning_delta(sink: &mut String, piece: &Value) {
     for detail in details {
         // `text` + `summary` fragments arrive without separators; join with a
         // space so words from adjacent details are not glued together.
-        let s = string_delta(detail.get("text"))
-            .or_else(|| string_delta(detail.get("summary")));
+        let s = string_delta(detail.get("text")).or_else(|| string_delta(detail.get("summary")));
         if let Some(s) = s {
             push_reasoning_fragment(sink, s);
         }

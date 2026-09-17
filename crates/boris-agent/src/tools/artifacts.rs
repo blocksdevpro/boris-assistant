@@ -68,8 +68,7 @@ pub fn is_safe_artifact_ref(raw: &str) -> bool {
     if stem.is_empty() || stem.len() > 96 {
         return false;
     }
-    stem
-        .chars()
+    stem.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 

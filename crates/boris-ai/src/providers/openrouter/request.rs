@@ -105,7 +105,12 @@ fn trim_trailing_slash(url: &str) -> &str {
     url.trim_end_matches('/')
 }
 
-fn base_body(model: &str, messages: &Value, tools: &Value, strip_openrouter_extensions: bool) -> Value {
+fn base_body(
+    model: &str,
+    messages: &Value,
+    tools: &Value,
+    strip_openrouter_extensions: bool,
+) -> Value {
     if tools_absent_or_empty(tools) {
         json!({
             "model": model,
@@ -243,8 +248,7 @@ mod tests {
 
     #[test]
     fn body_dual_sends_max_tokens_and_max_completion_tokens() {
-        let client = OpenRouterClient::new("k".into(), Some("m".into()))
-            .with_max_tokens(8_192);
+        let client = OpenRouterClient::new("k".into(), Some("m".into())).with_max_tokens(8_192);
         let body = client.request_body(&json!([]), &Value::Null, false);
         assert_eq!(body["max_tokens"], 8_192);
         assert_eq!(body["max_completion_tokens"], 8_192);
@@ -262,18 +266,22 @@ mod tests {
             temperature: Some(0.3),
             ..CompleteOptions::default()
         };
-        let body =
-            client.request_body_with(&json!([]), &Value::Null, false, &opts);
-        let sent = body["temperature"].as_f64().expect("temperature is numeric");
-        assert!((sent - 0.3).abs() < 1e-6, "temperature passthrough, got {sent}");
+        let body = client.request_body_with(&json!([]), &Value::Null, false, &opts);
+        let sent = body["temperature"]
+            .as_f64()
+            .expect("temperature is numeric");
+        assert!(
+            (sent - 0.3).abs() < 1e-6,
+            "temperature passthrough, got {sent}"
+        );
     }
 
     #[test]
     fn body_clamps_max_tokens_to_context_window() {
         // `with_context_window_tokens` floors at 1024, well below the
         // 24576 default cap, so the clamp must engage.
-        let client = OpenRouterClient::new("k".into(), Some("m".into()))
-            .with_context_window_tokens(10);
+        let client =
+            OpenRouterClient::new("k".into(), Some("m".into())).with_context_window_tokens(10);
         assert_eq!(client.context_window_tokens(), 1_024);
         let body = client.request_body(&json!([]), &Value::Null, false);
         assert_eq!(body["max_tokens"], 1_024);

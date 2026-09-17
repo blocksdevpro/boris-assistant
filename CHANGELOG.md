@@ -27,8 +27,49 @@ Further work on `next` after [1.2.0-beta.2].
   reduced-motion.
 - Cancellable LLM summary compaction that records provider usage and merges
   it into turn accounting (`TokenAccounting::merge`).
+- A monotonic `seq` counter on every `StatusPicture` snapshot so the UI can
+  order and dedupe latest-wins across the engine and per-turn publishers.
 
 ### Changed
+
+- Voice HITL confirm budget now mirrors the agent policy
+  (`max_confirms_per_turn`, default 12) instead of a hardcoded 8 rounds.
+  Post-confirm tool rounds feed the overlay context meter, the per-turn trace
+  (`agent_resume`), and the artifact peek instead of staying invisible.
+- Confirm prompts and re-asks are wake barge-in aware: a wake word mid-prompt
+  stops playback and listens for the yes/no instead of auto-denying. The
+  second-capture reject path resumes through the same barge-aware thinking
+  path as every other agent call (Stop / new-request barge-in applies).
+- Mid-confirm device switches re-speak the prompt on the new device instead
+  of capturing on a stale mic; wake-enroll requests yield the turn; audio
+  disconnects mark devices dead and a fresh Start re-marks them alive.
+- Overlay snapshot contract: latest-wins by `seq`, activity truncated to 160
+  chars and the reasoning tail to 512, the thinking tail is kept across
+  Hearing/Reading so the overlay does not flicker, a fresh turn reports zero
+  context (not 1), transient hints use `activity` instead of error `detail`,
+  `go_off` clears stale captions, a TTS-load failure clears unsaid text, and
+  a missed `present_artifact` peek only logs instead of blanking the card.
+- Confirm captures follow model residency (`LowMemory` evicts STT, otherwise
+  models stay warm across re-prompt rounds); a stuck TTS inference is parked
+  on a reaper thread instead of leaking model ownership.
+- System prompt gains an `<interaction>` block (host owns the turn, trailing
+  `?` opens the mic for one freeform reply, HITL prompts stay one short
+  sentence, `collect_input` is pointer-only and never reads secrets back,
+  cards go through `present_artifact` first), treats `<personal_context>` as
+  ground-truth data rather than instructions, and allows exactly one verified
+  profile URL on the spoken line.
+- OpenRouter clients for voice turns enable reasoning `include_text` so
+  `Reasoning` events reach the overlay thinking chip; intentionally unwired
+  client knobs (max tokens, timeouts, referer/title, base URL) stay on
+  defaults until the product needs them.
+- Engine setup applies the capability preset to the sandbox at the type level
+  before tool registration, pins `ToolRuntimeFeatures` listing knobs
+  (`force_list_all: false`, `core_tools: None`), and logs legacy-memory
+  discovery before queueing migration. Session handoff flushes durably with a
+  timeout so two sessions' snapshots cannot interleave.
+- Internal cleanup in `boris-agent` / `boris-ai`: dead compaction preview and
+  search-limit helpers removed, `MemoryStatus::parse` deduped,
+  `tool_observation_json` is test-only, plus `cargo fmt` normalization.
 
 - Existing task-execution and research playbooks now follow the user's intent
   and scope. Todos, extra research, artifacts, and fixed search quotas are
@@ -67,6 +108,15 @@ Further work on `next` after [1.2.0-beta.2].
   rebuilt by position and snapshots only cover content with no prior delta.
 - Overlay captions, thought tails, and artifact cards share one motion path
   with `inert`/`aria-hidden` hiding and reduced-motion instant paths.
+- Bare "please" no longer counts as a yes in voice confirmation (polite
+  filler re-asks, then denies by default); "yes please" and "please go ahead"
+  still approve.
+- Barge-in `TakeTurn` now carries the interrupted turn's `heard` text so the
+  next turn quotes the real request.
+- Confirm playback interrupts and missed-utterance hints no longer surface as
+  error `detail`; confirm TTS synth failures eagerly unload the model, and
+  confirm capture/STT/settle failures are logged with deny-by-default
+  instead of silent empty strings.
 
 ### Removed
 

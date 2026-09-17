@@ -90,8 +90,10 @@ pub struct PipelineConfig {
     /// Combined prompt + completion window used for compaction and UI status.
     pub context_window_tokens: u32,
     pub system_prompt: String,
-    /// Rate of PCM passed to playback (must match TTS native rate).
-    /// When `0` or unused, the engine prefers [`boris_inference::TextToSpeech::sample_rate`].
+    /// Fallback PCM rate for playback. Precedence: the TTS adapter's native
+    /// `sample_rate()` wins whenever it reports non-zero (see
+    /// `engine::setup::resolve_play_source_rate`); this value only applies
+    /// when the adapter reports `0`, and `44_100` when both are `0`.
     pub play_source_rate: u32,
     /// Wake-word ONNX model bytes (host may embed or load from disk).
     pub wakeword_model: Vec<u8>,

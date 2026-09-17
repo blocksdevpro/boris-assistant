@@ -239,17 +239,11 @@ pub async fn agent_loop_with_budget(
                 ToolBatchResult::Continue => {
                     // B11 breaker: track consecutive unknown-only rounds.
                     if all_unknown {
-                        consecutive_unknown_rounds =
-                            consecutive_unknown_rounds.saturating_add(1);
+                        consecutive_unknown_rounds = consecutive_unknown_rounds.saturating_add(1);
                         if consecutive_unknown_rounds >= 2 {
-                            let available: Vec<&str> = state
-                                .tools
-                                .iter()
-                                .map(|t| t.name())
-                                .take(20)
-                                .collect();
-                            let has_search =
-                                state.tools.iter().any(|t| t.name() == "tool_search");
+                            let available: Vec<&str> =
+                                state.tools.iter().map(|t| t.name()).take(20).collect();
+                            let has_search = state.tools.iter().any(|t| t.name() == "tool_search");
                             let hint = if has_search {
                                 " Hint: use tool_search to discover the right tool."
                             } else {
@@ -1354,10 +1348,7 @@ mod tests {
             None,
             None,
             None,
-            crate::finish_gate::FinishGateBudget {
-                markup: 2,
-                gate: 0,
-            },
+            crate::finish_gate::FinishGateBudget { markup: 2, gate: 0 },
             TokenAccounting::default(),
         )
         .await
@@ -1403,8 +1394,7 @@ mod tests {
         context.push(Role::System, "sys");
         context.push(Role::User, "resume me");
         let runtime = ToolRuntime::null();
-        let tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> =
-            vec![std::sync::Arc::new(Safe)];
+        let tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> = vec![std::sync::Arc::new(Safe)];
         let config = AgentLoopConfig::default();
         let todos = std::env::temp_dir().join(format!(
             "boris-resume-todos-{}",
@@ -1483,16 +1473,10 @@ mod tests {
             client: &client,
             activated: None,
         };
-        let result = resume_pending_input(
-            state,
-            pending2,
-            Some("hello".into()),
-            &config,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let result =
+            resume_pending_input(state, pending2, Some("hello".into()), &config, None, None)
+                .await
+                .unwrap();
         // Post-resume safe tool ran => tool_rounds 1 -> 2.
         assert_eq!(result.tool_rounds, 2, "post-resume batch must count");
         // Accounting restored, not default.

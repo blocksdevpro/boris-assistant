@@ -421,7 +421,8 @@ async fn run_child(
             } else {
                 ""
             };
-            let tool_result = format_subagent_result(&tools, result.tool_rounds, effort_attr, &body);
+            let tool_result =
+                format_subagent_result(&tools, result.tool_rounds, effort_attr, &body);
             finalize_child(
                 &child_dir,
                 "completed",

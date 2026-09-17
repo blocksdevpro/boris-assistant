@@ -414,7 +414,10 @@ mod tests {
         let (roots, dir) = crate::tools::files::test_util::temp_roots();
         std::fs::write(dir.join("a.txt"), "a\nb\nc\n").unwrap();
         let read = ReadFileTool::new(roots);
-        for args in [json!({"path": "a.txt", "limit": 2.5}), json!({"path": "a.txt", "offset": 1.2})] {
+        for args in [
+            json!({"path": "a.txt", "limit": 2.5}),
+            json!({"path": "a.txt", "offset": 1.2}),
+        ] {
             let err = read
                 .execute(&crate::tool_context::ToolCallContext::new("t"), args)
                 .await

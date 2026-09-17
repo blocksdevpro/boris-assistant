@@ -80,23 +80,6 @@ pub(super) fn truncate_tool_text(s: &str, max_chars: usize) -> String {
     format!("{head}\n…[compacted]…\n{tail}")
 }
 
-pub(super) fn value_preview(v: &Value, max: usize) -> String {
-    let s = match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    if s.chars().count() <= max {
-        s
-    } else {
-        let head: String = s.chars().take(max).collect();
-        format!("{head}…")
-    }
-}
-
-pub(super) fn estimate_message_chars(m: &Message) -> usize {
-    m.dump().to_string().len()
-}
-
 /// Deterministic tokenizer-free estimate over serialized provider input.
 ///
 /// ASCII uses the established four-bytes-per-token approximation. Each
@@ -487,8 +470,7 @@ impl Context {
             }
             digest_indices.remove(0);
         }
-        let keep: std::collections::HashSet<usize> =
-            digest_indices.into_iter().collect();
+        let keep: std::collections::HashSet<usize> = digest_indices.into_iter().collect();
         let mut idx = 0usize;
         // Only CompactedTool rows in the prefix are candidates; system/summary
         // and post-prefix turns are untouched.
@@ -497,10 +479,7 @@ impl Context {
         self.messages.retain(|m| {
             let i = idx;
             idx += 1;
-            if i >= body_copy
-                && i < prefix_end_copy
-                && m.origin == MessageOrigin::CompactedTool
-            {
+            if i >= body_copy && i < prefix_end_copy && m.origin == MessageOrigin::CompactedTool {
                 return keep.contains(&i);
             }
             true
@@ -678,35 +657,6 @@ mod tests {
         let out = truncate_tool_text(&s, 20);
         assert!(out.contains("…[compacted]…"));
         assert!(out.chars().count() < 100);
-    }
-
-    #[test]
-    fn value_preview_caps_long_strings() {
-        let s = "x".repeat(50);
-        let out = value_preview(&Value::String(s), 10);
-        assert_eq!(out.chars().count(), 11); // 10 + ellipsis
-        assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn value_preview_short_unchanged() {
-        assert_eq!(value_preview(&json!("hi"), 10), "hi");
-    }
-
-    #[test]
-    fn estimate_message_chars_string_and_object() {
-        let m = Message {
-            role: Role::User,
-            origin: MessageOrigin::Human,
-            content: Value::String("abcd".into()),
-        };
-        assert_eq!(estimate_message_chars(&m), m.dump().to_string().len());
-        let m2 = Message {
-            role: Role::Assistant,
-            origin: MessageOrigin::Assistant,
-            content: json!({"a": 1}),
-        };
-        assert_eq!(estimate_message_chars(&m2), m2.dump().to_string().len());
     }
 
     #[test]
@@ -1301,8 +1251,13 @@ mod tests {
         assert!(digests.last().unwrap().contains("digest-9"));
         assert!(matches!(ctx.messages[0].role, Role::System));
         // Prefix (system + digests) stays bounded.
-        let body = usize::from(matches!(ctx.messages.first(), Some(m) if matches!(m.role, Role::System)));
-        let first_human = ctx.messages.iter().position(|m| m.origin.is_human()).unwrap();
+        let body =
+            usize::from(matches!(ctx.messages.first(), Some(m) if matches!(m.role, Role::System)));
+        let first_human = ctx
+            .messages
+            .iter()
+            .position(|m| m.origin.is_human())
+            .unwrap();
         assert!((first_human - body) <= MAX_PREFIX_MESSAGES);
     }
 

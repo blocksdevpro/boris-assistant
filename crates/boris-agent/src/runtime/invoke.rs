@@ -902,7 +902,10 @@ mod tests {
         assert!(out.contains("HEAD-"));
         assert!(out.contains("TAIL-MARKER-ZZ"));
         assert!(out.contains("[truncated"));
-        assert_eq!(bound_error_message("short", MAX_ERROR_MESSAGE_CHARS), "short");
+        assert_eq!(
+            bound_error_message("short", MAX_ERROR_MESSAGE_CHARS),
+            "short"
+        );
     }
 
     #[tokio::test]
@@ -935,11 +938,7 @@ mod tests {
         }
         let rt = ToolRuntime::null();
         match rt
-            .invoke(
-                &FailBig,
-                inv("1", "failbig"),
-                InvokeOptions::default(),
-            )
+            .invoke(&FailBig, inv("1", "failbig"), InvokeOptions::default())
             .await
         {
             InvokeResult::Observation(s) => {
@@ -983,10 +982,7 @@ mod tests {
                 self.0.write(e);
             }
         }
-        let rt = ToolRuntime::new(
-            SandboxConfig::default(),
-            Box::new(Shared(sink.clone())),
-        );
+        let rt = ToolRuntime::new(SandboxConfig::default(), Box::new(Shared(sink.clone())));
         match rt
             .invoke(
                 &NeedName,
@@ -1018,12 +1014,7 @@ mod tests {
             }
         }
         let rt2 = ToolRuntime::new(SandboxConfig::default(), Box::new(Shared2(mem.clone())));
-        rt2.audit_unknown_tool(
-            "nope_tool",
-            &json!({"a": 1}),
-            Some("s1"),
-            Some("t1"),
-        );
+        rt2.audit_unknown_tool("nope_tool", &json!({"a": 1}), Some("s1"), Some("t1"));
         let events = mem.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].decision, "rejected");
@@ -1041,10 +1032,7 @@ mod tests {
                 self.0.write(e);
             }
         }
-        let rt = ToolRuntime::new(
-            SandboxConfig::default(),
-            Box::new(Shared3(audit.clone())),
-        );
+        let rt = ToolRuntime::new(SandboxConfig::default(), Box::new(Shared3(audit.clone())));
         match rt
             .invoke(&LongTool, inv("1", "long"), InvokeOptions::default())
             .await

@@ -18,7 +18,7 @@ use crate::status::{EngineState, Phase};
 use super::barge::{drain_mic, BargeWatch};
 use super::models::{lost_tts, TtsBox};
 use super::picture::Picture;
-use super::playback::{poll_running, PlaybackWait};
+use super::playback::{drain_output_events, poll_running, PlaybackWait};
 use super::EngineCommand;
 
 const EVENT_POLL: Duration = Duration::from_millis(20);
@@ -255,7 +255,9 @@ pub(super) fn stream_reply(
     };
 
     if !already_audible {
-        while output_events.try_recv().is_ok() {}
+        // Pre-play drain: a dead event channel here means `play` below fails
+        // and the loop reports `Stopped` — surfaced, not swallowed.
+        drain_output_events(output_events);
     }
 
     let mut synthesis_error = None;
@@ -564,7 +566,17 @@ pub(super) fn stream_reply(
                 )
             });
             tracing::error!(%turn, grace_ms = SYNTH_CANCEL_JOIN_GRACE.as_millis() as u64, "detaching stuck TTS inference");
-            drop(join);
+            // Never `drop(join)` a running native inference: that detaches the
+            // thread AND leaks model ownership (next turn would see `lost_tts`
+            // while weights are still pinned). Park the handle on a reaper
+            // thread that joins (blocking only itself) and drops the returned
+            // model, freeing native resources asynchronously.
+            std::thread::Builder::new()
+                .name("boris-tts-reap".into())
+                .spawn(move || {
+                    let _ = join.join();
+                })
+                .ok();
             lost_tts()
         }
     } else {

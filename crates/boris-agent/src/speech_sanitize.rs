@@ -177,7 +177,11 @@ fn strip_json_pseudo_tool_blocks(s: &str) -> String {
                 if looks_like_pseudo_tool_json(line) {
                     out.push(' ');
                     // Drop to end of line, keep following lines for prose.
-                    i = if line_end < s.len() { line_end + 1 } else { s.len() };
+                    i = if line_end < s.len() {
+                        line_end + 1
+                    } else {
+                        s.len()
+                    };
                     // If the remainder after the dropped line has no prose
                     // (only more JSON noise), the whitespace-collapse + noise
                     // filter below will finish the job.
@@ -355,7 +359,8 @@ mod tests {
 
     #[test]
     fn json_with_braces_in_strings_stripped_safely() {
-        let raw = "{\"name\": \"web_search\", \"arguments\": \"{\\\"query\\\": \\\"a } b { c\\\"}\"}";
+        let raw =
+            "{\"name\": \"web_search\", \"arguments\": \"{\\\"query\\\": \\\"a } b { c\\\"}\"}";
         assert!(is_markup_only_speech(raw));
         assert!(strip_tool_markup(raw).is_empty());
     }

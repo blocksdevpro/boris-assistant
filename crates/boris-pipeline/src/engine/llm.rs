@@ -47,6 +47,14 @@ pub(super) fn resolve_model_and_provider(
 ///
 /// - **strong** path → `high` effort (tools, research, plan)
 /// - **fast** path → `medium` (still thinks; cheaper than high)
+///
+/// Both use `.include_text()` so the `Reasoning` agent event keeps flowing to
+/// the overlay thinking chip. The agent loop already applies per-round stage
+/// budgets (`ToolPlanning`/`Complex` include trace; `SimpleVoice` excludes),
+/// but the client-level default is the fallback for compaction and any direct
+/// `complete` path — with `exclude: true` (the `ReasoningConfig` default) the
+/// provider would strip the trace and the `AgentEvent::Reasoning` UI that
+/// `engine/mod.rs` subscribes to would starve.
 pub(super) fn build_openrouter_client(
     api_key: &str,
     model: &str,
@@ -57,14 +65,20 @@ pub(super) fn build_openrouter_client(
     context_window_tokens: u32,
 ) -> OpenRouterClient {
     let reasoning = if strong {
-        ReasoningConfig::high()
+        ReasoningConfig::high().include_text()
     } else {
-        ReasoningConfig::medium()
+        ReasoningConfig::medium().include_text()
     };
     let mut client = OpenRouterClient::new(api_key.to_string(), Some(model.to_string()))
         .with_session_id(session_id)
         .with_reasoning(reasoning)
         .with_context_window_tokens(context_window_tokens);
+    // Intentionally unwired client knobs: `with_max_tokens` (implicit
+    // `DEFAULT_MAX_TOKENS` — per-round stage budgets in the agent own this),
+    // `with_request_timeout/with_idle_timeout` (client defaults; voice has its
+    // own turn-level deadlines), `with_referer/with_title` (no attribution
+    // needed for a local desktop app), `with_base_url` (default OpenRouter).
+    // Wire one only when the product needs it, with a comment why.
     if let Some(pref) = provider_pref {
         if !pref.trim().is_empty() {
             client = client.with_provider_pref(pref).with_allow_fallbacks(!pin);

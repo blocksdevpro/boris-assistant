@@ -368,11 +368,8 @@ mod tests {
     fn stream_message_omits_empty_tool_calls() {
         let msg = assistant_message_from_stream("assistant", "hi".into(), vec![]);
         assert!(msg.get("tool_calls").is_none());
-        let msg = assistant_message_from_stream(
-            "assistant",
-            String::new(),
-            vec![json!({ "id": "1" })],
-        );
+        let msg =
+            assistant_message_from_stream("assistant", String::new(), vec![json!({ "id": "1" })]);
         assert!(msg.get("tool_calls").is_some());
     }
 

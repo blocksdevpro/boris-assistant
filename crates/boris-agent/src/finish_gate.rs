@@ -625,7 +625,10 @@ mod tests {
         assert_eq!(FinishGateBudget::MARKUP_INIT, 2);
         assert_eq!(FinishGateBudget::GATE_INIT, 3);
 
-        assert_eq!(FinishGateBudget::none(), FinishGateBudget { markup: 0, gate: 0 });
+        assert_eq!(
+            FinishGateBudget::none(),
+            FinishGateBudget { markup: 0, gate: 0 }
+        );
         assert_eq!(
             FinishGateBudget::from_legacy(0),
             FinishGateBudget::none(),

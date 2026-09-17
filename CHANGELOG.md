@@ -51,6 +51,8 @@ Further work on `next` after [1.2.0-beta.2].
 - Oversized requests now fail fast with `InputTooLarge` before any provider
   call (no billing); summary-maintenance turns are forced onto the fast
   tier with an explicit cap.
+- Silero freeform endpointing is now 700 ms of trailing silence (was
+  550 ms); yes/no confirm stays at 250 ms.
 - Tools that collect typed input now force the sequential HITL-safe path so
   remaining calls are preserved across the `NeedsInput` pause.
 - Overlay window parking uses one stable top edge so the island grows

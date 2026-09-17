@@ -1,7 +1,7 @@
 //! Startup / environment dumps for debugging clean installs.
 //!
 //! On a machine without a console (packaged Windows), this is the first place
-//! to look: `~/.boris/logs/boris-desktop.*.log`.
+//! to look: `~/.boris/logs/boris.*.log`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

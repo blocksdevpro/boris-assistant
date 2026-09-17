@@ -67,7 +67,9 @@ go to disk. On another PC after install:
 %USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log
 ```
 
-What gets logged by default (**DEBUG** for all `boris_*` crates):
+What gets logged by default (**DEBUG** for the desktop, pipeline, audio,
+sense, agent, STT/TTS, core, and inference crates — `boris_ai` stays at
+`warn` unless `RUST_LOG`/`BORIS_LOG` overrides):
 
 1. **Boot diagnostics** — exe path, sidecar DLLs (`onnxruntime.dll` / `DirectML.dll`),
    `~/.boris` layout, model dir listings, preflight, mic/speaker list
@@ -100,11 +102,11 @@ Override home with `BORIS_HOME` if you need logs elsewhere.
 Wake-word and Silero VAD inference use the `ort` crate. On Windows, `build.rs` stages
 `onnxruntime.dll` / `DirectML.dll` (from `target/{profile}/` after ort's
 `copy-dylibs`, or the pyke download cache) into `src-tauri/resources/ort/`.
-Tauri `bundle.resources` then installs those DLLs **next to** `Boris.exe`
+Tauri `bundle.resources` then installs those DLLs **next to** `boris.exe`
 so a clean machine does not need a separate ORT install.
 
 **Verify after install (or open the NSIS/MSI payload):** `onnxruntime.dll`
-and/or `DirectML.dll` sit beside the app executable.
+and `DirectML.dll` sit beside the app executable.
 
 ## Add UI components
 

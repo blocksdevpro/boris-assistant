@@ -1,21 +1,19 @@
 # boris-pipeline
 
-Desktop voice engine for Boris: **one engine thread**, sequential turns, UI status
-snapshots. Not a worker mesh and not a Session FSM.
+Desktop voice engine for Boris: sequential turns with **single-threaded turn
+ordering** plus bounded helpers, UI status snapshots. Not a worker mesh and
+not a Session FSM.
 
 ## Turn loop
 
 ```text
-                    ┌──────────────────────────────────────────┐
-                    │              Engine thread               │
-                    └──────────────────────────────────────────┘
-                                      │
-         Start ──► Armed ──► (wake word) ──► Hearing ──► Reading
-                                      │                      │
-                                      │                      ▼
-                              AwaitingReply ◄── Talking ◄── Thinking
-                                      │                      │
-                                      └──────── (agent) ─────┘
+          Start ──► Armed ──► (wake word) ──► Hearing ──► Reading
+                                       │                      │
+                                       │                      ▼
+                               AwaitingReply ◄── Talking ◄── Thinking
+                                       │                      │
+                                       └──────── (agent) ─────┘
+                    (AwaitingConfirm / AwaitingInput can interrupt a turn)
 ```
 
 | Phase | Meaning |
@@ -25,15 +23,19 @@ snapshots. Not a worker mesh and not a Session FSM.
 | `Armed` | Listening for wake |
 | `AwaitingReply` | Freeform follow-up (no second wake) |
 | `AwaitingConfirm` | Yes/no after a dangerous tool |
+| `AwaitingInput` | Typed/pasted overlay/Home input |
 | `Hearing` | Mic capture + VAD |
 | `Reading` | STT |
 | `Thinking` | Agent + tools (+ TTS synth) |
 | `Talking` | Playback started |
 
-Wake scoring, VAD capture, and STT run on the engine thread. The agent turn
-runs on a scoped thread during Thinking so the engine can still service Stop
-and barge-in. Sentence TTS inference is handed to one turn-scoped producer;
-the engine remains the sole owner of phases and playback state. While Talking,
+Wake scoring, VAD capture, and STT run inline on the engine thread. The agent
+turn runs on a scoped thread during Thinking so the engine can still service
+Stop and barge-in. Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
+helper thread fed by one turn-scoped producer;
+the engine remains the sole owner of phases and playback state. Bounded helpers
+(a 2-worker Tokio runtime, a maintenance worker, two reusable model loaders)
+stay off the speech-critical path. While Talking,
 a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
 liveness is not used — leftover TTS in the mic looks like a speaker); silence
 or “continue” resumes from the cut. While Thinking, the same toggle uses wake
@@ -57,11 +59,11 @@ directly for local p50/p95 summaries.
 | Type | Role |
 |------|------|
 | [`Engine`](src/engine/mod.rs) | Owns the engine thread join handle |
-| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch) |
+| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch / wake enroll / typed input) |
 | [`PipelineConfig`](src/config.rs) / [`LlmPrefs`](src/config.rs) | Host spawn configuration |
 | [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail) |
 | [`AppSettings`](src/settings.rs) | Prefs + API key (`config.toml` + `auth.json`) |
-| [`PipelineError`](src/error.rs) | Typed errors for settings / install / init |
+| [`PipelineError`](src/error.rs) | Typed errors (settings / install / init / IO / other) |
 
 ### Spawn
 
@@ -71,9 +73,9 @@ use boris_pipeline::{Engine, LlmPrefs, PipelineConfig};
 let prefs = LlmPrefs::new(api_key)
     .model("google/gemini-2.5-flash-lite")
     .fast_model("google/gemini-2.5-flash-lite");
-let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes, vad_bytes);
+let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes.to_vec(), vad_bytes.to_vec());
 let (engine, handle, status_rx) = Engine::spawn(config)?;
-handle.start()?;
+handle.start().expect("engine command channel open");
 // … mirror status_rx to UI …
 engine.shutdown_and_join(); // preferred on host exit
 ```
@@ -98,11 +100,15 @@ Override root with `BORIS_HOME`.
     supertone/onnx/    # TTS graphs
     supertone/voices/  # M4.json
     silero/            # optional seed of embedded Silero VAD ONNX
+    livekit/           # optional seed of embedded wake classifier
+    speaker/           # optional CAM++ speaker model
   sessions/desktop/    # voice session transcripts + artifacts/
   memory/              # memory.sqlite canonical store + optional notes.jsonl
   skills/              # skill playbooks
   logs/                # boris.YYYY-MM-DD.log
-  workspace/           # sandboxed agent workspace
+  traces/              # turns.jsonl per-turn latency traces
+  speaker/             # live.json — wake liveness enroll (acoustic takes)
+  state/workspace/     # sandboxed agent workspace
 ```
 
 `save_settings` unconditionally rewrites `[models]`, `[capability]`, `[audio]`, `[speech]`,
@@ -129,9 +135,10 @@ leaves them in place for a later retry.
 ## Model downloads (`download.rs`)
 
 Each catalog entry enforces a `min_bytes` floor and a mandatory pinned SHA-256
-digest. Downloads and existing model files are hashed before being accepted; a
-mismatch is discarded or reinstalled. Default Hugging Face sources use pinned
-commit revisions.
+digest. Fresh downloads are hashed before being accepted; a mismatch is
+discarded or reinstalled. Already-installed files are skipped by `min_bytes`
+size only (no re-hash, to avoid freezing the UI). Default Hugging Face
+sources use pinned commit revisions.
 
 `BORIS_MODEL_BASE_URL` accepts only `https://` mirrors. Mirror responses must
 still match the catalog hash.
@@ -150,6 +157,15 @@ still match the catalog hash.
 | `BORIS_CAPABILITY` | `voice_safe` \| `local_power` \| `full` |
 | `BORIS_MEMORY` | `0` disables canonical Boris memory and legacy migration |
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate tools |
+| `BORIS_MAX_CONFIRMS` | HITL confirm budget per turn (default 12) |
+| `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
+| `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter |
+| `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
+| `BORIS_TTS_VOICE` | TTS voice id |
+| `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
+| `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` | OpenRouter host order |
+| `BORIS_PIN_PROVIDER` | `1` = no host fallback |
+| `EXA_API_KEY` / `BORIS_EXA_API_KEY` | Exa search upgrade key |
 | `BORIS_MODEL_BASE_URL` | Mirror base for `install_models` |
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
@@ -194,5 +210,8 @@ not in this crate’s unit suite.
 | `config` | `PipelineConfig` / `LlmPrefs` |
 | `devices` | Device list DTOs |
 | `diagnostics` | Startup environment dump |
+| `artifacts` | Session artifact store |
+| `liveness` | Taught-wake liveness enroll + scoring |
+| `env_util` | Env-var parsing helpers |
 | `error` | `PipelineError` |
 | `prompt` | System prompt text |

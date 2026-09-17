@@ -17,8 +17,8 @@ Point [`KokoroTts::with_model_path`] at a directory that contains at least:
 | Path | Required |
 |------|----------|
 | `config.json` | yes |
-| `kokoro-v1_0.pth` **or** `model.safetensors` / similar weights | yes |
-| `voices/<voice>.pt` | yes (for the configured voice) |
+| `kokoro-v1_0.pth`, `model.safetensors`, `pytorch_model.bin`, or any `*.pth` / `*.safetensors` | yes |
+| `voices/` dir **and** `voices/<voice>.pt` | yes (for the configured voice; skipped when no voice is set) |
 
 **No automatic HuggingFace download.** The `any-tts` dependency is built with
 `default-features = false, features = ["kokoro"]` only.
@@ -41,7 +41,8 @@ assert_eq!(tts.sample_rate(), 24_000);
 
 - Prefer explicit `load()`.
 - `synthesize` lazy-loads if unloaded.
-- Missing / incomplete model path → `Error::Config`.
+- Missing / incomplete model path → `Error::Config` (preflight); backend
+  load / synthesize failures → `Error::Other`.
 - Empty / whitespace text → `Ok(empty buffer)`.
 
 ### Trait methods
@@ -55,7 +56,8 @@ assert_eq!(tts.sample_rate(), 24_000);
 ### Long text
 
 Kokoro works best on short-to-medium phrases. Very long monologues may need
-host-side splitting (the product engine does not split for Kokoro today).
+host-side splitting (the adapter sends long text as one request; the product
+engine does not split for Kokoro today).
 
 ## Tests
 

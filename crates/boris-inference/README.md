@@ -10,6 +10,7 @@ Object-safe **ports** (traits) for speech models used by Boris.
 | `TextToSpeech` trait | Concrete TTS models |
 | Shared `load` / `unload` / `is_loaded` / `backend_id` defaults | Wake-word / VAD |
 | `TextToSpeech::sample_rate` | Agent / LLM clients |
+| `TextToSpeech::inter_unit_silence_samples` (default `0`) | Sentence pacing inside adapters |
 
 Adapters live in sibling crates:
 
@@ -66,6 +67,9 @@ impl TextToSpeech for MyTts {
 2. **Always** implement `sample_rate()` with the native mono PCM rate (Hz).
    Hosts use this for playback resampling. Return a fixed rate before load when
    the model rate is known a priori.
+3. Override `inter_unit_silence_samples()` when the adapter owns sentence
+   pacing (Supertone returns `silence_duration × sample_rate`); otherwise the
+   `0` default means hosts insert no gap.
 3. Output is mono `f32` in roughly `[-1.0, 1.0]`.
 4. Empty / whitespace text → `Ok(empty buffer)` so playback can be skipped.
 5. Missing model/voice paths → `Error::config(...)`.

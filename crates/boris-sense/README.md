@@ -11,7 +11,7 @@ Local perception ports for the Boris voice pipeline: **wake-word scoring** and
 | `wake`    | on      | `livekit-wakeword` (git), `ort`      |
 | `speaker` | on      | `rustfft` + `ort` (acoustics + CAM++ embeddings) |
 
-Desktop and `boris-pipeline` use the default set (`vad` + `wake`). `--features vad`
+Desktop and `boris-pipeline` use the default set (`vad` + `wake` + `speaker`). `--features vad`
 without `wake` still needs native ONNX Runtime. `--no-default-features` builds
 only `pcm` / `time`.
 
@@ -35,15 +35,14 @@ Call `init_onnx_runtime()` first. Call `Vad::reset()` at the start of each
 independent utterance.
 
 Default speech threshold is `0.5`. Hangover / endpointing stay in the pipeline
-(`VAD_SILENCE_WINDOW` = 550 ms, matching LiveKit's Silero `min_silence_duration`;
-confirm path uses 250 ms).
+(`VAD_SILENCE_WINDOW` = 700 ms freeform; confirm path uses 250 ms).
 
 ### WebRTC migration timing
 
 The previous WebRTC/libfvad backend scored 160-sample (10 ms) frames every
 40 ms and used 900 ms / 420 ms freeform/confirm hangover to tolerate GMM
 flicker. Silero is stateful: the host must now score every 512-sample (32 ms)
-hop without dropping or skipping samples. The endpoint windows are 550 ms for
+hop without dropping or skipping samples. The endpoint windows are 700 ms for
 freeform speech and 250 ms for short confirmations. These values are product
 behavior, not model-internal padding.
 
@@ -52,7 +51,7 @@ behavior, not model-internal padding.
 `LivekitWakeWord::try_new(model_name, model_bytes, sample_rate)` loads a
 LiveKit **open-wake-word classifier** ONNX blob from memory. Mel spectrogram
 and speech-embedding graphs are bundled inside the `livekit-wakeword` crate;
-you only embed the classifier weights (e.g. `boris.onnx` from
+you only embed the classifier weights (e.g. `boris-large.onnx` from
 `assets/models/livekit/`).
 
 `model_name` is the classifier key used when multi-label score maps are

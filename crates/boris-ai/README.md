@@ -11,7 +11,8 @@ src/
   message.rs         content + tool_calls helpers (private, internal use only)
   model_pref.rs      model@provider / provider list (private module; re-exported fns)
   usage.rs           TokenUsage + logging (private module; TokenUsage re-exported)
-  stream.rs          optional mpsc event helper — public module, not crate-root re-exported
+  request.rs         RequestStage / CompleteOptions — per-call reasoning + token budgets (re-exported)
+  stream.rs          mpsc event helper — public module; LlmStreamEvent also re-exported at root
   providers/
     openrouter/
       client.rs      construction / timeouts / base URL / session
@@ -30,15 +31,20 @@ whose public items are re-exported from the crate root. Prefer
 ```rust
 use boris_ai::{
     LlmClient, OpenRouterClient, LlmError, LlmErrorKind,
-    TokenUsage, parse_provider_list, split_model_and_provider,
+    TokenUsage, LlmStreamEvent, CompleteOptions, RequestStage,
+    parse_provider_list, split_model_and_provider,
     ReasoningConfig, ReasoningEffort,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_BASE_URL, DEFAULT_MODEL,
-    DEFAULT_MAX_TOKENS,
+    DEFAULT_MAX_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
 };
 ```
 
-`boris-agent` re-exports the same core surface so desktop/pipeline can keep
-`boris_agent::OpenRouterClient`.
+`boris-agent` re-exports most of the same surface (`LlmClient`,
+`OpenRouterClient`, errors, `TokenUsage`, `LlmStreamEvent`,
+`CompleteOptions`, `RequestStage`, reasoning types, provider helpers,
+`DEFAULT_MAX_TOKENS`, `DEFAULT_CONTEXT_WINDOW_TOKENS`) so desktop/pipeline
+can keep `boris_agent::OpenRouterClient` — except the timeout / base-URL /
+default-model constants, which stay `boris_ai`-only.
 
 ## Behaviour notes
 

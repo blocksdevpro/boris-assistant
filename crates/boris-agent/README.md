@@ -22,7 +22,9 @@ use boris_agent::{
 };
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = OpenRouterClient::from_env()?; // or construct with key + model
+# let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+# let model = std::env::var("OPENROUTER_MODEL").ok();
+let client = OpenRouterClient::new(api_key, model); // host reads the key env itself
 let home = dirs_next_home().join(".boris"); // host-specific home
 let mut sandbox = SandboxConfig::for_desktop_mvp(&home)
     .with_trusted_auto_moderate(true);
@@ -32,7 +34,8 @@ agent.enable_memory_store(home.join("memory/memory.sqlite"))?;
 
 // Register tools BEFORE configure_runtime: register_builtin_tools_with_preset
 // mutates `sandbox` in place via `CapabilityPreset::apply_to_sandbox` (network/shell
-// lockdown for VoiceSafe/LocalPower), so preset and sandbox can never drift apart.
+// lockdown for VoiceSafe/LocalPower), so registration and the policy handed to
+// `configure_runtime` start consistent.
 register_builtin_tools_with_preset(
     &mut agent,
     BuiltinToolPaths {
@@ -62,6 +65,10 @@ match agent.prompt("What time is it?").await? {
         println!("confirm: {text} ({})", pending.name);
         // host: resume_confirmation(&pending.id, approved)
     }
+    AgentOutcome::NeedsInput { text, pending } => {
+        println!("input: {text} ({})", pending.name);
+        // host: resume_input(&pending.id, value)
+    }
 }
 # Ok(())
 # }
@@ -90,16 +97,19 @@ in SQLite. Failure leaves the old files in place for retry.
 Skills are `SKILL.md` playbooks with `name` and `description` frontmatter.
 `ensure_default_skills` installs the bundled starter set under
 `<boris_home>/skills` and upgrades a stock file when its frontmatter version is
-behind the bundled version. `load_skills` discovers project skills from
-`.boris/skills`, then user skills from `<boris_home>/skills`, followed by any
-explicit extra paths; the first skill with a given name wins.
+behind the bundled version (legacy stock files without a version upgrade too;
+user forks are left alone). `load_skills` discovers project skills by walking
+up from the working directory through every `.boris/skills` to the git root,
+then user skills from `<boris_home>/skills`, followed by any explicit extra
+paths; the first skill with a given name wins.
 
 Only skill names and descriptions enter the prompt, as a bounded JSON
 `<skills_catalog_data>` user-role envelope paired with a small static trusted
 `SKILLS_SYSTEM_POLICY`. `load_skill` reads a
 full body on demand, so specialized guidance does not expand every turn. The
 bundled set includes task execution, research, daily briefs, remembering,
-coding, root-cause debugging, code explanation, design, change review,
+coding, root-cause debugging, code explanation, design rationale (`investigate-why`),
+design, change review,
 technical writing, mentoring, and skill creation. User intent controls whether
 a matching playbook is loaded, and optional steps such as todos, research, or
 artifacts are used only when they help produce the requested result.
@@ -107,8 +117,9 @@ artifacts are used only when they help produce the requested result.
 ## Context, prompt hardening, and compaction
 
 Trusted system content stays separate from untrusted user-role data:
-personal context, the skills catalog, memory hints, and task evidence are
-wired as user-role messages, and tool observations arrive as raw text with
+personal context, the skills catalog, retrieved records, and task evidence are
+wired as user-role messages (the small memory hint rides in the system prompt),
+and tool observations arrive as raw text with
 pending `<system-reminder>` controls flushed as their own message only once
 the batch resolves. Token estimates run over serialized message JSON.
 Summary compaction is lossless — only complete oldest turns fold into a
@@ -128,7 +139,7 @@ tier with an explicit cap.
 | **ShellPolicy** | `Denied` · `Allowlist` (binary/prefix) · `OpenConfirm`. Bash deny list is best-effort; **HITL is authoritative**. Windows prefers Git Bash (`bash -c`, no login profile); WSL `System32\bash.exe` is skipped. PowerShell fallback uses `-ExecutionPolicy Bypass` for usability only. |
 | **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backends (DuckDuckGo + Wikipedia, or Exa when a key is set) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
-| **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset. |
+| **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset (and only when risk ≤ Moderate with no confirm flag). |
 
 Desktop MVP: `SandboxConfig::for_desktop_mvp` opens network + shell-with-confirm and grants common user document roots for read.
 
@@ -140,7 +151,7 @@ There is **no hard cap** on count per message. The loop processes the full batch
 | Mode | When | Behavior |
 |------|------|----------|
 | **wave scheduling** (default) | batch auto-allowed | read-only tools run in parallel waves (`max_parallel_tools`, default **16**); writes run sequential |
-| **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` at once |
+| **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` in `max_parallel_tools`-bounded chunks (never unbounded) |
 | **sequential** | any call needs confirm, collects typed input, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
 
 Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
@@ -165,7 +176,7 @@ src/
   tools/               builtin tools (files, web, bash, notes, …)
   session/             SessionStore + transcript + artifacts/
   memory/              canonical ledger + legacy migration support
-  skills/              load, catalog, defaults
+  skills/              load, catalog, defaults, frontmatter
   …
 ```
 

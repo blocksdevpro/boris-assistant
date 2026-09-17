@@ -49,13 +49,13 @@ Workspace crates are `publish = false`. They ship inside the desktop app, not on
 
 Windows 10 or 11, x64, with a working mic and speakers.
 
-1. Download **`Boris_*_x64-setup.exe`** (or the MSI) from [Releases](https://github.com/blocksdevpro/boris-assistant/releases).
-2. Run the installer (you can install 1.2.0-beta.2 over 1.1.0 or an earlier beta).
+1. Download **`Boris_*_x64-setup.exe`** from [Releases](https://github.com/blocksdevpro/boris-assistant/releases) (1.1.0 on `main` also ships an MSI; `next` betas are NSIS only).
+2. Run the installer. Your `~/.boris` data (keys, models, memory, skills) lives outside the install directory and is untouched by reinstalls.
 3. On first launch, finish **model install** and set an [OpenRouter](https://openrouter.ai/) API key in Settings.
 
-Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
+Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → General → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
 
-Windows **1.1.0 ships NSIS and MSI**. Pre-release betas ship NSIS only because WiX/MSI cannot encode a label like `1.1.0-beta.1`.
+Windows **1.1.0** (on `main`) ships NSIS and MSI. Pre-release betas on this `next` tree ship NSIS only because WiX/MSI cannot encode a label like `1.1.0-beta.1`.
 
 Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log`.
 
@@ -91,12 +91,13 @@ Armed  →  wake  →  Hearing  →  Reading  →  Thinking  →  Talking  →  
    │                    │           │            │            │
    │                    VAD        Parakeet     agent +      Supertone
    │                                           tools         playback
-   └──────── AwaitingConfirm (HITL yes / no) ─────────────────┘
+   └──────── AwaitingConfirm (HITL yes/no) · AwaitingInput (typed) ─┘
 ```
 
 The engine thread owns voice state and turn ordering. Reusable loader threads
 preload STT/TTS, final speech is produced sentence-by-sentence while playback
-continues, and durable transcript/memory/trace work runs on maintenance lanes.
+continues, and durable memory/trace work runs on maintenance lanes (the
+transcript append stays in the turn path).
 This keeps Stop and device-switch commands responsive without turning the
 pipeline into an unbounded worker mesh.
 
@@ -115,7 +116,7 @@ pipeline into an unbounded worker mesh.
 ┌─────────────────────────────────────────────────────────────┐
 │  boris-pipeline  — ordered voice loop + bounded workers     │
 │    Off → Quiet → Armed → Hearing → Reading → Thinking       │
-│         → Talking → AwaitingReply / AwaitingConfirm         │
+│  → Talking → AwaitingReply / AwaitingConfirm / AwaitingInput │
 └───────┬───────────────┬───────────────┬─────────────────────┘
         │               │               │
         ▼               ▼               ▼
@@ -146,7 +147,7 @@ pipeline into an unbounded worker mesh.
 | [`boris-tts-supertone`](crates/boris-tts-supertone) | Product TTS (default) |
 | [`boris-tts-kokoro`](crates/boris-tts-kokoro) | Experimental Kokoro adapter |
 | [`boris-ai`](crates/boris-ai) | LLM client plane (OpenRouter) |
-| [`boris-agent`](crates/boris-agent) | Tool runtime, policy, memory, sessions, artifacts |
+| [`boris-agent`](crates/boris-agent) | Tool runtime, policy, memory, sessions, skills |
 | [`boris-pipeline`](crates/boris-pipeline) | Desktop voice engine + `~/.boris` + model install |
 | [`boris-desktop`](desktop/src-tauri) | Tauri shell, tray, overlay, updater, packaging |
 
@@ -270,7 +271,9 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
   memory/          # memory.sqlite canonical store + optional notes.jsonl
   skills/          # skill playbooks
   logs/            # boris.YYYY-MM-DD.log
-  workspace/       # sandboxed agent workspace
+  traces/          # turns.jsonl per-turn latency traces
+  speaker/         # live.json — wake liveness enroll (acoustic takes)
+  state/workspace/ # sandboxed agent workspace
 ```
 
 ---

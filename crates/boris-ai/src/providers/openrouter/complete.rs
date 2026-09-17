@@ -7,14 +7,16 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::client::LlmClient;
-use crate::error::{truncate_error_body, LlmError};
+use crate::error::{truncate_error_body, LlmError, LlmErrorKind};
 use crate::message::{message_has_usable_payload, normalize_assistant_message};
 use crate::request::CompleteOptions;
 use crate::stream::LlmStreamEvent;
 use crate::usage::{log_complete, log_complete_failed, TokenUsage};
 
 use super::client::OpenRouterClient;
-use super::sse::{flush_sse_buffer, push_sse_bytes, StreamAssembler, StreamDelta};
+use super::sse::{
+    flush_sse_buffer, push_sse_bytes, tool_delta_is_empty, StreamAssembler, StreamDelta,
+};
 
 #[async_trait]
 impl LlmClient for OpenRouterClient {
@@ -47,7 +49,16 @@ impl LlmClient for OpenRouterClient {
         let mut saw_payload_delta = false;
         let streamed = self
             .complete_streaming_with(&messages, &tools, &opts, |delta| {
-                if !delta.content.is_empty() || !delta.tool_deltas.is_empty() {
+                // Fully-empty tool heartbeat fragments (`{"index": 0}` with no
+                // id/name/arguments) do not count as payload. Reasoning-only
+                // streams intentionally still fall back (reasoning is display
+                // text, not a speakable answer or tool call).
+                if !delta.content.is_empty()
+                    || delta
+                        .tool_deltas
+                        .iter()
+                        .any(|t| !tool_delta_is_empty(t))
+                {
                     saw_payload_delta = true;
                 }
                 emit_stream_delta(on_event, delta, started, &mut first_delta_emitted);
@@ -74,7 +85,7 @@ impl LlmClient for OpenRouterClient {
                 self.complete_blocking_with_events(&messages, &tools, &opts, on_event)
                     .await
             }
-            Err(e) if !saw_payload_delta => {
+            Err(e) if !saw_payload_delta && should_fallback_for_error(&e) => {
                 tracing::debug!(
                     error = %e,
                     ms = started.elapsed().as_millis() as u64,
@@ -122,6 +133,16 @@ impl OpenRouterClient {
                     "blocking-stream-fallback",
                     started.elapsed().as_millis() as u64,
                     usage.as_ref(),
+                );
+                // Event parity with the streaming path: `ModelSend` was already
+                // emitted once by `complete_stream` before the fallback, so it
+                // is NOT re-emitted here. Delta-only consumers still need
+                // `FirstDelta` (+ the full text as one `ContentDelta`) to
+                // notice an answer that arrived via fallback.
+                emit_blocking_fallback_events(
+                    on_event,
+                    &message,
+                    started.elapsed().as_millis() as u64,
                 );
                 if let Some(usage) = usage {
                     on_event(LlmStreamEvent::Usage(usage));
@@ -173,6 +194,18 @@ impl OpenRouterClient {
                 self.complete_blocking(messages, tools, opts).await
             }
             Err(e) => {
+                // No second request for provider rejections (auth / rate limit
+                // / bad model): the blocking call would fail the same way and
+                // burn rate-limit budget. See `should_fallback_for_error`.
+                if !should_fallback_for_error(&e) {
+                    tracing::debug!(
+                        error = %e,
+                        kind = %e.kind(),
+                        ms = stream_t.elapsed().as_millis() as u64,
+                        "stream complete failed with provider error; not falling back"
+                    );
+                    return Err(e);
+                }
                 tracing::debug!(
                     error = %e,
                     ms = stream_t.elapsed().as_millis() as u64,
@@ -257,7 +290,21 @@ impl OpenRouterClient {
                 ))
             })?;
 
-        Ok((normalize_assistant_message(message), usage))
+        // Keep parity with the stream-assembled path (`assistant_message_from_stream`
+        // omits empty `tool_calls`): strip `"tool_calls": []` so both paths
+        // return the same shape for tool-less answers.
+        let mut message = normalize_assistant_message(message);
+        if message
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| a.is_empty())
+        {
+            message
+                .as_object_mut()
+                .and_then(|obj| obj.remove("tool_calls"));
+        }
+        warn_if_truncated_tool_arguments(&message);
+        Ok((message, usage))
     }
 
     /// SSE chat completions — assemble full assistant message from deltas.
@@ -309,7 +356,10 @@ impl OpenRouterClient {
         let mut stream_error: Option<Value> = None;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| LlmError::http(format!("stream read: {e}")))?;
+            // `From<reqwest::Error>` preserves the Timeout kind (connect /
+            // deadline) instead of collapsing everything into `Http`, so
+            // callers and fallback guards can distinguish a stall mid-stream.
+            let chunk = chunk.map_err(LlmError::from)?;
             push_sse_bytes(&mut line_buf, &chunk, |data| {
                 on_delta(ingest_sse_data(&mut assembler, data));
             });
@@ -331,8 +381,78 @@ impl OpenRouterClient {
         }
 
         let usage = assembler.last_usage().cloned();
-        Ok((assembler.finish(), usage))
+        let message = assembler.finish();
+        warn_if_truncated_tool_arguments(&message);
+        Ok((message, usage))
     }
+}
+
+/// Whether a stream failure may fall back to the blocking path.
+///
+/// Provider errors (auth, rate limit, bad model — HTTP 4xx/5xx surfaced as
+/// [`LlmErrorKind::Provider`]) must NOT trigger a second request: the blocking
+/// call would fail the same way while doubling load and burning rate-limit
+/// budget. Transport / timeout / parse / unknown failures fall back, as does
+/// an empty payload with no provider error (handled by the `Ok` arms above).
+fn should_fallback_for_error(err: &LlmError) -> bool {
+    !matches!(err.kind(), LlmErrorKind::Provider)
+}
+
+/// Best-effort truncated-arguments detector (`finish_reason == "length"`).
+///
+/// `finish_reason` is not always visible on the assembled message, so sniff
+/// the tool-call arguments instead: any non-empty `function.arguments` string
+/// that is not parseable JSON is suspicious (providers emit a JSON object
+/// string for well-formed calls; a `length` stop slices it mid-token).
+/// Never fails the turn — just warns so truncation shows in logs instead of
+/// surfacing later as a confusing tool-schema error.
+fn warn_if_truncated_tool_arguments(msg: &Value) {
+    if !arguments_parseable(msg) {
+        tracing::warn!("tool arguments unparseable (possibly truncated, finish_reason=length?)");
+    }
+}
+
+/// True when every tool call's `function.arguments` parses as JSON.
+///
+/// Empty / missing argument strings are skipped (common for parameter-less
+/// tools); only non-empty unparseable strings count as truncated.
+fn arguments_parseable(msg: &Value) -> bool {
+    let Some(calls) = msg.get("tool_calls").and_then(|t| t.as_array()) else {
+        return true;
+    };
+    calls.iter().all(|tc| {
+        match tc
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .and_then(|a| a.as_str())
+        {
+            None | Some("") => true,
+            Some(s) => serde_json::from_str::<Value>(s).is_ok(),
+        }
+    })
+}
+
+/// Delta-side events for the blocking fallback path.
+///
+/// Emits `FirstDelta` + one `ContentDelta` with the full text when the final
+/// message has non-empty content, plus `ToolCallComplete` per tool call —
+/// mirroring the streaming success path's ordering (deltas, then `Usage`,
+/// then `FinalMessage`, which the caller emits afterwards). Never emits
+/// `ModelSend`: the surrounding `complete_stream` already sent it once.
+fn emit_blocking_fallback_events(
+    on_event: &mut (dyn FnMut(LlmStreamEvent) + Send),
+    message: &Value,
+    elapsed_ms: u64,
+) {
+    if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+        if !content.is_empty() {
+            on_event(LlmStreamEvent::FirstDelta { ttfb_ms: elapsed_ms });
+            on_event(LlmStreamEvent::ContentDelta {
+                text: content.to_string(),
+            });
+        }
+    }
+    emit_completed_tool_events(on_event, message);
 }
 
 fn emit_stream_delta(
@@ -341,8 +461,11 @@ fn emit_stream_delta(
     started: Instant,
     first_delta_emitted: &mut bool,
 ) {
-    let has_payload =
-        !delta.content.is_empty() || !delta.reasoning.is_empty() || !delta.tool_deltas.is_empty();
+    // Fully-empty tool heartbeat fragments do not count as payload (see
+    // `tool_delta_is_empty`): they must not trigger `FirstDelta` on their own.
+    let has_payload = !delta.content.is_empty()
+        || !delta.reasoning.is_empty()
+        || delta.tool_deltas.iter().any(|t| !tool_delta_is_empty(t));
     if has_payload && !*first_delta_emitted {
         *first_delta_emitted = true;
         on_event(LlmStreamEvent::FirstDelta {
@@ -501,6 +624,106 @@ mod tests {
         assert!(!first);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], LlmStreamEvent::Usage(_)));
+    }
+
+    #[test]
+    fn provider_errors_do_not_fall_back() {
+        assert!(!should_fallback_for_error(&LlmError::provider("rate limited")));
+        assert!(!should_fallback_for_error(
+            &LlmError::from_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down")
+        ));
+        assert!(should_fallback_for_error(&LlmError::http("conn reset")));
+        assert!(should_fallback_for_error(&LlmError::timeout("deadline")));
+        assert!(should_fallback_for_error(&LlmError::parse("bad json")));
+        assert!(should_fallback_for_error(&LlmError::new("misc")));
+    }
+
+    #[test]
+    fn arguments_parseable_sniffs_truncation() {
+        assert!(arguments_parseable(&serde_json::json!({ "content": "hi" })));
+        assert!(arguments_parseable(&serde_json::json!({
+            "tool_calls": [{
+                "function": { "name": "bash", "arguments": "{\"c\":\"ls\"}" }
+            }]
+        })));
+        // Empty args (parameter-less tools) are not truncation.
+        assert!(arguments_parseable(&serde_json::json!({
+            "tool_calls": [{ "function": { "name": "get_time", "arguments": "" } }]
+        })));
+        // Sliced mid-token JSON is suspicious.
+        assert!(!arguments_parseable(&serde_json::json!({
+            "tool_calls": [{ "function": { "name": "bash", "arguments": "{\"c\":" } }]
+        })));
+    }
+
+    #[test]
+    fn empty_tool_heartbeat_does_not_trigger_first_delta() {
+        let mut events = Vec::new();
+        let mut first = false;
+        emit_stream_delta(
+            &mut |event| events.push(event),
+            StreamDelta {
+                content: String::new(),
+                reasoning: String::new(),
+                tool_deltas: vec![ToolDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    arguments_delta: String::new(),
+                }],
+                usage: None,
+            },
+            Instant::now(),
+            &mut first,
+        );
+        assert!(!first);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, LlmStreamEvent::FirstDelta { .. })));
+    }
+
+    #[test]
+    fn blocking_fallback_emits_first_delta_content_and_tools_without_model_send() {
+        let mut events = Vec::new();
+        emit_blocking_fallback_events(
+            &mut |event| events.push(event),
+            &serde_json::json!({
+                "role": "assistant",
+                "content": "fallback text",
+                "tool_calls": [{
+                    "id": "c1",
+                    "function": { "name": "bash", "arguments": "{}" }
+                }]
+            }),
+            42,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                LlmStreamEvent::FirstDelta { ttfb_ms: 42 },
+                LlmStreamEvent::ContentDelta { .. },
+                LlmStreamEvent::ToolCallComplete { .. },
+            ]
+        ));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LlmStreamEvent::ModelSend { .. }
+        )));
+        assert!(matches!(
+            events.get(1),
+            Some(LlmStreamEvent::ContentDelta { text }) if text == "fallback text"
+        ));
+    }
+
+    #[test]
+    fn blocking_fallback_with_empty_content_emits_no_first_delta() {
+        let mut events = Vec::new();
+        emit_blocking_fallback_events(
+            &mut |event| events.push(event),
+            &serde_json::json!({ "role": "assistant", "content": "" }),
+            7,
+        );
+        assert!(events.is_empty());
     }
 
     #[test]

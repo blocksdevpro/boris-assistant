@@ -139,7 +139,8 @@ mod tests {
             .await
             .expect("recall");
         assert!(listed.contains("user likes dark mode"), "got: {listed}");
-        assert!(listed.starts_with("- "), "got: {listed}");
+        assert!(listed.contains("- user likes dark mode"), "got: {listed}");
+        assert!(listed.contains("<untrusted_notes>"), "got: {listed}");
 
         let searched = recall
             .execute(
@@ -186,13 +187,13 @@ mod tests {
         }
         let recall = RecallNotesTool::new(&path);
 
-        // default 5
+        // default 5 (plus 3 wrapper lines: open, banner, close)
         let out = recall
             .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
             .await
             .unwrap();
-        let count = out.lines().count();
-        assert_eq!(count, 5, "got:\n{out}");
+        let bullets = out.lines().filter(|l| l.starts_with("- ")).count();
+        assert_eq!(bullets, 5, "got:\n{out}");
 
         // cap at 20
         let out = recall
@@ -202,7 +203,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out.lines().count(), 20);
+        assert_eq!(out.lines().filter(|l| l.starts_with("- ")).count(), 20);
 
         // explicit 3
         let out = recall
@@ -212,7 +213,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out.lines().count(), 3);
+        assert_eq!(out.lines().filter(|l| l.starts_with("- ")).count(), 3);
 
         cleanup(&path);
     }

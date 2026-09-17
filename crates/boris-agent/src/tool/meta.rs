@@ -139,12 +139,32 @@ pub struct ToolMeta {
 
 impl ToolMeta {
     /// Safe, no special permissions, 5s timeout, no confirmation.
+    ///
+    /// Explicit opt-in only — the [`crate::tool::Tool`] trait default is
+    /// [`Self::deny_default`] so forgotten `meta()` overrides pause for HITL.
     pub fn safe_default() -> Self {
         Self {
             risk: ToolRisk::Safe,
             permissions: &[Permission::None],
             default_timeout: ToolRisk::Safe.default_timeout(),
             requires_confirmation: false,
+            collects_input: false,
+            kind: ToolKind::Other,
+            max_result_chars: None,
+            read_only: None,
+            max_concurrency: None,
+        }
+    }
+
+    /// Default-deny-ish trait default: `Moderate`, `Other`, no permissions,
+    /// requires confirmation (15s timeout). Used by [`crate::tool::Tool::meta`]
+    /// when a tool forgets to override `meta()`.
+    pub fn deny_default() -> Self {
+        Self {
+            risk: ToolRisk::Moderate,
+            permissions: &[Permission::None],
+            default_timeout: ToolRisk::Moderate.default_timeout(),
+            requires_confirmation: true,
             collects_input: false,
             kind: ToolKind::Other,
             max_result_chars: None,
@@ -275,5 +295,18 @@ mod tests {
         let w = ToolMeta::with_risk(ToolRisk::Dangerous).read_only(false);
         assert_eq!(w.effective_max_concurrency(), 1);
         assert_eq!(w.max_concurrency(4).effective_max_concurrency(), 4);
+    }
+
+    #[test]
+    fn deny_default_requires_confirm() {
+        let m = ToolMeta::deny_default();
+        assert_eq!(m.risk, ToolRisk::Moderate);
+        assert!(m.requires_confirmation);
+        assert_eq!(m.kind, ToolKind::Other);
+        assert!(!m.is_read_only());
+        // Explicit safe default stays permissive for opt-in callers.
+        let s = ToolMeta::safe_default();
+        assert_eq!(s.risk, ToolRisk::Safe);
+        assert!(!s.requires_confirmation);
     }
 }

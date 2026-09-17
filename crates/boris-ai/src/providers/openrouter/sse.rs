@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
+use crate::error::truncate_error_body;
 use crate::message::{
     append_stream_content_delta, assistant_message_from_stream, extract_text_content,
 };
@@ -43,6 +44,15 @@ pub(super) struct ToolDelta {
     pub id: Option<String>,
     pub name: Option<String>,
     pub arguments_delta: String,
+}
+
+/// True when a tool delta carries no new information at all.
+///
+/// Used by the stream caller (`complete.rs`) to keep fully-empty fragments
+/// out of payload detection: a bare `{"index": 0}` heartbeat must not mark
+/// the stream as "saw payload" or trigger `FirstDelta`.
+pub(crate) fn tool_delta_is_empty(delta: &ToolDelta) -> bool {
+    delta.id.is_none() && delta.name.is_none() && delta.arguments_delta.is_empty()
 }
 
 impl ToolCallAcc {
@@ -102,6 +112,10 @@ impl ToolCallAcc {
     }
 
     fn into_json(self, index: u32) -> Value {
+        // Synthetic `call_{index}` ids fill gaps when a provider streams no
+        // tool-call id. The id scheme is load-bearing for transcripts/tests, so
+        // it stays as-is; the blocking path is normalized the same way (A4:
+        // empty `tool_calls` omitted, `content` always a string) for parity.
         let id = if self.id.is_empty() {
             format!("call_{index}")
         } else {
@@ -193,6 +207,19 @@ impl StreamAssembler {
         // Surface it instead of silently dropping the event, which used to
         // leave the stream to "succeed" with an empty assembled message.
         if let Some(err) = event.get("error") {
+            // Abort even when the event also carries valid choices: mixing a
+            // provider error with a partial draft risks acting on a payload
+            // the provider already disowned.
+            let choices_len = event
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            tracing::warn!(
+                error = %truncate_error_body(&err.to_string()),
+                choices_len,
+                "SSE event carries top-level error; aborting stream assembly"
+            );
             self.error = Some(err.clone());
             return delta;
         }
@@ -203,6 +230,14 @@ impl StreamAssembler {
             delta.usage = Some(u);
         }
 
+        if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
+            if choices.len() > 1 {
+                tracing::warn!(
+                    choices_len = choices.len(),
+                    "SSE event carries multiple choices; only choices[0] is assembled"
+                );
+            }
+        }
         let Some(choice) = event.get("choices").and_then(|c| c.get(0)) else {
             return delta;
         };
@@ -211,17 +246,42 @@ impl StreamAssembler {
         // `message` snapshot. Treat that snapshot as canonical. Appending it
         // after prior deltas glues two answer drafts together (for example,
         // `first answer?Second answer`).
-        if let Some(piece) = choice.get("delta") {
-            self.ingest_incremental_piece(piece, &mut delta);
-        } else if let Some(message) = choice.get("message") {
-            self.ingest_message_snapshot(message, &mut delta);
+        //
+        // When one choice carries BOTH a `delta` and a `message` whose
+        // `tool_calls` are non-empty, the snapshot is ingested FIRST and the
+        // delta merged on top: ignoring the delta would drop argument bytes,
+        // while ignoring the snapshot would drop the canonical tool list.
+        let message_with_tools = choice.get("message").filter(|m| {
+            !m.is_null()
+                && m.get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty())
+        });
+        match (choice.get("delta"), message_with_tools) {
+            (Some(piece), Some(message)) if !piece.is_null() => {
+                self.ingest_message_snapshot(message, &mut delta);
+                self.ingest_incremental_piece(piece, &mut delta);
+            }
+            (Some(piece), _) if !piece.is_null() => {
+                self.ingest_incremental_piece(piece, &mut delta);
+            }
+            (_, Some(message)) => {
+                self.ingest_message_snapshot(message, &mut delta);
+            }
+            _ => {
+                if let Some(message) = choice.get("message") {
+                    if !message.is_null() {
+                        self.ingest_message_snapshot(message, &mut delta);
+                    }
+                }
+            }
         }
         delta
     }
 
     fn ingest_incremental_piece(&mut self, piece: &Value, delta: &mut StreamDelta) {
         if let Some(r) = piece.get("role").and_then(|r| r.as_str()) {
-            self.role = r.to_string();
+            self.role = r.to_lowercase();
         }
 
         append_reasoning_delta(&mut delta.reasoning, piece);
@@ -233,6 +293,10 @@ impl StreamAssembler {
             let before = self.content.len();
             append_stream_content_delta(&mut self.content, c);
             if self.content.len() > before {
+                debug_assert!(
+                    self.content.is_char_boundary(before),
+                    "content is only extended with &str chunks, so `before` is a char boundary"
+                );
                 delta.content = self.content[before..].to_string();
                 self.emitted_content = true;
             }
@@ -253,7 +317,7 @@ impl StreamAssembler {
 
     fn ingest_message_snapshot(&mut self, message: &Value, delta: &mut StreamDelta) {
         if let Some(r) = message.get("role").and_then(|r| r.as_str()) {
-            self.role = r.to_string();
+            self.role = r.to_lowercase();
         }
 
         let mut reasoning = String::new();
@@ -282,6 +346,11 @@ impl StreamAssembler {
         // Full assistant messages do not carry streaming indexes reliably, so
         // rebuild tool state by array position instead of applying them as
         // fragments to previously accumulated calls.
+        //
+        // Replacement semantics are intentional (pinned by tests): a canonical
+        // snapshot supersedes earlier fragments. Shrinking the set drops prior
+        // drafts, which is worth a warning for diagnosis.
+        let tools_before = self.tools.len();
         self.tools.clear();
         if let Some(tcs) = message.get("tool_calls").and_then(|t| t.as_array()) {
             for (position, tc) in tcs.iter().enumerate() {
@@ -300,6 +369,13 @@ impl StreamAssembler {
                 }
                 self.tools.insert(idx, call);
             }
+            if tools_before > 0 && self.tools.len() < tools_before {
+                tracing::warn!(
+                    before = tools_before,
+                    after = self.tools.len(),
+                    "message snapshot dropped previously accumulated tool calls"
+                );
+            }
             if !delta.tool_deltas.is_empty() {
                 self.emitted_tools = true;
             }
@@ -307,6 +383,9 @@ impl StreamAssembler {
     }
 
     /// Snapshot completed tool calls (id + name + full arguments string).
+    ///
+    /// Uses the same synthetic `call_{index}` fallback as [`finish`](Self::finish);
+    /// see [`ToolCallAcc::into_json`] for why the scheme is frozen.
     #[allow(dead_code)]
     pub(super) fn completed_tools(&self) -> Vec<(u32, String, String, String)> {
         self.tools
@@ -386,12 +465,26 @@ fn append_reasoning_delta(sink: &mut String, piece: &Value) {
         return;
     };
     for detail in details {
-        if let Some(s) = string_delta(detail.get("text")) {
-            sink.push_str(s);
-        } else if let Some(s) = string_delta(detail.get("summary")) {
-            sink.push_str(s);
+        // `text` + `summary` fragments arrive without separators; join with a
+        // space so words from adjacent details are not glued together.
+        let s = string_delta(detail.get("text"))
+            .or_else(|| string_delta(detail.get("summary")));
+        if let Some(s) = s {
+            push_reasoning_fragment(sink, s);
         }
     }
+}
+
+/// Append one reasoning fragment, separating it from prior text with a space
+/// unless whitespace already separates them.
+fn push_reasoning_fragment(sink: &mut String, fragment: &str) {
+    if !sink.is_empty()
+        && !sink.ends_with(char::is_whitespace)
+        && !fragment.starts_with(char::is_whitespace)
+    {
+        sink.push(' ');
+    }
+    sink.push_str(fragment);
 }
 
 fn string_delta(value: Option<&Value>) -> Option<&str> {
@@ -719,6 +812,129 @@ mod tests {
         }));
         assert_eq!(delta.reasoning, "Step one.");
         assert!(delta.content.is_empty());
+    }
+
+    #[test]
+    fn delta_and_message_with_tools_merge() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "{\"extra\":1}" }
+                    }]
+                },
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "snap-call",
+                        "type": "function",
+                        "function": { "name": "todo_read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        }));
+        // Snapshot ingested first, delta arguments merged on top.
+        assert!(!delta.tool_deltas.is_empty());
+        let msg = a.finish();
+        assert_eq!(msg["tool_calls"][0]["id"], "snap-call");
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "todo_read");
+        assert!(
+            msg["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .contains("extra"),
+            "delta arguments must merge onto the snapshot, got: {}",
+            msg["tool_calls"][0]["function"]["arguments"]
+        );
+    }
+
+    #[test]
+    fn delta_without_snapshot_tools_keeps_delta_only_behavior() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": { "content": "Hi" },
+                "message": { "role": "assistant", "content": "Ignored draft" }
+            }]
+        }));
+        // No tool_calls in the message → legacy path: delta wins, snapshot ignored.
+        assert_eq!(a.finish()["content"], "Hi");
+    }
+
+    #[test]
+    fn extra_choices_are_ignored_but_first_assembles() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [
+                { "delta": { "content": "one" } },
+                { "delta": { "content": "two" } }
+            ]
+        }));
+        assert_eq!(delta.content, "one");
+        assert_eq!(a.finish()["content"], "one");
+    }
+
+    #[test]
+    fn role_is_lowercased() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({
+            "choices": [{ "delta": { "role": "ASSISTANT", "content": "hi" } }]
+        }));
+        assert_eq!(a.finish()["role"], "assistant");
+
+        let mut b = StreamAssembler::new();
+        b.ingest_event(&json!({
+            "choices": [{ "message": { "role": "Assistant", "content": "hi" } }]
+        }));
+        assert_eq!(b.finish()["role"], "assistant");
+    }
+
+    #[test]
+    fn reasoning_details_text_and_summary_join_with_space() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "Step one." },
+                        { "type": "reasoning.summary", "summary": "Step two." }
+                    ]
+                }
+            }]
+        }));
+        assert_eq!(delta.reasoning, "Step one. Step two.");
+        assert!(delta.content.is_empty());
+    }
+
+    #[test]
+    fn tool_delta_is_empty_unit() {
+        assert!(tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: String::new(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: "{}".into(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: Some("c1".into()),
+            name: None,
+            arguments_delta: String::new(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: Some("bash".into()),
+            arguments_delta: String::new(),
+        }));
     }
 
     #[test]

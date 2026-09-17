@@ -250,6 +250,12 @@ mod tests {
             tool_rounds: 1,
             confirms_used: 1,
             user_text: "run two actions".into(),
+            // B2/B4 compilation fix (Group A fields): defaults preserve the
+            // abort-clearing behavior under test.
+            todos_file: None,
+            markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+            gate_left: 0,
+            token_accounting: crate::types::TokenAccounting::default(),
         });
 
         agent.abort();

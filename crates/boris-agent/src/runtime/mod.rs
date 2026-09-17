@@ -26,8 +26,9 @@ pub use listing::{
 };
 pub use pending::{InputKind, PendingInput, PendingToolCall, PendingTurn, RawToolCall};
 pub use policy::{
-    decide, default_user_read_roots, normalize_path, path_is_within, resolve_in_roots,
-    resolve_path_for_policy, NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,
+    decide, default_user_read_roots, normalize_path, path_is_within, path_within_root,
+    re_resolve_after_open, resolve_in_roots, resolve_path_for_policy, resolve_under_roots,
+    NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,
 };
 pub use progress::{EventProgressSink, NullProgressSink, ProgressEvent, ProgressSink};
 pub use timeout::{is_timeout, run_with_timeout};

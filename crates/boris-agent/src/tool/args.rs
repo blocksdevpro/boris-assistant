@@ -40,6 +40,86 @@ pub fn optional_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
     obj.get(key).and_then(coerce_u64)
 }
 
+/// Strict integer field: `None` when missing/`null`, `Ok(Some)` for JSON
+/// integers and numeric strings, `Err(invalid_args)` for floats and other
+/// shapes (never a silent default).
+///
+/// Use for strict `integer` schema fields (`offset`/`limit`/`timeout`/…).
+/// Lenient grep aliases (`-B`/`-A`/`-C`/…) keep [`coerce_u64`].
+pub fn optional_u64_strict(
+    obj: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, ToolError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => strict_u64(v, key).map(Some),
+    }
+}
+
+/// First present key among `keys` parsed with [`optional_u64_strict`] rules.
+///
+/// Missing/`null` keys are skipped. The first present non-null value decides:
+/// integers and numeric strings succeed, floats and other shapes return
+/// `Err(invalid_args)` instead of silently falling back to a default.
+pub fn optional_u64_keys_strict(
+    obj: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<Option<u64>, ToolError> {
+    for k in keys {
+        match obj.get(*k) {
+            None | Some(Value::Null) => continue,
+            Some(v) => return strict_u64(v, k).map(Some),
+        }
+    }
+    Ok(None)
+}
+
+/// Strict JSON → u64: integers and integer strings only.
+///
+/// Floats (even `12.0`) are rejected with [`ToolError::invalid_args`] so a
+/// model typo cannot silently become the default limit/timeout. Negative
+/// integers, booleans, arrays, objects, and non-numeric strings are also
+/// rejected.
+pub fn strict_u64(v: &Value, field: &str) -> Result<u64, ToolError> {
+    if let Some(n) = v.as_u64() {
+        return Ok(n);
+    }
+    if let Some(i) = v.as_i64() {
+        if i >= 0 {
+            if let Ok(n) = u64::try_from(i) {
+                return Ok(n);
+            }
+        }
+        return Err(ToolError::invalid_args(format!(
+            "argument `{field}` must be a non-negative integer, got {i}"
+        )));
+    }
+    if v.is_number() {
+        return Err(ToolError::invalid_args(format!(
+            "argument `{field}` must be an integer, got float; pass an integer (e.g. 3) not 3.0"
+        )));
+    }
+    if let Some(s) = v.as_str() {
+        let t = s.trim();
+        if let Ok(n) = t.parse::<u64>() {
+            return Ok(n);
+        }
+        // Reject float-looking strings explicitly rather than defaulting.
+        if t.parse::<f64>().is_ok() {
+            return Err(ToolError::invalid_args(format!(
+                "argument `{field}` must be an integer, got float string `{t}`"
+            )));
+        }
+        return Err(ToolError::invalid_args(format!(
+            "argument `{field}` must be an integer, got string `{t}`"
+        )));
+    }
+    Err(ToolError::invalid_args(format!(
+        "argument `{field}` must be an integer, got {}",
+        value_type_name(v)
+    )))
+}
+
 /// Optional bool.
 pub fn optional_bool(obj: &Map<String, Value>, key: &str) -> Option<bool> {
     obj.get(key).and_then(coerce_bool)
@@ -61,6 +141,12 @@ pub fn optional_bool_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<boo
 }
 
 /// Lenient JSON → u64 (number, numeric string, truncated float).
+///
+/// Truncates floats (`12.0` → `12`, `12.9` → `12`). Intended for lenient grep
+/// alias fields (`-B`/`-A`/`-C`/`head_limit`/…) whose schemas omit `type` so
+/// strings and floats reach this path. Strict `integer` fields must use
+/// [`strict_u64`] / [`optional_u64_strict`] instead so floats become
+/// `invalid_args` rather than a silent default or truncation.
 pub fn coerce_u64(v: &Value) -> Option<u64> {
     if let Some(n) = v.as_u64() {
         return Some(n);
@@ -187,5 +273,40 @@ mod tests {
         );
         assert_eq!(coerce_bool(&json!(1)), Some(true));
         assert_eq!(coerce_bool(&json!("no")), Some(false));
+    }
+
+    #[test]
+    fn strict_u64_accepts_ints_and_numeric_strings() {
+        assert_eq!(strict_u64(&json!(3), "limit").unwrap(), 3);
+        assert_eq!(strict_u64(&json!("42"), "limit").unwrap(), 42);
+        assert_eq!(strict_u64(&json!("  7  "), "limit").unwrap(), 7);
+        let obj = json!({"limit": "3"}).as_object().cloned().unwrap();
+        assert_eq!(optional_u64_strict(&obj, "limit").unwrap(), Some(3));
+        let obj = json!({"a": 5, "b": 9}).as_object().cloned().unwrap();
+        assert_eq!(
+            optional_u64_keys_strict(&obj, &["missing", "a", "b"]).unwrap(),
+            Some(5)
+        );
+        let empty = Map::new();
+        assert_eq!(optional_u64_strict(&empty, "limit").unwrap(), None);
+    }
+
+    #[test]
+    fn strict_u64_rejects_floats_with_invalid_args() {
+        for v in [json!(12.0), json!(3.14), json!("12.0"), json!(1.5)] {
+            let err = strict_u64(&v, "limit").unwrap_err();
+            assert_eq!(err.kind(), ToolErrorKind::InvalidArgs);
+            assert!(err.message.contains("integer"), "got: {}", err.message);
+        }
+        let obj = json!({"limit": 12.0}).as_object().cloned().unwrap();
+        let err = optional_u64_strict(&obj, "limit").unwrap_err();
+        assert_eq!(err.kind(), ToolErrorKind::InvalidArgs);
+        let obj = json!({"limit": 12.0}).as_object().cloned().unwrap();
+        let err = optional_u64_keys_strict(&obj, &["limit"]).unwrap_err();
+        assert_eq!(err.kind(), ToolErrorKind::InvalidArgs);
+        // Negative and wrong shapes also reject (never silent default).
+        for v in [json!(-1), json!(true), json!("nope"), json!([1])] {
+            assert!(strict_u64(&v, "limit").is_err(), "got ok for {v}");
+        }
     }
 }

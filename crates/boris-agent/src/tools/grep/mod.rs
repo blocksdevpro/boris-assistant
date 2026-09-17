@@ -67,6 +67,11 @@ impl Tool for GrepTool {
     }
 
     fn parameters(&self) -> Value {
+        // Lenient numeric/bool alias fields (`-B`/`-A`/`-C`/`-i`/`head_limit`/
+        // `multiline`/`ignore_case`/`context`/`limit`) deliberately omit `type`
+        // so the subset validator passes strings, floats, and bools through to
+        // the lenient `coerce_*` path in `query.rs` (e.g. `"3"`, `12.0`,
+        // `"true"`). Strict string fields keep `"type": "string"`.
         json!({
             "type": "object",
             "properties": {
@@ -83,48 +88,39 @@ impl Tool for GrepTool {
                     "description": "Glob pattern (rg --glob GLOB -- PATH) to filter files (e.g. \"*.js\", \"*.{ts,tsx}\")."
                 },
                 "-B": {
-                    "type": "number",
-                    "description": "Number of lines to show before each match (rg -B)."
+                    "description": "Number of lines to show before each match (rg -B). Integer; numeric strings and floats (truncated) are accepted."
                 },
                 "-A": {
-                    "type": "number",
-                    "description": "Number of lines to show after each match (rg -A)."
+                    "description": "Number of lines to show after each match (rg -A). Integer; numeric strings and floats (truncated) are accepted."
                 },
                 "-C": {
-                    "type": "number",
-                    "description": "Number of lines to show before and after each match (rg -C)."
+                    "description": "Number of lines to show before and after each match (rg -C). Integer; numeric strings and floats (truncated) are accepted."
                 },
                 "-i": {
-                    "type": "boolean",
-                    "description": "Case insensitive search (rg -i)."
+                    "description": "Case insensitive search (rg -i). Boolean; \"true\"/\"false\"/1/0 are accepted."
                 },
                 "type": {
                     "type": "string",
                     "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."
                 },
                 "head_limit": {
-                    "type": "number",
-                    "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries."
+                    "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries. Integer; numeric strings and floats (truncated) are accepted."
                 },
                 "multiline": {
-                    "type": "boolean",
-                    "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall)."
+                    "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Boolean; \"true\"/\"false\"/1/0 are accepted."
                 },
                 "output_mode": {
                     "type": "string",
                     "description": "content (default, matching lines), files_with_matches (paths only), or count (per-file counts)."
                 },
                 "ignore_case": {
-                    "type": "boolean",
-                    "description": "Alias of -i."
+                    "description": "Alias of -i. Boolean; \"true\"/\"false\"/1/0 are accepted."
                 },
                 "context": {
-                    "type": "number",
-                    "description": "Alias of -C."
+                    "description": "Alias of -C. Integer; numeric strings and floats (truncated) are accepted."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Alias of head_limit."
+                    "description": "Alias of head_limit. Integer; numeric strings and floats (truncated) are accepted."
                 }
             },
             "required": ["pattern"]
@@ -357,6 +353,46 @@ mod tests {
         assert!(looks_like_regex("a|b"));
         assert!(looks_like_regex(r"\d+"));
         assert!(looks_like_regex("foo[0-9]"));
+    }
+
+    #[test]
+    fn lenient_schema_passes_strings_floats_bools_to_coerce() {
+        use crate::tool::validate_args;
+        let roots = roots_at(std::env::temp_dir());
+        let tool = GrepTool::new(roots);
+        let schema = tool.parameters();
+        // Lenient fields omit `type`: these must NOT fail validation.
+        let args = json!({
+            "pattern": "TODO",
+            "-B": "3",
+            "-A": 12.0,
+            "-C": "2",
+            "-i": "true",
+            "ignore_case": "true",
+            "context": "3",
+            "head_limit": "20",
+            "multiline": "true"
+        });
+        validate_args(&schema, &args, &args.to_string()).expect("lenient fields must pass validator");
+        // And they must reach the coerce path with expected values.
+        // NOTE: `head_limit` is canonical and wins over the `limit` alias;
+        // pass only one of them here (see `limit_alias_falls_back_to_limit`).
+        let obj = args.as_object().cloned().unwrap();
+        let q = crate::tools::grep::query::GrepQuery::parse(&obj).unwrap();
+        assert_eq!(q.before, 3);
+        assert_eq!(q.after, 12);
+        assert!(q.ignore_case);
+        assert_eq!(q.limit, 20);
+    }
+
+    #[test]
+    fn limit_alias_falls_back_to_limit() {
+        let obj = json!({ "pattern": "x", "limit": 12.0 })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let q = crate::tools::grep::query::GrepQuery::parse(&obj).unwrap();
+        assert_eq!(q.limit, 12);
     }
 
     #[test]

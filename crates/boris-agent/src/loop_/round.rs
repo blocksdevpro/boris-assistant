@@ -46,6 +46,11 @@ pub(super) fn reasoning_preview(acc: &str) -> String {
 }
 
 /// One LLM completion for this round (tools withheld at cap).
+///
+/// Tool-schema pruning (see `helpers::tools_json_for_llm`) is silent on the
+/// wire: when `pruned > 0`, `tool_search` is already retained as the
+/// last-resort hatch and a `warn!` records the count. The model can recover
+/// via `tool_search`.
 pub(super) async fn complete_round(
     state: &mut LoopState<'_>,
     user_text: &str,
@@ -58,7 +63,15 @@ pub(super) async fn complete_round(
     let tools_json = if at_cap {
         Value::Null
     } else {
-        listed_tools_json(state.tools, config, state.activated)
+        let (payload, pruned) = listed_tools_json(state.tools, config, state.activated);
+        if pruned > 0 {
+            tracing::warn!(
+                pruned,
+                tools = payload.as_array().map(|a| a.len()).unwrap_or(0),
+                "tool schemas pruned to budget; tool_search retained for discovery"
+            );
+        }
+        payload
     };
     let task = config
         .task
@@ -159,6 +172,12 @@ pub(super) fn tool_calls_if_runnable(response: &Value, at_cap: bool) -> Option<&
 }
 
 /// At cap with empty content: force one more speak attempt (no tools).
+///
+/// This is the single extra completion beyond the `0..=max_tool_rounds` loop
+/// (see `agent_loop` docs for the full accounting: up to `max+1` completions
+/// in-loop plus at most one forced-speak here). It never issues tools and
+/// never recurses — exactly one additional `complete_round` when the cap
+/// round came back empty.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_spoken_reply_at_cap(
     state: &mut LoopState<'_>,

@@ -1,9 +1,13 @@
 //! Pending HITL tool call state for pause/resume.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::finish_gate::FinishGateBudget;
 use crate::tool::ToolRisk;
+use crate::types::TokenAccounting;
 
 /// What the on-screen field should collect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,4 +136,34 @@ pub struct PendingTurn {
     pub confirms_used: u32,
     /// Original user text for post-turn learn after final outcome.
     pub user_text: String,
+    /// Session-bound todos file (`{session_dir}/todos.json`) at pause time.
+    /// `None` falls back to the sandbox guess on resume (fresh turns always
+    /// populate this; resume must restore it instead of passing `None`).
+    pub todos_file: Option<PathBuf>,
+    /// Remaining markup-only re-prompt budget at pause time.
+    pub markup_left: u32,
+    /// Remaining research / todo finish-gate budget at pause time.
+    /// Post-HITL resume forces this to `0` (see
+    /// [`FinishGateBudget::post_hitl`]) so an approval cannot loop back into
+    /// finish-gate nudges, while `markup_left` is preserved separately.
+    pub gate_left: u32,
+    /// Token accounting accumulated before the pause (request estimates +
+    /// provider usage). Resume restores this as the starting accounting so a
+    /// HITL pause never discards pre-pause LLM cost.
+    pub token_accounting: TokenAccounting,
+}
+
+impl PendingTurn {
+    /// Current finish-gate budget snapshot.
+    pub fn finish_budget(&self) -> FinishGateBudget {
+        FinishGateBudget {
+            markup: self.markup_left,
+            gate: self.gate_left,
+        }
+    }
+
+    /// Post-HITL budget: preserved markup, gate forced to zero.
+    pub fn post_hitl_budget(&self) -> FinishGateBudget {
+        FinishGateBudget::post_hitl(self.markup_left)
+    }
 }

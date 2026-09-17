@@ -15,11 +15,15 @@ pub const DEFAULT_SOFT_WRAP_WIDTH: usize = 2_000;
 const TRUNCATED_SUFFIX: &str = "\n…[truncated]";
 
 /// Result of a head+tail truncation, including a resumable cursor.
+///
+/// `cursor` (`byte:N`) is an informational char-offset hint embedded in the
+/// marker text only — it is **not** a tool argument. Re-call with narrower
+/// args (`offset`/`limit`/`head_limit`) instead of passing the cursor back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruncateOutcome {
     pub text: String,
     pub truncated: bool,
-    /// Byte offset where the omitted middle / tail resumes.
+    /// Char offset where the omitted middle / tail resumes (informational only).
     pub cursor: Option<String>,
 }
 
@@ -37,7 +41,11 @@ pub fn truncate_tool_result_to(s: String, max_chars: usize) -> String {
     truncate_tool_result_detailed(s, max_chars).text
 }
 
-/// Head + tail truncation with a byte-offset cursor (`byte:N`).
+/// Head + tail truncation with an informational char-offset cursor (`byte:N`).
+///
+/// The marker tells the model to re-call with narrower args; the cursor is
+/// explicitly **not** a tool argument. Offsets are char counts (multibyte
+/// safe), kept under the legacy `byte:N` label for wire compatibility.
 pub fn truncate_tool_result_detailed(s: String, max_chars: usize) -> TruncateOutcome {
     if max_chars == 0 {
         return TruncateOutcome {
@@ -58,9 +66,9 @@ pub fn truncate_tool_result_detailed(s: String, max_chars: usize) -> TruncateOut
             cursor: None,
         };
     }
-    let _marker = "\n…[truncated; cursor=byte:{off} lines={ls}-{le}]…\n";
-    // Reserve room for marker + head/tail. Worst-case marker ~60 chars.
-    let reserve = 72usize;
+    // Reserve room for marker + head/tail. Marker now carries the re-call
+    // hint plus the informational-only note, so reserve generously.
+    let reserve = 160usize;
     if max_chars <= reserve {
         let suffix_len = TRUNCATED_SUFFIX.chars().count();
         if max_chars <= suffix_len {
@@ -73,7 +81,7 @@ pub fn truncate_tool_result_detailed(s: String, max_chars: usize) -> TruncateOut
         }
         let keep = max_chars.saturating_sub(suffix_len);
         let head: String = s.chars().take(keep).collect();
-        let off = head.len();
+        let off = head.chars().count();
         return TruncateOutcome {
             text: format!("{head}{TRUNCATED_SUFFIX}"),
             truncated: true,
@@ -93,9 +101,12 @@ pub fn truncate_tool_result_detailed(s: String, max_chars: usize) -> TruncateOut
             .chars()
             .rev()
             .collect();
-        let off = head.len();
+        let off = head.chars().count();
         let (ls, le) = line_span(&s, off);
-        let marker = format!("\n…[truncated; cursor=byte:{off} lines={ls}-{le}]…\n");
+        let marker = format!(
+            "\n…[truncated; re-call with narrower args (offset/limit/head_limit), \
+             cursor=byte:{off} lines={ls}-{le} — cursor is informational only, not a tool arg]…\n"
+        );
         let marker_chars = marker.chars().count();
         if keep.saturating_add(marker_chars) <= max_chars {
             return TruncateOutcome {
@@ -115,9 +126,18 @@ pub fn truncate_tool_result_detailed(s: String, max_chars: usize) -> TruncateOut
     }
 }
 
-fn line_span(s: &str, byte_off: usize) -> (usize, usize) {
+/// Line span for a char-offset cursor (multibyte safe).
+///
+/// `char_off` is a char count, converted to the nearest char boundary before
+/// slicing so split UTF-8 can never panic (`get` + fallback).
+fn line_span(s: &str, char_off: usize) -> (usize, usize) {
+    let byte_idx = s
+        .char_indices()
+        .nth(char_off)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
     let start_lines = s
-        .get(..byte_off.min(s.len()))
+        .get(..byte_idx)
         .map(|h| h.bytes().filter(|b| *b == b'\n').count() + 1)
         .unwrap_or(1);
     let total = s.bytes().filter(|b| *b == b'\n').count() + 1;
@@ -208,5 +228,45 @@ mod tests {
         let wrapped = soft_wrap_line(&line, 2000);
         assert_eq!(wrapped.replace('\n', "").len(), 5000);
         assert!(wrapped.contains('\n'));
+    }
+
+    #[test]
+    fn truncated_marker_is_actionable_and_cursor_not_a_tool_arg() {
+        let long: String = "a".repeat(MAX_TOOL_RESULT_CHARS + 500);
+        let out = truncate_tool_result(long);
+        assert!(out.contains("re-call with narrower args"));
+        assert!(out.contains("offset/limit/head_limit"));
+        assert!(out.contains("informational only, not a tool arg"));
+        assert!(out.contains("cursor=byte:"));
+    }
+
+    #[test]
+    fn truncate_multibyte_is_char_safe_and_never_panics() {
+        // Emoji are 4 bytes / 1 char: byte-len vs char-count mix would
+        // mislabel the cursor and risk splitting UTF-8.
+        let s = format!("{}\n{}\n{}", "🎉".repeat(2_000), "line-🎉-mid", "🚀".repeat(2_000));
+        let out = truncate_tool_result_to(s.clone(), 1_000);
+        assert!(out.chars().count() <= 1_000);
+        assert!(out.contains("[truncated"));
+        // Cursor value must be a char count, not a byte length.
+        let cursor_off: usize = out
+            .find("cursor=byte:")
+            .map(|i| {
+                out[i + "cursor=byte:".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(usize::MAX)
+            })
+            .unwrap();
+        assert!(cursor_off <= 1_000, "cursor {cursor_off} must be char-based");
+        // line_span on a split-UTF-8 boundary must not panic.
+        let (ls, le) = super::line_span(&s, 1);
+        assert!(ls >= 1 && le >= ls);
+        let emoji_boundary = "a🎉b";
+        // char offset 2 lands mid-emoji in byte terms; must fallback safely.
+        let (ls2, _) = super::line_span(emoji_boundary, 2);
+        assert_eq!(ls2, 1);
     }
 }

@@ -3,7 +3,29 @@
 //! Prune is by real **human turns**, not user-role rows or raw message count, so assistant `tool_calls`
 //! stay paired with their following `Role::Tool` results.
 
-use super::{Context, Message, MessageOrigin, Role};
+use super::{Context, Message, MessageOrigin, Role, MAX_PREFIX_MESSAGES};
+
+/// Cap a pre-human prefix to at most [`MAX_PREFIX_MESSAGES`] rows.
+///
+/// Keeps the leading system prompt plus the newest prefix rows (summary and
+/// newest collapsed digests). Oldest collapsed digests are dropped first.
+fn capped_prefix(prefix: Vec<Message>) -> Vec<Message> {
+    if prefix.len() <= MAX_PREFIX_MESSAGES {
+        return prefix;
+    }
+    if prefix
+        .first()
+        .is_some_and(|m| matches!(m.role, Role::System))
+    {
+        let mut out = Vec::with_capacity(MAX_PREFIX_MESSAGES);
+        out.push(prefix[0].clone());
+        let take = MAX_PREFIX_MESSAGES - 1;
+        out.extend(prefix[prefix.len() - take..].iter().cloned());
+        out
+    } else {
+        prefix[prefix.len() - MAX_PREFIX_MESSAGES..].to_vec()
+    }
+}
 
 /// Index of the first non-system message (0 or 1).
 pub(super) fn body_start(messages: &[Message]) -> usize {
@@ -63,22 +85,45 @@ impl Context {
                 })
                 .unwrap_or(self.messages.len());
             self.messages.truncate(metadata_prefix_end);
+            self.cap_prefix_before_first_human();
             return;
         }
 
-        // No user turns, or already within budget — nothing to drop.
+        // No user turns, or already within budget — still cap an overgrown
+        // collapsed prefix (Tier2 digests accumulate before the first human).
         if turn_starts.is_empty() || turn_starts.len() <= max {
+            self.cap_prefix_before_first_human();
             return;
         }
 
         // First message index of the oldest turn we still keep.
         let keep_from = turn_starts[turn_starts.len() - max];
 
-        let prefix = self.messages[..prefix_end].to_vec();
+        let mut prefix = self.messages[..prefix_end].to_vec();
+        prefix = capped_prefix(prefix);
         let kept = self.messages[keep_from..].to_vec();
         self.messages.clear();
         self.messages.extend(prefix);
         self.messages.extend(kept);
+    }
+
+    /// Cap the pre-human prefix (system/summary/digests) to newest rows.
+    fn cap_prefix_before_first_human(&mut self) {
+        let body = body_start(&self.messages);
+        let prefix_end = self.messages[body..]
+            .iter()
+            .position(|m| m.origin.is_human())
+            .map(|p| body + p)
+            .unwrap_or(self.messages.len());
+        if prefix_end <= body {
+            return;
+        }
+        let capped = capped_prefix(self.messages[..prefix_end].to_vec());
+        if capped.len() != prefix_end {
+            self.messages.splice(..prefix_end, capped);
+        }
+        // Also enforce the digest count/char budget (drops oldest digests).
+        self.cap_compacted_prefix();
     }
 
     /// Count real human turns (excludes summary and host-control user-role rows).
@@ -318,5 +363,41 @@ mod tests {
         assert_eq!(ctx.user_turn_count(), 1);
         assert_eq!(ctx.messages[1].origin, MessageOrigin::Summary);
         assert!(ctx.messages.iter().any(|m| m.content == json!("u2")));
+    }
+
+    #[test]
+    fn prune_caps_overgrown_collapsed_prefix_to_newest() {
+        use crate::context::{MAX_COMPACTED_PREFIX_DIGESTS, MAX_PREFIX_MESSAGES};
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+        for i in 0..10 {
+            ctx.messages.push(Message::with_origin(
+                Role::User,
+                MessageOrigin::CompactedTool,
+                format!("digest-{i}"),
+            ));
+        }
+        ctx.push(Role::User, "u1");
+        ctx.push(Role::Assistant, "a1");
+        // Trigger prune path that caps even when within turn budget.
+        ctx.push(Role::User, "u2");
+
+        let first_human = ctx
+            .messages
+            .iter()
+            .position(|m| m.origin.is_human())
+            .unwrap();
+        assert!((first_human) <= MAX_PREFIX_MESSAGES);
+        assert!(matches!(ctx.messages[0].role, Role::System));
+        // Newest digests survive, oldest dropped.
+        let digests: Vec<_> = ctx.messages[..first_human]
+            .iter()
+            .filter(|m| m.origin == MessageOrigin::CompactedTool)
+            .filter_map(|m| m.content.as_str())
+            .collect();
+        assert!(digests.len() <= MAX_COMPACTED_PREFIX_DIGESTS + 1);
+        if !digests.is_empty() {
+            assert!(digests.last().unwrap().contains("digest-9"));
+        }
     }
 }

@@ -18,8 +18,8 @@ mod trait_;
 
 pub use args::{
     coerce_bool, coerce_u64, optional_bool, optional_bool_keys, optional_string,
-    optional_string_keys, optional_u64, optional_u64_keys, require_object, require_string,
-    value_type_name,
+    optional_string_keys, optional_u64, optional_u64_keys, optional_u64_keys_strict,
+    optional_u64_strict, require_object, require_string, strict_u64, value_type_name,
 };
 pub use error::{ToolError, ToolErrorKind};
 pub use meta::{Permission, ToolKind, ToolMeta, ToolRisk};

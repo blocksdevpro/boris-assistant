@@ -7,6 +7,14 @@
 use serde_json::{json, Value};
 
 /// How hard the model should think before answering / calling tools.
+///
+/// # Effort vocabulary
+///
+/// These strings are sent verbatim as OpenRouter `reasoning.effort`.
+/// `"low"` / `"medium"` / `"high"` are widely accepted, but `"minimal"`,
+/// `"xhigh"`, and `"max"` are model-dependent: some routes reject them with
+/// HTTP 400. Prefer `Low`–`High` when talking to an unverified route; only
+/// use `Minimal` / `XHigh` / `Max` against models known to accept them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningEffort {
     /// Disable extended reasoning when the model allows it.
@@ -41,6 +49,20 @@ impl ReasoningEffort {
 }
 
 /// Per-request reasoning controls attached to [`super::OpenRouterClient`].
+///
+/// # Default vs `Complex` budget — intentional divergence
+///
+/// - [`ReasoningConfig::default`] is `High` + `exclude: true`: the cheap
+///   no-trace default. The model still thinks hard, but reasoning text is
+///   kept off the wire so voice payloads stay small (the agent only needs
+///   `content` / `tool_calls`).
+/// - [`crate::RequestStage::Complex::budget()`](crate::RequestStage::budget)
+///   is `High` + `exclude: false`: the trace-for-UI budget. Reasoning text
+///   is streamed so the desktop UI can show live thinking.
+///
+/// Both think equally hard; they differ only in whether the trace is
+/// returned. Pick `default()` when nobody watches the trace, `Complex` when
+/// the UI should stream it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasoningConfig {
     pub effort: ReasoningEffort,
@@ -52,6 +74,10 @@ pub struct ReasoningConfig {
 impl Default for ReasoningConfig {
     fn default() -> Self {
         // Always think by default — "dumber without thinking" is worse than latency.
+        // Cheap no-trace variant: High effort, trace excluded from the wire.
+        // Contrast RequestStage::Complex::budget(), which is High effort with
+        // the trace INCLUDED so the UI can stream thinking. See the
+        // ReasoningConfig type docs for the full divergence rationale.
         Self {
             effort: ReasoningEffort::High,
             exclude: true,
@@ -94,10 +120,16 @@ impl ReasoningConfig {
 
     /// Include reasoning text in the stream / response so a host can show it.
     ///
-    /// Does not change effort. The agent still ignores this text for speech
-    /// and context — only the SSE consumer should surface it.
+    /// Does not change effort — except when effort is [`ReasoningEffort::None`]:
+    /// asking for the trace while reasoning is disabled would otherwise be a
+    /// silent no-op, so effort is upgraded to [`ReasoningEffort::Minimal`].
+    /// The agent still ignores this text for speech and context — only the
+    /// SSE consumer should surface it.
     pub fn include_text(mut self) -> Self {
         self.exclude = false;
+        if matches!(self.effort, ReasoningEffort::None) {
+            self.effort = ReasoningEffort::Minimal;
+        }
         self
     }
 
@@ -157,5 +189,28 @@ mod tests {
         // Must explicitly disable, not just omit `enabled`, so behavior
         // doesn't depend on unverified provider-default assumptions.
         assert_eq!(v["enabled"], false);
+    }
+
+    #[test]
+    fn include_text_upgrades_none_effort_to_minimal() {
+        // Asking for the trace while disabled must not be silently discarded.
+        let c = ReasoningConfig {
+            effort: ReasoningEffort::None,
+            exclude: true,
+        }
+        .include_text();
+        assert_eq!(c.effort, ReasoningEffort::Minimal);
+        assert!(!c.exclude);
+        let v = c.to_request_value();
+        assert_eq!(v["effort"], "minimal");
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["exclude"], false);
+    }
+
+    #[test]
+    fn default_is_cheap_no_trace_high() {
+        let d = ReasoningConfig::default();
+        assert_eq!(d.effort, ReasoningEffort::High);
+        assert!(d.exclude, "default keeps the trace off the wire");
     }
 }

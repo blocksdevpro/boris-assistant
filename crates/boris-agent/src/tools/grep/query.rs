@@ -124,6 +124,38 @@ mod tests {
     }
 
     #[test]
+    fn lenient_strings_floats_and_bool_strings_reach_coerce() {
+        // Numeric strings, floats (truncated), and bool strings must all parse
+        // via the lenient coerce path (validator omits `type` for these).
+        let q = GrepQuery::parse(&obj(json!({
+            "pattern": "TODO",
+            "-B": "3",
+            "-A": 12.0,
+            "-C": "2",
+            "head_limit": "20"
+        })))
+        .unwrap();
+        assert_eq!(q.before, 3);
+        assert_eq!(q.after, 12);
+        assert_eq!(q.limit, 20);
+
+        let q = GrepQuery::parse(&obj(json!({
+            "pattern": "x",
+            "ignore_case": "true",
+            "-i": "true",
+            "multiline": "true",
+            "context": "3",
+            "limit": 12.0
+        })))
+        .unwrap();
+        assert!(q.ignore_case);
+        assert!(q.multiline);
+        assert_eq!(q.before, 3);
+        assert_eq!(q.after, 3);
+        assert_eq!(q.limit, 12);
+    }
+
+    #[test]
     fn grok_aliases_and_context() {
         let q = GrepQuery::parse(&obj(json!({
             "pattern": "TODO",

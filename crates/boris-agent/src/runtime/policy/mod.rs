@@ -27,8 +27,8 @@ use crate::tool::{Permission, ToolMeta, ToolRisk};
 
 use paths::{args_path_strings, check_path_allowed, PathAccess};
 pub use paths::{
-    default_user_read_roots, normalize_path, path_is_within, resolve_in_roots,
-    resolve_path_for_policy,
+    default_user_read_roots, normalize_path, path_is_within, path_within_root,
+    re_resolve_after_open, resolve_in_roots, resolve_path_for_policy, resolve_under_roots,
 };
 
 /// Network access policy for tools that declare [`Permission::Network`].
@@ -52,12 +52,25 @@ pub enum NetworkPolicy {
 /// - [`Denied`](Self::Denied): no shell tools.
 /// - [`Allowlist`](Self::Allowlist): first argv token / command prefix must match
 ///   an entry (case-insensitive). Entries are binary names (`git`) or prefixes
-///   (`git status`, `cargo `). Commands containing shell metacharacters
-///   (`;`, `&`, `|`, backtick, `$(`, newline) are rejected even when the first
-///   token matches, since the whole string is passed verbatim to the shell and
-///   a chained command (`"git status; curl evil.com"`) would otherwise ride
-///   along unapproved — unless the full command string is an exact literal
-///   allowlist entry.
+///   (`git status`, `cargo `). Commands containing shell metacharacters are
+///   rejected even when the first token matches, since the whole string is
+///   passed verbatim to the shell and a chained command
+///   (`"git status; curl evil.com"`) would otherwise ride along unapproved —
+///   unless the full command string is an exact literal allowlist entry.
+///
+///   Denied metacharacters (best-effort, see [`shell_command_allowed`]):
+///   `; & |` (chaining/pipe), backtick, `$` (covers `$VAR`, `${…}`, `$(…)`),
+///   `> <` (redirection), `~` (home expansion), `#` (comment),
+///   `!` (history), `%` (batch var), `^` (batch escape), newline/CR.
+///   `*?` globs and `=` are intentionally **not** denied so legitimate
+///   `git status *.rs` / `cargo test --flag=value` forms keep working.
+///   Env-assignment prefixes (`FOO=bar git status`) are skipped when finding
+///   the first token, but a bare `$`/`>`/`<`/etc anywhere still denies.
+///
+///   This denylist is **best-effort only, not a full shell parser** — HITL
+///   confirmation is the real control for shell tools. Env vars are scrubbed
+///   from audit digests on a best-effort basis; never rely on the denylist
+///   alone as a sandbox boundary.
 /// - [`OpenConfirm`](Self::OpenConfirm): shell allowed; risk/confirm still apply
 ///   (bash is Dangerous + confirm). Hard deny patterns in the bash tool remain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,10 +435,18 @@ fn normalize_allowlist_host(entry: &str) -> String {
 /// Shell allowlist: match first token (binary) or full command prefix.
 ///
 /// Rejects commands containing shell metacharacters (`;`, `&`, `|`, backtick,
-/// `$(`, newline) that could chain an unapproved command onto an allowlisted
-/// prefix (e.g. `"git status; curl evil.com"`) — UNLESS the entire command is
-/// an exact literal match of an allowlist entry (so legitimate multi-word
-/// allowlisted commands that happen to contain a benign character still pass).
+/// `$` incl. `$(`/`${`/`$VAR`, `>`, `<`, `~`, `#`, `!`, `%`, `^`, newline)
+/// that could chain an unapproved command, redirect output, expand env/home,
+/// or inject comments/history onto an allowlisted prefix
+/// (e.g. `"git status; curl evil.com"`, `"git status > /tmp/evil"`,
+/// `"echo $HOME"`) — UNLESS the entire command is an exact literal match of
+/// an allowlist entry (so legitimate multi-word allowlisted commands that
+/// happen to contain a benign character still pass).
+///
+/// Best-effort only: not a full shell parser. HITL confirmation remains the
+/// authoritative control; this gate just closes the obvious injection vectors
+/// without breaking legit `git status` / `cargo test -p foo` (which contain
+/// none of the denied characters).
 pub(crate) fn shell_command_allowed(command: &str, allowlist: &[String]) -> bool {
     let cmd = command.trim();
     if cmd.is_empty() || allowlist.is_empty() {
@@ -471,15 +492,27 @@ pub(crate) fn shell_command_allowed(command: &str, allowlist: &[String]) -> bool
 }
 
 /// Best-effort detection of shell metacharacters that could chain a second
-/// command onto an allowlisted prefix. Not a full shell parser — just enough
-/// to close the obvious `cmd1; cmd2` / `cmd1 && cmd2` / `cmd1 | cmd2` /
-/// backtick / `$()` / newline injection vectors.
+/// command, redirect I/O, or expand env/home onto an allowlisted prefix.
+/// Not a full shell parser — just enough to close the obvious `cmd1; cmd2` /
+/// `cmd1 && cmd2` / `cmd1 | cmd2` / backtick / `$VAR` / `${…}` / `$()` /
+/// `>` / `<` / `~` / `#` / `!` / `%` / `^` / newline injection vectors.
+///
+/// Intentionally does **not** deny `*?` globs or `=` so legitimate
+/// `git status *.rs` / `cargo test --flag=value` forms keep working.
+/// HITL confirmation is the authoritative control; this is defense in depth.
 fn has_shell_metacharacters(cmd: &str) -> bool {
     cmd.contains(';')
         || cmd.contains('&')
         || cmd.contains('|')
         || cmd.contains('`')
-        || cmd.contains("$(")
+        || cmd.contains('$')
+        || cmd.contains('>')
+        || cmd.contains('<')
+        || cmd.contains('~')
+        || cmd.contains('#')
+        || cmd.contains('!')
+        || cmd.contains('%')
+        || cmd.contains('^')
         || cmd.contains('\n')
         || cmd.contains('\r')
 }
@@ -845,6 +878,49 @@ mod tests {
             "git status && echo done; curl evil.com",
             &list
         ));
+    }
+
+    #[test]
+    fn shell_allowlist_blocks_redirection_and_expansion() {
+        let list = vec!["git".into(), "cargo".into(), "echo".into()];
+        // Redirection must be blocked even with an allowlisted prefix.
+        assert!(!shell_command_allowed("git status > evil", &list));
+        assert!(!shell_command_allowed("git status >> /tmp/x", &list));
+        assert!(!shell_command_allowed("cargo test < input.txt", &list));
+        // Var expansion / command substitution must be blocked under Allowlist.
+        assert!(!shell_command_allowed("echo $HOME", &list));
+        assert!(!shell_command_allowed("echo ${HOME}", &list));
+        assert!(!shell_command_allowed("echo $(whoami)", &list));
+        assert!(!shell_command_allowed("echo `whoami`", &list));
+        // Home / comment / history / batch metachars.
+        assert!(!shell_command_allowed("echo ~/secrets", &list));
+        assert!(!shell_command_allowed("git status # comment", &list));
+        assert!(!shell_command_allowed("echo hello!", &list));
+        assert!(!shell_command_allowed("echo %PATH%", &list));
+        assert!(!shell_command_allowed("echo a^b", &list));
+        // Legit forms without metachars still pass.
+        assert!(shell_command_allowed("cargo test -p foo", &list));
+        assert!(shell_command_allowed("git status", &list));
+        // `=` and `*?` globs are intentionally allowed (see
+        // `has_shell_metacharacters` docs) so flag values keep working.
+        assert!(shell_command_allowed("cargo test --flag=value", &list));
+    }
+
+    #[test]
+    fn shell_allowlist_decide_blocks_redirection() {
+        let mut c = cfg();
+        c.shell = ShellPolicy::Allowlist(vec!["git".into(), "cargo".into()]);
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .permissions(&[Permission::Shell])
+            .confirm(true);
+        let deny = decide(&c, &meta, &json!({ "command": "git status > evil" }), 0);
+        assert!(matches!(deny, PolicyDecision::Deny { reason } if reason.contains("allowlist")));
+        let deny2 = decide(&c, &meta, &json!({ "command": "echo $HOME" }), 0);
+        // `echo` is not allowlisted here, so deny either way; the point is no
+        // expansion bypass reaches NeedsConfirmation.
+        assert!(matches!(deny2, PolicyDecision::Deny { .. }));
+        let ok = decide(&c, &meta, &json!({ "command": "cargo test -p foo" }), 0);
+        assert!(matches!(ok, PolicyDecision::NeedsConfirmation { .. }));
     }
 
     #[test]

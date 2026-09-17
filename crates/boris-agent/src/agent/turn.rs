@@ -356,7 +356,7 @@ impl Agent {
         let mut compaction_accounting = TokenAccounting::default();
 
         let config = self.loop_config(user_text);
-        let tools_for_request =
+        let (tools_for_request, _pruned) =
             loop_::listed_tools_json(&self.tools, &config, Some(&self.activated));
         let context_limit = self
             .client
@@ -381,8 +381,10 @@ impl Agent {
         }
         self.context
             .compact_mechanical_for_request_with_budget(&tools_for_request, compact_budget);
-        // Todo + research re-entry budget (each re-enter costs one).
-        self.finish_gate_remaining = 3;
+        // Split finish budgets: markup (tool-XML re-prompt) vs gate
+        // (research/todo). `finish_gate_remaining` tracks the gate; markup
+        // always starts at `MARKUP_INIT` (see `FinishGateBudget::fresh`).
+        self.finish_gate_remaining = crate::finish_gate::FinishGateBudget::GATE_INIT;
 
         let preview = log_preview(user_text, LOG_PREVIEW_CHARS);
         info!(
@@ -424,7 +426,11 @@ impl Agent {
                 client: self.client.as_ref(),
                 activated: Some(&self.activated),
             };
-            loop_::agent_loop(
+            // Fresh turn: full split budgets + session todos path.
+            let budget = crate::finish_gate::FinishGateBudget::fresh();
+            // Keep the legacy gate field in sync for hosts that read it.
+            self.finish_gate_remaining = budget.gate;
+            loop_::agent_loop_with_budget(
                 state,
                 user_text,
                 &config,
@@ -433,8 +439,9 @@ impl Agent {
                 0,
                 Some(ct),
                 Some(emit),
-                Some(todos_for_gate),
-                self.finish_gate_remaining,
+                Some(todos_for_gate.clone()),
+                budget,
+                TokenAccounting::default(),
             )
             .await
         };
@@ -447,6 +454,22 @@ impl Agent {
                 if let Some(control) = &replacement_control {
                     self.context
                         .remove_control(&serde_json::Value::String(control.clone()));
+                }
+                // B2: when pausing, capture session todos path + accounting.
+                // The loop already snapshots budgets/accounting/todos, but
+                // ensure the session path wins over any sandbox fallback and
+                // fold compaction cost into the pending accounting so resume
+                // never loses it. tool_rounds/confirms/tools_used are already
+                // preserved by the loop.
+                if let Some(pending) = loop_out.pending_turn.as_mut() {
+                    // Session path wins over any sandbox fallback.
+                    pending.todos_file = Some(todos_for_gate.clone());
+                    // Merge compaction into both the report and the pending
+                    // snapshot (resume restores from pending).
+                    pending.token_accounting.merge(&compaction_accounting);
+                    // `finish_gate_remaining` mirrors the gate budget; markup
+                    // lives only in the pending snapshot.
+                    self.finish_gate_remaining = pending.gate_left;
                 }
                 self.pending_turn = loop_out.pending_turn.clone();
                 self.maybe_refresh_after_tools(&loop_out.tools_used);
@@ -493,10 +516,19 @@ impl Agent {
         value: Option<String>,
     ) -> Result<(AgentOutcome, TurnReport), AgentError> {
         let started = Instant::now();
-        let pending_turn = self
+        let mut pending_turn = self
             .pending_turn
             .take()
             .ok_or_else(|| AgentError::new("no pending input to resume"))?;
+        // B2: never resume with `None` todos (would fall back to the sandbox
+        // guess instead of the session file). Fill from the session binding.
+        if pending_turn.todos_file.is_none() {
+            pending_turn.todos_file = Some(
+                self.todos_path
+                    .clone()
+                    .unwrap_or_else(|| self.sandbox_snapshot.sandbox_root.join("todos.json")),
+            );
+        }
 
         if pending_turn.pending.id != pending_id {
             let id = pending_turn.pending.id.clone();
@@ -583,10 +615,19 @@ impl Agent {
         approved: bool,
     ) -> Result<(AgentOutcome, TurnReport), AgentError> {
         let started = Instant::now();
-        let pending_turn = self
+        let mut pending_turn = self
             .pending_turn
             .take()
             .ok_or_else(|| AgentError::new("no pending tool confirmation to resume"))?;
+        // B2: never resume with `None` todos (would fall back to the sandbox
+        // guess instead of the session file). Fill from the session binding.
+        if pending_turn.todos_file.is_none() {
+            pending_turn.todos_file = Some(
+                self.todos_path
+                    .clone()
+                    .unwrap_or_else(|| self.sandbox_snapshot.sandbox_root.join("todos.json")),
+            );
+        }
 
         if pending_turn.pending.id != pending_id {
             let id = pending_turn.pending.id.clone();

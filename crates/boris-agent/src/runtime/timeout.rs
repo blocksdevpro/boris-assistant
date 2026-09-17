@@ -1,4 +1,16 @@
 //! Async tool body execution with wall-clock timeout.
+//!
+//! # Double-layer timeout model (documented, no behavior change)
+//!
+//! The runtime timeout here fires **first**: [`run_with_timeout`] awaits
+//! `tool.execute` under `tokio::time::timeout` and, on expiry, drops the
+//! future and returns [`ToolError::timeout`]. Dropping is cooperative —
+//! cancel-safe tools should honor drop (e.g. select on the context cancel
+//! token); pure CPU work with no `.await` may keep running on the executor
+//! until its next yield point. There is no separate OS-kill layer; the
+//! "internal kill" is that drop. Tools that spawn child processes must
+//! therefore watch cancellation themselves (see `tools/bash` cooperative
+//! cancel) — the runtime cannot SIGKILL a detached child.
 
 use std::time::Duration;
 

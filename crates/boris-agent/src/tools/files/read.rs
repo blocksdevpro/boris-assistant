@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
-    ToolMeta, ToolRisk,
+    optional_u64_strict, require_object, require_string, truncate_tool_result, Permission, Tool,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
 
@@ -164,12 +164,12 @@ impl Tool for ReadFileTool {
                     "description": "Absolute or relative path to read"
                 },
                 "offset": {
-                    "type": "number",
-                    "description": "1-based start line (default 1)"
+                    "type": "integer",
+                    "description": "1-based start line (default 1). Must be an integer; floats are rejected."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Max lines to return (default 200, max 2000)"
+                    "type": "integer",
+                    "description": "Max lines to return (default 200, max 2000). Must be an integer; floats are rejected."
                 }
             },
             "required": ["path"]
@@ -192,9 +192,11 @@ impl Tool for ReadFileTool {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let path = resolve_under_roots(&raw, &self.roots.readers())?;
+        // Strict integers: floats and non-numeric strings become invalid_args
+        // (never a silent default). Numeric strings ("42") are accepted.
         let window = parse_read_window(
-            obj.get("offset").and_then(|v| v.as_u64()),
-            obj.get("limit").and_then(|v| v.as_u64()),
+            optional_u64_strict(obj, "offset")?,
+            optional_u64_strict(obj, "limit")?,
         );
 
         if !path.exists() {
@@ -372,6 +374,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("exceeds"));
+    }
+
+    #[test]
+    fn schema_uses_integer_for_offset_limit() {
+        let tool = ReadFileTool::new(crate::tools::files::FsRoots {
+            sandbox: std::path::PathBuf::from("/tmp"),
+            data: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+        });
+        let schema = tool.parameters();
+        assert_eq!(schema["properties"]["offset"]["type"], "integer");
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn truncate_by_read_budget_is_multibyte_safe() {
+        // Emoji are 4 bytes / 1 char: truncation must count chars, never split UTF-8.
+        let emoji = "🎉".repeat(50);
+        let out = truncate_by_read_budget(emoji.clone(), 10);
+        assert_eq!(out.chars().take(10).collect::<String>().len() > 0, true);
+        assert!(out.starts_with(&"🎉".repeat(10)));
+        assert!(out.ends_with("\n…[truncated by bytes]"));
+        // No panic on split boundary; output minus marker is exactly 10 chars.
+        let body = out.strip_suffix("\n…[truncated by bytes]").unwrap();
+        assert_eq!(body.chars().count(), 10);
+        // Mixed content with emoji mid-line.
+        let mixed = format!("line1\n{}\nline3\n", "🚀".repeat(30));
+        let out = truncate_by_read_budget(mixed, 12);
+        assert!(out.contains("…[truncated by bytes]"));
+        // Must still be valid UTF-8 (Rust String guarantees it; char-count check).
+        assert!(out.is_ascii() == false);
+        assert!(out.chars().count() <= 12 + "\n…[truncated by bytes]".chars().count());
+    }
+
+    #[tokio::test]
+    async fn float_offset_limit_rejected_not_silent_default() {
+        let (roots, dir) = crate::tools::files::test_util::temp_roots();
+        std::fs::write(dir.join("a.txt"), "a\nb\nc\n").unwrap();
+        let read = ReadFileTool::new(roots);
+        for args in [json!({"path": "a.txt", "limit": 2.5}), json!({"path": "a.txt", "offset": 1.2})] {
+            let err = read
+                .execute(&crate::tool_context::ToolCallContext::new("t"), args)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+            assert!(err.message.contains("integer"), "got: {}", err.message);
+        }
+        // Numeric strings are accepted via strict coerce.
+        let out = read
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"path": "a.txt", "limit": "2"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("1\ta"));
+        assert!(out.contains("2\tb"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

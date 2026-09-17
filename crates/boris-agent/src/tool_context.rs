@@ -19,6 +19,13 @@ pub struct ToolCallContext {
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
     /// Working directory for relative path resolution (when known).
+    ///
+    /// Policy note: hosts/tools must not validate this with a lexical
+    /// `starts_with` (case-sensitive, `..`/symlink-blind). Use
+    /// `crate::runtime::path_within_root(&candidate, &root)` — the
+    /// canonicalizing, case-insensitive-on-Windows helper — for any
+    /// session-`cwd` fallback check. See `runtime::policy::paths` docs and the
+    /// TODO there for `tools/bash/exec.rs`.
     pub cwd: Option<PathBuf>,
     /// Cooperative cancel for long-running tools (bash, web).
     pub cancel: Option<CancellationToken>,

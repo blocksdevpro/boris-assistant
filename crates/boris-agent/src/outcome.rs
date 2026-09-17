@@ -75,17 +75,33 @@ impl AgentOutcome {
 ///
 /// Freeform by design: name, choice, clarify, yes/no — anything speakable.
 /// Heuristic only (no LLM). Used when the model does not set policy explicitly.
+///
+/// Trailing markdown / quote decoration (`"`, `'`, `*`, `_`, whitespace) is
+/// trimmed before looking for the terminal `?`, so `"Are you sure?"` and
+/// `**Are you sure?**` still count. At least two whitespace-separated words
+/// are required (a lone `?` never opens freeform listen) and over-long
+/// replies (> 28 words, counted after trimming) never do either.
 pub fn looks_like_question(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return false;
     }
-    let core = t.trim_end_matches(|c: char| c == '!' || c == '.' || c == '…' || c.is_whitespace());
+    let core = t.trim_end_matches(|c: char| {
+        c.is_whitespace()
+            || c == '"'
+            || c == '\''
+            || c == '*'
+            || c == '_'
+            || c == '`'
+            || c == '!'
+            || c == '.'
+            || c == '…'
+    });
     if !core.ends_with('?') {
         return false;
     }
     let words = core.split_whitespace().count();
-    if words == 0 || words > 28 {
+    if words < 2 || words > 28 {
         return false;
     }
     true
@@ -107,6 +123,43 @@ mod tests {
         assert!(!looks_like_question("I am basically a genius."));
         assert!(!looks_like_question("Done."));
         assert!(!looks_like_question(""));
+    }
+
+    #[test]
+    fn trailing_markdown_and_quotes_still_question() {
+        assert!(looks_like_question("Are you sure?\""));
+        assert!(looks_like_question("\"Are you sure?\""));
+        assert!(looks_like_question("**Are you sure?**"));
+        assert!(looks_like_question("Are you sure?*"));
+        assert!(looks_like_question("Are you really sure?!"));
+    }
+
+    #[test]
+    fn lone_question_mark_is_not_question() {
+        // Fewer than two words never opens freeform listen.
+        assert!(!looks_like_question("?"));
+        assert!(!looks_like_question("?\""));
+        assert!(!looks_like_question("Really?"));
+        assert!(!looks_like_question("\"Really?\""));
+    }
+
+    #[test]
+    fn long_text_is_not_question() {
+        let long = (0..30)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            + "?";
+        assert!(long.split_whitespace().count() > 28);
+        assert!(!looks_like_question(&long));
+        // 28 words still counts.
+        let edge = (0..27)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            + " really?";
+        assert_eq!(edge.split_whitespace().count(), 28);
+        assert!(looks_like_question(&edge));
     }
 
     #[test]

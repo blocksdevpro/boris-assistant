@@ -17,7 +17,7 @@ use super::steer::steer_simple_command;
 use super::CAPTURE_MAX_BYTES;
 use crate::runtime::ProgressEvent;
 use crate::tool::{
-    optional_string, require_object, require_string, soft_wrap_text, truncate_tool_result,
+    optional_string, optional_string_keys, require_object, soft_wrap_text, truncate_tool_result,
     Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk, DEFAULT_SOFT_WRAP_WIDTH,
 };
 use crate::tool_context::ToolCallContext;
@@ -363,18 +363,30 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo."
+                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo. Aliases: cmd, shell."
+                },
+                "cmd": {
+                    "type": "string",
+                    "description": "Alias of command (accepted for model compatibility)."
+                },
+                "shell": {
+                    "type": "string",
+                    "description": "Alias of command (accepted for model compatibility)."
                 },
                 "cwd": {
                     "type": "string",
                     "description": "Working directory under allowed roots (default: sandbox). Set this when the work is not in the sandbox."
                 },
                 "timeout": {
-                    "type": "number",
-                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline."
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline. Must be an integer; floats are rejected. Alias: timeout_secs."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Alias of timeout in seconds (default 120, max 300). Must be an integer; floats are rejected."
                 }
             },
-            "required": ["command"]
+            "required": []
         })
     }
 
@@ -394,7 +406,9 @@ impl Tool for BashTool {
         }
 
         let obj = require_object(&args)?;
-        let command = require_string(obj, "command")?;
+        let command = optional_string_keys(obj, &["command", "cmd", "shell"]).ok_or_else(|| {
+            ToolError::invalid_args("missing required string argument `command` (aliases: cmd, shell)")
+        })?;
         let command = command.trim();
         validate_command(command)?;
         if let Some(steer) = steer_simple_command(command) {
@@ -429,7 +443,7 @@ impl Tool for BashTool {
             }
         }
 
-        let timeout_secs = parse_timeout_secs(obj);
+        let timeout_secs = parse_timeout_secs(obj)?;
 
         let start = Instant::now();
         let mut child = match Self::build_command(command, &cwd).spawn() {
@@ -573,6 +587,18 @@ mod tests {
         assert!(tool.meta().requires_confirmation);
     }
 
+    #[test]
+    fn schema_exposes_aliases_and_integer_timeout() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(vec![dir.clone()], dir);
+        let schema = tool.parameters();
+        let props = &schema["properties"];
+        assert_eq!(props["timeout"]["type"], "integer");
+        assert_eq!(props["timeout_secs"]["type"], "integer");
+        assert_eq!(props["cmd"]["type"], "string");
+        assert_eq!(props["shell"]["type"], "string");
+    }
+
     #[tokio::test]
     async fn pwd_smoke_works() {
         let dir = std::env::temp_dir().join(format!("boris-bash-{}", std::process::id()));
@@ -589,6 +615,58 @@ mod tests {
             out.contains("Exit code: 0") && !out.contains("Command was not run."),
             "got: {out}"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn cmd_alias_and_float_timeout_rejected() {
+        let dir = std::env::temp_dir().join(format!("boris-bash-alias-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+        // `cmd` alias reaches the same path as `command`.
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "cmd": "pwd" }),
+            )
+            .await
+            .expect("cmd alias");
+        assert!(out.contains("Exit code: 0"), "got: {out}");
+        // `shell` alias also works.
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "shell": "pwd" }),
+            )
+            .await
+            .expect("shell alias");
+        assert!(out.contains("Exit code: 0"), "got: {out}");
+        // Float timeout is invalid_args, not a silent default.
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "command": "pwd", "timeout": 12.5 }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("integer"), "got: {}", err.message);
+        // Numeric string timeout is accepted.
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "command": "pwd", "timeout": "30" }),
+            )
+            .await
+            .expect("string timeout");
+        assert!(out.contains("Exit code: 0"), "got: {out}");
+        // Missing command (all aliases absent) is invalid_args.
+        let err = tool
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("command"), "got: {}", err.message);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

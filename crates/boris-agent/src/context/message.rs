@@ -25,6 +25,12 @@ pub enum MessageOrigin {
     TaskState,
     /// Search result injected proactively from durable memory.
     RetrievedMemory,
+    /// Merged host-derived reference block (personal + skills + memory + task).
+    ///
+    /// Single `Role::User` message inserted after the system prompt. Wire role
+    /// stays `user` so provider shape is unchanged; origin is only harness
+    /// provenance and is never persisted as history.
+    DerivedContext,
 }
 
 impl MessageOrigin {

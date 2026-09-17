@@ -27,6 +27,61 @@ fn store_at(dir: &Path) -> ArtifactStore {
     ArtifactStore::new(dir)
 }
 
+/// Validate a model-supplied artifact `id` slug before policy/store lookup.
+///
+/// Accepts `alnum-hyphen-underscore`, 1–64 chars. Rejects empty, `..`, `/`,
+/// `\`, and any other traversal/special characters with `invalid-args`.
+/// Filenames (`{slug}-{hex}.{ext}`) are validated via [`is_safe_artifact_ref`].
+pub fn is_safe_artifact_id(id: &str) -> bool {
+    let t = id.trim();
+    if t.is_empty() || t.len() > 64 {
+        return false;
+    }
+    if t.contains("..") || t.contains('/') || t.contains('\\') {
+        return false;
+    }
+    t.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Validate an artifact reference: either a bare [`is_safe_artifact_id`] slug
+/// or a `{slug}-{hex}.{ext}` filename whose stem/extension are safe and whose
+/// full string contains no traversal sequences.
+pub fn is_safe_artifact_ref(raw: &str) -> bool {
+    let t = raw.trim();
+    if t.is_empty() || t.len() > 128 {
+        return false;
+    }
+    if t.contains("..") || t.contains('/') || t.contains('\\') {
+        return false;
+    }
+    // Bare id.
+    if is_safe_artifact_id(t) {
+        return true;
+    }
+    // Filename: split optional extension, then require safe chars.
+    let stem = t
+        .rsplit_once('.')
+        .filter(|(_, ext)| !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(|(s, _)| s)
+        .unwrap_or(t);
+    if stem.is_empty() || stem.len() > 96 {
+        return false;
+    }
+    stem
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn reject_unsafe_artifact_ref(raw: &str) -> Result<(), ToolError> {
+    if !is_safe_artifact_ref(raw) {
+        return Err(ToolError::invalid_args(
+            "invalid artifact id: use alnum-hyphen-underscore (1-64 chars) or a known artifact filename; traversal (.., /, \\) is rejected",
+        ));
+    }
+    Ok(())
+}
+
 async fn run_blocking<T: Send + 'static>(
     label: &'static str,
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -145,6 +200,12 @@ impl Tool for PresentArtifactTool {
             .ok_or_else(|| ToolError::invalid_args("kind must be markdown or code"))?;
         let title = require_string(obj, "title")?;
         let body = require_string(obj, "body")?;
+        if title.trim().is_empty() {
+            return Err(ToolError::invalid_args("title must not be empty"));
+        }
+        if body.trim().is_empty() {
+            return Err(ToolError::invalid_args("body must not be empty"));
+        }
         if body.chars().count() > MAX_ARTIFACT_BODY_CHARS {
             return Err(ToolError::truncated(format!(
                 "artifact body exceeds {MAX_ARTIFACT_BODY_CHARS} characters"
@@ -152,6 +213,9 @@ impl Tool for PresentArtifactTool {
         }
         let language = optional_string(obj, "language");
         let id = optional_string(obj, "id");
+        if let Some(ref raw) = id {
+            reject_unsafe_artifact_ref(raw)?;
+        }
         let pinned = optional_bool(obj, "pinned");
         let turn_id = ctx.turn_id.clone();
         let dir = self.dir.clone();
@@ -278,6 +342,9 @@ impl Tool for GetArtifactTool {
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let id = optional_string(obj, "id");
+        if let Some(ref raw) = id {
+            reject_unsafe_artifact_ref(raw)?;
+        }
         let dir = self.dir.clone();
         let (meta, body) =
             run_blocking("get_artifact", move || store_at(&dir).get(id.as_deref())).await?;
@@ -370,6 +437,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("unknown") || err.message.contains("no current"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn safe_id_accepts_slug_rejects_traversal() {
+        assert!(is_safe_artifact_id("abc123"));
+        assert!(is_safe_artifact_id("my-note_1"));
+        assert!(!is_safe_artifact_id(""));
+        assert!(!is_safe_artifact_id("../evil"));
+        assert!(!is_safe_artifact_id("a/b"));
+        assert!(!is_safe_artifact_id("a\\b"));
+        assert!(!is_safe_artifact_id("a..b"));
+        assert!(!is_safe_artifact_id(&"x".repeat(65)));
+        assert!(is_safe_artifact_ref("rename-photos-a1f3c9.ps1"));
+        assert!(!is_safe_artifact_ref("../../etc/passwd"));
+        assert!(!is_safe_artifact_ref(".."));
+    }
+
+    #[tokio::test]
+    async fn get_rejects_traversal_with_invalid_args() {
+        let dir = temp_dir("traversal");
+        let get = GetArtifactTool::with_dir(&dir);
+        for evil in ["../evil", "..", "a/b", "a\\b", "../../etc/passwd"] {
+            let err = get
+                .execute(&ToolCallContext::new("c"), json!({"id": evil}))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.kind(),
+                crate::tool::ToolErrorKind::InvalidArgs,
+                "id={evil}: {}",
+                err.message
+            );
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn present_rejects_empty_title_and_body() {
+        let dir = temp_dir("empty");
+        let present = PresentArtifactTool::with_dir(&dir);
+        for args in [
+            json!({"kind": "markdown", "title": "", "body": "hi"}),
+            json!({"kind": "markdown", "title": "   ", "body": "hi"}),
+            json!({"kind": "markdown", "title": "x", "body": ""}),
+            json!({"kind": "markdown", "title": "x", "body": "   "}),
+        ] {
+            let err = present
+                .execute(&ToolCallContext::new("c"), args)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+            assert!(
+                err.message.contains("must not be empty"),
+                "got: {}",
+                err.message
+            );
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn present_rejects_traversal_id() {
+        let dir = temp_dir("present-traversal");
+        let present = PresentArtifactTool::with_dir(&dir);
+        let err = present
+            .execute(
+                &ToolCallContext::new("c"),
+                json!({"kind": "markdown", "title": "x", "body": "hi", "id": "../evil"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use crate::tool::{optional_u64_keys_strict, ToolError};
+
 use super::{DEFAULT_TIMEOUT_SECS, MAX_BYTES, MAX_LINES};
 
 /// Truncate combined output: keep the beginning and the end (Grok-style).
@@ -85,12 +87,15 @@ fn ceil_nl(s: &str, mut at: usize) -> usize {
 }
 
 /// Parse timeout from tool args (`timeout` or `timeout_secs`), default 120, clamp 1–300.
-pub(crate) fn parse_timeout_secs(obj: &serde_json::Map<String, Value>) -> u64 {
-    obj.get("timeout")
-        .or_else(|| obj.get("timeout_secs"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
-        .clamp(1, 300)
+///
+/// Strict integers only: floats and non-numeric strings return
+/// `invalid_args` instead of silently falling back to the default. Numeric
+/// strings (`"30"`) are accepted via [`optional_u64_keys_strict`].
+pub(crate) fn parse_timeout_secs(
+    obj: &serde_json::Map<String, Value>,
+) -> Result<u64, ToolError> {
+    let raw = optional_u64_keys_strict(obj, &["timeout", "timeout_secs"])?;
+    Ok(raw.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 300))
 }
 
 #[cfg(test)]
@@ -104,15 +109,40 @@ mod tests {
 
     #[test]
     fn parse_timeout_defaults_and_clamps() {
-        assert_eq!(parse_timeout_secs(&map(json!({}))), 120);
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 30 }))), 30);
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout_secs": 45 }))), 45);
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 0 }))), 1);
-        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 999 }))), 300);
+        assert_eq!(parse_timeout_secs(&map(json!({}))).unwrap(), 120);
+        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 30 }))).unwrap(), 30);
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout_secs": 45 }))).unwrap(),
+            45
+        );
+        assert_eq!(parse_timeout_secs(&map(json!({ "timeout": 0 }))).unwrap(), 1);
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout": 999 }))).unwrap(),
+            300
+        );
         // `timeout` wins over `timeout_secs` when both present
         assert_eq!(
-            parse_timeout_secs(&map(json!({ "timeout": 10, "timeout_secs": 50 }))),
+            parse_timeout_secs(&map(json!({ "timeout": 10, "timeout_secs": 50 }))).unwrap(),
             10
+        );
+    }
+
+    #[test]
+    fn parse_timeout_rejects_floats_accepts_numeric_strings() {
+        // Floats become invalid_args, never a silent default.
+        let err = parse_timeout_secs(&map(json!({ "timeout": 12.5 }))).unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("integer"), "got: {}", err.message);
+        let err = parse_timeout_secs(&map(json!({ "timeout_secs": 30.0 }))).unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        // Numeric strings are accepted.
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout": "30" }))).unwrap(),
+            30
+        );
+        assert_eq!(
+            parse_timeout_secs(&map(json!({ "timeout_secs": "45" }))).unwrap(),
+            45
         );
     }
 

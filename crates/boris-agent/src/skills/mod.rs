@@ -23,7 +23,7 @@
 mod catalog;
 mod defaults;
 mod frontmatter;
-mod load;
+pub mod load;
 
 use std::path::PathBuf;
 
@@ -32,7 +32,8 @@ pub(crate) use catalog::SKILLS_SYSTEM_POLICY;
 pub use defaults::ensure_default_skills;
 pub use frontmatter::{is_valid_name, strip_frontmatter};
 pub use load::{
-    load_skill_body, load_skills, parse_skill_file, project_skills_dirs, user_skills_dir,
+    check_skill_path, escape_skill_data, load_skill_body, load_skills, parse_skill_file,
+    project_skills_dirs, user_skills_dir,
 };
 
 /// Where a skill was discovered.

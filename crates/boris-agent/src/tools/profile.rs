@@ -149,7 +149,7 @@ impl Tool for ForgetUserMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Forget personal memory only when the human explicitly asks. Matching facts are tombstoned for audit and excluded from future context. Use all=true only for an explicit request to forget everything."
+        "Forget personal memory only when the human explicitly asks. Provide query or all=true (one required). Matching facts are tombstoned for audit and excluded from future context. Use all=true only for an explicit request to forget everything."
     }
 
     fn parameters(&self) -> Value {
@@ -180,7 +180,9 @@ impl Tool for ForgetUserMemoryTool {
         let all = optional_bool(obj, "all").unwrap_or(false);
         let query = optional_string(obj, "query").unwrap_or_default();
         if !all && query.trim().is_empty() {
-            return Err(ToolError::invalid_args("provide query or all=true"));
+            return Err(ToolError::invalid_args(
+                "provide query or all=true (one is required): e.g. {\"query\": \"topic\"} or {\"all\": true}",
+            ));
         }
         // Profile JSON used tombstones. The canonical store is the runtime
         // source of truth, so an explicit forget must erase it there first.
@@ -228,7 +230,8 @@ impl Tool for UpdateUserProfileTool {
     }
 
     fn description(&self) -> &str {
-        "Update the user's profile fields: preferred_name, address_as, or a preference line. \
+        "Update the user's profile fields: preferred_name, address_as, preference, or ongoing. \
+         Provide at least one of preferred_name, address_as, preference, ongoing (one required). \
          Call when they say their name, how to address them, or a lasting preference."
     }
 
@@ -289,7 +292,7 @@ impl Tool for UpdateUserProfileTool {
             }
             if !changed {
                 return Err(ToolError::invalid_args(
-                    "provide preferred_name, address_as, preference, and/or ongoing",
+                    "provide preferred_name, address_as, preference, and/or ongoing (at least one is required)",
                 ));
             }
             Ok(())
@@ -349,6 +352,9 @@ impl Tool for GetUserContextTool {
         if guard.is_empty() {
             return Ok("No personal context stored yet.".into());
         }
+        // render_block is already an untrusted `<personal_context>` envelope
+        // (banner + escaped closers); return it directly so the model treats
+        // stored facts as data, not instructions.
         Ok(truncate_tool_result(guard.render_block(2000)))
     }
 }
@@ -389,5 +395,46 @@ mod tests {
         assert_eq!(get_m.read_only, Some(true));
         assert!(get_m.permissions.contains(&Permission::FsRead));
         assert!(get_m.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn forget_empty_rejected_with_helpful_text() {
+        let profile = dummy_profile();
+        let path = std::env::temp_dir().join(format!(
+            "boris-profile-forget-{}-{}.json",
+            std::process::id(),
+            crate::memory::now_ms()
+        ));
+        let tool = ForgetUserMemoryTool::with_path(profile, &path);
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("c"),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("query"));
+        assert!(err.message.contains("all=true"));
+    }
+
+    #[tokio::test]
+    async fn update_empty_rejected_with_helpful_text() {
+        let profile = dummy_profile();
+        let path = std::env::temp_dir().join(format!(
+            "boris-profile-update-{}-{}.json",
+            std::process::id(),
+            crate::memory::now_ms()
+        ));
+        let tool = UpdateUserProfileTool::with_path(profile, &path);
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("c"),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("preferred_name"));
     }
 }

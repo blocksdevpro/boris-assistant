@@ -137,4 +137,29 @@ mod tests {
         assert_eq!(out.chars().count(), 10);
         assert!(out.ends_with('…'));
     }
+
+    #[test]
+    fn truncate_line_is_multibyte_safe() {
+        // Emoji are multibyte: truncation must count chars, never split UTF-8.
+        let line = format!("{}-suffix", "🎉".repeat(100));
+        let out = truncate_line(&line, 10);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('…'));
+        // Must be valid UTF-8 and start with intact emoji.
+        assert!(out.starts_with("🎉"));
+        let mixed = format!("prefix-{}-suffix", "🚀".repeat(50));
+        let hits = GrepHits {
+            lines: vec![mixed.clone()],
+            match_count: 1,
+            file_count: 1,
+            truncated: false,
+        };
+        let rendered = hits.render("🚀", "/tmp", None);
+        assert!(rendered.contains("Found 1 match"));
+        // Long emoji line still capped at 500 chars + counts footer.
+        let long_emoji = "🎉".repeat(600);
+        let cut = truncate_line(&long_emoji, super::super::MAX_LINE_CHARS);
+        assert_eq!(cut.chars().count(), super::super::MAX_LINE_CHARS);
+        assert!(cut.ends_with('…'));
+    }
 }

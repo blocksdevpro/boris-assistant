@@ -92,11 +92,18 @@ pub fn parse_collect_args(args: &Value) -> (InputKind, String, String, u32) {
 }
 
 /// Observation fed back to the model after the host collected a value.
+///
+/// Secrets never echo the value: the model only learns a length-tagged
+/// receipt. The raw value stays with the host; transcripts persist only the
+/// redacted receipt via [`redact_secret_tool_content`].
 pub fn format_input_observation(kind: InputKind, value: &str) -> String {
     match kind {
         InputKind::Secret => format!(
-            "{SECRET_INPUT_MARK}\nUser provided a secret. Never speak it, store it in memory, \
-             or put it in artifacts or URLs.\n{value}"
+            "{SECRET_INPUT_MARK}\n\
+             [boris-secret received, length={}, redacted from transcript] \
+             Never speak it, store it in memory, or put it in artifacts or URLs. \
+             Use only via approved tool.",
+            value.chars().count()
         ),
         InputKind::Exact => format!("User typed:\n{value}"),
         InputKind::Blob => format!("User pasted:\n{value}"),
@@ -149,9 +156,22 @@ mod tests {
     #[test]
     fn redact_secret_mark() {
         let raw = format_input_observation(InputKind::Secret, "ghp_secret");
+        // Secret value must never reach the model observation.
+        assert!(!raw.contains("ghp_secret"));
+        assert!(raw.contains("length=10"));
+        assert!(raw.contains(SECRET_INPUT_MARK));
         let v = json!({"tool_call_id": "c1", "content": raw});
         let out = redact_secret_tool_content(&v);
         assert_eq!(out["content"], "User provided a secret (redacted).");
         assert!(!out["content"].as_str().unwrap().contains("ghp_"));
+    }
+
+    #[test]
+    fn secret_observation_never_echoes_value() {
+        let secret = "super-secret-value-123";
+        let out = format_input_observation(InputKind::Secret, secret);
+        assert!(!out.contains(secret));
+        assert!(out.contains("redacted"));
+        assert!(out.contains(&secret.chars().count().to_string()));
     }
 }

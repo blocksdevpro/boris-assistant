@@ -5,7 +5,7 @@
 
 /// Optional reminder text to append after a tool observation.
 pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
-    let err = observation.starts_with("Error:");
+    let err = observation.starts_with("Error:") || observation.starts_with("Error [");
     match tool_name {
         "load_skill" if !err => Some(load_skill_reminder(observation)),
         "list_skills" if !err && observation.contains("skill(s)") => Some(
@@ -202,6 +202,18 @@ mod tests {
     fn file_write_error_skips_reminder() {
         let s = "Error: permission denied".to_string();
         assert_eq!(with_reminder("file_write", s.clone()), s);
+    }
+
+    #[test]
+    fn bracket_error_prefix_also_suppresses_success_reminder() {
+        // Matches `ToolObservation::to_provider_text` ("Error [code]: …") and
+        // `loop_::observation_looks_ok` conventions.
+        let s = "Error [invalid_args]: missing command. Fix the arguments and retry.".to_string();
+        assert_eq!(with_reminder("file_write", s.clone()), s);
+        // `bash` errors still get the shell-retry reminder, but must be
+        // detected as an error (not the success/batch path).
+        let out = with_reminder("bash", "Error [timeout]: timed out".into());
+        assert!(out.contains("Shell failed"));
     }
 
     #[test]

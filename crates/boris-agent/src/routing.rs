@@ -55,6 +55,12 @@ pub fn route_from_traits(task: TaskTraits, round: RoundTraits) -> RouteMode {
 }
 
 /// Stage-aware reasoning / token budget for this request.
+///
+/// Once tool results are in context the reply must synthesize them, so any
+/// prior tool output escalates to at least `ToolPlanning` (whose 4_096-token
+/// budget fits synthesis). The only exception is an explicitly simple-voice
+/// turn with short (< [`SIMPLE_VOICE_TOOL_CHARS`]) clean results and no error
+/// evidence, which stays on the 768-token `SimpleVoice` budget.
 pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
     if task.complexity == crate::task::TaskComplexity::Complex
         || task.research_depth >= crate::task::ResearchDepth::Deep
@@ -62,11 +68,25 @@ pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
         || (round.tool_rounds > 0 && task.needs_strong())
     {
         RequestStage::Complex
-    } else if task.needs_strong() || (round.has_tool_results && !task.is_simple_voice()) {
+    } else if task.needs_strong()
+        || (round.has_tool_results && !short_clean_simple_voice(task, round))
+    {
         RequestStage::ToolPlanning
     } else {
         RequestStage::SimpleVoice
     }
+}
+
+/// Tool results longer than this force synthesis budget even on simple-voice
+/// turns (the 768-token `SimpleVoice` budget may truncate the reply).
+pub const SIMPLE_VOICE_TOOL_CHARS: usize = 200;
+
+/// True when a simple-voice turn may keep the cheap stage despite prior tool
+/// output: short results with no error evidence.
+fn short_clean_simple_voice(task: TaskTraits, round: RoundTraits) -> bool {
+    task.is_simple_voice()
+        && !round.has_error_evidence
+        && round.max_tool_result_chars < SIMPLE_VOICE_TOOL_CHARS
 }
 
 /// Infer round traits from the wire messages (tool results / error observations).
@@ -79,6 +99,7 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
     let mut has_tool_results = false;
     let mut has_error_evidence = false;
     let mut tool_rounds = 0u32;
+    let mut max_tool_result_chars = 0usize;
     if let Some(arr) = messages.as_array() {
         let turn_start = current_turn_start(arr).map_or(0, |i| i.saturating_add(1));
         for m in &arr[turn_start..] {
@@ -86,8 +107,9 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
             if role == "tool" {
                 has_tool_results = true;
                 if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
-                    let c = c.trim_start().to_ascii_lowercase();
-                    if c.starts_with("error") || c.contains("invalid arguments") {
+                    max_tool_result_chars =
+                        max_tool_result_chars.max(c.chars().count());
+                    if tool_content_is_error(c) {
                         has_error_evidence = true;
                     }
                 }
@@ -102,7 +124,40 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
         has_tool_results,
         has_error_evidence,
         tool_rounds,
+        max_tool_result_chars,
     }
+}
+
+/// True when one tool observation looks like a failure.
+///
+/// Matches the loop helper convention (`Error:` / `Error [` prefixes) plus
+/// case-insensitive `invalid arguments` / `failed` observations.
+fn tool_content_is_error(content: &str) -> bool {
+    let t = content.trim_start();
+    if t.starts_with("Error:") || t.starts_with("Error [") {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("error:") || lower.starts_with("error [") || lower.contains("invalid arguments") || lower.contains("failed")
+}
+
+/// True when any current-turn tool observation looks like a failure.
+///
+/// Unified error check over the wire messages: `Error:` / `Error [` prefixes
+/// (case-insensitive) plus `invalid arguments` / `failed` observations.
+/// Evidence from older user turns is ignored.
+pub fn round_has_error(messages: &Value) -> bool {
+    let Some(arr) = messages.as_array() else {
+        return false;
+    };
+    let turn_start = current_turn_start(arr).map_or(0, |i| i.saturating_add(1));
+    arr[turn_start..].iter().any(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("tool")
+            && m
+                .get("content")
+                .and_then(|c| c.as_str())
+                .is_some_and(tool_content_is_error)
+    })
 }
 
 fn current_turn_start(messages: &[Value]) -> Option<usize> {
@@ -457,16 +512,58 @@ mod tests {
     fn classifies_code_needles_as_strong() {
         assert_eq!(classify_route("please debug this"), RouteMode::Strong);
         assert_eq!(classify_route("how to install rust"), RouteMode::Strong);
-        assert_eq!(classify_route("open the file"), RouteMode::Strong);
+        // File/code mentions need an action verb to count as coding.
+        assert_eq!(
+            classify_route("please edit this file to fix the bug"),
+            RouteMode::Strong
+        );
+        assert_eq!(
+            classify_route("please review this code for bugs"),
+            RouteMode::Strong
+        );
+    }
+
+    #[test]
+    fn plain_file_mention_without_verb_stays_fast() {
+        // Read-only file mentions are not coding: no verb, no strong route.
+        assert_eq!(classify_route("open the file"), RouteMode::Fast);
+        assert_eq!(classify_route("Summarize this file"), RouteMode::Fast);
     }
 
     #[test]
     fn classifies_long_request_as_strong() {
+        // Length alone is not a plan: 20 filler words without step markers
+        // stay fast.
         let long = (0..20)
             .map(|i| format!("word{i}"))
             .collect::<Vec<_>>()
             .join(" ");
-        assert_eq!(classify_route(&long), RouteMode::Strong);
+        assert_eq!(classify_route(&long), RouteMode::Fast);
+    }
+
+    #[test]
+    fn classifies_long_request_with_steps_as_strong() {
+        // Same length class, but sequencing markers make it a multi-step plan.
+        let text = "first collect all of the monthly sales figures from every single \
+            regional office report then normalize each of the totals and after that \
+            build the summary table step by step for the quarterly review meeting";
+        assert!(text.split_whitespace().count() > 28);
+        assert_eq!(classify_route(text), RouteMode::Strong);
+    }
+
+    #[test]
+    fn classifies_verbose_greeting_as_fast() {
+        let text = "hello there my friend I hope you are having a wonderful and \
+            marvelous day today because I just wanted to stop by and say hello \
+            and share how grateful I am for all of your kind and thoughtful help";
+        assert!(text.split_whitespace().count() > 28);
+        assert_eq!(classify_route(text), RouteMode::Fast);
+    }
+
+    #[test]
+    fn classifies_bare_hi_as_fast_greeting() {
+        assert_eq!(classify_route("hi"), RouteMode::Fast);
+        assert_eq!(classify_route("hi!"), RouteMode::Fast);
     }
 
     #[test]
@@ -629,6 +726,112 @@ mod tests {
         assert_eq!(round.tool_rounds, 1);
         assert_eq!(route_from_traits(round.task, round), RouteMode::Strong);
         assert_eq!(request_stage_for(round.task, round), RequestStage::Complex);
+    }
+
+    #[test]
+    fn simple_voice_short_tool_results_stay_simple() {
+        let messages = json!([
+            { "role": "user", "content": "hello" },
+            { "role": "assistant", "content": null, "tool_calls": [{
+                "id": "c1", "function": {"name": "get_time"}
+            }]},
+            { "role": "tool", "content": "10:41" },
+        ]);
+        let round = round_traits_from_messages(&messages, "hello");
+        assert!(round.has_tool_results);
+        assert!(!round.has_error_evidence);
+        assert!(round.max_tool_result_chars < SIMPLE_VOICE_TOOL_CHARS);
+        assert_eq!(
+            request_stage_for(round.task, round),
+            RequestStage::SimpleVoice
+        );
+    }
+
+    #[test]
+    fn simple_voice_long_tool_results_escalate_to_planning() {
+        let long_result = "x".repeat(300);
+        let messages = json!([
+            { "role": "user", "content": "hello" },
+            { "role": "assistant", "content": null, "tool_calls": [{
+                "id": "c1", "function": {"name": "get_time"}
+            }]},
+            { "role": "tool", "content": long_result },
+        ]);
+        let round = round_traits_from_messages(&messages, "hello");
+        assert!(round.has_tool_results);
+        assert!(!round.has_error_evidence);
+        assert!(round.max_tool_result_chars >= SIMPLE_VOICE_TOOL_CHARS);
+        // Long results must be synthesized: never the 768-token stage.
+        assert_eq!(
+            request_stage_for(round.task, round),
+            RequestStage::ToolPlanning
+        );
+        // Route itself stays fast for the greeting; only the budget escalates.
+        assert_eq!(route_from_traits(round.task, round), RouteMode::Fast);
+    }
+
+    #[test]
+    fn non_simple_tool_results_escalate_to_planning() {
+        // Research turn with tool results but no completed tool round yet:
+        // ToolPlanning synthesis budget (not the 768-token stage).
+        let messages = json!([
+            { "role": "user", "content": "research the latest Rust async runtimes" },
+            { "role": "tool", "content": "short hit" },
+        ]);
+        let round = round_traits_from_messages(
+            &messages,
+            "research the latest Rust async runtimes",
+        );
+        assert_eq!(round.tool_rounds, 0);
+        assert_eq!(
+            request_stage_for(round.task, round),
+            RequestStage::ToolPlanning
+        );
+    }
+
+    #[test]
+    fn round_has_error_detects_helper_conventions() {
+        // Helper prefixes, exact and case-insensitive.
+        assert!(tool_content_is_error("Error: user declined this action"));
+        assert!(tool_content_is_error("Error [missing_required]: missing command"));
+        assert!(tool_content_is_error("error: something broke"));
+        assert!(tool_content_is_error("error [invalid_args]: fix it"));
+        // Invalid-args / failed observations, case-insensitive.
+        assert!(tool_content_is_error(
+            "Error [invalid_args]: Invalid arguments provided. Fix the arguments and retry."
+        ));
+        assert!(tool_content_is_error("Failed to fetch the page"));
+        assert!(tool_content_is_error("failed: timeout"));
+        // Clean observations are not errors.
+        assert!(!tool_content_is_error("pong"));
+        assert!(!tool_content_is_error("10:41"));
+        assert!(!tool_content_is_error("found 3 results"));
+    }
+
+    #[test]
+    fn round_has_error_scopes_to_current_turn() {
+        let messages = json!([
+            { "role": "user", "content": "old task" },
+            { "role": "tool", "content": "Error: old failure" },
+            { "role": "assistant", "content": "Could not finish." },
+            { "role": "user", "content": "hello" },
+            { "role": "assistant", "content": null, "tool_calls": [{
+                "id": "new", "function": {"name": "get_time"}
+            }]},
+            { "role": "tool", "content": "Failed to reach the clock" },
+        ]);
+        assert!(round_has_error(&messages));
+
+        let clean = json!([
+            { "role": "user", "content": "old task" },
+            { "role": "tool", "content": "Error: old failure" },
+            { "role": "assistant", "content": "Could not finish." },
+            { "role": "user", "content": "hello" },
+        ]);
+        // Old-turn errors must not poison the new turn.
+        assert!(!round_has_error(&clean));
+        assert!(!round_has_error(&json!([])));
+        assert!(!round_has_error(&json!({})));
     }
 
     struct RecordingClient {

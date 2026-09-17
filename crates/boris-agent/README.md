@@ -94,13 +94,29 @@ behind the bundled version. `load_skills` discovers project skills from
 `.boris/skills`, then user skills from `<boris_home>/skills`, followed by any
 explicit extra paths; the first skill with a given name wins.
 
-Only skill names and descriptions enter the system prompt. `load_skill` reads a
+Only skill names and descriptions enter the prompt, as a bounded JSON
+`<skills_catalog_data>` user-role envelope paired with a small static trusted
+`SKILLS_SYSTEM_POLICY`. `load_skill` reads a
 full body on demand, so specialized guidance does not expand every turn. The
 bundled set includes task execution, research, daily briefs, remembering,
 coding, root-cause debugging, code explanation, design, change review,
 technical writing, mentoring, and skill creation. User intent controls whether
 a matching playbook is loaded, and optional steps such as todos, research, or
 artifacts are used only when they help produce the requested result.
+
+## Context, prompt hardening, and compaction
+
+Trusted system content stays separate from untrusted user-role data:
+personal context, the skills catalog, memory hints, and task evidence are
+wired as user-role messages, and tool observations arrive as raw text with
+pending `<system-reminder>` controls flushed as their own message only once
+the batch resolves. Token estimates run over serialized message JSON.
+Summary compaction is lossless — only complete oldest turns fold into a
+single `Summary` message and the unsummarized tail is never deleted — with
+hysteresis before LLM compaction and smaller mechanical fallbacks. Requests
+estimated past the input budget fail fast with `AgentErrorKind::InputTooLarge`
+before any provider call. Summary-maintenance turns are forced onto the fast
+tier with an explicit cap.
 
 ## Security model
 
@@ -125,7 +141,7 @@ There is **no hard cap** on count per message. The loop processes the full batch
 |------|------|----------|
 | **wave scheduling** (default) | batch auto-allowed | read-only tools run in parallel waves (`max_parallel_tools`, default **16**); writes run sequential |
 | **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` at once |
-| **sequential** | any call needs confirm, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
+| **sequential** | any call needs confirm, collects typed input, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
 
 Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
 HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).

@@ -15,6 +15,18 @@ Further work on `next` after [1.2.0-beta.2].
   available through progressive skill discovery.
 - Coverage that installs and loads every bundled playbook, including its
   frontmatter and full-body envelope.
+- A phase-aware **presence orb** (`thinking-orbs`) on Home, the overlay
+  island, startup, and Teach Voice. Fifteen states (off / starting / ready /
+  hearing / reading / thinking / searching / working / weaving / shaping /
+  talking / awaiting-reply / awaiting-input / confirm / fault) are derived
+  from engine phase and activity text — never audio amplitude. It pauses
+  off-screen, debounces thinking-state churn, falls back to a static ring
+  when Canvas is unavailable, and stays static under reduced-motion.
+- Shared overlay motion plus revision-keyed **streaming overlay text**:
+  streamed words append without replaying, with instant swaps under
+  reduced-motion.
+- Cancellable LLM summary compaction that records provider usage and merges
+  it into turn accounting (`TokenAccounting::merge`).
 
 ### Changed
 
@@ -24,6 +36,44 @@ Further work on `next` after [1.2.0-beta.2].
 - Skill catalogs, load results, and post-tool reminders now reinforce matching
   a skill by its full description and stopping when the requested result is
   complete.
+- **Prompt hardening**: trusted system content is now separate from untrusted
+  user-role data. Personal context, the skills catalog, memory, and task
+  evidence are sent as user-role data; the skills catalog is a bounded JSON
+  envelope (`<skills_catalog_data>`) paired with a static
+  `SKILLS_SYSTEM_POLICY`, and user info is length-bounded with markup
+  escaping. Turn abort/reset paths refresh the system prompt and resolve
+  pending tool calls as cancelled.
+- **Context accounting and compaction**: token estimates run over serialized
+  message JSON; summary compaction is lossless (only complete oldest turns
+  are folded into a single `Summary` message, the unsummarized tail is never
+  deleted), with hysteresis before triggering LLM compaction and smaller
+  Tier-2/Tier-3 fallbacks.
+- Oversized requests now fail fast with `InputTooLarge` before any provider
+  call (no billing); summary-maintenance turns are forced onto the fast
+  tier with an explicit cap.
+- Tools that collect typed input now force the sequential HITL-safe path so
+  remaining calls are preserved across the `NeedsInput` pause.
+- Overlay window parking uses one stable top edge so the island grows
+  downward instead of jumping; startup splash, Home, Teach Voice, Settings,
+  and overlay transitions are faster and share one motion helper.
+  Settings toggles use a compact switch style.
+
+### Fixed
+
+- OpenRouter SSE assembly no longer glues duplicate text when a stream sends
+  both incremental `delta` and canonical `message` payloads; tool calls are
+  rebuilt by position and snapshots only cover content with no prior delta.
+- Overlay captions, thought tails, and artifact cards share one motion path
+  with `inert`/`aria-hidden` hiding and reduced-motion instant paths.
+
+### Removed
+
+- The `cargo xtask trace-report` helper and the `xtask` workspace member are
+  gone (including the `cargo xtask` alias). Per-turn traces are still
+  appended to `~/.boris/traces/turns.jsonl` — read the JSONL directly.
+- The 3×3 presence-grid components (`GridPresence`, presence state/play
+  helpers, and their CSS/tests) are replaced by the orb (`BorisOrb`,
+  `orbStateFromStatus`, `overlayMotion`).
 
 ## [1.2.0-beta.2] - 2026-08-28
 

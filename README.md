@@ -70,6 +70,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
+- **Presence orb** — a phase-aware orb on Home, the overlay, startup, and Teach Voice (listening / transcribing / thinking / searching / working / speaking / confirm / fault); honors reduced-motion with a static fallback
 - **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
 - **Scoped skill playbooks** — bundled playbooks for coding, debugging, design, review, research, writing, mentoring, and skill authoring, loaded only when a request matches
 - **Async research** — background subagents with poll/join/cancel and read-only tool isolation
@@ -78,7 +79,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Your model** — OpenRouter (OpenAI-compatible) via `boris-ai`; audio stays on the machine
 - **Web search without a key** — DuckDuckGo + Wikipedia by default; an Exa key is an optional upgrade *(1.1)*
 - **Session artifacts** — markdown and code cards on the overlay and Home desk; spoken replies stay short *(1.1)*
-- **Local diagnostics** — durable turn traces with `cargo xtask trace-report` p50/p95 summaries
+- **Local diagnostics** — durable per-turn latency traces under `~/.boris/traces/turns.jsonl`
 - **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace, speaker teach
 
 ---

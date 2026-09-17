@@ -49,8 +49,8 @@ when Boris returns to idle. `low_latency` may keep both loaded for the powered-o
 session.
 
 Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
-maintenance lane. Generation latency excludes audible playback. Summarize p50
-and p95 locally with `cargo xtask trace-report` (or add `--json`).
+maintenance lane. Generation latency excludes audible playback. Read the JSONL
+directly for local p50/p95 summaries.
 
 ## Public surface
 

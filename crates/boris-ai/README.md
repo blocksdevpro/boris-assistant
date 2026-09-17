@@ -61,6 +61,10 @@ use boris_ai::{
   split across two TCP chunks decodes correctly instead of corrupting into
   replacement characters on both halves.
 - SSE assembly flushes a final unterminated line when the byte stream ends.
+- SSE assembly treats incremental `delta` payloads as appends and canonical
+  `message` payloads as replacements, so streams that send both do not glue
+  duplicated text; tool calls rebuild by position and snapshots only cover
+  content with no prior delta.
 - Multi-line SSE events are **not** reassembled (single-line `data:` only).
 - Default model (`DEFAULT_MODEL`) is owned by this crate as a last-resort
   fallback when the host passes `None`; product defaults should set a model

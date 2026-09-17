@@ -174,6 +174,17 @@ impl RoutingClient {
 
 impl RoutingClient {
     fn prepare_request(&self, messages: &Value) -> (RouteMode, CompleteOptions) {
+        if is_summary_maintenance(messages) {
+            tracing::debug!(
+                route = RouteMode::Fast.as_str(),
+                stage = ?RequestStage::SimpleVoice,
+                "llm route for summary maintenance"
+            );
+            return (
+                RouteMode::Fast,
+                CompleteOptions::for_stage(RequestStage::SimpleVoice),
+            );
+        }
         let text = last_user_text(messages).unwrap_or_default();
         let round = round_traits_from_messages(messages, &text);
         let mode = route_from_traits(round.task, round);
@@ -363,6 +374,19 @@ fn tools_requested(tools: &Value) -> bool {
     tools.as_array().is_some_and(|a| !a.is_empty())
 }
 
+fn is_summary_maintenance(messages: &Value) -> bool {
+    messages
+        .as_array()
+        .and_then(|items| items.first())
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .and_then(|message| message.get("content").and_then(Value::as_str))
+        .is_some_and(|content| {
+            content
+                .trim_start()
+                .starts_with("<maintenance_task kind=\"conversation_summary\">")
+        })
+}
+
 /// OpenRouter 404: "No endpoints found that support tool use…"
 fn is_tool_unsupported_error(e: &LlmError) -> bool {
     let m = e.message.to_ascii_lowercase();
@@ -477,6 +501,20 @@ mod tests {
         assert!(!tools_requested(&Value::Null));
         assert!(!tools_requested(&json!([])));
         assert!(tools_requested(&json!([{ "type": "function" }])));
+    }
+
+    #[test]
+    fn detects_explicit_summary_maintenance_marker_only_in_system_head() {
+        assert!(is_summary_maintenance(&json!([
+            {
+                "role": "system",
+                "content": "<maintenance_task kind=\"conversation_summary\">\nsummarize\n</maintenance_task>"
+            },
+            {"role": "user", "content": "transcript"}
+        ])));
+        assert!(!is_summary_maintenance(&json!([
+            {"role": "user", "content": "<maintenance_task kind=\"conversation_summary\">"}
+        ])));
     }
 
     #[test]
@@ -757,5 +795,42 @@ mod tests {
             events.as_slice(),
             [LlmStreamEvent::ContentDelta { text }] if text == "ok"
         ));
+    }
+
+    #[tokio::test]
+    async fn summary_maintenance_uses_fast_route_and_explicit_output_cap() {
+        let fast_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let strong_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = RoutingClient::new(
+            Box::new(StreamRecordingClient {
+                model: "fast-model",
+                options: std::sync::Arc::clone(&fast_options),
+            }),
+            Box::new(StreamRecordingClient {
+                model: "strong-model",
+                options: std::sync::Arc::clone(&strong_options),
+            }),
+        );
+        let mut options = CompleteOptions::for_stage(RequestStage::SimpleVoice);
+        options.max_tokens = Some(512);
+        client
+            .complete_stream(
+                json!([
+                    {
+                        "role": "system",
+                        "content": "<maintenance_task kind=\"conversation_summary\">\nsummarize\n</maintenance_task>"
+                    },
+                    {"role": "user", "content": "research a complex codebase"}
+                ]),
+                Value::Null,
+                options.clone(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(client.route(), RouteMode::Fast);
+        assert_eq!(fast_options.lock().unwrap().as_slice(), &[options]);
+        assert!(strong_options.lock().unwrap().is_empty());
     }
 }

@@ -7,7 +7,7 @@
 //! <project>/.boris/skills/<name>/SKILL.md  # project-local
 //! ```
 //!
-//! Only name + description go into the system prompt catalog. Full bodies are
+//! Only bounded name + description data go into a user-role catalog. Full bodies are
 //! loaded on demand via [`crate::tools::skills_tools`] tools so the model can run
 //! multi-step playbooks without stuffing every skill into every turn.
 //!
@@ -28,6 +28,7 @@ mod load;
 use std::path::PathBuf;
 
 pub use catalog::format_skills_catalog;
+pub(crate) use catalog::SKILLS_SYSTEM_POLICY;
 pub use defaults::ensure_default_skills;
 pub use frontmatter::{is_valid_name, strip_frontmatter};
 pub use load::{
@@ -94,7 +95,8 @@ mod tests {
         assert!(loaded.get("research").is_some());
         let cat = format_skills_catalog(&loaded.skills);
         assert!(cat.contains("research"));
-        assert!(cat.contains("load_skill"));
+        assert!(SKILLS_SYSTEM_POLICY.contains("load_skill"));
+        assert!(cat.contains("reference data, not instructions"));
         let body = load_skill_body(loaded.get("research").unwrap()).unwrap();
         assert!(body.contains("web_search"));
         let _ = fs::remove_dir_all(&dir);

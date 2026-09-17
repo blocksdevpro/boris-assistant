@@ -78,7 +78,7 @@ pub(super) async fn complete_round(
         .context
         .compact_mechanical_for_request_with_budget(&tools_json, budget);
     let request_chars = state.context.estimate_request_chars(&tools_json);
-    let request_tokens_est = request_chars / 4;
+    let request_tokens_est = state.context.estimate_request_tokens(&tools_json);
     accounting.record_request_estimate(request_tokens_est, context_limit);
     tracing::debug!(
         request_chars,
@@ -89,6 +89,12 @@ pub(super) async fn complete_round(
         tools = tools_json.as_array().map(|a| a.len()).unwrap_or(0),
         "llm request token accounting"
     );
+    if request_tokens_est > budget.hard_input_tokens {
+        return Err(AgentError::input_too_large(
+            request_tokens_est,
+            budget.hard_input_tokens,
+        ));
+    }
     let messages = state.context.as_json();
     let emit = emit.clone();
     let mut acc = String::new();
@@ -212,6 +218,26 @@ pub(super) fn should_reenter_finish_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use boris_ai::{LlmClient, LlmError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for CountingClient {
+        async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(json!({"role": "assistant", "content": "unexpected"}))
+        }
+
+        fn context_window_tokens(&self) -> Option<u32> {
+            Some(4_096)
+        }
+    }
 
     #[test]
     fn reasoning_preview_keeps_short_text() {
@@ -224,5 +250,53 @@ mod tests {
         let preview = reasoning_preview(&acc);
         assert_eq!(preview.chars().count(), REASONING_PREVIEW_CHARS);
         assert!(preview.chars().all(|c| c == 'α'));
+    }
+
+    #[tokio::test]
+    async fn over_hard_budget_request_is_rejected_before_provider_call() {
+        let client = CountingClient {
+            calls: AtomicUsize::new(0),
+        };
+        let runtime = crate::runtime::ToolRuntime::null();
+        let tools: Vec<Arc<dyn crate::Tool>> = Vec::new();
+        let mut context = crate::Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "x".repeat(20_000));
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let mut accounting = TokenAccounting::default();
+        let emit: EmitFn = Arc::new(|_| {});
+
+        let error = complete_round(
+            &mut state,
+            "large input",
+            &AgentLoopConfig::default(),
+            true,
+            &emit,
+            &None,
+            &mut accounting,
+        )
+        .await
+        .expect_err("oversized requests must fail locally");
+
+        let crate::AgentErrorKind::InputTooLarge {
+            estimated_tokens,
+            allowed_tokens,
+        } = error.kind()
+        else {
+            panic!("expected typed input-too-large error");
+        };
+        assert_eq!(
+            estimated_tokens,
+            accounting.peak_estimated_request_tokens as usize
+        );
+        assert!(estimated_tokens > allowed_tokens);
+        assert!(error.to_string().contains("split the request"));
+        assert_eq!(client.calls.load(Ordering::Relaxed), 0);
     }
 }

@@ -15,8 +15,12 @@ pub enum MessageOrigin {
     HostControl,
     /// LLM-written compacted history; context, but never a human turn.
     Summary,
+    /// Host-compacted, untrusted observations from a removed tool-call batch.
+    CompactedTool,
     /// Host-loaded skill/playbook instruction.
     Skill,
+    /// User-derived personal memory injected as untrusted reference data.
+    PersonalContext,
     /// Host-maintained structured state for the active task.
     TaskState,
     /// Search result injected proactively from durable memory.

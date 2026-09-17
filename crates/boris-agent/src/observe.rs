@@ -56,7 +56,8 @@ pub struct TurnReport {
     pub context_used_tokens: u32,
     /// Configured combined prompt + completion window for the active model.
     pub context_limit_tokens: Option<u32>,
-    /// True when `context_used_tokens` is chars/4 rather than provider usage.
+    /// True when `context_used_tokens` is the local serialized-input estimate
+    /// rather than provider-reported usage.
     pub context_estimated: bool,
     /// Provider-reported usage summed across every completion in this invocation.
     pub token_usage: Box<TokenUsage>,

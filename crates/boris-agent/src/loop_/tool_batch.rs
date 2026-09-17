@@ -2,8 +2,8 @@
 //!
 //! Dispatch rules:
 //! - Length 1 → sequential path.
-//! - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call needs
-//!   confirmation, fall back to sequential (HITL-safe). Otherwise:
+//! - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call can
+//!   pause for confirmation or input, fall back to sequential. Otherwise:
 //!   - **wave scheduling** (default): read-only wave (parallel, chunked) then
 //!     write wave (sequential)
 //!   - else: legacy parallel path — all auto-allow calls, still chunked by
@@ -65,7 +65,7 @@ pub(super) async fn process_tool_calls(
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
     if calls.len() > 1 {
-        if !batch_needs_confirmation(state, &calls, *confirms_used)? {
+        if !batch_may_pause(state, &calls, *confirms_used)? {
             if config.features.wave_scheduling {
                 tracing::debug!(
                     batch = calls.len(),
@@ -100,7 +100,7 @@ pub(super) async fn process_tool_calls(
         }
         tracing::debug!(
             batch = calls.len(),
-            "tool batch: sequential after optional read-only prefix (HITL in batch)"
+            "tool batch: sequential after optional read-only prefix (pause in batch)"
         );
         let (prefix, rest) = split_auto_readonly_prefix(state, calls, *confirms_used);
         if !prefix.is_empty() {
@@ -151,9 +151,9 @@ pub(super) async fn process_tool_calls(
     .await
 }
 
-/// True if any call in the batch would require user confirmation under current policy.
-/// Unknown tools are treated as non-confirm (soft-failed later with an error observation).
-fn batch_needs_confirmation(
+/// True if any call can pause for confirmation or on-screen input.
+/// Unknown tools are treated as non-pausing (soft-failed later with an error observation).
+fn batch_may_pause(
     state: &LoopState<'_>,
     calls: &[RawToolCall],
     confirms_used: u32,
@@ -166,6 +166,9 @@ fn batch_needs_confirmation(
         let Some(tool) = find_tool_opt(state.tools, &call.name) else {
             continue;
         };
+        if tool.meta().collects_input {
+            return Ok(true);
+        }
         if matches!(
             state.runtime.decide_only(tool, &call.args, opts),
             PolicyDecision::NeedsConfirmation { .. }
@@ -693,6 +696,66 @@ mod tests {
             _args: serde_json::Value,
         ) -> Result<String, ToolError> {
             Ok("wrote".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_collect_input_pauses_and_preserves_remaining_calls() {
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(crate::tools::collect_input::CollectInputTool)];
+        let runtime = ToolRuntime::null();
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = vec![
+            RawToolCall {
+                call_id: "input-1".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type the first value.", "label": "First"}),
+            },
+            RawToolCall {
+                call_id: "input-2".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type the second value.", "label": "Second"}),
+            },
+        ];
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+
+        let result = process_tool_calls(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "collect two values",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+
+        match result {
+            ToolBatchResult::Paused {
+                outcome,
+                pending_turn,
+            } => {
+                assert!(matches!(outcome, AgentOutcome::NeedsInput { .. }));
+                assert!(pending_turn.pending.input.is_some());
+                assert_eq!(pending_turn.pending.call_id, "input-1");
+                assert_eq!(pending_turn.remaining_calls.len(), 1);
+                assert_eq!(pending_turn.remaining_calls[0].call_id, "input-2");
+            }
+            ToolBatchResult::Continue => panic!("collect_input batch must pause"),
         }
     }
 

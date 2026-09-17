@@ -1,7 +1,7 @@
-//! Post-tool system reminders (Grok-style, short for voice).
+//! Post-tool host reminders (Grok-style, short for voice).
 //!
-//! Appended to the tool observation so the model sees a nudge in the same
-//! turn without a separate API round-trip.
+//! This module selects reminder text only. Context insertion keeps the raw
+//! tool observation unchanged and emits host guidance as a separate control.
 
 /// Optional reminder text to append after a tool observation.
 pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
@@ -115,17 +115,18 @@ fn is_empty_or_weak_search(observation: &str) -> bool {
         || observation.lines().filter(|l| !l.trim().is_empty()).count() <= 2
 }
 
-/// Attach a reminder as a trailing `<system-reminder>` block when present.
-pub fn with_reminder(tool_name: &str, observation: String) -> String {
-    match reminder_for(tool_name, &observation) {
-        Some(r) => format!("{observation}\n\n<system-reminder>\n{r}\n</system-reminder>"),
-        None => observation,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render selected text for concise content assertions. Production code
+    /// inserts this text as a separate context message.
+    fn with_reminder(tool_name: &str, observation: String) -> String {
+        match reminder_for(tool_name, &observation) {
+            Some(reminder) => format!("<system-reminder>\n{reminder}\n</system-reminder>"),
+            None => observation,
+        }
+    }
 
     #[test]
     fn load_skill_gets_reminder() {

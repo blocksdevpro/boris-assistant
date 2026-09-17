@@ -113,6 +113,47 @@ impl TokenAccounting {
             .saturating_add(usage.cache_write_tokens);
     }
 
+    /// Fold accounting from a separate model call (for example maintenance
+    /// compaction) into the report for the user-visible turn.
+    pub fn merge(&mut self, other: &Self) {
+        self.provider_usage.prompt_tokens = self
+            .provider_usage
+            .prompt_tokens
+            .saturating_add(other.provider_usage.prompt_tokens);
+        self.provider_usage.completion_tokens = self
+            .provider_usage
+            .completion_tokens
+            .saturating_add(other.provider_usage.completion_tokens);
+        self.provider_usage.total_tokens = self
+            .provider_usage
+            .total_tokens
+            .saturating_add(other.provider_usage.total_tokens);
+        self.provider_usage.cached_tokens = self
+            .provider_usage
+            .cached_tokens
+            .saturating_add(other.provider_usage.cached_tokens);
+        self.provider_usage.cache_write_tokens = self
+            .provider_usage
+            .cache_write_tokens
+            .saturating_add(other.provider_usage.cache_write_tokens);
+        self.peak_provider_prompt_tokens = match (
+            self.peak_provider_prompt_tokens,
+            other.peak_provider_prompt_tokens,
+        ) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (value @ Some(_), None) | (None, value @ Some(_)) => value,
+            (None, None) => None,
+        };
+        self.peak_estimated_request_tokens = self
+            .peak_estimated_request_tokens
+            .max(other.peak_estimated_request_tokens);
+        self.context_limit_tokens = match (self.context_limit_tokens, other.context_limit_tokens) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (value @ Some(_), None) | (None, value @ Some(_)) => value,
+            (None, None) => None,
+        };
+    }
+
     pub fn context_used_tokens(&self) -> u32 {
         let used = self
             .peak_provider_prompt_tokens
@@ -201,5 +242,31 @@ mod tests {
         assert_eq!(accounting.context_used_tokens(), 9_432);
         assert!(!accounting.context_is_estimated());
         assert_eq!(accounting.provider_usage.total_tokens, 9_552);
+    }
+
+    #[test]
+    fn merge_sums_usage_but_keeps_peak_context() {
+        let mut turn = TokenAccounting::default();
+        turn.record_request_estimate(8_000, 128_000);
+        turn.record_provider_usage(&TokenUsage {
+            prompt_tokens: 7_000,
+            completion_tokens: 200,
+            total_tokens: 7_200,
+            ..Default::default()
+        });
+        let mut compact = TokenAccounting::default();
+        compact.record_request_estimate(12_000, 64_000);
+        compact.record_provider_usage(&TokenUsage {
+            prompt_tokens: 11_500,
+            completion_tokens: 300,
+            total_tokens: 11_800,
+            ..Default::default()
+        });
+
+        turn.merge(&compact);
+
+        assert_eq!(turn.provider_usage.total_tokens, 19_000);
+        assert_eq!(turn.context_used_tokens(), 11_500);
+        assert_eq!(turn.context_limit_tokens, Some(64_000));
     }
 }

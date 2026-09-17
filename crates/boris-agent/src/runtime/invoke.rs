@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::reminder::with_reminder;
 use crate::tool::{
     truncate_tool_result_detailed, validate_args, Permission, Tool, ToolMeta, ToolObservation,
 };
@@ -221,7 +220,7 @@ impl ToolRuntime {
                 let cut = truncate_tool_result_detailed(output, budget);
                 let structured =
                     ToolObservation::from_text(cut.text, duration_ms, cut.truncated, cut.cursor);
-                let obs = with_reminder(&inv.name, structured.to_provider_text());
+                let obs = structured.to_provider_text();
                 self.audit_event(
                     &inv,
                     &meta,
@@ -248,7 +247,7 @@ impl ToolRuntime {
                     crate::tool::ObservationError::new(kind, timed_out, e.message.clone()),
                     duration_ms,
                 );
-                let obs = with_reminder(&inv.name, structured.to_provider_text());
+                let obs = structured.to_provider_text();
                 InvokeResult::Observation(obs)
             }
         }

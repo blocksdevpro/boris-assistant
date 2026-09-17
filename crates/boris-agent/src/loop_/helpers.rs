@@ -300,8 +300,19 @@ pub(super) fn commit_tool_observation(
         duration_ms,
     });
     tools_used.push(call.name.clone());
-    context.record_tool_result(&call.name, &call.call_id, ok, &content);
-    context.push(Role::Tool, tool_observation_json(&call.call_id, content));
+    push_tool_result_messages(context, &call.name, &call.call_id, content, ok);
+}
+
+/// Store an unmodified tool observation, followed by any host-authored nudge
+/// as a separate control message with explicit provenance.
+pub(super) fn push_tool_result_messages(
+    context: &mut Context,
+    tool_name: &str,
+    call_id: &str,
+    content: String,
+    ok: bool,
+) {
+    context.push_tool_result(tool_name, call_id, content, ok);
 }
 
 /// Structured completion line so each tool call has a wall-clock in the log.

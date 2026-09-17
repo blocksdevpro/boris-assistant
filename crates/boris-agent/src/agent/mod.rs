@@ -27,7 +27,7 @@ use boris_ai::LlmClient;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::context::{Context, Message, RetrievedMemory, Role, TaskStateCapsule};
+use crate::context::{Context, Message, RetrievedMemory, Role, TaskStateCapsule, TaskStatus};
 use crate::memory::{LegacyMemoryPaths, LongTermMemory, MemoryStore};
 use crate::runtime::{
     new_activation_set, ActivationSet, JsonlAuditSink, NullAuditSink, PendingTurn, SandboxConfig,
@@ -186,6 +186,97 @@ mod tests {
             .iter()
             .any(|message| message.content == serde_json::json!("old question")));
     }
+
+    #[test]
+    fn primary_agent_keeps_more_than_twenty_small_turns_in_model_context() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        for turn in 0..=20 {
+            agent
+                .context
+                .push(super::Role::User, format!("question-{turn}"));
+            agent
+                .context
+                .push(super::Role::Assistant, format!("answer-{turn}"));
+        }
+
+        assert!(agent
+            .context
+            .messages()
+            .iter()
+            .any(|message| message.content == serde_json::json!("question-0")));
+        assert_eq!(
+            agent
+                .context
+                .messages()
+                .iter()
+                .filter(|message| message.origin == crate::MessageOrigin::Human)
+                .count(),
+            21
+        );
+    }
+
+    #[test]
+    fn abort_closes_every_unresolved_tool_call_in_pending_batch() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push(super::Role::User, "run two actions");
+        agent.context.begin_task("run two actions");
+        agent.context.push(
+            super::Role::Assistant,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+                    {"id": "call-2", "type": "function", "function": {"name": "write", "arguments": "{}"}}
+                ]
+            }),
+        );
+        agent.context.push(
+            super::Role::Tool,
+            serde_json::json!({"tool_call_id": "call-1", "content": "done"}),
+        );
+        agent.pending_turn = Some(crate::runtime::PendingTurn {
+            pending: crate::runtime::PendingToolCall::new(
+                "pending-1",
+                "write",
+                serde_json::json!({}),
+                "write",
+                crate::ToolRisk::Dangerous,
+                "call-2",
+            ),
+            batch_with: Vec::new(),
+            remaining_calls: Vec::new(),
+            tools_used: vec!["read".into()],
+            tool_rounds: 1,
+            confirms_used: 1,
+            user_text: "run two actions".into(),
+        });
+
+        agent.abort();
+
+        assert!(agent.pending_turn.is_none());
+        assert_eq!(agent.context.task_state().status, crate::TaskStatus::Failed);
+        let persisted = agent.export_messages_for_persist();
+        let call_2 = persisted
+            .iter()
+            .find(|message| {
+                matches!(message.role, super::Role::Tool)
+                    && message.content["tool_call_id"] == serde_json::json!("call-2")
+            })
+            .expect("aborted call must receive a tool observation");
+        assert!(call_2.content["content"]
+            .as_str()
+            .unwrap()
+            .contains("cancelled"));
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|message| matches!(message.role, super::Role::Tool))
+                .count(),
+            2,
+            "the resolved call must not receive a duplicate observation"
+        );
+    }
 }
 
 impl Agent {
@@ -204,7 +295,9 @@ impl Agent {
     }
 
     pub fn from_options(opts: AgentOptions) -> Self {
-        let mut context = Context::new(20);
+        // The primary agent is token-budgeted. A fixed turn cap silently loses
+        // short history before summary compaction has any reason to run.
+        let mut context = Context::new(u32::MAX);
         context.push(Role::System, opts.system_prompt.as_str());
 
         let mut policy = opts.sandbox.unwrap_or_default();
@@ -626,8 +719,11 @@ impl Agent {
             ct.cancel();
         }
         if self.pending_turn.take().is_some() {
-            info!("pending tool confirmation aborted");
+            let cancelled_calls = self.context.resolve_pending_tool_calls_as_cancelled();
+            self.context.finish_task(TaskStatus::Failed, "");
+            info!(cancelled_calls, "pending tool turn aborted");
         }
+        self.context.clear_host_controls();
         // Do not keep a turn-scoped shell grant after abort — next turn / retry
         // must re-confirm shell.
         self.runtime.clear_turn_grants();
@@ -720,6 +816,7 @@ impl Agent {
         self.base_system_prompt = system_prompt.to_string();
         let composed = self.composed_system_prompt();
         self.context.reset(composed);
+        self.refresh_system_prompt();
     }
 
     /// Alias for [`Self::reset`].
@@ -733,13 +830,17 @@ impl Agent {
         self.base_system_prompt = system_prompt.to_string();
         let composed = self.composed_system_prompt();
         self.context.load_history(&composed, history);
+        self.refresh_system_prompt();
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.abort();
         self.context.replace_history(messages);
+        self.refresh_system_prompt();
     }
 
-    /// Canonical append-only transcript, not the compacted model request view.
+    /// Canonical transcript, not the compacted model request view. Conversation
+    /// events are append-only; the system row reflects the current prompt.
     pub fn export_messages(&self) -> Vec<Message> {
         self.context.history().to_vec()
     }

@@ -40,7 +40,7 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult, TokenAccount
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
-    tool_observation_json, unknown_tool_observation, useful_research_observation_count,
+    push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
 };
 use message_parse::{extract_reply_text, parse_raw_tool_calls};
 use round::{
@@ -353,9 +353,12 @@ pub async fn resume_pending_input(
         duration_ms,
     });
     tools_used.push(pending.name.clone());
-    state.context.push(
-        Role::Tool,
-        tool_observation_json(&pending.call_id, observation),
+    push_tool_result_messages(
+        state.context,
+        &pending.name,
+        &pending.call_id,
+        observation,
+        ok,
     );
 
     let batch_result = process_tool_calls(
@@ -493,9 +496,12 @@ pub async fn resume_pending_tool(
     });
 
     tools_used.push(pending.name.clone());
-    state.context.push(
-        Role::Tool,
-        tool_observation_json(&pending.call_id, observation),
+    push_tool_result_messages(
+        state.context,
+        &pending.name,
+        &pending.call_id,
+        observation,
+        ok,
     );
 
     // Same yes/no covers batch_with siblings (one HITL decision).
@@ -518,10 +524,7 @@ pub async fn resume_pending_tool(
                 duration_ms,
             });
             tools_used.push(call.name.clone());
-            state.context.push(
-                Role::Tool,
-                tool_observation_json(&call.call_id, observation),
-            );
+            push_tool_result_messages(state.context, &call.name, &call.call_id, observation, false);
             continue;
         };
         let observation = if approved {
@@ -565,10 +568,7 @@ pub async fn resume_pending_tool(
             duration_ms,
         });
         tools_used.push(call.name.clone());
-        state.context.push(
-            Role::Tool,
-            tool_observation_json(&call.call_id, observation),
-        );
+        push_tool_result_messages(state.context, &call.name, &call.call_id, observation, ok);
     }
 
     let batch_result = process_tool_calls(

@@ -5,7 +5,7 @@ pub use boris_ai::{LlmError, LlmErrorKind};
 // ── AgentError ────────────────────────────────────────────────────────────────
 
 /// Classification of an [`AgentError`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentErrorKind {
     /// Propagated from an [`LlmError`] (non-timeout).
     Llm,
@@ -17,6 +17,11 @@ pub enum AgentErrorKind {
     Timeout,
     /// Operation was cancelled.
     Cancelled,
+    /// Provider input could not fit the hard preflight request boundary.
+    InputTooLarge {
+        estimated_tokens: usize,
+        allowed_tokens: usize,
+    },
     /// Unclassified / catch-all.
     Other,
 }
@@ -72,8 +77,21 @@ impl AgentError {
         }
     }
 
+    pub fn input_too_large(estimated_tokens: usize, allowed_tokens: usize) -> Self {
+        Self {
+            message: format!(
+                "model input is too large: estimated {estimated_tokens} tokens, allowed \
+                 {allowed_tokens}; split the request or reduce the attached/tool input"
+            ),
+            kind: AgentErrorKind::InputTooLarge {
+                estimated_tokens,
+                allowed_tokens,
+            },
+        }
+    }
+
     pub fn kind(&self) -> AgentErrorKind {
-        self.kind
+        self.kind.clone()
     }
 }
 
@@ -156,5 +174,18 @@ mod tests {
         assert_eq!(AgentError::timeout("x").kind(), AgentErrorKind::Timeout);
         assert_eq!(AgentError::cancelled("x").kind(), AgentErrorKind::Cancelled);
         assert_eq!(AgentError::llm("x").kind(), AgentErrorKind::Llm);
+    }
+
+    #[test]
+    fn input_too_large_carries_actionable_budget_details() {
+        let error = AgentError::input_too_large(9_001, 8_000);
+        assert_eq!(
+            error.kind(),
+            AgentErrorKind::InputTooLarge {
+                estimated_tokens: 9_001,
+                allowed_tokens: 8_000,
+            }
+        );
+        assert!(error.to_string().contains("split the request"));
     }
 }

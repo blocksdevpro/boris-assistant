@@ -6,6 +6,7 @@
 //! | [`meta`] | [`ToolMeta`], risk, permissions, kind |
 //! | [`args`] | `require_object` / `require_string` / … |
 //! | [`output`] | truncation + soft-wrap |
+//! | [`output_store`] | spill truncated observations to disk + reread |
 //! | [`trait_`] | [`Tool`] trait (`trait` is a keyword → `trait_`) |
 
 mod args;
@@ -13,6 +14,7 @@ mod error;
 mod meta;
 mod observation;
 mod output;
+mod output_store;
 mod schema;
 mod trait_;
 
@@ -29,5 +31,6 @@ pub use output::{
     truncate_tool_result_to, TruncateOutcome, DEFAULT_SOFT_WRAP_WIDTH, MAX_SKILL_RESULT_CHARS,
     MAX_TOOL_RESULT_CHARS,
 };
+pub use output_store::{output_store_hint, ToolOutputStore, GC_DAYS, MAX_STORED_CHARS};
 pub use schema::{validate_args, InvalidArgs};
 pub use trait_::Tool;

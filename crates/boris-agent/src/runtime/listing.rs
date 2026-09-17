@@ -116,6 +116,7 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "grep",
     "bash",
     "present_artifact",
+    "get_tool_output",
     "collect_input",
 ];
 

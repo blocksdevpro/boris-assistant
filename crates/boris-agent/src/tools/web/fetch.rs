@@ -80,21 +80,26 @@ impl Tool for WebFetchTool {
         let url_arg = require_string(obj, "url")?;
         // SSRF: scheme + blocked hosts before any network I/O.
         let safe_url = parse_safe_http_url(&url_arg)?;
-        let host = safe_url.host_str().unwrap_or("site");
+        let host = safe_url.host_str().unwrap_or("site").to_string();
         ctx.report_text(format!("Fetching {host}…"));
 
-        let send = self.client.get(safe_url.as_str()).send();
-        let resp = if let Some(token) = ctx.cancel.clone() {
-            tokio::select! {
-                biased;
-                r = send => r.map_err(|e| ToolError::failed(format!("fetch failed: {e}")))?,
-                _ = token.cancelled() => {
-                    return Err(ToolError::failed("fetch cancelled by host"));
-                }
+        let resp = send_with_cancel(&self.client, safe_url.as_str(), ctx).await?;
+
+        // Cloudflare / bot-block retry once: 403/503 with cf headers often
+        // passes on a second browser-UA hit after a short backoff.
+        let resp = if matches!(resp.status().as_u16(), 403 | 503) && is_likely_bot_block(&resp) {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            if ctx.is_cancelled() {
+                return Err(ToolError::failed("fetch cancelled by host"));
+            }
+            let retry = send_with_cancel(&self.client, safe_url.as_str(), ctx).await?;
+            if retry.status().is_success() {
+                retry
+            } else {
+                resp
             }
         } else {
-            send.await
-                .map_err(|e| ToolError::failed(format!("fetch failed: {e}")))?
+            resp
         };
 
         // Re-validate final URL after redirects (defense in depth).
@@ -102,6 +107,12 @@ impl Tool for WebFetchTool {
 
         let status = resp.status();
         if !status.is_success() {
+            // Speakable hint for bot protection vs plain 404.
+            if matches!(status.as_u16(), 403 | 503) {
+                return Err(ToolError::failed(format!(
+                    "fetch HTTP {status} from {host} (possibly bot protection; try web_search for a cached snippet)"
+                )));
+            }
             return Err(ToolError::failed(format!("fetch HTTP {status}")));
         }
         ctx.report_text(format!("Reading {host}…"));
@@ -157,6 +168,44 @@ pub(crate) fn truncate_fetch_body(text: &str, max_chars: usize) -> String {
         body.push_str("\n…[truncated]");
     }
     body
+}
+
+async fn send_with_cancel(
+    client: &Client,
+    url: &str,
+    ctx: &crate::tool_context::ToolCallContext,
+) -> Result<reqwest::Response, ToolError> {
+    let send = client.get(url).send();
+    if let Some(token) = ctx.cancel.clone() {
+        tokio::select! {
+            biased;
+            r = send => r.map_err(|e| ToolError::failed(format!("fetch failed: {e}"))),
+            _ = token.cancelled() => Err(ToolError::failed("fetch cancelled by host")),
+        }
+    } else {
+        send
+            .await
+            .map_err(|e| ToolError::failed(format!("fetch failed: {e}")))
+    }
+}
+
+/// Heuristic: Cloudflare / bot-block signals worth one retry.
+fn is_likely_bot_block(resp: &reqwest::Response) -> bool {
+    let headers = resp.headers();
+    // `cf-mitigated`, `cf-ray`, `server: cloudflare`, or cf challenge cookie.
+    if headers.contains_key("cf-mitigated") || headers.contains_key("cf-ray") {
+        return true;
+    }
+    if let Some(server) = headers
+        .get(reqwest::header::SERVER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if server.to_ascii_lowercase().contains("cloudflare") {
+            return true;
+        }
+    }
+    // Fallback: retry any 403/503 once (cheap, single extra hit).
+    true
 }
 
 #[cfg(test)]

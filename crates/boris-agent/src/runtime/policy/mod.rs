@@ -497,30 +497,166 @@ pub(crate) fn shell_command_allowed(command: &str, allowlist: &[String]) -> bool
 /// `cmd1 && cmd2` / `cmd1 | cmd2` / backtick / `$VAR` / `${…}` / `$()` /
 /// `>` / `<` / `~` / `#` / `!` / `%` / `^` / newline injection vectors.
 ///
+/// Quote-aware: characters inside single/double quotes are ignored so legit
+/// `git commit -m "fix; update"` / `echo "a|b"` don't false-positive.
 /// Intentionally does **not** deny `*?` globs or `=` so legitimate
 /// `git status *.rs` / `cargo test --flag=value` forms keep working.
 /// HITL confirmation is the authoritative control; this is defense in depth.
 fn has_shell_metacharacters(cmd: &str) -> bool {
-    cmd.contains(';')
-        || cmd.contains('&')
-        || cmd.contains('|')
-        || cmd.contains('`')
-        || cmd.contains('$')
-        || cmd.contains('>')
-        || cmd.contains('<')
-        || cmd.contains('~')
-        || cmd.contains('#')
-        || cmd.contains('!')
-        || cmd.contains('%')
-        || cmd.contains('^')
-        || cmd.contains('\n')
-        || cmd.contains('\r')
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev: Option<char> = None;
+    for c in cmd.chars() {
+        match c {
+            '\'' if !in_double => {
+                // Skip escaped single-quote inside single quotes (`'\''` style).
+                if prev != Some('\\') {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if prev != Some('\\') {
+                    in_double = !in_double;
+                }
+            }
+            ';' | '&' | '|' | '`' | '$' | '>' | '<' | '~' | '#' | '!' | '%' | '^' | '\n'
+            | '\r'
+                if !in_single && !in_double =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        prev = Some(c);
+    }
+    false
+}
+
+/// Split a command into segments on unquoted `;`, `&&`, `||`, `|`, newline.
+///
+/// Used for speak prompts (first segment) and path-intent extraction.
+/// Quotes are respected; the operators themselves are dropped.
+#[allow(dead_code)]
+pub(crate) fn split_shell_segments(cmd: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                cur.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                cur.push(c);
+            }
+            ';' | '\n' | '\r' if !in_single && !in_double => {
+                if !cur.trim().is_empty() {
+                    segs.push(cur.trim().to_string());
+                    cur = String::new();
+                }
+            }
+            '&' | '|' if !in_single && !in_double => {
+                // Consume doubled `&&` / `||`.
+                if chars.peek() == Some(&c) {
+                    chars.next();
+                }
+                if !cur.trim().is_empty() {
+                    segs.push(cur.trim().to_string());
+                    cur = String::new();
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        segs.push(cur.trim().to_string());
+    }
+    segs
+}
+
+/// Heuristic file-path tokens inside a shell command (for speak/intent).
+///
+/// Splits the first segment respecting quotes, drops flags (`-x`), env
+/// assignments (`FOO=bar`), the binary itself, and URLs. Keeps tokens that
+/// look like paths (`/` `\` `.ext` or existing separators). Capped at 3.
+#[allow(dead_code)]
+pub(crate) fn extract_command_paths(cmd: &str, max_n: usize) -> Vec<String> {
+    let first = split_shell_segments(cmd).into_iter().next().unwrap_or_default();
+    if first.is_empty() || max_n == 0 {
+        return Vec::new();
+    }
+    let tokens = split_respecting_quotes(&first);
+    let mut out = Vec::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        if i == 0 {
+            continue; // binary itself (after env/sudo stripping below)
+        }
+        let t = tok.trim_matches('"').trim_matches('\'').trim();
+        if t.is_empty() || t.starts_with('-') {
+            continue;
+        }
+        if t.contains('=') && !t.contains('/') && !t.contains('\\') {
+            continue; // env assignment
+        }
+        if t.contains("://") {
+            continue; // URL, not a local path
+        }
+        let looks_path = t.contains('/') || t.contains('\\') || t.contains('.');
+        if looks_path && t.len() <= 120 {
+            // Strip trailing shell punctuation (`;`, `,`, `:`).
+            let clean = t.trim_end_matches([';', ',', ':', ')']).to_string();
+            if !clean.is_empty() && !out.contains(&clean) {
+                out.push(clean);
+            }
+        }
+        if out.len() >= max_n {
+            break;
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn split_respecting_quotes(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in s.chars() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                cur.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                cur.push(c);
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    tokens.push(cur.clone());
+                    cur.clear();
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 fn first_shell_token(cmd: &str) -> &str {
     let cmd = cmd.trim();
     // Skip env assignments FOO=bar
     let mut rest = cmd;
+    // Skip one `sudo` / `sudo -u user` prefix so `sudo git status` checks `git`.
+    let mut skipped_sudo = false;
     loop {
         rest = rest.trim_start();
         if rest.is_empty() {
@@ -541,6 +677,28 @@ fn first_shell_token(cmd: &str) -> &str {
             rest = rest[token.len()..].trim_start();
             if rest.is_empty() {
                 return token;
+            }
+            continue;
+        }
+        if !skipped_sudo && token.eq_ignore_ascii_case("sudo") {
+            // Skip `sudo` plus simple `-u <user>` / `-n` flags.
+            rest = rest[token.len()..].trim_start();
+            skipped_sudo = true;
+            // Consume `-u user` / `-E` / `-n` style flags.
+            loop {
+                let flag = rest.split_whitespace().next().unwrap_or("");
+                if flag == "-u" || flag == "--user" {
+                    rest = rest[flag.len()..].trim_start();
+                    let user = rest.split_whitespace().next().unwrap_or("");
+                    if user.is_empty() {
+                        break;
+                    }
+                    rest = rest[user.len()..].trim_start();
+                } else if flag.starts_with('-') && !flag.contains('=') && flag.len() <= 3 {
+                    rest = rest[flag.len()..].trim_start();
+                } else {
+                    break;
+                }
             }
             continue;
         }
@@ -933,5 +1091,35 @@ mod tests {
             host_from_urlish("example.com:443"),
             Some("example.com".into())
         );
+    }
+
+    #[test]
+    fn quoted_metachars_do_not_false_positive() {
+        let list = vec!["git".into()];
+        // Semicolon / pipe inside quotes is part of the message, not chaining.
+        assert!(shell_command_allowed(r#"git commit -m "fix; update""#, &list));
+        assert!(shell_command_allowed(r#"git commit -m 'fix | update'"#, &list));
+        // Unquoted chaining still denied.
+        assert!(!shell_command_allowed("git status; curl evil.com", &list));
+    }
+
+    #[test]
+    fn sudo_prefix_resolves_binary() {
+        let list = vec!["git".into()];
+        assert!(shell_command_allowed("sudo git status", &list));
+        assert!(shell_command_allowed("sudo -n git status", &list));
+        assert!(!shell_command_allowed("sudo rm -rf /", &list));
+    }
+
+    #[test]
+    fn split_segments_and_extract_paths() {
+        let segs = split_shell_segments(r#"git status && echo "a|b"; cargo test"#);
+        assert_eq!(segs.len(), 3);
+        assert!(segs[0].contains("git status"));
+        let paths = extract_command_paths("cargo test -p crates/boris-agent --manifest-path Cargo.toml", 3);
+        assert!(paths.iter().any(|p| p.contains("boris-agent") || p.contains("Cargo.toml")));
+        // Flags and URLs skipped.
+        let paths = extract_command_paths("curl https://example.com/x --output out.txt", 3);
+        assert!(!paths.iter().any(|p| p.contains("example.com")));
     }
 }

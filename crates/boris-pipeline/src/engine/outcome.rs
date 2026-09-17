@@ -603,6 +603,7 @@ fn collect_typed_input(
         kind: boris_agent::InputKind::Exact,
         label: "Exact text".into(),
         max_chars: 512,
+        options: Vec::new(),
     });
     tracing::info!(
         turn = %ctx.turn,
@@ -620,6 +621,7 @@ fn collect_typed_input(
         spoken: prompt.clone(),
         multiline: input.kind.multiline(),
         max_chars: input.max_chars,
+        options: input.options.clone(),
     });
     // Flip the phase before TTS so the overlay reads "Your turn" and the
     // HWND parks on-screen. Waiting for playback first left the field up

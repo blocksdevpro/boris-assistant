@@ -462,7 +462,11 @@ pub async fn resume_pending_input(
     let observation = match value {
         Some(raw) => {
             let clipped: String = raw.chars().take(input.max_chars as usize).collect();
-            crate::tools::collect_input::format_input_observation(input.kind, &clipped)
+            if input.kind == crate::runtime::InputKind::Choice && !input.options.is_empty() {
+                crate::tools::collect_input::format_choice_observation(&clipped, &input.options)
+            } else {
+                crate::tools::collect_input::format_input_observation(input.kind, &clipped)
+            }
         }
         None => "Error: user cancelled typed input".into(),
     };
@@ -1444,6 +1448,7 @@ mod tests {
             kind: crate::runtime::InputKind::Exact,
             label: "L".into(),
             max_chars: 512,
+            options: Vec::new(),
         });
         let tools2: Vec<std::sync::Arc<dyn crate::tool::Tool>> = vec![
             std::sync::Arc::new(crate::tools::collect_input::CollectInputTool),

@@ -120,13 +120,13 @@ pub use stats::AgentStats;
 pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
     InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolRisk,
-    MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS,
+    ToolOutputStore, MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS, MAX_STORED_CHARS,
 };
 pub use tool_context::ToolCallContext;
 pub use tools::{
     artifact_tools, artifact_tools_at, bash_tools, builtin_tools, fs_tools, os_tools,
-    register_builtin_tools, register_builtin_tools_with_options,
-    register_builtin_tools_with_preset, web_tools, BuiltinToolPaths,
+    output_tools, output_tools_at, register_builtin_tools, register_builtin_tools_with_options,
+    register_builtin_tools_with_preset, register_mcp_tools, web_tools, BuiltinToolPaths,
 };
 pub use trace::{percentile_ms, summarize_traces, TraceSummary, TurnTrace};
 

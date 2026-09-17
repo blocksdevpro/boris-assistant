@@ -107,12 +107,15 @@ pub struct StatusPicture {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputPeek {
     pub id: String,
-    /// `exact` | `secret` | `blob`
+    /// `exact` | `secret` | `blob` | `choice`
     pub kind: String,
     pub label: String,
     pub spoken: String,
     pub multiline: bool,
     pub max_chars: u32,
+    /// Numbered options for `choice` (empty otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// Progress for the dedicated “teach your voice” page.

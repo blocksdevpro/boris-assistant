@@ -19,14 +19,17 @@ pub enum InputKind {
     Secret,
     /// Large paste. Textarea.
     Blob,
+    /// Numbered choice (voice disambiguation). Host speaks options, user says number.
+    Choice,
 }
 
 impl InputKind {
-    /// Parse `exact` / `secret` / `blob` (and a few aliases). Unknown → Exact.
+    /// Parse `exact` / `secret` / `blob` / `choice` (and a few aliases). Unknown → Exact.
     pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "secret" | "password" | "token" | "key" => Self::Secret,
             "blob" | "text" | "paste" | "multiline" => Self::Blob,
+            "choice" | "choose" | "select" | "options" | "option" => Self::Choice,
             _ => Self::Exact,
         }
     }
@@ -36,6 +39,7 @@ impl InputKind {
             Self::Exact => "exact",
             Self::Secret => "secret",
             Self::Blob => "blob",
+            Self::Choice => "choice",
         }
     }
 
@@ -52,6 +56,7 @@ impl InputKind {
             Self::Exact => 512,
             Self::Secret => 2048,
             Self::Blob => 12_000,
+            Self::Choice => 128,
         }
     }
 
@@ -60,6 +65,7 @@ impl InputKind {
             Self::Exact => "Exact text",
             Self::Secret => "Secret",
             Self::Blob => "Paste text",
+            Self::Choice => "Choose",
         }
     }
 }
@@ -70,6 +76,8 @@ pub struct PendingInput {
     pub kind: InputKind,
     pub label: String,
     pub max_chars: u32,
+    /// Numbered options for `Choice` (empty otherwise). Max 4, each ≤40 chars.
+    pub options: Vec<String>,
 }
 
 /// A tool call waiting for user confirmation (not yet executed).

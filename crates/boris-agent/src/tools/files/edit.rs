@@ -8,6 +8,7 @@ use crate::tool::{
     ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::did_you_mean_suffix;
 
 use super::FsRoots;
 
@@ -21,6 +22,8 @@ pub(crate) struct AppliedEdit {
     pub strategy: &'static str,
     pub old_bytes: usize,
     pub new_bytes: usize,
+    pub old_lines: usize,
+    pub new_lines: usize,
 }
 
 /// Failure reasons for applying an edit (mapped to [`ToolError`] by the tool).
@@ -155,19 +158,40 @@ pub(crate) fn apply_edit(
         strategy,
         old_bytes,
         new_bytes,
+        old_lines: old_string.lines().count(),
+        new_lines: new_string.lines().count(),
     })
 }
 
 /// Success observation after a disk write.
+#[allow(dead_code)]
 pub(crate) fn format_edit_result(
     path_display: &str,
     strategy: &str,
     old_bytes: usize,
     new_bytes: usize,
 ) -> String {
+    format_edit_result_full(path_display, strategy, old_bytes, new_bytes, 1, 1)
+}
+
+/// Success observation with line deltas (speakable for voice confirm UX).
+pub(crate) fn format_edit_result_full(
+    path_display: &str,
+    strategy: &str,
+    old_bytes: usize,
+    new_bytes: usize,
+    old_lines: usize,
+    new_lines: usize,
+) -> String {
+    // Speakable line delta: +added -removed relative to replaced span.
+    let (added, removed) = if new_lines >= old_lines {
+        (new_lines - old_lines, 0)
+    } else {
+        (0, old_lines - new_lines)
+    };
     format!(
         "Replaced 1 occurrence in {path_display} (match={strategy}). \
-         {old_bytes} → {new_bytes} bytes"
+         {old_bytes} → {new_bytes} bytes (+{added} -{removed} lines)"
     )
 }
 
@@ -239,8 +263,9 @@ impl Tool for EditFileTool {
 
         let path = resolve_under_roots(&raw, &self.roots.writers())?;
         if !path.exists() {
+            let hint = did_you_mean_suffix(&path, 3);
             return Err(ToolError::failed(format!(
-                "File not found: {}",
+                "File not found: {}{hint}",
                 path.display()
             )));
         }
@@ -256,11 +281,13 @@ impl Tool for EditFileTool {
             .await
             .map_err(|e| ToolError::failed(format!("write {}: {e}", path.display())))?;
 
-        Ok(truncate_tool_result(format_edit_result(
+        Ok(truncate_tool_result(format_edit_result_full(
             &path.display().to_string(),
             applied.strategy,
             applied.old_bytes,
             applied.new_bytes,
+            applied.old_lines,
+            applied.new_lines,
         )))
     }
 }

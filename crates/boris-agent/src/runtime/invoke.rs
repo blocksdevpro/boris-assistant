@@ -34,6 +34,16 @@ pub struct ToolRuntime {
     /// Lets the runtime warn when a grant would otherwise creep past one turn
     /// because the host forgot [`ToolRuntime::clear_turn_grants`].
     shell_grant_turn: AtomicU64,
+    /// Sticky "always allow" patterns from the host UI (`reply always`).
+    ///
+    /// Entries are `tool` or `tool:prefix` with `*` wildcards, e.g.
+    /// `bash:git status*`, `file_read:*`, `file_write:~/.boris/sandbox/*.md`.
+    /// Checked in [`ToolRuntime::effective_skip_confirmation`]; hard gates
+    /// (path/shell/network) still run after the skip.
+    always_approved: std::sync::Mutex<Vec<String>>,
+    /// Directory for spilled truncated outputs (see `tool::output_store`).
+    /// When `None`, truncated observations are returned without a reread hint.
+    output_store_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     gate: super::ConcurrencyGate,
 }
 
@@ -47,6 +57,8 @@ impl ToolRuntime {
             shell_granted_this_turn: AtomicBool::new(false),
             turn_seq: AtomicU64::new(0),
             shell_grant_turn: AtomicU64::new(0),
+            always_approved: std::sync::Mutex::new(Vec::new()),
+            output_store_dir: std::sync::Mutex::new(None),
             gate: super::ConcurrencyGate::new(16),
         }
     }
@@ -176,8 +188,121 @@ impl ToolRuntime {
         if opts.skip_confirmation {
             return true;
         }
-        meta.permissions.contains(&Permission::Shell)
+        if meta.permissions.contains(&Permission::Shell)
             && self.shell_granted_this_turn.load(Ordering::Relaxed)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// True when a sticky `always` pattern covers this tool call.
+    ///
+    /// Separate from [`ToolRuntime::effective_skip_confirmation`] (which is
+    /// turn-scoped) so hosts can distinguish session grants. Callers should
+    /// still run [`decide`] hard gates after a `true` here.
+    pub fn is_always_approved(&self, tool_name: &str, args: &Value) -> bool {
+        let patterns = self
+            .always_approved
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if patterns.is_empty() {
+            return false;
+        }
+        let summary = args_summary(tool_name, args);
+        // Normalized haystack covers `tool`, raw JSON, and summary so
+        // `bash:git*`, `file_read:*`, or plain `bash` all work.
+        let haystack = format!("{tool_name} {} {summary}", args.to_string());
+        patterns.iter().any(|p| {
+            if let Some((tool_pat, rest)) = p.split_once(':') {
+                let tool_pat = tool_pat.trim();
+                if !tool_pat.is_empty() && !wildcard_match(tool_pat, tool_name) {
+                    return false;
+                }
+                let rest = rest.trim();
+                if rest.is_empty() || rest == "*" {
+                    return true;
+                }
+                // `rest` with `*` = ordered token containment
+                // (`git status*` needs git … status in order).
+                let tokens: Vec<&str> = rest
+                    .split('*')
+                    .flat_map(|s| s.split_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if tokens.is_empty() {
+                    return true;
+                }
+                let hay_lower = haystack.to_ascii_lowercase();
+                let mut pos = 0usize;
+                for tok in tokens {
+                    let tok = tok.to_ascii_lowercase();
+                    match hay_lower[pos..].find(&tok) {
+                        Some(idx) => pos += idx + tok.len(),
+                        None => return false,
+                    }
+                }
+                true
+            } else {
+                wildcard_match(p, &haystack) || wildcard_match(p, tool_name)
+            }
+        })
+    }
+
+    /// Remember a sticky `always allow` pattern from the host UI.
+    ///
+    /// Bounded (64 entries, 256 chars each) so a compromised model cannot
+    /// grow memory via many distinct pending ids. Duplicates are ignored.
+    pub fn approve_always(&self, pattern: impl Into<String>) {
+        let mut p = pattern.into().trim().to_string();
+        if p.is_empty() {
+            return;
+        }
+        if p.chars().count() > 256 {
+            p = p.chars().take(256).collect();
+        }
+        if let Ok(mut guard) = self.always_approved.lock() {
+            if !guard.iter().any(|e| e == &p) {
+                guard.push(p);
+                if guard.len() > 64 {
+                    guard.remove(0);
+                }
+            }
+        }
+    }
+
+    /// Current sticky patterns (host diagnostics / tests).
+    pub fn always_approved_patterns(&self) -> Vec<String> {
+        self.always_approved
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Clear sticky approvals (turn boundary / host reset).
+    pub fn clear_always_approved(&self) {
+        if let Ok(mut guard) = self.always_approved.lock() {
+            guard.clear();
+        }
+    }
+
+    /// Set the directory for spilled truncated outputs.
+    ///
+    /// Hosts should point this at `{session_dir}/tool_outputs` (or a sandbox
+    /// fallback). When set, truncated observations gain a reread hint.
+    pub fn set_output_store_dir(&self, dir: Option<std::path::PathBuf>) {
+        if let Ok(mut guard) = self.output_store_dir.lock() {
+            *guard = dir;
+        }
+    }
+
+    /// Current output store dir (host diagnostics).
+    pub fn output_store_dir(&self) -> Option<std::path::PathBuf> {
+        self.output_store_dir
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Policy-only decision (no execute). Used to plan parallel batches.
@@ -197,9 +322,11 @@ impl ToolRuntime {
             };
         }
         let args = args.clone();
+        let skip = self.effective_skip_confirmation(&meta, opts)
+            || self.is_always_approved(tool.name(), &args);
         apply_skip_confirmation(
             decide(&self.policy, &meta, &args, opts.confirms_used),
-            self.effective_skip_confirmation(&meta, opts),
+            skip,
         )
     }
 
@@ -234,9 +361,11 @@ impl ToolRuntime {
         let args = inv.args.clone();
 
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
+        let skip = self.effective_skip_confirmation(&meta, opts)
+            || self.is_always_approved(&inv.name, &args);
         let decision = apply_skip_confirmation(
             decide(&self.policy, &meta, &args, opts.confirms_used),
-            self.effective_skip_confirmation(&meta, opts),
+            skip,
         );
 
         match decision {
@@ -273,7 +402,7 @@ impl ToolRuntime {
     }
 
     fn pause_input(&self, inv: ToolInvocation, meta: ToolMeta, args: Value) -> InvokeResult {
-        let (kind, spoken, label, max_chars) = parse_collect_args(&args);
+        let (kind, spoken, label, max_chars, options) = parse_collect_args(&args);
         let pending = PendingToolCall::new(
             self.next_pending_id(),
             inv.name.clone(),
@@ -286,6 +415,7 @@ impl ToolRuntime {
             kind,
             label,
             max_chars,
+            options,
         });
         self.audit_event(&inv, &meta, "input", None, None, Some("needs_input"));
         InvokeResult::NeedsInput {
@@ -319,11 +449,32 @@ impl ToolRuntime {
         let budget = meta.result_char_budget();
         match result {
             Ok(output) => {
+                // Spill the FULL text before truncation so follow-ups can
+                // reread without re-running the tool. Clone only when over
+                // budget to avoid copying large-but-fitting outputs.
+                let needs_spill = output.chars().count() > budget;
+                let full_for_store = if needs_spill {
+                    Some(output.clone())
+                } else {
+                    None
+                };
                 let cut = truncate_tool_result_detailed(output, budget);
-                let bytes = cut.text.len();
+                let mut text = cut.text;
+                if cut.truncated {
+                    if let Some(dir) = self.output_store_dir() {
+                        if let Some(full) = full_for_store.as_ref() {
+                            let store = crate::tool::ToolOutputStore::new(dir);
+                            // Best-effort: spill failures never fail the turn.
+                            if let Ok(path) = store.save(tool.name(), full) {
+                                text.push_str(&crate::tool::output_store_hint(&path));
+                            }
+                        }
+                    }
+                }
+                let bytes = text.len();
                 let truncated = cut.truncated;
                 let structured =
-                    ToolObservation::from_text(cut.text, duration_ms, truncated, cut.cursor);
+                    ToolObservation::from_text(text, duration_ms, truncated, cut.cursor);
                 let obs = structured.to_provider_text();
                 self.audit_event_full(
                     &inv,
@@ -476,20 +627,181 @@ fn apply_skip_confirmation(decision: PolicyDecision, skip: bool) -> PolicyDecisi
 /// Short voice-friendly confirm line. Prefer the shell command itself when
 /// present so TTS stays snappy ("Run git status?" vs a long args dump).
 fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
-    if pending.name == "bash" {
-        if let Some(cmd) = pending
+    let short_arg = |key: &str| {
+        pending
             .args
-            .get("command")
+            .get(key)
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            let cmd = truncate_voice_chars(cmd, 56);
-            return format!("Run `{cmd}`?");
+            .map(|s| truncate_voice_chars(s, 56))
+    };
+    match pending.name.as_str() {
+        "bash" => {
+            if let Some(cmd) = short_arg("command") {
+                // Include cwd tail + timeout hint when non-default for clarity.
+                let cwd_hint = pending
+                    .args
+                    .get("workdir")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let base = s
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or(s);
+                        format!(" in {base}")
+                    })
+                    .unwrap_or_default();
+                return format!("Run `{cmd}`{cwd_hint}?");
+            }
         }
+        "file_edit" => {
+            if let Some(path) = short_arg("path") {
+                let base = basename(&path);
+                let old_len = pending
+                    .args
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                let new_len = pending
+                    .args
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                if old_len > 0 || new_len > 0 {
+                    return format!("Edit {base}, replace {old_len} chars with {new_len}?");
+                }
+                return format!("Edit {base}?");
+            }
+        }
+        "file_write" => {
+            if let Some(path) = short_arg("path") {
+                let base = basename(&path);
+                let n = pending
+                    .args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                return format!("Write {base}, {n} chars?");
+            }
+        }
+        "open_url" => {
+            if let Some(url) = short_arg("url") {
+                let host = url_host(&url);
+                return format!("Open {host}?");
+            }
+        }
+        "open_path" => {
+            if let Some(p) = short_arg("path") {
+                return format!("Open {}?", basename(&p));
+            }
+        }
+        "web_fetch" => {
+            if let Some(url) = short_arg("url") {
+                return format!("Fetch {}?", url_host(&url));
+            }
+        }
+        "web_search" => {
+            if let Some(q) = short_arg("query") {
+                return format!("Search for `{q}`?");
+            }
+        }
+        _ => {}
     }
     let summary = truncate_voice_chars(&pending.args_summary, 64);
-    format!("Run {summary}?")
+    format!("Run {summary}? Say yes or no.")
+}
+
+fn basename(p: &str) -> String {
+    p.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(p)
+        .chars()
+        .take(40)
+        .collect()
+}
+
+fn url_host(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = after_scheme
+        .split(['/','?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    truncate_voice_chars(host, 32)
+}
+
+/// Simple `*` wildcard match (case-insensitive).
+///
+/// Normalizes `:`/`(`/`)`/`=`/quotes to spaces (so `bash:git*` matches
+/// `bash {"command":"git status"}`), collapses whitespace, then:
+/// - no `*` → substring contains,
+/// - with `*` → ordered glob (`*` = any substring, must cover full pattern
+///   in order; leading/trailing literals anchor to start/end unless the
+///   pattern itself starts/ends with `*`).
+pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
+    fn norm(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut prev_space = true;
+        for c in s.to_ascii_lowercase().chars() {
+            let c = match c {
+                ':' | '(' | ')' | '=' | '"' | '\'' | '{' | '}' | ',' => ' ',
+                _ => c,
+            };
+            if c.is_whitespace() {
+                if !prev_space {
+                    out.push(' ');
+                    prev_space = true;
+                }
+            } else {
+                out.push(c);
+                prev_space = false;
+            }
+        }
+        out.trim().to_string()
+    }
+    let pattern = norm(pattern);
+    let text = norm(text);
+    if pattern == "*" || pattern.is_empty() {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return text.contains(&pattern);
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0usize;
+    let starts_anchored = !pattern.starts_with('*');
+    let ends_anchored = !pattern.ends_with('*');
+    if starts_anchored {
+        if !text.starts_with(parts[0]) {
+            return false;
+        }
+        pos = parts[0].len();
+    }
+    let last_idx = parts.len() - 1;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 && starts_anchored {
+            continue; // already consumed prefix
+        }
+        let is_last = i == last_idx;
+        if is_last && ends_anchored {
+            // Trailing literal must be a suffix (after pos).
+            return text[pos..].ends_with(*part)
+                || text[pos..].contains(*part) && text.ends_with(*part);
+        }
+        match text[pos..].find(*part) {
+            Some(idx) => pos += idx + part.len(),
+            None => return false,
+        }
+    }
+    true
 }
 
 fn truncate_voice_chars(s: &str, max_chars: usize) -> String {
@@ -740,6 +1052,63 @@ mod tests {
         );
         let s = speak_confirm_prompt(&pending);
         assert_eq!(s, "Run `git status`?");
+    }
+
+    #[test]
+    fn speak_confirm_prompt_file_edit_and_write() {
+        let pending = PendingToolCall::new(
+            "p1",
+            "file_edit",
+            json!({ "path": "notes.md", "old_string": "hello", "new_string": "hello world!" }),
+            "file_edit",
+            ToolRisk::Dangerous,
+            "c1",
+        );
+        let s = speak_confirm_prompt(&pending);
+        assert!(s.contains("notes.md"), "got: {s}");
+        assert!(s.contains("replace"), "got: {s}");
+
+        let pending = PendingToolCall::new(
+            "p2",
+            "file_write",
+            json!({ "path": "a/b/report.md", "content": "hi" }),
+            "file_write",
+            ToolRisk::Dangerous,
+            "c1",
+        );
+        let s = speak_confirm_prompt(&pending);
+        assert!(s.contains("report.md"), "got: {s}");
+
+        let pending = PendingToolCall::new(
+            "p3",
+            "web_fetch",
+            json!({ "url": "https://example.com/page?q=1" }),
+            "web_fetch",
+            ToolRisk::Moderate,
+            "c1",
+        );
+        assert!(speak_confirm_prompt(&pending).contains("example.com"));
+    }
+
+    #[test]
+    fn wildcard_match_basic() {
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("bash", "bash (command=git)"));
+        assert!(wildcard_match("bash:git*", "bash git status"));
+        assert!(wildcard_match("file_read:*", "file_read notes.md"));
+        assert!(!wildcard_match("bash:cargo*", "bash git status"));
+    }
+
+    #[test]
+    fn always_approved_skips_confirm() {
+        let rt = ToolRuntime::null();
+        assert!(!rt.is_always_approved("bash", &json!({"command": "git status"})));
+        rt.approve_always("bash:git*");
+        assert!(rt.is_always_approved("bash", &json!({"command": "git status"})));
+        assert!(!rt.is_always_approved("bash", &json!({"command": "rm -rf /"})));
+        assert_eq!(rt.always_approved_patterns().len(), 1);
+        rt.clear_always_approved();
+        assert!(rt.always_approved_patterns().is_empty());
     }
 
     #[tokio::test]

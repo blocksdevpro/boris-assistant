@@ -52,6 +52,11 @@ use crate::tool::ToolError;
 const BROWSER_SEARCH_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// Browser UA for generic fetches (avoids bot-block on product UA).
+const BROWSER_FETCH_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 \
+     BorisAssistant/1.0";
+
 pub use fetch::WebFetchTool;
 pub use search::WebSearchTool;
 
@@ -76,11 +81,19 @@ fn client_builder(connect_secs: u64, timeout_secs: u64) -> reqwest::ClientBuilde
 
 /// Shared HTTP client for web tools (connect 10s, total 30s).
 ///
-/// Redirect policy re-validates every hop with the same SSRF host rules as the
-/// initial URL (see [`url::parse_safe_http_url`]).
+/// Uses a browser-like UA (not the product UA) so generic fetches don't get
+/// DDG-style anomaly blocks. Redirect policy re-validates every hop with the
+/// same SSRF host rules as the initial URL (see [`url::parse_safe_http_url`]).
 pub(crate) fn http_client() -> Result<Client, ToolError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     client_builder(10, 30)
-        .user_agent(concat!("boris-agent/", env!("CARGO_PKG_VERSION")))
+        .user_agent(BROWSER_FETCH_UA)
+        .default_headers(headers)
         .build()
         .map_err(|e| ToolError::failed(format!("http client: {e}")))
 }

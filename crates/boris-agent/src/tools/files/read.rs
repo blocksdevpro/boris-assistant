@@ -8,6 +8,7 @@ use crate::tool::{
     ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::did_you_mean_suffix;
 
 use super::{FsRoots, DEFAULT_READ_LINES, MAX_READ_BYTES, MAX_READ_LINES};
 
@@ -36,6 +37,89 @@ pub(crate) fn parse_read_window(offset: Option<u64>, limit: Option<u64>) -> Read
 /// Heuristic: treat as binary if any NUL byte appears in the first 512 bytes.
 pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(512).any(|&b| b == 0)
+}
+
+/// Media type sniffed from magic bytes / extension (no new deps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Pdf,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Gif => "gif",
+            Self::Webp => "webp",
+            Self::Bmp => "bmp",
+            Self::Pdf => "pdf",
+        }
+    }
+
+    pub fn is_image(self) -> bool {
+        !matches!(self, Self::Pdf)
+    }
+}
+
+/// Sniff image / PDF from magic bytes (extension is only a tiebreak).
+pub(crate) fn sniff_media(bytes: &[u8]) -> Option<MediaKind> {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some(MediaKind::Png);
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"\xff\xd8\xff" {
+        return Some(MediaKind::Jpeg);
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return Some(MediaKind::Gif);
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(MediaKind::Webp);
+    }
+    if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
+        return Some(MediaKind::Bmp);
+    }
+    if bytes.len() >= 5 && &bytes[0..5] == b"%PDF-" {
+        return Some(MediaKind::Pdf);
+    }
+    None
+}
+
+/// Build a voice-sized envelope for images / PDFs.
+///
+/// The tool trait returns `String` only (no binary attachments like OpenCode),
+/// so we return a structured placeholder the model + host can act on:
+/// desktop shows the file via `open_path`, voice speaks the summary.
+pub(crate) fn format_media_envelope(
+    kind: MediaKind,
+    path_display: &str,
+    byte_len: usize,
+) -> String {
+    let kb = byte_len / 1024.max(1);
+    if kind.is_image() {
+        format!(
+            "<untrusted_image type={} path=\"{path_display}\" bytes={byte_len}>\n\
+             Image file ({}, ~{kb} KB). I cannot read pixels as text — \
+             use open_path to show it on screen, then describe what the user asks about. \
+             Speak a one-line summary, never base64.\n\
+             </untrusted_image>",
+            kind.as_str(),
+            kind.as_str(),
+        )
+    } else {
+        format!(
+            "<untrusted_document type=pdf path=\"{path_display}\" bytes={byte_len}>\n\
+             PDF file (~{kb} KB). Text extraction is not built in — \
+             use open_path to show it, or ask the user to paste the relevant pages. \
+             Summarize for speech.\n\
+             </untrusted_document>"
+        )
+    }
 }
 
 /// Result of slicing a file into a line window for display.
@@ -200,8 +284,9 @@ impl Tool for ReadFileTool {
         );
 
         if !path.exists() {
+            let hint = did_you_mean_suffix(&path, 3);
             return Err(ToolError::failed(format!(
-                "File not found: {}",
+                "File not found: {}{hint}",
                 path.display()
             )));
         }
@@ -209,8 +294,19 @@ impl Tool for ReadFileTool {
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| ToolError::failed(format!("read {}: {e}", path.display())))?;
+        // Images / PDFs get a structured envelope (not a binary error) so the
+        // model can show via open_path + speak a summary.
+        if let Some(kind) = sniff_media(&bytes) {
+            return Ok(truncate_tool_result(format_media_envelope(
+                kind,
+                &path.display().to_string(),
+                bytes.len(),
+            )));
+        }
         if looks_binary(&bytes) {
-            return Err(ToolError::failed("File appears to be binary"));
+            return Err(ToolError::failed(
+                "File appears to be binary. If this is an image or PDF, the envelope above applies; otherwise use open_path to show it.",
+            ));
         }
         let content = String::from_utf8(bytes)
             .map_err(|_| ToolError::failed("File appears to be binary (invalid UTF-8)"))?;
@@ -246,6 +342,27 @@ mod tests {
         assert!(!looks_binary(b"hello world"));
         assert!(looks_binary(b"abc\0def"));
         assert!(!looks_binary(&[]));
+    }
+
+    #[test]
+    fn sniff_media_magic() {
+        assert_eq!(
+            sniff_media(b"\x89PNG\r\n\x1a\nrest"),
+            Some(MediaKind::Png)
+        );
+        assert_eq!(sniff_media(b"\xff\xd8\xff123"), Some(MediaKind::Jpeg));
+        assert_eq!(sniff_media(b"GIF89a123"), Some(MediaKind::Gif));
+        assert_eq!(sniff_media(b"%PDF-1.7 hi"), Some(MediaKind::Pdf));
+        assert_eq!(sniff_media(b"hello world"), None);
+    }
+
+    #[test]
+    fn media_envelope_shape() {
+        let s = format_media_envelope(MediaKind::Png, "/s/a.png", 2048);
+        assert!(s.contains("<untrusted_image"));
+        assert!(s.contains("open_path"));
+        let s = format_media_envelope(MediaKind::Pdf, "/s/a.pdf", 4096);
+        assert!(s.contains("<untrusted_document"));
     }
 
     #[test]

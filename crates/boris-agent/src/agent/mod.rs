@@ -654,6 +654,17 @@ impl Agent {
         self.artifacts_dir.as_deref()
     }
 
+    /// Bind or clear the session-local tool-output directory.
+    ///
+    /// When `Some`, re-registers `get_tool_output` against that dir and points
+    /// the runtime spill dir there. When `None`, clears the runtime dir only.
+    pub fn set_output_store_dir(&mut self, dir: Option<PathBuf>) {
+        self.runtime.set_output_store_dir(dir.clone());
+        if let Some(p) = dir {
+            self.register_tools(crate::tools::output_tools_at(&p));
+        }
+    }
+
     /// Bind all session-local paths. Best-effort sequential; no multi-step rollback.
     pub fn bind_session(&mut self, session_dir: &std::path::Path, session_id: &str) {
         self.set_session_id(Some(session_id.to_string()));
@@ -661,6 +672,7 @@ impl Agent {
         let todos = session_dir.join("todos.json");
         self.set_todos_path(Some(todos));
         self.set_artifacts_dir(Some(session_dir.join("artifacts")));
+        self.set_output_store_dir(Some(session_dir.join("tool_outputs")));
         self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
         self.set_subagent_session_root(Some(session_dir.to_path_buf()));
         if let Some(ltm) = &self.long_term {
@@ -805,6 +817,24 @@ impl Agent {
         p.trusted_auto_moderate = on;
         self.sandbox_snapshot.trusted_auto_moderate = on;
         self.runtime.set_policy(p);
+    }
+
+    /// Remember a sticky `always allow` pattern (`reply always` in the host UI).
+    ///
+    /// Example: `approve_always("bash:git status*")`. Hard gates still run;
+    /// only the confirm UI is skipped for matching calls.
+    pub fn approve_always(&self, pattern: impl Into<String>) {
+        self.runtime.approve_always(pattern);
+    }
+
+    /// Current sticky approval patterns (host diagnostics).
+    pub fn always_approved_patterns(&self) -> Vec<String> {
+        self.runtime.always_approved_patterns()
+    }
+
+    /// Clear sticky approvals.
+    pub fn clear_always_approved(&self) {
+        self.runtime.clear_always_approved();
     }
 
     /// Cap HITL confirmations per user turn (multi-tool budget). Minimum 1.

@@ -12,7 +12,6 @@ members = [
     "crates/boris-tts-supertone",
     "crates/boris-pipeline",
     "desktop/src-tauri",
-    "xtask",
 ]
 
 [workspace.package]

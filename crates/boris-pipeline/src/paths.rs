@@ -172,7 +172,7 @@ pub fn traces_dir() -> PathBuf {
     boris_home().join("traces")
 }
 
-/// Append-only engine trace stream consumed by `cargo xtask trace-report`.
+/// Append-only engine trace stream: one JSON object per turn.
 pub fn turn_traces_path() -> PathBuf {
     traces_dir().join("turns.jsonl")
 }

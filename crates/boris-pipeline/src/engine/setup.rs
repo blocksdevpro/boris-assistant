@@ -174,7 +174,7 @@ pub(super) fn init_runtime(
         wake_enroll: None,
         input: None,
         status_tx,
-        seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        latest: std::sync::Arc::new(std::sync::Mutex::new(StatusPicture::off())),
         phase_started: std::time::Instant::now(),
     };
     picture.publish();
@@ -417,7 +417,7 @@ fn fault(
     // (usually after Install models / device fix). The Fault snapshot stays
     // up so the UI can show the reason instead of a silent Off.
     let _ = status_tx.send(StatusPicture {
-        seq: 0,
+        seq: 1,
         engine: EngineState::Fault,
         phase: Phase::Off,
         detail: Some(detail.into()),

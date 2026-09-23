@@ -830,6 +830,7 @@ mod tests {
             spoken: "Type your ID.".into(),
             multiline: false,
             max_chars: 512,
+            options: Vec::new(),
         });
         assert_eq!(layout_for(&picture), OverlayLayout::Thought);
     }
@@ -845,6 +846,7 @@ mod tests {
             spoken: "Paste the log.".into(),
             multiline: true,
             max_chars: 12_000,
+            options: Vec::new(),
         });
         assert_eq!(layout_for(&picture), OverlayLayout::Card);
     }

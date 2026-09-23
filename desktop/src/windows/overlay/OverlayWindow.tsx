@@ -46,6 +46,8 @@ type OverlayPreferences = Pick<
   "overlay_caption_mode" | "overlay_scale_percent"
 >;
 
+export type OverlayDebugPreferences = OverlayPreferences;
+
 type OverlayPreferencesEvent = {
   captionMode: AppSettings["overlay_caption_mode"];
   scalePercent: number;
@@ -74,10 +76,18 @@ function initialOverlayPreferences(): OverlayPreferences {
 }
 
 /** Always-on-top, click-through voice presence. */
-export function OverlayWindow() {
+export function OverlayWindow({
+  debugPreferences,
+  debugReadyCaptionMs,
+  debugReducedMotion,
+}: {
+  debugPreferences?: OverlayDebugPreferences;
+  debugReadyCaptionMs?: number;
+  debugReducedMotion?: boolean;
+} = {}) {
   const status = useStatus();
   const tauriRuntime = isTauriRuntime();
-  const reduceMotion = Boolean(useReducedMotion());
+  const reduceMotion = debugReducedMotion ?? Boolean(useReducedMotion());
   const [preferences, setPreferences] =
     useState<OverlayPreferences>(initialOverlayPreferences);
   const [preferencesReady, setPreferencesReady] = useState(
@@ -85,6 +95,8 @@ export function OverlayWindow() {
   );
   const [readyCaptionHidden, setReadyCaptionHidden] = useState(false);
   const [hostHiding, setHostHiding] = useState(false);
+  const activePreferences = debugPreferences ?? preferences;
+  const readyCaptionDelay = debugReadyCaptionMs ?? READY_CAPTION_MS;
 
   const tone = useMemo(
     () => toneFor(status.phase, status.engine),
@@ -101,11 +113,11 @@ export function OverlayWindow() {
 
   const privateCaption = filterCaption(
     liveCaption,
-    preferences.overlay_caption_mode,
+    activePreferences.overlay_caption_mode,
   );
   const showCard = shouldShowOverlayCard(status);
   const thought = useRetainedThinking(status);
-  const contentHidden = preferences.overlay_caption_mode === "hidden";
+  const contentHidden = activePreferences.overlay_caption_mode === "hidden";
   const stageMode = contentHidden ? "presence" : overlayStageMode(status);
   const caption =
     isReady && readyCaptionHidden && !showCard ? null : privateCaption;
@@ -136,7 +148,7 @@ export function OverlayWindow() {
   });
   const scale = Math.min(
     1.25,
-    Math.max(0.75, preferences.overlay_scale_percent / 100),
+    Math.max(0.75, activePreferences.overlay_scale_percent / 100),
   );
   const surfaceReady =
     preferencesReady &&
@@ -222,10 +234,10 @@ export function OverlayWindow() {
     setReadyCaptionHidden(false);
     const timer = window.setTimeout(
       () => setReadyCaptionHidden(true),
-      READY_CAPTION_MS,
+      readyCaptionDelay,
     );
     return () => window.clearTimeout(timer);
-  }, [isReady, liveCaption?.kind, liveCaption?.text, status.turn]);
+  }, [isReady, liveCaption?.kind, liveCaption?.text, readyCaptionDelay, status.turn]);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-mode");
@@ -259,7 +271,7 @@ export function OverlayWindow() {
   }, [surfaceReady, tauriRuntime]);
 
   return (
-    <MotionConfig reducedMotion="user" transition={reduceMotion ? { duration: 0 } : { ...overlaySpring, opacity: overlayFade }}>
+    <MotionConfig reducedMotion={debugReducedMotion === undefined ? "user" : reduceMotion ? "always" : "never"} transition={reduceMotion ? { duration: 0 } : { ...overlaySpring, opacity: overlayFade }}>
       <div className="overlay-surface relative flex h-full w-full items-center justify-center bg-transparent">
         <div
           className="overlay-stage flex items-start justify-center bg-transparent"
@@ -374,6 +386,8 @@ export function OverlayWindow() {
                 </AnimatePresence>
               </motion.div>
 
+              {/* Exiting cards leave layout immediately so the island spring
+                  measures the compact target while their fade finishes. */}
               <AnimatePresence mode="popLayout" initial={false}>
                 {status.input ? (
                   <motion.div key={`input-${status.input.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>

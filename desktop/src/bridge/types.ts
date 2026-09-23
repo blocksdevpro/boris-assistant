@@ -64,7 +64,7 @@ export type ArtifactCard = {
 
 /** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
-  /** Monotonic snapshot counter. Latest-wins + dedupe key: ignore `seq <= last_seen`. */
+  /** Tauri's process-wide snapshot counter, including stop/restart transitions. */
   seq?: number;
   engine: EngineState;
   phase: Phase;

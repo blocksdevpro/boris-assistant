@@ -2,13 +2,13 @@ import { useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { overlayContentMotion, overlayFade } from "@/lib/overlayMotion";
 
-/** Replace labels as a unit; append streamed words without replaying old text. */
+/** Replace labels as a unit; streamed text keeps its container across rolling tails. */
 export function OverlayText({ text, stream = false }: { text: string; stream?: boolean }) {
   const reduced = Boolean(useReducedMotion());
   const [snapshot, setSnapshot] = useState({ text, revision: 0 });
   let revision = snapshot.revision;
   if (snapshot.text !== text) {
-    if (!stream || !text.startsWith(snapshot.text)) revision += 1;
+    if (!stream) revision += 1;
     setSnapshot({ text, revision });
   }
   if (reduced) return <>{text}</>;

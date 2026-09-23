@@ -906,33 +906,12 @@ fn run(
             rt.agent.set_session_id(Some(sid.to_string()));
         }
 
-        // Live tool activity → overlay. Snapshot freezes non-activity fields so
-        // mid-turn events do not clobber heard/said with a stale full rebuild.
-        // `wake_enroll` is preserved (not blanked): a teach session and a
-        // voice turn never overlap, but blanking here would stall the teach
-        // page if one ever does.
-        let activity_base = std::sync::Arc::new(std::sync::Mutex::new(StatusPicture {
-            seq: rt.picture.next_seq(),
-            engine: rt.picture.engine,
-            phase: rt.picture.phase,
-            detail: rt.picture.detail.clone(),
-            heard: rt.picture.heard.clone(),
-            said: rt.picture.said.clone(),
-            mic: rt.picture.mic.clone(),
-            speaker: rt.picture.speaker.clone(),
-            turn: rt.picture.turn.map(|t| t.to_string()),
-            activity: None,
-            thinking: None,
-            context_used: rt.picture.context_used,
-            context_limit: rt.picture.context_limit,
-            context_estimated: rt.picture.context_estimated,
-            artifact: rt.picture.artifact.clone(),
-            wake_enroll: rt.picture.wake_enroll.clone(),
-            input: None,
-        }));
+        // Agent events and the engine publish through the same current status.
+        // A later tool event therefore inherits fresh phase, device, input,
+        // artifact, and fault fields instead of replaying a turn-start copy.
         let activity_tx = rt.picture.status_tx.clone();
-        let activity_seq = rt.picture.seq.clone();
-        let base_w = activity_base.clone();
+        let activity_latest = rt.picture.latest.clone();
+        let activity_turn = turn.to_string();
         let activity_events_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let activity_events_enabled_w = activity_events_enabled.clone();
         let wave = std::sync::Arc::new(std::sync::Mutex::new(boris_agent::ActivityWave::default()));
@@ -978,38 +957,36 @@ fn run(
                 if tool_name == "present_artifact" {
                     if let Some(sid) = art_sid.as_ref() {
                         if let Some(peek) = peek_current(&art_store, sid) {
-                            if let Ok(mut base) = base_w.lock() {
-                                base.artifact = Some(peek);
+                            if let Ok(mut latest) = activity_latest.lock() {
+                                if latest.turn.as_deref() == Some(activity_turn.as_str()) {
+                                    latest.artifact = Some(peek);
+                                }
                             }
                         }
                     }
                 }
             }
             if let AgentEvent::ToolNote { text } = ev {
-                let Ok(mut base) = base_w.lock() else {
+                let Ok(mut latest) = activity_latest.lock() else {
                     return;
                 };
-                base.thinking = Some(text.clone());
-                let mut snap = base.clone();
-                snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = activity_tx.send(snap);
+                if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                    return;
+                }
+                latest.thinking = Some(picture::truncate_thinking(text));
+                picture::send_locked(&mut latest, &activity_tx);
                 return;
             }
             if let AgentEvent::Reasoning { preview } = ev {
-                let Ok(mut base) = base_w.lock() else {
+                let Ok(mut latest) = activity_latest.lock() else {
                     return;
                 };
-                // Bound the wire tail; the engine keeps nothing (preview is
-                // display-only) and `Picture::publish` truncates as well.
-                const MAX_REASONING_PREVIEW: usize = 512;
-                let preview = if preview.chars().count() > MAX_REASONING_PREVIEW {
-                    let head: String = preview.chars().take(MAX_REASONING_PREVIEW - 1).collect();
-                    format!("{head}…")
-                } else {
-                    preview.clone()
-                };
-                base.thinking = Some(preview);
-                let mut snap = base.clone();
+                if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                    return;
+                }
+                // The agent sends a rolling tail. Keep its newest characters
+                // when narrowing the status payload for the overlay.
+                latest.thinking = Some(picture::truncate_thinking(preview));
                 let elapsed = thought_w
                     .lock()
                     .ok()
@@ -1017,15 +994,13 @@ fn run(
                     .unwrap_or_default();
                 let thought = boris_agent::describe_thought(elapsed);
                 // Don't clobber a live tool chip with the think timer.
-                let busy_tool = snap.activity.as_deref().is_some_and(is_tool_chip);
+                let busy_tool = latest.activity.as_deref().is_some_and(is_tool_chip);
                 if !busy_tool {
-                    snap.activity = Some(format!("thinking · {thought}"));
-                } else if snap.activity.is_none() {
-                    snap.activity = Some("thinking…".into());
+                    latest.activity = Some(format!("thinking · {thought}"));
+                } else if latest.activity.is_none() {
+                    latest.activity = Some("thinking…".into());
                 }
-                base.activity = snap.activity.clone();
-                snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = activity_tx.send(snap);
+                picture::send_locked(&mut latest, &activity_tx);
                 return;
             }
             // Confirmation and typed input replace the current note.
@@ -1033,21 +1008,24 @@ fn run(
                 ev,
                 AgentEvent::NeedsConfirmation { .. } | AgentEvent::NeedsInput { .. }
             ) {
-                if let Ok(mut base) = base_w.lock() {
-                    base.thinking = None;
+                if let Ok(mut latest) = activity_latest.lock() {
+                    if latest.turn.as_deref() == Some(activity_turn.as_str()) {
+                        latest.thinking = None;
+                    }
                 }
             }
             let wave_snapshot = wave_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
             let Some(label) = activity_label(ev, &wave_snapshot) else {
                 return;
             };
-            let Ok(mut base) = base_w.lock() else {
+            let Ok(mut latest) = activity_latest.lock() else {
                 return;
             };
-            base.activity = Some(label);
-            let mut snap = base.clone();
-            snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = activity_tx.send(snap);
+            if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                return;
+            }
+            latest.activity = Some(label);
+            picture::send_locked(&mut latest, &activity_tx);
         });
 
         let work = match interrupted_text.as_deref() {

@@ -242,9 +242,10 @@ pub async fn stop_engine(app: AppHandle) -> Result<(), String> {
     let result = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         state.stop()?;
-        let picture = state.status();
-        overlay_win::sync_visibility(&app_for_overlay, &picture);
-        let _ = app_for_overlay.emit(EVENT_STATUS, picture);
+        state.with_status(|picture| {
+            overlay_win::sync_visibility(&app_for_overlay, &picture);
+            let _ = app_for_overlay.emit(EVENT_STATUS, picture);
+        });
         Ok::<(), String>(())
     })
     .await

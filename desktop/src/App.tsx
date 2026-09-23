@@ -42,6 +42,14 @@ function SurfaceFallback({
 const OverlayFixtureMatrix = lazy(
   () => import("@/preview/OverlayFixtureMatrix"),
 );
+const OverlayDebugHarness = import.meta.env.DEV
+  ? lazy(() => import("@/preview/OverlayDebugHarness"))
+  : null;
+
+function isOverlayDebugHarness(): boolean {
+  if (!import.meta.env.DEV || isTauriRuntime()) return false;
+  return new URLSearchParams(window.location.search).get("overlay-debug") === "1";
+}
 
 function isOverlayFixtureMatrix(): boolean {
   if (!import.meta.env.DEV || isTauriRuntime()) return false;
@@ -84,6 +92,7 @@ function resolveSurface(): Surface {
 
 function App() {
   const [surface] = useState<Surface>(resolveSurface);
+  const overlayDebug = isOverlayDebugHarness();
   const fixtureMatrix = isOverlayFixtureMatrix();
   const startupPreview = isStartupPreview();
   const fixtureName = devFixtureName();
@@ -138,6 +147,16 @@ function App() {
       }
     };
   }, [surface]);
+
+  if (overlayDebug && OverlayDebugHarness) {
+    return (
+      <AppErrorBoundary>
+        <Suspense fallback={<SurfaceFallback label="Preparing overlay lab" />}>
+          <OverlayDebugHarness />
+        </Suspense>
+      </AppErrorBoundary>
+    );
+  }
 
   if (fixtureMatrix) {
     return (

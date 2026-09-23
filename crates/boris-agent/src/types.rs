@@ -195,6 +195,10 @@ pub enum AgentEvent {
         role: Role,
         preview: String,
     },
+    /// Short, silent progress note from the same assistant message as tool calls.
+    ToolNote {
+        text: String,
+    },
     ToolExecutionStart {
         call_id: String,
         tool_name: String,

@@ -9,12 +9,14 @@ use std::time::Duration;
 use boris_audio::buffer::{RecordingBuffer, SlidingBuffer};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::{ArcAudioBuffer, AudioBuffer};
+use boris_inference::SpeechToText;
 use boris_sense::{
     duration_to_samples, vad_initial_timeout_samples, vad_silence_samples, Vad, WakeWord,
     VAD_WINDOW_SIZE, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
 use crate::engine::EngineCommand;
+use crate::partials::{PartialConfig, PartialTracker};
 
 /// How long the user has to *start* speaking when Boris is awaiting a freeform reply.
 const AWAIT_REPLY_START_TIMEOUT: Duration = Duration::from_secs(12);
@@ -41,6 +43,37 @@ const POST_BARGE_SETTLE: Duration = Duration::from_millis(220);
 /// enough to absorb a breath, not enough to make HITL feel frozen. Freeform
 /// keeps the longer shared [`vad_silence_samples`] (LiveKit 550 ms) window.
 const CONFIRM_SILENCE_AFTER: Duration = Duration::from_millis(250);
+
+/// Env override for the freeform capture cap (`BORIS_MAX_UTTERANCE_SECS`).
+pub const MAX_UTTERANCE_SECS_ENV: &str = "BORIS_MAX_UTTERANCE_SECS";
+/// Product default freeform cap.
+const DEFAULT_MAX_UTTERANCE_SECS: u32 = 30;
+/// Floor so a typo can't shrink normal turns to nothing.
+const MAX_UTTERANCE_SECS_FLOOR: u32 = 15;
+/// Hard ceiling: RAM is trivial (~11 MB at 180 s) but STT decode time grows
+/// linearly with clip length, so very long single decodes feel frozen.
+const MAX_UTTERANCE_SECS_HARD_CAP: u32 = 180;
+/// Confirm captures stay short regardless of the freeform override.
+const MAX_CONFIRM_SECS: u32 = 8;
+
+/// Capture length cap in seconds for `kind`.
+///
+/// Freeform kinds honor `BORIS_MAX_UTTERANCE_SECS` (clamped 15–180, default
+/// 30); confirms always use [`MAX_CONFIRM_SECS`].
+pub fn max_utterance_secs(kind: CaptureKind) -> u32 {
+    match kind {
+        CaptureKind::AwaitConfirm => MAX_CONFIRM_SECS,
+        _ => resolve_max_secs(std::env::var(MAX_UTTERANCE_SECS_ENV).ok()),
+    }
+}
+
+/// Pure parse + clamp for [`max_utterance_secs`] (unit-testable without env).
+fn resolve_max_secs(raw: Option<String>) -> u32 {
+    match raw.and_then(|v| v.trim().parse::<u32>().ok()) {
+        Some(n) => n.clamp(MAX_UTTERANCE_SECS_FLOOR, MAX_UTTERANCE_SECS_HARD_CAP),
+        None => DEFAULT_MAX_UTTERANCE_SECS,
+    }
+}
 
 /// Why a hear step returned early.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,10 +310,7 @@ pub fn capture_utterance_until(
     kind: CaptureKind,
     mut abort: impl FnMut() -> bool,
 ) -> Result<AudioBuffer, HearBreak> {
-    let max_secs: u32 = match kind {
-        CaptureKind::AwaitConfirm => 8, // short yes/no — do not hold the mic forever
-        _ => 30,
-    };
+    let max_secs = max_utterance_secs(kind);
     tracing::info!(?kind, max_secs, "capture_utterance begin");
     let wall = std::time::Instant::now();
     let mut record = RecordingBuffer::new(
@@ -395,6 +425,175 @@ pub fn capture_utterance_until(
     }
 }
 
+/// Record like [`capture_utterance`], but re-decode the growing prefix as a
+/// live partial while the user is still speaking (Parakeet pseudo-streaming).
+///
+/// Every [`PartialConfig::interval_samples`] of recorded audio (past the
+/// configured minimum and after speech started), the current
+/// prefix is snapshotted and run through
+/// [`SpeechToText::transcribe_partial`]. Results go to `on_partial` as
+/// `(text, snapshot_samples)` — typically forwarded to the overlay `heard`
+/// line. Partials are advisory: the caller must still run a final
+/// `transcribe` on the returned clip at endpoint.
+///
+/// When consecutive partials stabilize ([`PartialTracker::is_stable`]), the
+/// trailing-silence endpoint shrinks to
+/// [`PartialConfig::early_silence_samples`], saving dead air. Partial decode
+/// errors are logged and skipped (capture continues). When the backend
+/// reports `!supports_partials()`, no snapshot ever runs and this behaves
+/// exactly like [`capture_utterance`].
+///
+/// Cost: up to `max_partials_per_turn` extra decodes, run inline — the mic
+/// channel buffers while a partial decodes, and host Stop is serviced between
+/// snapshots (a Stop arriving mid-decode is honored right after it returns).
+#[allow(clippy::too_many_arguments)]
+pub fn capture_utterance_with_partials(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &mut impl Vad,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    kind: CaptureKind,
+    partial_cfg: &PartialConfig,
+    stt: &mut dyn SpeechToText,
+    mut on_partial: impl FnMut(&str, usize),
+) -> Result<AudioBuffer, HearBreak> {
+    let max_secs = max_utterance_secs(kind);
+    tracing::info!(
+        ?kind,
+        max_secs,
+        partials = partial_cfg.enabled,
+        "capture_utterance begin"
+    );
+    let wall = std::time::Instant::now();
+    let mut record = RecordingBuffer::new(
+        AUDIO_TARGET_RATE as usize * 2,
+        AUDIO_TARGET_RATE as usize * max_secs as usize,
+    );
+    record.set_recording(true);
+    vad.reset();
+
+    let mut has_spoken = false;
+    let mut samples_since_speech: usize = 0;
+    let mut hop = [0.0f32; VAD_WINDOW_SIZE];
+    let mut hop_len = 0usize;
+    let mut n_predicts: u32 = 0;
+    let mut n_speech_hops: u32 = 0;
+    let silence_after = match kind {
+        CaptureKind::AwaitConfirm => {
+            duration_to_samples(CONFIRM_SILENCE_AFTER, AUDIO_TARGET_RATE).max(VAD_WINDOW_SIZE)
+        }
+        CaptureKind::BargeIn => {
+            duration_to_samples(Duration::from_millis(850), AUDIO_TARGET_RATE).max(VAD_WINDOW_SIZE)
+        }
+        _ => vad_silence_samples(),
+    };
+    let silence_before = match kind {
+        CaptureKind::AfterWake | CaptureKind::BargeIn => vad_initial_timeout_samples(),
+        CaptureKind::AwaitReply => {
+            duration_to_samples(AWAIT_REPLY_START_TIMEOUT, AUDIO_TARGET_RATE)
+        }
+        CaptureKind::AwaitConfirm => {
+            duration_to_samples(AWAIT_CONFIRM_START_TIMEOUT, AUDIO_TARGET_RATE)
+        }
+    };
+    let mut tracker = PartialTracker::new();
+    // Confirm captures are short yes/no answers — prefix re-decodes cost more
+    // than they show. Only freeform kinds get live partials.
+    let want_partials = partial_cfg.enabled
+        && stt.supports_partials()
+        && !matches!(kind, CaptureKind::AwaitConfirm);
+
+    loop {
+        let frame = next_frame(mic, cmd_rx, running)?;
+        record.push(&frame);
+        if record.exceeded_max() {
+            let clip = record.take_audio();
+            record.set_recording(false);
+            tracing::warn!(
+                samples = clip.len(),
+                has_spoken,
+                ms = wall.elapsed().as_millis() as u64,
+                "utterance hit max length — cutting clip"
+            );
+            return Ok(clip);
+        }
+
+        // Live partial: snapshot the growing prefix and re-decode. Runs inline
+        // (mic frames queue behind it); errors are advisory-only, never fatal.
+        if want_partials && has_spoken && tracker.should_snapshot(partial_cfg, record.len()) {
+            let snapshot = record.snapshot();
+            tracker.note_snapshot(snapshot.len());
+            match stt.transcribe_partial(&snapshot) {
+                Ok(text) => {
+                    if tracker.note_partial(&text) {
+                        tracing::debug!(
+                            chars = text.chars().count(),
+                            samples = snapshot.len(),
+                            stable = tracker.is_stable(partial_cfg),
+                            "stt partial"
+                        );
+                        on_partial(&text, snapshot.len());
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "stt partial failed — continuing capture"),
+            }
+        }
+
+        for &sample in frame.iter() {
+            hop[hop_len] = sample;
+            hop_len += 1;
+            if hop_len < VAD_WINDOW_SIZE {
+                continue;
+            }
+            hop_len = 0;
+            n_predicts = n_predicts.saturating_add(1);
+
+            match vad.predict(&hop) {
+                Ok(true) => {
+                    if !has_spoken {
+                        tracing::debug!("vad: speech started");
+                    }
+                    has_spoken = true;
+                    n_speech_hops = n_speech_hops.saturating_add(1);
+                    samples_since_speech = 0;
+                }
+                Ok(false) => {
+                    samples_since_speech = samples_since_speech.saturating_add(hop.len());
+                    let limit = if has_spoken {
+                        // Stable partials endpoint early: the transcript already
+                        // converged, so the full hangover is dead air.
+                        if tracker.is_stable(partial_cfg) {
+                            partial_cfg.early_silence_samples.min(silence_after)
+                        } else {
+                            silence_after
+                        }
+                    } else {
+                        silence_before
+                    };
+                    if samples_since_speech >= limit {
+                        let clip = record.take_audio();
+                        record.set_recording(false);
+                        tracing::info!(
+                            samples = clip.len(),
+                            clip_ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
+                            ms = wall.elapsed().as_millis() as u64,
+                            has_spoken,
+                            n_predicts,
+                            n_speech_hops,
+                            partials = tracker.snapshots_taken(),
+                            early = tracker.is_stable(partial_cfg),
+                            ?kind,
+                            "capture_utterance end (silence endpoint)"
+                        );
+                        return Ok(clip);
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "vad predict failed"),
+            }
+        }
+    }
+}
+
 /// Speech region inside a wake window. Empty when Silero heard no speech —
 /// do **not** fall back to the raw 2 s buffer (that enrolled room noise).
 #[derive(Debug, Clone)]
@@ -470,6 +669,8 @@ mod tests {
     use boris_sense::Vad;
 
     use super::*;
+    use crate::partials::PartialConfig;
+    use boris_inference::SpeechToText;
 
     struct ScriptedVad {
         answers: Vec<bool>,
@@ -488,6 +689,90 @@ mod tests {
             self.idx = self.idx.saturating_add(1);
             Ok(self.answers.get(i).copied().unwrap_or(false))
         }
+    }
+
+    struct ScriptedStt {
+        texts: Vec<String>,
+        idx: usize,
+        calls: u32,
+        support: bool,
+        fail: bool,
+    }
+
+    impl SpeechToText for ScriptedStt {
+        fn transcribe(&mut self, _: &[f32]) -> boris_core::Result<String> {
+            Ok(String::new())
+        }
+
+        fn supports_partials(&self) -> bool {
+            self.support
+        }
+
+        fn transcribe_partial(&mut self, _: &[f32]) -> boris_core::Result<String> {
+            self.calls = self.calls.saturating_add(1);
+            if self.fail {
+                return Err(boris_core::Error::other("partial down"));
+            }
+            let i = self.idx.min(self.texts.len().saturating_sub(1));
+            self.idx = self.idx.saturating_add(1);
+            Ok(self.texts.get(i).cloned().unwrap_or_default())
+        }
+    }
+
+    fn streaming_cfg() -> PartialConfig {
+        PartialConfig {
+            enabled: true,
+            min_samples: VAD_WINDOW_SIZE,
+            interval_samples: VAD_WINDOW_SIZE,
+            max_partials_per_turn: 10,
+            stability_needed: 2,
+            early_silence_samples: duration_to_samples(
+                std::time::Duration::from_millis(350),
+                AUDIO_TARGET_RATE,
+            ),
+        }
+    }
+
+    fn run_streaming(
+        answers: Vec<bool>,
+        hops: usize,
+        texts: Vec<String>,
+        support: bool,
+        fail: bool,
+    ) -> (boris_core::AudioBuffer, Vec<String>, u32) {
+        let (mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        for _ in 0..hops {
+            mic_tx
+                .send(Arc::from(vec![0.0f32; VAD_WINDOW_SIZE]))
+                .expect("send hop");
+        }
+        let mut vad = ScriptedVad {
+            answers,
+            idx: 0,
+            reset_count: 0,
+        };
+        let mut stt = ScriptedStt {
+            texts,
+            idx: 0,
+            calls: 0,
+            support,
+            fail,
+        };
+        let mut partials = Vec::new();
+        let mut running = true;
+        let clip = capture_utterance_with_partials(
+            &mic_rx,
+            &mut vad,
+            &cmd_rx,
+            &mut running,
+            CaptureKind::AfterWake,
+            &streaming_cfg(),
+            &mut stt,
+            |text, _| partials.push(text.to_string()),
+        )
+        .expect("streaming capture should endpoint");
+        (clip, partials, stt.calls)
     }
 
     fn run_capture(
@@ -616,5 +901,127 @@ mod tests {
         .expect("oversized frame should contain a complete utterance");
         assert_eq!(vad.idx, hops, "every complete hop must reach Silero");
         assert_eq!(clip.len(), hops * VAD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn stable_partials_endpoint_earlier_than_unstable() {
+        // 2 speech hops, then silence. Stable transcripts ("hello" x N) must
+        // cut the trailing wait to the early budget; drifting transcripts keep
+        // the full freeform window.
+        let trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let hops = trailing + 8;
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+        answers[1] = true;
+
+        let (stable_clip, stable_partials, _) = run_streaming(
+            answers.clone(),
+            hops,
+            vec!["hello".into(), "hello".into(), "hello".into()],
+            true,
+            false,
+        );
+        // Every snapshot differs → never stable → full hangover.
+        let drifting: Vec<String> = (0..40).map(|i| format!("candidate {i}")).collect();
+        let (drifting_clip, _, _) = run_streaming(answers, hops, drifting, true, false);
+        assert!(
+            !stable_partials.is_empty(),
+            "speech must produce live partials"
+        );
+        assert!(
+            stable_clip.len() < drifting_clip.len(),
+            "stable={} drifting={}",
+            stable_clip.len(),
+            drifting_clip.len()
+        );
+    }
+
+    #[test]
+    fn backend_without_partial_support_behaves_like_plain_capture() {
+        let trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let hops = trailing + 8;
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+        let (clip, partials, calls) =
+            run_streaming(answers, hops, vec!["hello".into()], false, false);
+        assert!(partials.is_empty());
+        assert_eq!(calls, 0);
+        assert_eq!(clip.len(), (trailing + 1) * VAD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn partial_decode_errors_do_not_fail_capture() {
+        let trailing = vad_silence_samples().div_ceil(VAD_WINDOW_SIZE);
+        let hops = trailing + 8;
+        let mut answers = vec![false; hops];
+        answers[0] = true;
+        let (clip, partials, _) = run_streaming(answers, hops, vec!["hello".into()], true, true);
+        assert!(partials.is_empty(), "errored partials must not publish");
+        assert_eq!(clip.len(), (trailing + 1) * VAD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn utterance_cap_defaults_parses_and_clamps() {
+        assert_eq!(resolve_max_secs(None), 30);
+        assert_eq!(resolve_max_secs(Some("".into())), 30);
+        assert_eq!(resolve_max_secs(Some("abc".into())), 30);
+        assert_eq!(resolve_max_secs(Some("60".into())), 60);
+        assert_eq!(resolve_max_secs(Some("  90  ".into())), 90);
+        assert_eq!(resolve_max_secs(Some("5".into())), 15);
+        assert_eq!(resolve_max_secs(Some("0".into())), 15);
+        assert_eq!(resolve_max_secs(Some("600".into())), 180);
+        assert_eq!(
+            max_utterance_secs(CaptureKind::AwaitConfirm),
+            8,
+            "confirms stay short regardless of env"
+        );
+        // Env-dependent: only assert the default when the tester (or host)
+        // hasn't set an override.
+        if std::env::var(MAX_UTTERANCE_SECS_ENV).is_err() {
+            assert_eq!(max_utterance_secs(CaptureKind::AfterWake), 30);
+            assert_eq!(max_utterance_secs(CaptureKind::BargeIn), 30);
+        }
+    }
+
+    #[test]
+    fn confirm_captures_skip_prefix_decodes() {
+        // Even with a partial-capable backend, short yes/no captures must not
+        // burn decodes on two-word answers.
+        let (mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        for _ in 0..30 {
+            mic_tx
+                .send(Arc::from(vec![0.0f32; VAD_WINDOW_SIZE]))
+                .expect("send hop");
+        }
+        let mut answers = vec![false; 30];
+        answers[0] = true;
+        let mut vad = ScriptedVad {
+            answers,
+            idx: 0,
+            reset_count: 0,
+        };
+        let mut stt = ScriptedStt {
+            texts: vec!["yes".into()],
+            idx: 0,
+            calls: 0,
+            support: true,
+            fail: false,
+        };
+        let mut partials = Vec::new();
+        let mut running = true;
+        capture_utterance_with_partials(
+            &mic_rx,
+            &mut vad,
+            &cmd_rx,
+            &mut running,
+            CaptureKind::AwaitConfirm,
+            &streaming_cfg(),
+            &mut stt,
+            |text, _| partials.push(text.to_string()),
+        )
+        .expect("confirm capture should endpoint");
+        assert!(partials.is_empty());
+        assert_eq!(stt.calls, 0);
     }
 }

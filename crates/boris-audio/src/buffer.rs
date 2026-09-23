@@ -206,6 +206,15 @@ impl RecordingBuffer {
         self.buffer.drain(..).collect()
     }
 
+    /// Copy all samples without disturbing the recording.
+    ///
+    /// Used for live STT partials: the engine snapshots the growing prefix
+    /// mid-utterance while capture continues. Callers must still
+    /// [`Self::take_audio`] the final clip at endpoint.
+    pub fn snapshot(&self) -> AudioBuffer {
+        self.buffer.range(..).copied().collect()
+    }
+
     /// Drop samples without returning them.
     pub fn clear(&mut self) {
         self.buffer.clear();
@@ -302,5 +311,18 @@ mod tests {
         // Next idle push slides to pre-roll capacity.
         r.push(&[6.0]);
         assert_eq!(r.take_audio(), vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn snapshot_copies_without_draining() {
+        let mut r = RecordingBuffer::new(4, 20);
+        r.set_recording(true);
+        r.push(&[1.0, 2.0, 3.0]);
+        assert_eq!(r.snapshot(), vec![1.0, 2.0, 3.0]);
+        // Recording continues undisturbed.
+        r.push(&[4.0]);
+        assert_eq!(r.snapshot(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(r.take_audio(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(r.is_empty());
     }
 }

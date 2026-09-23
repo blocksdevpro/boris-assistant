@@ -44,7 +44,7 @@ use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
     push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
 };
-use message_parse::{extract_reply_text, parse_raw_tool_calls};
+use message_parse::{extract_reply_text, extract_tool_note, parse_raw_tool_calls};
 use round::{
     cancelled, complete_round, ensure_spoken_reply_at_cap, should_reenter_finish_gate,
     tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
@@ -198,6 +198,9 @@ pub async fn agent_loop_with_budget(
                 role: Role::Assistant,
                 preview: format!("{} tool call(s)", batch.len()),
             });
+            if let Some(text) = extract_tool_note(&response) {
+                emit(AgentEvent::ToolNote { text });
+            }
 
             let raw_calls = parse_raw_tool_calls(batch);
             // B11: detect unknown-only batches before execution for the breaker.
@@ -1010,6 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn loop_runs_parallel_safe_tools_then_speaks() {
         use crate::tool::{ToolError, ToolMeta};
+        use std::sync::Arc;
 
         struct Alpha;
         #[async_trait]
@@ -1063,7 +1067,7 @@ mod tests {
             responses: Mutex::new(vec![
                 json!({
                     "role": "assistant",
-                    "content": null,
+                    "content": "I'll run the two independent checks, then report what they found.",
                     "tool_calls": [
                         {
                             "id": "c1",
@@ -1090,6 +1094,11 @@ mod tests {
         let tools: Vec<std::sync::Arc<dyn Tool>> =
             vec![std::sync::Arc::new(Alpha), std::sync::Arc::new(Beta)];
         let config = AgentLoopConfig::default();
+        let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+        let events_out = events.clone();
+        let emit: EmitFn = Arc::new(move |event| {
+            events_out.lock().unwrap().push(event);
+        });
 
         let state = LoopState {
             context: &mut context,
@@ -1106,7 +1115,7 @@ mod tests {
             0,
             0,
             None,
-            None,
+            Some(emit),
             None,
             0,
         )
@@ -1118,6 +1127,16 @@ mod tests {
             vec!["alpha".to_string(), "beta".to_string()]
         );
         assert_eq!(result.tool_rounds, 1);
+        let events = events.lock().unwrap();
+        let note = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ToolNote { text } if text == "I'll run the two independent checks, then report what they found."))
+            .expect("tool note");
+        let start = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ToolExecutionStart { .. }))
+            .expect("tool start");
+        assert!(note < start);
         match result.outcome {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Both done."),
             other => panic!("unexpected {other:?}"),

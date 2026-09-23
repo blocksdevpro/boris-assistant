@@ -721,42 +721,96 @@ fn run(
             (text, 0u64, barge.interrupted_text)
         } else {
             // Hearing only while the mic is actually recording (not during STT).
-            // Preload STT in parallel — should be ready by the time capture ends.
             rt.picture.set_phase(Phase::Hearing);
-            tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
+            let partial_cfg = crate::partials::PartialConfig::from_env();
+            // Live partials need the model in place *during* capture, so they
+            // only run when STT is already warm (balanced/low_latency after
+            // the first turn). Cold turns keep the preload-then-decode path
+            // below so capture still overlaps the load.
+            let streaming = partial_cfg.enabled
+                && rt.stt.is_loaded()
+                && !matches!(capture_kind, CaptureKind::AwaitConfirm);
 
-            let stt_job = rt.stt_loader.load(rt.stt);
-            let capture =
-                hear::capture_utterance(&rt.mic, &mut rt.vad, &cmd_rx, &mut running, capture_kind);
-            turn_trace.mark("speech_end", None);
-            let (stt_owned, stt_load) = join_stt_load(stt_job);
-            rt.stt = stt_owned;
+            let clip = if streaming {
+                tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ live STT partials)");
+                let mut partial_count = 0u32;
+                let capture = hear::capture_utterance_with_partials(
+                    &rt.mic,
+                    &mut rt.vad,
+                    &cmd_rx,
+                    &mut running,
+                    capture_kind,
+                    &partial_cfg,
+                    rt.stt.as_mut(),
+                    |text, snapshot_samples| {
+                        partial_count += 1;
+                        turn_trace.mark(
+                            "stt_partial",
+                            Some(serde_json::json!({
+                                "n": partial_count,
+                                "chars": text.chars().count(),
+                                "snapshot_samples": snapshot_samples,
+                            })),
+                        );
+                        // Live overlay line; the final transcribe below stays
+                        // authoritative and republishes.
+                        rt.picture.heard = Some(text.to_string());
+                        rt.picture.publish();
+                    },
+                );
+                turn_trace.mark("speech_end", None);
+                match capture {
+                    Ok(c) => c,
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                    }) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                }
+            } else {
+                // Preload STT in parallel — should be ready by the time capture ends.
+                tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
 
-            let clip = match capture {
-                Ok(c) => c,
-                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                let stt_job = rt.stt_loader.load(rt.stt);
+                let capture = hear::capture_utterance(
+                    &rt.mic,
+                    &mut rt.vad,
+                    &cmd_rx,
+                    &mut running,
+                    capture_kind,
+                );
+                turn_trace.mark("speech_end", None);
+                let (stt_owned, stt_load) = join_stt_load(stt_job);
+                rt.stt = stt_owned;
+
+                let clip = match capture {
+                    Ok(c) => c,
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                    }) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                };
+
+                if let Err(e) = stt_load {
+                    turn_trace.mark(
+                        "stt_load_error",
+                        Some(serde_json::json!({ "error": e.to_string() })),
+                    );
+                    tracing::error!(error = %e, %turn, "stt load failed");
+                    crate::diagnostics::log_model_load_failure("parakeet", &rt.stt_model_dir, &e);
+                    let _ = rt.stt.unload();
+                    rt.picture.detail = Some(format!("stt load: {e}"));
                     follow_up_depth = 0;
-                }) {
-                    LoopReact::Continue => continue,
-                    LoopReact::Exit => return Ok(()),
-                },
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+                clip
             };
 
             if go_off_if_not_running(&mut rt, &mut sess, running) {
-                continue;
-            }
-
-            if let Err(e) = stt_load {
-                turn_trace.mark(
-                    "stt_load_error",
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                tracing::error!(error = %e, %turn, "stt load failed");
-                crate::diagnostics::log_model_load_failure("parakeet", &rt.stt_model_dir, &e);
-                let _ = rt.stt.unload();
-                rt.picture.detail = Some(format!("stt load: {e}"));
-                follow_up_depth = 0;
-                rt.picture.set_phase(Phase::Armed);
                 continue;
             }
 
@@ -881,9 +935,6 @@ fn run(
         let base_w = activity_base.clone();
         let activity_events_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let activity_events_enabled_w = activity_events_enabled.clone();
-        // Recent tool names (for "thinking · after web_search" style labels).
-        let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let recent_w = recent_tools.clone();
         let wave = std::sync::Arc::new(std::sync::Mutex::new(boris_agent::ActivityWave::default()));
         let wave_w = wave.clone();
         let thought_t = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
@@ -896,21 +947,13 @@ fn run(
             if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
-            // Track tools for post-tool thinking labels + same-kind collapse.
+            // Track consecutive tool starts for same-kind collapse.
             if let AgentEvent::ToolExecutionStart {
                 tool_name,
                 args_summary,
                 ..
             } = ev
             {
-                if let Ok(mut g) = recent_w.lock() {
-                    if !g.iter().any(|t| t == tool_name) {
-                        g.push(tool_name.clone());
-                    }
-                    while g.len() > 4 {
-                        g.remove(0);
-                    }
-                }
                 if let Ok(mut w) = wave_w.lock() {
                     note_tool_start(&mut w, tool_name, args_summary);
                 }
@@ -942,6 +985,16 @@ fn run(
                     }
                 }
             }
+            if let AgentEvent::ToolNote { text } = ev {
+                let Ok(mut base) = base_w.lock() else {
+                    return;
+                };
+                base.thinking = Some(text.clone());
+                let mut snap = base.clone();
+                snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = activity_tx.send(snap);
+                return;
+            }
             if let AgentEvent::Reasoning { preview } = ev {
                 let Ok(mut base) = base_w.lock() else {
                     return;
@@ -970,33 +1023,29 @@ fn run(
                 } else if snap.activity.is_none() {
                     snap.activity = Some("thinking…".into());
                 }
+                base.activity = snap.activity.clone();
                 snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let _ = activity_tx.send(snap);
                 return;
             }
-            // New LLM round or a tool start — drop stale thoughts so the chip
-            // and live preview don't fight.
+            // Confirmation and typed input replace the current note.
             if matches!(
                 ev,
-                AgentEvent::TurnStart { .. }
-                    | AgentEvent::ToolExecutionStart { .. }
-                    | AgentEvent::NeedsConfirmation { .. }
-                    | AgentEvent::NeedsInput { .. }
+                AgentEvent::NeedsConfirmation { .. } | AgentEvent::NeedsInput { .. }
             ) {
                 if let Ok(mut base) = base_w.lock() {
                     base.thinking = None;
                 }
             }
-            let tools_snapshot = recent_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
             let wave_snapshot = wave_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            let Some(label) = activity_label(ev, &tools_snapshot, &wave_snapshot) else {
+            let Some(label) = activity_label(ev, &wave_snapshot) else {
                 return;
             };
-            let Ok(base) = base_w.lock() else {
+            let Ok(mut base) = base_w.lock() else {
                 return;
             };
+            base.activity = Some(label);
             let mut snap = base.clone();
-            snap.activity = Some(label);
             snap.seq = activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = activity_tx.send(snap);
         });

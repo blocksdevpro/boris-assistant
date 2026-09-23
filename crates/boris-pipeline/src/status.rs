@@ -77,7 +77,7 @@ pub struct StatusPicture {
     /// Compact progressive status (tool name, confirm summary) for the overlay.
     #[serde(default)]
     pub activity: Option<String>,
-    /// Live model reasoning tail while Thinking. Display-only; never spoken.
+    /// Live model reasoning or a tool progress note. Display-only; never spoken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
     /// Estimated context tokens used (chars/4 heuristic).

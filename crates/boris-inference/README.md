@@ -60,6 +60,9 @@ impl TextToSpeech for MyTts {
 4. Map missing/invalid model paths → `Error::config(...)`.
 5. Empty audio → `Ok("")` (never panic).
 6. Prefer lazy-load *or* clear error if unloaded — document which.
+7. Opt into live partials with `supports_partials() -> true` when a prefix
+   re-decode is cheap enough to run mid-utterance (offline models keep the
+   default `transcribe_partial`, which re-decodes via `transcribe`).
 
 ### TTS (`TextToSpeech`)
 

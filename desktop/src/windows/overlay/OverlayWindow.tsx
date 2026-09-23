@@ -431,7 +431,7 @@ export function OverlayWindow() {
           </p>
           {surfaceReady && thought ? (
             <p className="sr-only" aria-live="off">
-              Live reasoning: {thought}
+              Boris is working: {thought}
             </p>
           ) : null}
         </div>

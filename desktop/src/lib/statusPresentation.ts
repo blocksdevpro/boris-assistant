@@ -139,14 +139,8 @@ export function humanizeActivity(
     }
     if (/^calling tools$/i.test(rest)) return "About to run tools…";
     if (/^next action$/i.test(rest)) return "Choosing next action…";
-    const after = rest.match(/^after\s+(.+)$/i);
-    if (after) {
-      const names = after[1]!
-        .split(",")
-        .map((s) => friendlyTool(s.trim()))
-        .filter(Boolean)
-        .join(", ");
-      return names ? `Thinking after ${names}…` : "Choosing next action…";
+    if (/^after\s+.+/i.test(rest)) {
+      return "Checking tool results…";
     }
     return clip(capitalize(rest), 56);
   }
@@ -504,7 +498,7 @@ export function pickOverlayPresence(
   return { primary, secondary };
 }
 
-/** Live reasoning tail for the island. Hidden once a spoken reply exists. */
+/** Live thought or tool note for the island. Hidden once a spoken reply exists. */
 export function overlayThinkingText(status: StatusPicture): string | null {
   if (bargeInStage(status.activity)) return null;
   if (status.phase !== "Thinking") return null;
@@ -627,11 +621,12 @@ export function conversationLines(status: StatusPicture): ConversationLine[] {
   if (phase === "Thinking") {
     if (heard) lines.push({ kind: "you", text: heard });
     const thought = status.thinking?.trim() ?? "";
+    if (activityLine && !isEchoOfThinking(activityLine)) {
+      lines.push({ kind: "status", text: activityLine });
+    }
     if (thought) {
       lines.push({ kind: "thought", text: thought });
-    } else if (activityLine) {
-      lines.push({ kind: "status", text: activityLine });
-    } else {
+    } else if (!activityLine || isEchoOfThinking(activityLine)) {
       lines.push({ kind: "status", text: "Working…" });
     }
     if (said) lines.push({ kind: "boris", text: said });

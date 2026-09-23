@@ -42,6 +42,7 @@ pub mod env_util;
 pub mod error;
 pub mod hear;
 pub mod liveness;
+pub mod partials;
 pub mod paths;
 pub mod prompt;
 pub mod settings;

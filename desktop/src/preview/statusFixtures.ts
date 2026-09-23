@@ -103,6 +103,7 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     phase: "Thinking",
     heard: "Check the forecast before my trip.",
     activity: "tool · Searching weather in Bengaluru",
+    thinking: "I'll check the forecast before suggesting a departure time.",
     turn: "preview-tool",
   }),
   fixture("tool-failure", "Thinking · tool failed", {

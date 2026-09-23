@@ -76,7 +76,7 @@ export type StatusPicture = {
   turn?: string | null;
   /** Progressive tool / confirm chip (compact). */
   activity?: string | null;
-  /** Live model reasoning tail while Thinking. Display-only. */
+  /** Live model reasoning or a tool progress note. Display-only. */
   thinking?: string | null;
   /** Provider-reported context tokens, or a local estimate when flagged below. */
   context_used?: number | null;

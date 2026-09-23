@@ -181,6 +181,11 @@ still match the catalog hash.
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
+| `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
+| `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |
+| `BORIS_STT_PARTIAL_MIN_MS` | Recorded audio before the first partial, 500–10000 ms (default 1500) |
+| `BORIS_STT_PARTIAL_MAX` | Prefix re-decodes per turn, 1–24 (default 3) |
+| `BORIS_MAX_UTTERANCE_SECS` | Freeform capture cap in seconds, 15–180 (default 30; confirms stay 8) |
 | `BORIS_LOG` / `RUST_LOG` | Logging filters (host) |
 
 ## Features

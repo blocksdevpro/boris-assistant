@@ -104,12 +104,18 @@ describe("overlay preview fixtures", () => {
     });
   });
 
-  it("streams reasoning on the thinking island, not the tool chip", () => {
+  it("shows a tool note beside live tool activity", () => {
     const thinking = getStatusFixture("thinking")!;
     expect(overlayStageMode(thinking)).toBe("thought");
     expect(overlayThinkingText(thinking)).toMatch(/spoken brief/i);
-    expect(overlayThinkingText(getStatusFixture("thinking-tool")!)).toBeNull();
-    expect(overlayStageMode(getStatusFixture("thinking-tool")!)).toBe("thought");
+    const tool = getStatusFixture("thinking-tool")!;
+    expect(overlayThinkingText(tool)).toMatch(/check the forecast/i);
+    expect(overlayStageMode(tool)).toBe("thought");
+    expect(conversationLines(tool)).toEqual([
+      { kind: "you", text: "Check the forecast before my trip." },
+      { kind: "status", text: "Searching weather in Bengaluru" },
+      { kind: "thought", text: "I'll check the forecast before suggesting a departure time." },
+    ]);
     expect(overlayStageMode(getStatusFixture("ready")!)).toBe("presence");
     expect(overlayStageMode(getStatusFixture("artifact-card")!)).toBe("card");
     const typed = getStatusFixture("typed-input")!;

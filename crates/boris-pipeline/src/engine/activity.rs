@@ -9,23 +9,16 @@ use boris_agent::{describe_batch, describe_tool, ActivityWave, AgentEvent, Role,
 /// Wire prefixes for the overlay chip. The UI parses on these — `mod.rs` must
 /// use [`is_tool_chip`] instead of re-stating string prefixes.
 pub(super) const TOOL_PREFIX: &str = "tool · ";
-pub(super) const DONE_PREFIX: &str = "done · ";
-
 /// True while the chip shows live tool work (not thinking/confirm/input).
 /// Used to avoid clobbering a tool label with the think timer.
 pub(super) fn is_tool_chip(activity: &str) -> bool {
-    activity.starts_with(TOOL_PREFIX) || activity.starts_with(DONE_PREFIX)
+    activity.starts_with(TOOL_PREFIX)
 }
 
 /// Compact tool-activity label for the overlay chip.
 ///
-/// `recent_tools` (most recent last) enriches post-tool thinking labels.
 /// `wave` counts consecutive same-kind starts so parallel reads collapse.
-pub(super) fn activity_label(
-    ev: &AgentEvent,
-    recent_tools: &[String],
-    wave: &ActivityWave,
-) -> Option<String> {
+pub(super) fn activity_label(ev: &AgentEvent, wave: &ActivityWave) -> Option<String> {
     match ev {
         AgentEvent::ToolExecutionStart {
             tool_name,
@@ -96,23 +89,6 @@ pub(super) fn activity_label(
                 Some(format!("thinking · {n} tools next"))
             }
         }
-        AgentEvent::TurnStart { round } if *round > 0 => {
-            if recent_tools.is_empty() {
-                Some("thinking · next action".into())
-            } else {
-                let names = recent_tools
-                    .iter()
-                    .rev()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Some(format!("thinking · after {names}"))
-            }
-        }
         AgentEvent::NeedsConfirmation { pending } => {
             let phrase = describe_tool(&pending.name, &pending.args_summary, Tense::Present);
             Some(format!("confirm · {phrase}"))
@@ -159,14 +135,15 @@ mod tests {
 
     #[test]
     fn activity_label_tools() {
-        let empty: &[String] = &[];
+        assert!(is_tool_chip("tool · Reading file.rs"));
+        assert!(!is_tool_chip("done · Read file.rs"));
         let start = AgentEvent::ToolExecutionStart {
             call_id: "1".into(),
             tool_name: "bash".into(),
             args_summary: String::new(),
         };
         assert_eq!(
-            activity_label(&start, empty, &wave_for(&["bash"])).as_deref(),
+            activity_label(&start, &wave_for(&["bash"])).as_deref(),
             Some("tool · Running a command")
         );
 
@@ -176,7 +153,7 @@ mod tests {
             args_summary: "bash (command=ls -la)".into(),
         };
         assert_eq!(
-            activity_label(&start_args, empty, &wave_for(&["bash"])).as_deref(),
+            activity_label(&start_args, &wave_for(&["bash"])).as_deref(),
             Some("tool · Running ls -la")
         );
 
@@ -186,7 +163,7 @@ mod tests {
             args_summary: "web_search (query=Uttam LinkedIn Dhanbad)".into(),
         };
         assert_eq!(
-            activity_label(&search, empty, &wave_for(&["web_search"])).as_deref(),
+            activity_label(&search, &wave_for(&["web_search"])).as_deref(),
             Some("tool · Searching Uttam LinkedIn Dhanbad")
         );
 
@@ -198,7 +175,7 @@ mod tests {
                     .into(),
         };
         assert_eq!(
-            activity_label(&read, empty, &wave_for(&["file_read"])).as_deref(),
+            activity_label(&read, &wave_for(&["file_read"])).as_deref(),
             Some("tool · Reading finish_gate.rs (471-520)")
         );
 
@@ -210,7 +187,6 @@ mod tests {
         assert_eq!(
             activity_label(
                 &batch,
-                empty,
                 &wave_for(&["file_read", "file_read", "file_read", "file_read"])
             )
             .as_deref(),
@@ -224,7 +200,7 @@ mod tests {
             duration_ms: 1,
         };
         assert_eq!(
-            activity_label(&end_ok, empty, &wave_for(&["bash"])).as_deref(),
+            activity_label(&end_ok, &wave_for(&["bash"])).as_deref(),
             Some("done · Ran a command")
         );
 
@@ -235,30 +211,22 @@ mod tests {
             duration_ms: 1,
         };
         assert_eq!(
-            activity_label(&end_fail, empty, &wave_for(&["bash"])).as_deref(),
+            activity_label(&end_fail, &wave_for(&["bash"])).as_deref(),
             Some("fail · Ran a command")
         );
 
         let noise = AgentEvent::TurnStart { round: 0 };
-        assert!(activity_label(&noise, empty, &ActivityWave::default()).is_none());
+        assert!(activity_label(&noise, &ActivityWave::default()).is_none());
 
         let round2 = AgentEvent::TurnStart { round: 1 };
-        assert_eq!(
-            activity_label(&round2, empty, &ActivityWave::default()).as_deref(),
-            Some("thinking · next action")
-        );
-        let after = vec!["web_search".into(), "web_fetch".into()];
-        assert_eq!(
-            activity_label(&round2, &after, &ActivityWave::default()).as_deref(),
-            Some("thinking · after web_search, web_fetch")
-        );
+        assert!(activity_label(&round2, &ActivityWave::default()).is_none());
 
         let tools_next = AgentEvent::MessageEnd {
             role: Role::Assistant,
             preview: "3 tool call(s)".into(),
         };
         assert_eq!(
-            activity_label(&tools_next, empty, &ActivityWave::default()).as_deref(),
+            activity_label(&tools_next, &ActivityWave::default()).as_deref(),
             Some("thinking · 3 tools next")
         );
 
@@ -266,7 +234,7 @@ mod tests {
             preview: "Need to search first.".into(),
         };
         assert!(
-            activity_label(&thoughts, empty, &ActivityWave::default()).is_none(),
+            activity_label(&thoughts, &ActivityWave::default()).is_none(),
             "reasoning uses StatusPicture.thinking, not the activity chip"
         );
 
@@ -277,7 +245,7 @@ mod tests {
             byte_total: Some(200),
         };
         assert!(
-            activity_label(&flood, empty, &wave_for(&["bash"])).is_none(),
+            activity_label(&flood, &wave_for(&["bash"])).is_none(),
             "stdout chunks must not clobber the command line"
         );
     }

@@ -29,6 +29,21 @@ Further work on `next` after [1.2.0-beta.2].
   it into turn accounting (`TokenAccounting::merge`).
 - A monotonic `seq` counter on every `StatusPicture` snapshot so the UI can
   order and dedupe latest-wins across the engine and per-turn publishers.
+- Live capture feedback re-decodes the growing audio prefix when warm STT
+  supports partials. The overlay shows advisory text during freeform capture;
+  the final transcription still drives the turn. Stable partials can shorten
+  the silence wait. Confirm captures stay short and skip partial decoding.
+- The overlay shows the current tool operation and live progress notes during
+  a turn.
+- `collect_input` now supports numbered choices with up to four spoken options,
+  alongside exact values, secrets, and large pastes.
+- Truncated tool results can be reread without rerunning the tool. Session
+  binding stores the pre-context-truncation result, up to 256K characters,
+  under `tool_outputs/`; `get_tool_output` reads it by path and offset. The
+  store removes old files on a best-effort basis after seven days.
+- Optional host integration for stdio MCP servers. Read-suggestive tools
+  register by default; writes require host opt-in, and every remote call still
+  requires confirmation.
 
 ### Changed
 
@@ -96,6 +111,19 @@ Further work on `next` after [1.2.0-beta.2].
   550 ms); yes/no confirm stays at 250 ms.
 - Tools that collect typed input now force the sequential HITL-safe path so
   remaining calls are preserved across the `NeedsInput` pause.
+- Confirmation and input prompts use short, speakable tool descriptions. File
+  tools suggest close sibling names when a spoken path does not match. Image
+  and PDF reads return a bounded file description for on-screen opening; they
+  do not extract pixels or PDF text. `web_fetch` retries likely bot-blocked
+  403 or 503 responses once.
+- Freeform capture length is configurable from 15 to 180 seconds with
+  `BORIS_MAX_UTTERANCE_SECS` (default 30); confirmation capture remains capped
+  at 8 seconds. Live partial decoding can be disabled with
+  `BORIS_STT_PARTIALS=0` and tuned with the other `BORIS_STT_PARTIAL_*` values.
+- The OpenRouter client normalizes assistant content and uses a blocking
+  completion fallback when a stream has no usable text or tool call. The agent
+  loop also reminds the model of available tools after repeated unknown-tool
+  rounds.
 - Overlay window parking uses one stable top edge so the island grows
   downward instead of jumping; startup splash, Home, Teach Voice, Settings,
   and overlay transitions are faster and share one motion helper.
@@ -117,6 +145,11 @@ Further work on `next` after [1.2.0-beta.2].
   error `detail`; confirm TTS synth failures eagerly unload the model, and
   confirm capture/STT/settle failures are logged with deny-by-default
   instead of silent empty strings.
+- Engine and agent events now update one shared status snapshot before the
+  host assigns the public sequence number. The host drops snapshots from old
+  engine generations, so late tool activity cannot overwrite newer phase,
+  device, input, artifact, or fault state. Overlay text and card transitions
+  also keep their layout through status changes.
 
 ### Removed
 

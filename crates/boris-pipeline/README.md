@@ -51,8 +51,17 @@ a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
  mark devices dead until the next Start. Reusable STT
  and TTS loader threads live for the engine lifetime instead of being recreated
  per turn. Status is pushed for the UI (latest-wins by monotonic `seq`;
- activity is capped at 160 chars, the reasoning tail at 512, and the thinking
- tail is kept across Hearing/Reading so the overlay does not flicker).
+activity is capped at 160 chars, the reasoning tail at 512, and the thinking
+tail is kept across Hearing/Reading so the overlay does not flicker).
+Engine and agent event publishers update the same locked snapshot before it is
+sequenced. The desktop drops snapshots from old engine generations.
+
+When Parakeet is warm, freeform capture can re-decode the recorded audio prefix
+and show interim text in the overlay. Those partials are advisory; the final
+decode remains authoritative. Stable partials can shorten the silence wait.
+Confirmation captures skip partial decoding. Set `BORIS_STT_PARTIALS=0` to
+disable this behavior. See the environment variable table for cadence and
+capture-length controls.
 
  `low_memory` releases the outgoing model at each STT→TTS handoff (including
  confirm captures). `balanced`
@@ -112,7 +121,7 @@ Override root with `BORIS_HOME`.
     silero/            # optional seed of embedded Silero VAD ONNX
     livekit/           # optional seed of embedded wake classifier
     speaker/           # optional CAM++ speaker model
-  sessions/desktop/    # voice session transcripts + artifacts/
+  sessions/desktop/    # transcripts, artifacts/, and tool_outputs/
   memory/              # memory.sqlite canonical store + optional notes.jsonl
   skills/              # skill playbooks
   logs/                # boris.YYYY-MM-DD.log

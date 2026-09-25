@@ -114,6 +114,41 @@ technical writing, mentoring, and skill creation. User intent controls whether
 a matching playbook is loaded, and optional steps such as todos, research, or
 artifacts are used only when they help produce the requested result.
 
+## Tool inputs and results
+
+`collect_input` supports exact values, secrets, large pastes, and numbered
+choices. A choice can include up to four short options for the host to speak;
+the returned number is resolved to its option before the agent resumes. Hosts
+should bind secrets to the masked input field. Secret observations are redacted
+when transcripts are persisted.
+
+When a host binds a session with `Agent::bind_session`, tool results that exceed
+their result-size budget are saved under that session's `tool_outputs/` directory.
+The agent receives a `get_tool_output` hint and can reread the saved result by
+path and character offset instead of running the tool again. The store caps each
+file at 256K characters and removes files older than seven days on a best-effort
+basis.
+
+File tools offer close sibling-name suggestions when a path is not found. They
+do not choose a suggested path automatically. `file_read` recognizes common
+image and PDF formats, but it does not inspect image pixels or extract PDF
+text; the host can open the file on screen. `web_fetch` retries a likely
+Cloudflare or bot-protection response once.
+
+## Optional MCP host integration
+
+Hosts can load stdio MCP server definitions from `~/.boris/mcp.json`, discover
+their tools with `discover_mcp_tools`, and register them with
+`register_mcp_tools`. By default, only read-suggestive tool names register.
+The file accepts either a `servers` array or an `mcpServers` object. Set
+`allow_writes` in a server config to register other names. MCP calls use the
+network permission, stay outside the read-only class, and always require human
+confirmation. Capability presets still filter them. Results are marked as
+untrusted data and truncated before they enter the agent context.
+
+The Desktop host does not configure MCP servers. This API is for hosts that
+choose to add that integration.
+
 ## Context, prompt hardening, and compaction
 
 Trusted system content stays separate from untrusted user-role data:
@@ -172,9 +207,9 @@ src/
   agent/               stateful host API
   loop_/               pure ReAct (complete → tools → events)
   runtime/             policy, timeout, audit, HITL, listing
-  tool/                Tool trait, ToolMeta, arg helpers, truncation
-  tools/               builtin tools (files, web, bash, notes, …)
-  session/             SessionStore + transcript + artifacts/
+  tool/                Tool trait, ToolMeta, arg helpers, truncation, output store
+  tools/               built-in tools (files, web, bash, notes) + MCP
+  session/             SessionStore + transcript + artifacts/ + tool_outputs/
   memory/              canonical ledger + legacy migration support
   skills/              load, catalog, defaults, frontmatter
   …

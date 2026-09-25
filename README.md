@@ -39,7 +39,7 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 |---|---|---|
 | **Stable** | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
 | **Beta** | [1.2.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) — NSIS |
-| **This tree** | **1.2.0-beta.2** | `next` branch — NSIS only |
+| **This tree** | **1.2.0-beta.2** | Unreleased changes after beta.2 — NSIS only |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -55,7 +55,7 @@ Windows 10 or 11, x64, with a working mic and speakers.
 
 Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → General → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
 
-Windows **1.1.0** (on `main`) ships NSIS and MSI. Pre-release betas on this `next` tree ship NSIS only because WiX/MSI cannot encode a label like `1.1.0-beta.1`.
+Windows **1.1.0** (on `main`) ships NSIS and MSI. Pre-release betas ship NSIS only because WiX/MSI cannot encode labels such as `1.1.0-beta.1`.
 
 Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log`.
 
@@ -69,9 +69,10 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback, with wake barge-in while talking, thinking, or confirming
 - **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
-- **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
+- **Voice island** — always-on-top overlay with live captions, interim transcripts during capture, and current tool progress
 - **Presence orb** — a phase-aware orb on Home, the overlay, startup, and Teach Voice (listening / transcribing / thinking / searching / working / speaking / confirm / fault); honors reduced-motion with a static fallback
-- **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
+- **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos, and recovery hints for misheard file names
+- **On-screen input** — masked secrets, exact values, large pastes, and numbered choices; secrets stay out of transcripts
 - **Scoped skill playbooks** — bundled playbooks for coding, debugging, design, review, research, writing, mentoring, and skill authoring, loaded only when a request matches
 - **Async research** — background subagents with poll/join/cancel and read-only tool isolation
 - **Capability presets** — `voice_safe` / `local_power` / `full` plus path policy and human approval for risky work
@@ -271,7 +272,7 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
   config.toml      # prefs
   auth.json        # secrets (plaintext)
   models/          # STT / TTS weights
-  sessions/        # transcripts + per-session artifacts/
+  sessions/        # transcripts, artifacts/, and tool_outputs/
   memory/          # memory.sqlite canonical store + optional notes.jsonl
   skills/          # skill playbooks
   logs/            # boris.YYYY-MM-DD.log

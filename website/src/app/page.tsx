@@ -18,14 +18,43 @@ import {
   Volume2,
 } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
-import { MarketingHeader } from "@/components/marketing-header";
 import { HowItWorks } from "@/components/how-it-works";
 import { cn } from "@/lib/utils";
+import { repo, siteDescription, siteName, siteUrl } from "@/lib/site";
+import { betaRelease, stableRelease } from "@/lib/releases";
 
-const repo = "https://github.com/blocksdevpro/boris-assistant";
-const releases = `${repo}/releases`;
-const windowsInstaller = "/download";
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": `${siteUrl}/#website`,
+      name: siteName,
+      alternateName: "Boris",
+      url: `${siteUrl}/`,
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": `${siteUrl}/#application`,
+      name: siteName,
+      url: `${siteUrl}/`,
+      description: siteDescription,
+      applicationCategory: "ProductivityApplication",
+      operatingSystem: "Windows 10, Windows 11",
+      softwareVersion: stableRelease.version,
+      downloadUrl: stableRelease.download,
+      releaseNotes: stableRelease.url,
+      screenshot: `${siteUrl}/boris-screenshot.png`,
+      image: `${siteUrl}/boris-icon.png`,
+      license: `${repo}/blob/main/LICENSE`,
+      isAccessibleForFree: true,
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD", url: `${siteUrl}/download` },
+      sameAs: repo,
+    },
+  ],
+};
 
 function BorisMark({ className }: { className?: string }) {
   return (
@@ -56,8 +85,8 @@ function FloatingTile({
 
 export default function Home() {
   return (
-    <main className="min-h-screen overflow-x-clip bg-[#090a0c] text-[#f4f4f5] selection:bg-[#d9ff75] selection:text-[#11130c]">
-      <MarketingHeader />
+    <main id="main-content" className="min-h-screen overflow-x-clip bg-[#090a0c] text-[#f4f4f5] selection:bg-[#d9ff75] selection:text-[#11130c]">
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/</g, "\\u003c") }} />
 
       <section id="top" className="hero relative min-h-[1080px] px-5 pt-[138px] sm:pt-[148px]">
         <div className="hero-grid" aria-hidden="true" />
@@ -68,28 +97,26 @@ export default function Home() {
         <FloatingTile className="tile-search" icon={Search} />
 
         <div className="relative z-10 mx-auto flex max-w-4xl flex-col items-center text-center">
-          <a href={`${releases}/tag/v1.1.0`} target="_blank" rel="noreferrer" className="launch-note hero-enter" style={{ "--delay": "0ms" } as React.CSSProperties}>
-            <span /> Boris 1.1 is out for Windows <ArrowRight className="size-3.5" />
-          </a>
+          <Link href="/releases" className="launch-note hero-enter" style={{ "--delay": "0ms" } as React.CSSProperties}>
+            <span /> New in beta: Boris {betaRelease.version} <ArrowRight className="size-3.5" />
+          </Link>
 
           <h1 className="hero-title hero-enter" style={{ "--delay": "80ms" } as React.CSSProperties}>
-            A voice assistant
-            <br />
-            <span>that can actually help.</span>
+            Boris Assistant
           </h1>
 
           <p className="hero-copy hero-enter" style={{ "--delay": "150ms" } as React.CSSProperties}>
-            Boris listens, remembers, and gets things done on your computer. Local voice, your choice of model, and tools that ask before they act.
+            An open-source AI voice assistant for Windows. Speak naturally to search the web, work with files, and remember useful context. Speech runs locally, with your choice of AI model and approval for risky actions.
           </p>
 
           <div className="hero-actions hero-enter" style={{ "--delay": "220ms" } as React.CSSProperties}>
-            <a href={windowsInstaller} download="Boris_1.1.0_x64-setup.exe" className={cn(buttonVariants({ size: "lg" }), "primary-download")}>
+            <Link href="/download" className={cn(buttonVariants({ size: "lg" }), "primary-download")}>
               <Monitor data-icon="inline-start" /> Download for Windows
-            </a>
+            </Link>
             <a href={repo} target="_blank" rel="noreferrer" className="source-link">
               <Code2 className="size-4" /> Browse the source <ArrowRight className="size-3.5 opacity-45" />
             </a>
-            <p>Free and open source · Windows 10 and 11</p>
+            <p>Stable {stableRelease.version} · Windows 10 and 11 · Free and open source</p>
           </div>
         </div>
 
@@ -116,6 +143,21 @@ export default function Home() {
         </div>
       </section>
 
+      <section id="updates" className="section-shell release-summary">
+        <div>
+          <p className="story-label"><span /> Latest releases</p>
+          <h2>What&apos;s new in Boris</h2>
+          <p>Stable {stableRelease.version} brings faster spoken replies, background research, and result cards. The latest published beta adds evidence-backed local memory.</p>
+          <Link href="/releases" className="text-link">Read the release notes <ArrowRight size={16} /></Link>
+        </div>
+        <div>
+          <span className="channel-label">Beta {betaRelease.version}</span>
+          <h3>Memory you can search, correct, and forget.</h3>
+          <p>Facts, preferences, projects, and conversation evidence share a local SQLite store. Older memories are verified before migration finishes.</p>
+          <Link href="/download#beta" className="text-link">Explore the Windows beta <ArrowRight size={16} /></Link>
+        </div>
+      </section>
+
       <section id="how-it-works" className="section-shell py-28 sm:py-36">
         <div className="section-heading">
           <p><span /> One quiet loop</p>
@@ -131,7 +173,7 @@ export default function Home() {
           <div className="story-copy">
             <p className="story-label"><span /> Always within earshot</p>
             <h2>It shows up when you call. Then gets out of your way.</h2>
-            <p>Boris lives in a small, always-on-top voice island—not a dashboard. You see what it heard, what it is doing, and when it needs your attention.</p>
+            <p>Boris has a small, always-on-top voice island and a Home desk for longer results. You see what it heard, what it is doing, and when it needs your attention.</p>
             <ul>
               <li><Check /> Wake-word activation</li>
               <li><Check /> Live private captions</li>
@@ -178,7 +220,7 @@ export default function Home() {
           <div>
             <p className="story-label"><span /> Local where it matters</p>
             <h2 className="local-title">Your voice shouldn’t need a round trip to the cloud.</h2>
-            <p className="local-copy">Wake detection, speech recognition, and speech generation run locally. Boris only sends the assistant request to the model provider you choose.</p>
+            <p className="local-copy">Wake detection, speech recognition, and speech generation run locally. Your transcribed request and relevant conversation, memory, or tool context go to your chosen model through OpenRouter. Raw microphone audio stays on your PC.</p>
           </div>
           <div className="local-stack">
             <div><span className="stack-icon"><AudioLines /></span><span><strong>Parakeet speech-to-text</strong><small>Runs locally with ONNX</small></span><em>On device</em></div>
@@ -211,23 +253,44 @@ export default function Home() {
         </div>
       </section>
 
+      <section id="faq" className="section-shell faq-section">
+        <p className="story-label"><span /> Before you install</p>
+        <h2>Questions about Boris Assistant</h2>
+        <div className="faq-list">
+          <details>
+            <summary>Is Boris Assistant free?</summary>
+            <p>Boris is free and open source under Apache 2.0. You bring an OpenRouter API key for the AI model. Any model usage charges come from your provider.</p>
+          </details>
+          <details>
+            <summary>Does Boris work offline?</summary>
+            <p>Wake detection, speech-to-text, and spoken replies run locally after the speech models are installed. AI responses through OpenRouter and web searches need an internet connection.</p>
+          </details>
+          <details>
+            <summary>Which Windows versions can run Boris?</summary>
+            <p>The published installers support Windows 10 and Windows 11 on x64 PCs. You need a microphone for voice input and speakers or headphones for spoken replies. See the <Link href="/download">Windows download and setup guide</Link>.</p>
+          </details>
+          <details>
+            <summary>What can Boris do on my computer?</summary>
+            <p>Boris can search the web, read and work with files, search optional memory, and run system actions within its capability preset and workspace controls. Risky actions pause for your approval. Research results and code can appear as on-screen cards.</p>
+          </details>
+          <details>
+            <summary>What changes in the latest beta?</summary>
+            <p>Boris {betaRelease.version} adds a canonical local memory store and evidence-backed search, retrieval, and forgetting. Its one-time migration sends older memory to your configured LLM for refinement. See <Link href="/releases#beta">the beta release notes</Link> for migration details and how to disable it.</p>
+          </details>
+        </div>
+      </section>
+
       <section className="final-cta">
         <div className="final-ring" aria-hidden="true" />
         <div className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-5 text-center">
           <span className="final-mark"><BorisMark className="h-8 w-10" /></span>
           <h2>Talk to your computer.<br />Not around it.</h2>
           <p>Free, open source, and ready for Windows.</p>
-          <span className="release-meta">Version 1.1.0 · Windows 10 and 11</span>
-          <a href={windowsInstaller} download="Boris_1.1.0_x64-setup.exe" className={cn(buttonVariants({ size: "lg" }), "primary-download mt-8")}><Download /> Download Boris</a>
+          <span className="release-meta">Stable {stableRelease.version} · Windows 10 and 11</span>
+          <Link href="/download" className={cn(buttonVariants({ size: "lg" }), "primary-download mt-8")}><Download /> Download Boris</Link>
         </div>
       </section>
 
-      <footer>
-        <div className="mx-auto flex max-w-[1160px] flex-col items-center justify-between gap-5 px-5 py-7 sm:flex-row">
-          <div className="footer-brand"><BorisMark className="h-4 w-5" /><span>Boris</span><small>© 2026 BlocksDevPro</small></div>
-          <div className="footer-links"><a href={repo}>GitHub</a><a href={releases}>Release notes</a><a href={`${repo}/blob/main/SECURITY.md`}>Security</a><a href={`${repo}/blob/main/LICENSE`}>License</a></div>
-        </div>
-      </footer>
     </main>
   );
 }

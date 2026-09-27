@@ -46,7 +46,7 @@ export default function DownloadPage() {
           <span className="channel-label beta-label">Latest published beta</span>
           <h2 id="beta-title">Boris {betaRelease.version}</h2>
           <p>Released <time dateTime={betaRelease.date}>{betaRelease.dateLabel}</time>. {betaRelease.summary} This is a pre-release and uses an EXE installer only.</p>
-          <p>The first beta.2 launch can migrate older memory using your configured LLM. Read the <Link href="/releases#beta">migration and privacy notes</Link> before upgrading.</p>
+          <p>Upgrading from beta.1 or earlier can migrate older memory using your configured LLM. Read the <Link href="/releases#beta">migration and privacy notes</Link> before upgrading.</p>
         </div>
         <div className="download-actions">
           <a href={betaRelease.download} className={cn(buttonVariants({ size: "lg" }), "beta-download")}><Download /> Download beta EXE</a>

@@ -147,13 +147,13 @@ export default function Home() {
         <div>
           <p className="story-label"><span /> Latest releases</p>
           <h2>What&apos;s new in Boris</h2>
-          <p>Stable {stableRelease.version} brings faster spoken replies, background research, and result cards. The latest published beta adds evidence-backed local memory.</p>
+          <p>Stable {stableRelease.version} brings faster spoken replies, background research, and result cards. Beta {betaRelease.version} adds live voice feedback and more reliable confirmations.</p>
           <Link href="/releases" className="text-link">Read the release notes <ArrowRight size={16} /></Link>
         </div>
         <div>
           <span className="channel-label">Beta {betaRelease.version}</span>
-          <h3>Memory you can search, correct, and forget.</h3>
-          <p>Facts, preferences, projects, and conversation evidence share a local SQLite store. Older memories are verified before migration finishes.</p>
+          <h3>Live feedback while Boris works.</h3>
+          <p>{betaRelease.summary} A new presence orb follows the conversation, while the overlay keeps captions and current work visible.</p>
           <Link href="/download#beta" className="text-link">Explore the Windows beta <ArrowRight size={16} /></Link>
         </div>
       </section>
@@ -275,7 +275,7 @@ export default function Home() {
           </details>
           <details>
             <summary>What changes in the latest beta?</summary>
-            <p>Boris {betaRelease.version} adds a canonical local memory store and evidence-backed search, retrieval, and forgetting. Its one-time migration sends older memory to your configured LLM for refinement. See <Link href="/releases#beta">the beta release notes</Link> for migration details and how to disable it.</p>
+            <p>Boris {betaRelease.version} adds a presence orb, live transcription previews, tool progress, and more reliable confirmations and context handling. It retains evidence-backed local memory. Upgrading from beta.1 or earlier can send older memory to your configured LLM for migration. See <Link href="/releases#beta">the beta release notes</Link> for details and how to disable it.</p>
           </details>
         </div>
       </section>

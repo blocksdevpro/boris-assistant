@@ -15,6 +15,8 @@ class Page(HTMLParser):
         super().__init__()
         self.title = ""
         self.h1_count = 0
+        self.h2s = []
+        self.in_h2 = False
         self.meta = {}
         self.canonicals = []
         self.links = []
@@ -33,6 +35,9 @@ class Page(HTMLParser):
             self.in_title = True
         elif tag == "h1":
             self.h1_count += 1
+        elif tag == "h2":
+            self.h2s.append("")
+            self.in_h2 = True
         elif tag == "meta":
             self.meta[attrs.get("name", attrs.get("property"))] = attrs.get("content", "")
         elif tag == "link" and attrs.get("rel") == "canonical":
@@ -46,18 +51,22 @@ class Page(HTMLParser):
     def handle_data(self, data):
         if self.in_title:
             self.title += data
+        if self.in_h2:
+            self.h2s[-1] += data
         if self.in_schema:
             self.schema_text += data
 
     def handle_endtag(self, tag):
         if tag == "title":
             self.in_title = False
+        elif tag == "h2":
+            self.in_h2 = False
         elif tag == "script" and self.in_schema:
             self.schemas.append(json.loads(self.schema_text))
             self.in_schema = False
 
 
-def check(base, origin):
+def check(base, origin, beta_version=None):
     def normalized_url(url):
         parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, parts.fragment))
@@ -120,6 +129,15 @@ def check(base, origin):
     assert "aggregateRating" not in application and "review" not in application, "Unverified review data"
     print("PASS structured data and stable download consistency")
 
+    if beta_version:
+        for path in ("/download", "/releases"):
+            assert f"Boris {beta_version}" in pages[path].h2s, f"{path}: wrong beta heading"
+        repo = "https://github.com/blocksdevpro/boris-assistant"
+        asset = f"{repo}/releases/download/v{beta_version}/Boris_{beta_version}_x64-setup.exe"
+        assert asset in pages["/download"].links, "Beta installer does not match the release"
+        assert f"{repo}/releases/tag/v{beta_version}" in pages["/releases"].links, "Wrong beta release link"
+        print(f"PASS published beta {beta_version}: headings, installer, and release link")
+
     for path in images:
         headers, data = fetch(path)
         assert "image/png" in headers.get("Content-Type", ""), f"{path}: not a PNG"
@@ -140,5 +158,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", nargs="?", default="http://127.0.0.1:3000")
     parser.add_argument("--origin", default="https://boris.blocksdev.pro")
+    parser.add_argument("--beta-version", help="Expected published beta version")
     args = parser.parse_args()
-    check(args.base.rstrip("/"), args.origin.rstrip("/"))
+    check(args.base.rstrip("/"), args.origin.rstrip("/"), args.beta_version)

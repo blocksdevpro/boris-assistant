@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.2.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) — NSIS |
-| **This tree** | **1.2.0-beta.2** | Unreleased changes after beta.2 — NSIS only |
+| **Beta** | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — NSIS |
+| **This tree** | **1.2.0-beta.3** | Beta release source — NSIS only |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -291,7 +291,7 @@ conversation evidence separate from small retrievable facts, preferences,
 projects, and past events. `memory_search` retrieves active evidence-backed
 records; `forget_memory` permanently removes explicitly requested memory.
 
-On the first beta.2 launch, Boris imports the old `profile.json`, global and
+On the first launch of beta.2 or later, Boris imports the old `profile.json`, global and
 workspace `MEMORY.md`, and legacy session `memory.md` files. Each excerpt is
 refined with your configured LLM and written into the SQLite store. Only after
 every source has been refined and verified does Boris delete those obsolete
@@ -299,7 +299,7 @@ files and the old derived `search.sqlite` index. A failed or timed-out
 refinement leaves all legacy files untouched for a later retry.
 
 The one-time refinement sends historical memory to the LLM provider you have
-configured for Boris. Set `BORIS_MEMORY=0` before the first beta.2 launch to
+configured for Boris. Set `BORIS_MEMORY=0` before the first launch of beta.2 or later to
 skip both canonical memory and migration.
 
 ## Agent skills
@@ -344,6 +344,6 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
 | Current stable | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
-| Current beta | [1.2.0-beta.2](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2) — canonical Boris memory with verified legacy import and AI refinement |
+| Current beta | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — presence orb, live transcription and tool progress, safer confirmations, and context reliability |
 | Git `main` | Stable line (`1.1.x`) |
-| Git `next` | Beta line — this tree is `1.2.0-beta.2` |
+| Git `next` | Beta release line; this checkout is `1.2.0-beta.3` |

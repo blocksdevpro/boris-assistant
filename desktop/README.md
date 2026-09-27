@@ -27,8 +27,9 @@ Windows **1.1.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
 `1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
-This **`next`** tree is **`1.2.0-beta.2`** (NSIS only). Download the signed
-installer from the [beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2).
+This tree is **`1.2.0-beta.3`** (NSIS only). Download the signed installer from
+[beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3).
+Release notes are in [`.tauri/releases/v1.2.0-beta.3.md`](../.tauri/releases/v1.2.0-beta.3.md).
 Stable **`1.1.0`** lives on **`main`**. See [`.tauri/README.md`](../.tauri/README.md).
 
 ## App updates (Tauri updater)

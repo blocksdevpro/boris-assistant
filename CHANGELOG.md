@@ -5,10 +5,21 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Further work on `next` after [1.2.0-beta.2].
+No changes yet.
+
+## [1.2.0-beta.3] - 2026-09-27
+
+Third 1.2 beta. Stable **1.1.x** stays on `main`. Windows x64, NSIS only.
 
 ### Added
 
+- A `bun run verify:release` check in `desktop/` validates product versions,
+  installer targets, the updater public key, and release documentation before
+  signing. `bun run release:manifest <UTC-timestamp>` creates the updater
+  manifest from the built installer and its signature.
+- Product website download and release pages, setup FAQs, canonical URLs,
+  structured data, crawl files, and working social preview images. Published
+  release listings remain pinned until the new beta is uploaded.
 - A desktop architecture guide at `desktop/docs/ARCHITECTURE.md` maps the UI,
   IPC bridge, Tauri host, and paths for tracing common behavior.
 - **Bundled agent playbooks** for code changes, root-cause debugging, code
@@ -514,6 +525,7 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.2.0-beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3
 [1.2.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2
 [1.2.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1
 [1.1.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0

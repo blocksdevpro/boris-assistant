@@ -59,6 +59,37 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/boris.key)"
 Tauri writes updater artifacts next to the normal installers (e.g.
 `Boris_*_x64-setup.exe` + `.sig` under `target/release/bundle/nsis/`).
 
+### Release build: 1.2.0-beta.3
+
+The product manifests and Cargo lockfile are set to `1.2.0-beta.3`.
+[Release notes](releases/v1.2.0-beta.3.md) describe the versioned GitHub
+pre-release. Run the signed build above from this checkout. Expected
+artifacts are `Boris_1.2.0-beta.3_x64-setup.exe` and its `.sig` file.
+
+Run `bun run verify:release` from `desktop/` before signing. It checks product
+versions, the locked Cargo metadata, installer targets, the updater public key,
+and the release-note and changelog headings. It does not read the private key
+or create a signed installer.
+
+After signing and testing the installer:
+
+1. Confirm the changelog date matches the actual publication date and its
+   beta.3 entry links to the versioned release.
+2. Commit the prepared source and land it on `next` before tagging. The tag
+   `v1.2.0-beta.3` must identify the source used for the signed build. Rebuild
+   and sign again if application code changes before tagging.
+3. Run `bun run release:manifest <UTC-timestamp>` from `desktop/`, with the
+   publication time in ISO 8601 form, such as `2026-09-27T09:00:00Z`. It creates
+   `latest.json` beside the installer using the product version, release notes,
+   and complete generated `.sig` contents. Verify the signature before uploading.
+   Its Windows x64 URL is
+   `https://github.com/blocksdevpro/boris-assistant/releases/download/v1.2.0-beta.3/Boris_1.2.0-beta.3_x64-setup.exe`.
+4. Attach the installer, `.sig`, and `latest.json` to the versioned pre-release,
+   then update the rolling `beta` feed with the same manifest. Follow the beta
+   publishing procedure below. Stable must remain on `1.1.0`.
+5. Update the README's published-beta links and `website/src/lib/releases.ts`
+   only after the new release and assets are available.
+
 ## Branches
 
 | Git branch | Holds | Product version | Installers |
@@ -141,7 +172,7 @@ and put the same version in `latest.json`.
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-This **`next`** tree is **`1.2.0-beta.2`** (NSIS only). `main` holds
+This tree is **`1.2.0-beta.3`** (NSIS only). `main` holds
 the **`1.1.0`** stable (NSIS + MSI). Do **not** uncheck Pre-release on
 `v1.1.0-beta.5` — that would offer Stable 1.0.0 installs a build still
 labeled `1.1.0-beta.5` (NSIS only, no MSI).

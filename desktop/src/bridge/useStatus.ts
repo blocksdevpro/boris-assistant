@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { getStatus, onStatus } from "./status";
+import { getStatus, onStatus } from "./commands/engine";
 import { OFF_STATUS, type StatusPicture } from "./types";
 
 const StatusPreviewContext = createContext<StatusPicture | null>(null);

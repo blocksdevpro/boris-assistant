@@ -9,6 +9,8 @@ Further work on `next` after [1.2.0-beta.2].
 
 ### Added
 
+- A desktop architecture guide at `desktop/docs/ARCHITECTURE.md` maps the UI,
+  IPC bridge, Tauri host, and paths for tracing common behavior.
 - **Bundled agent playbooks** for code changes, root-cause debugging, code
   explanation, design, change review, technical writing, mentoring, and skill
   creation. The playbooks are installed under `~/.boris/skills` and are
@@ -47,6 +49,10 @@ Further work on `next` after [1.2.0-beta.2].
 
 ### Changed
 
+- Desktop command handlers, bridge calls, status presentation helpers, and
+  settings and update controllers now live in focused modules. The desktop
+  README links to the architecture guide, and `@/lib/statusPresentation`
+  remains the stable import path for status helpers.
 - Voice HITL confirm budget now mirrors the agent policy
   (`max_confirms_per_turn`, default 12) instead of a hardcoded 8 rounds.
   Post-confirm tool rounds feed the overlay context meter, the per-turn trace

@@ -13,7 +13,7 @@
 //!
 //! # Module map
 //!
-//! - [`commands`] — `#[tauri::command]` handlers + event name constants
+//! - [`commands`] — `#[tauri::command]` handlers grouped under `commands/` by topic
 //! - [`orchestrator`] — `AppState`: spawn engine, Start/Stop, device prefs
 //! - [`tray`] — system tray (show console / quit / overlay lock)
 //! - [`overlay_win`] — always-on-top click-through island
@@ -43,27 +43,27 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
-            commands::get_status,
-            commands::preflight_check,
-            commands::start_engine,
-            commands::stop_engine,
-            commands::wake_liveness_status,
-            commands::start_wake_enroll,
-            commands::clear_wake_profile,
-            commands::list_input_devices,
-            commands::list_output_devices,
-            commands::switch_input,
-            commands::switch_output,
-            commands::submit_input,
-            commands::cancel_input,
-            commands::models_status,
-            commands::download_models,
-            commands::get_settings,
-            commands::save_app_settings,
-            commands::get_log_path,
-            commands::frontend_log,
-            commands::list_session_artifacts,
-            commands::get_session_artifact,
+            commands::status::get_status,
+            commands::status::preflight_check,
+            commands::engine::start_engine,
+            commands::engine::stop_engine,
+            commands::engine::wake_liveness_status,
+            commands::engine::start_wake_enroll,
+            commands::engine::clear_wake_profile,
+            commands::engine::list_input_devices,
+            commands::engine::list_output_devices,
+            commands::engine::switch_input,
+            commands::engine::switch_output,
+            commands::engine::submit_input,
+            commands::engine::cancel_input,
+            commands::models::models_status,
+            commands::models::download_models,
+            commands::settings::get_settings,
+            commands::settings::save_app_settings,
+            commands::diagnostics::get_log_path,
+            commands::diagnostics::frontend_log,
+            commands::artifacts::list_session_artifacts,
+            commands::artifacts::get_session_artifact,
             updater::check_app_update,
         ])
         .setup(setup_app)
@@ -145,7 +145,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let boot = handle.clone();
         let saved = settings.clone();
         match tauri::async_runtime::spawn_blocking(move || {
-            commands::start_engine_with_settings(&boot, &saved)
+            commands::engine::start_engine_with_settings(&boot, &saved)
         })
         .await
         {

@@ -2,7 +2,7 @@
  * Stable Tauri IPC names for the desktop host.
  *
  * **Contract:** these string values must match Rust:
- * - commands → `desktop/src-tauri/src/commands.rs` (`#[tauri::command]` fn names)
+ * - commands → `desktop/src-tauri/src/commands/*.rs` (`#[tauri::command]` fn names)
  * - events   → `commands::EVENT_*` / `overlay_win::EVENT_*` constants
  *
  * Rename only in an atomic host + bridge PR.

@@ -5,14 +5,11 @@ import {
   Settings as SettingsIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import type { Update } from "@tauri-apps/plugin-updater";
 import { TitleBar } from "@/components/TitleBar";
 import {
   downloadModels,
-  EMPTY_SETTINGS,
   formatContextMeter,
   getModelsStatus,
-  getSettings,
   listInputDevices,
   listOutputDevices,
   onModelsProgress,
@@ -22,32 +19,23 @@ import {
   switchInput,
   switchOutput,
   useStatus,
-  type AppSettings,
   type DeviceDto,
   type DownloadProgress,
   type ModelsStatus,
 } from "@/bridge";
 import { getLogPath, logger } from "@/lib/logger";
 import { toneFor } from "@/lib/phaseVisual";
-import {
-  appVersion,
-  checkForUpdate,
-  downloadAndInstallUpdate,
-  type AvailableUpdate,
-  type CheckResult,
-  type UpdateProgress,
-} from "@/lib/updater";
 import { HomeView } from "./HomeView";
 import {
   CAPABILITY_OPTIONS,
   type ModelCheckState,
-  type SaveState,
   type SettingsCategory,
-  type UpdateUiState,
   type View,
 } from "./mainWindowShared";
 import { SettingsView } from "./settings";
 import { TeachVoiceView } from "./TeachVoiceView";
+import { useSettingsController } from "./settings/useSettingsController";
+import { useUpdateController } from "./useUpdateController";
 
 /**
  * Main window — Home (run) + Settings (prefs).
@@ -65,31 +53,37 @@ export function MainWindow() {
   const mainScrollRef = useRef<HTMLElement>(null);
   const [settingsCategory, setSettingsCategory] =
     useState<SettingsCategory>("general");
-  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [inputs, setInputs] = useState<DeviceDto[]>([]);
   const [outputs, setOutputs] = useState<DeviceDto[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const {
+    settings,
+    settingsRef,
+    saveState,
+    patchSettings,
+    cancelPendingSave,
+  } = useSettingsController(setError);
+  const {
+    appVer,
+    updateUi,
+    availableUpdate,
+    updateProgress,
+    updateError,
+    updateBannerDismissed,
+    setUpdateBannerDismissed,
+    runUpdateCheck,
+    installAvailableUpdate,
+  } = useUpdateController(settings?.update_channel);
   const [models, setModels] = useState<ModelsStatus | null>(null);
   const [modelCheckState, setModelCheckState] =
     useState<ModelCheckState>("loading");
-  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] =
     useState<DownloadProgress | null>(null);
   const [logPath, setLogPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const autoStarted = useRef(false);
-  const [appVer, setAppVer] = useState<string | null>(null);
-  const [updateUi, setUpdateUi] = useState<UpdateUiState>("idle");
-  const [availableUpdate, setAvailableUpdate] =
-    useState<AvailableUpdate | null>(null);
-  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
-  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(
-    null,
-  );
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
@@ -138,57 +132,6 @@ export function MainWindow() {
     }
   }, []);
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const savedIndicatorTimer = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-
-  const flushSave = useCallback(async (next: AppSettings) => {
-    try {
-      await saveSettings(next);
-      setSaveState("saved");
-      if (savedIndicatorTimer.current)
-        clearTimeout(savedIndicatorTimer.current);
-      savedIndicatorTimer.current = setTimeout(
-        () => setSaveState("idle"),
-        1800,
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logger.error("saveSettings failed", msg);
-      setError(msg);
-      setSaveState("error");
-    }
-  }, []);
-
-  const patchSettings = useCallback(
-    (patch: Partial<AppSettings>) => {
-      const base = settingsRef.current ?? { ...EMPTY_SETTINGS };
-      const next = { ...base, ...patch };
-      setSettings(next);
-      setSaveState("saving");
-      setError(null);
-      settingsRef.current = next;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (savedIndicatorTimer.current)
-        clearTimeout(savedIndicatorTimer.current);
-      saveTimer.current = setTimeout(() => {
-        void flushSave(next);
-      }, 320);
-    },
-    [flushSave],
-  );
-
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (savedIndicatorTimer.current)
-        clearTimeout(savedIndicatorTimer.current);
-    };
-  }, []);
-
   useEffect(() => {
     void refreshDevices();
     void refreshModels();
@@ -197,120 +140,8 @@ export function MainWindow() {
     });
   }, [refreshDevices, refreshModels]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const s = await getSettings();
-        if (cancelled) return;
-        setSettings(s);
-      } catch {
-        if (!cancelled) setSettings({ ...EMPTY_SETTINGS });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const restoredInput = useRef(false);
   const restoredOutput = useRef(false);
-
-  // Resolve packaged version once for Settings / About.
-  useEffect(() => {
-    void appVersion().then((v) => {
-      if (v) setAppVer(v);
-    });
-  }, []);
-
-  /** True while download+install is in progress (survives re-renders / checks). */
-  const installingUpdateRef = useRef(false);
-  const checkInFlight = useRef<Promise<CheckResult> | null>(null);
-  const checkInFlightChannel = useRef<string | null>(null);
-
-  const runUpdateCheck = useCallback(async (opts?: { silent?: boolean }) => {
-    const silent = opts?.silent ?? false;
-    if (installingUpdateRef.current) return;
-    if (!silent) {
-      setUpdateUi("checking");
-      setUpdateError(null);
-    }
-    const channel = settingsRef.current?.update_channel ?? "stable";
-    let pending = checkInFlight.current;
-    if (!pending || checkInFlightChannel.current !== channel) {
-      pending = checkForUpdate(channel);
-      checkInFlight.current = pending;
-      checkInFlightChannel.current = channel;
-      void pending.finally(() => {
-        if (checkInFlight.current === pending) {
-          checkInFlight.current = null;
-          checkInFlightChannel.current = null;
-        }
-      });
-    }
-    const result = await pending;
-    // Don't clobber an in-flight install if one started while we were checking.
-    if (installingUpdateRef.current) return;
-    if ((settingsRef.current?.update_channel ?? "stable") !== channel) return;
-    switch (result.status) {
-      case "unavailable":
-        if (!silent) setUpdateUi("idle");
-        break;
-      case "up_to_date":
-        setAvailableUpdate(null);
-        setPendingUpdate(null);
-        setUpdateError(null);
-        setAppVer(result.currentVersion);
-        setUpdateUi("up_to_date");
-        break;
-      case "available":
-        setAvailableUpdate(result.update);
-        setPendingUpdate(result.raw);
-        setUpdateError(null);
-        setAppVer(result.update.currentVersion);
-        setUpdateUi("available");
-        setUpdateBannerDismissed(false);
-        break;
-      case "error":
-        setUpdateError(result.message);
-        if (!silent) setUpdateUi("error");
-        break;
-    }
-  }, []);
-
-  // Quiet check once settings are known; re-check when the channel changes.
-  const didStartupUpdateCheck = useRef(false);
-  const updateChannel = settings?.update_channel;
-  useEffect(() => {
-    if (!updateChannel) return;
-    if (!didStartupUpdateCheck.current) {
-      didStartupUpdateCheck.current = true;
-      const t = window.setTimeout(() => {
-        void runUpdateCheck({ silent: true });
-      }, 2500);
-      return () => window.clearTimeout(t);
-    }
-    setUpdateBannerDismissed(false);
-    void runUpdateCheck({ silent: true });
-  }, [updateChannel, runUpdateCheck]);
-
-  const onInstallUpdate = useCallback(async () => {
-    if (!pendingUpdate || installingUpdateRef.current) return;
-    installingUpdateRef.current = true;
-    setUpdateUi("downloading");
-    setUpdateProgress({ downloaded: 0, contentLength: null });
-    setUpdateError(null);
-    try {
-      await downloadAndInstallUpdate(pendingUpdate, setUpdateProgress);
-      // Windows exits during install; relaunch covers other platforms.
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logger.error("update install failed", msg);
-      setUpdateError(msg);
-      setUpdateUi("error");
-      installingUpdateRef.current = false;
-    }
-  }, [pendingUpdate]);
 
   // Restore each preferred device once. Unrelated settings edits must not
   // interrupt the active audio stream by switching the same device again.
@@ -370,10 +201,7 @@ export function MainWindow() {
       setView("settings");
       return;
     }
-    if (saveTimer.current) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
+    cancelPendingSave();
     setBusy(true);
     setError(null);
     logger.info("UI onStart", {
@@ -587,7 +415,7 @@ export function MainWindow() {
                 onStart={() => void onStart()}
                 onStop={() => void onStop()}
                 onInstall={() => void onInstallModels()}
-                onInstallUpdate={() => void onInstallUpdate()}
+                onInstallUpdate={() => void installAvailableUpdate()}
                 onDismissUpdate={() => setUpdateBannerDismissed(true)}
                 onOpenSettings={(category = "general") => {
                   setSettingsCategory(category);
@@ -639,7 +467,7 @@ export function MainWindow() {
                 onTeachVoice={() => setView("teach")}
                 onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
                 onCheckUpdate={() => void runUpdateCheck()}
-                onInstallUpdate={() => void onInstallUpdate()}
+                onInstallUpdate={() => void installAvailableUpdate()}
               />
             ) : (
               <div

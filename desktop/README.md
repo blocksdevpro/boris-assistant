@@ -114,15 +114,12 @@ and `DirectML.dll` sit beside the app executable.
 bunx shadcn@latest add <component>
 ```
 
-## Layout
+## Code map
 
-```text
-desktop/
-├── src/                 # React frontend
-│   ├── components/ui/   # shadcn components
-│   ├── lib/utils.ts
-│   └── App.tsx
-└── src-tauri/           # Tauri / Rust host
-```
+Start with [the desktop architecture guide](docs/ARCHITECTURE.md) when you need
+to find a behavior or trace a bug. It maps the UI, IPC bridge, native commands,
+and the handoff to the voice pipeline.
 
-Workspace member: `desktop/src-tauri` (see root `Cargo.toml`).
+The Tauri host is the Cargo workspace member at `src-tauri`. Voice behavior and
+model work belong to `crates/boris-pipeline` and its dependencies, outside this
+desktop refactor.

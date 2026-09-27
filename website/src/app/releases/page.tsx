@@ -5,7 +5,7 @@ import { pageMetadata, repo } from "@/lib/site";
 
 export const metadata = pageMetadata({
   title: "Boris Assistant release notes | Stable and beta updates",
-  description: `See what's new in Boris Assistant ${betaRelease.version} and stable ${stableRelease.version}: local memory, faster voice replies, background research, and Windows downloads.`,
+  description: `See what's new in Boris Assistant ${betaRelease.version} and stable ${stableRelease.version}: live transcription, tool progress, voice confirmations, and Windows downloads.`,
   path: "/releases",
 });
 
@@ -29,8 +29,8 @@ export default function ReleasesPage() {
             {release.channel === "Beta" && (
               <aside className="migration-note">
                 <h3>Memory migration and privacy</h3>
-                <p>The one-time migration sends historical memory to the LLM provider already configured for Boris. Old files are retired only after refinement and verification succeed. Failed imports leave the original files intact for a later retry.</p>
-                <p>To disable canonical memory and skip migration, set <code>BORIS_MEMORY=0</code> before the first beta.2 launch.</p>
+                <p>Beta.3 retains the local memory store introduced in beta.2. When upgrading from beta.1 or earlier, the one-time migration sends historical memory to the LLM provider already configured for Boris. Old files are retired only after refinement and verification succeed. Failed imports leave the original files intact for a later retry.</p>
+                <p>To disable canonical memory and skip migration, set <code>BORIS_MEMORY=0</code> before your first launch of beta.2 or later.</p>
               </aside>
             )}
             <div className="release-links">

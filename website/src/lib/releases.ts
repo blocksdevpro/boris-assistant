@@ -20,17 +20,19 @@ export const stableRelease = {
 };
 
 export const betaRelease = {
-  version: "1.2.0-beta.2",
-  date: "2026-08-28",
-  dateLabel: "August 28, 2026",
+  version: "1.2.0-beta.3",
+  date: "2026-09-27",
+  dateLabel: "September 27, 2026",
   channel: "Beta",
-  url: `${repo}/releases/tag/v1.2.0-beta.2`,
-  download: `${repo}/releases/download/v1.2.0-beta.2/Boris_1.2.0-beta.2_x64-setup.exe`,
-  summary: "Local, evidence-backed memory for facts, preferences, projects, and conversations.",
+  url: `${repo}/releases/tag/v1.2.0-beta.3`,
+  download: `${repo}/releases/download/v1.2.0-beta.3/Boris_1.2.0-beta.3_x64-setup.exe`,
+  summary: "Live transcription, visible tool progress, and more reliable voice confirmations.",
   highlights: [
-    "A local SQLite store brings conversation evidence, durable facts, preferences, and projects into one memory system.",
-    "Boris can search, retrieve, and forget evidence-backed memories. Completed conversations are saved to the store.",
-    "Older profile, workspace, and session memories are imported and verified before the original files are retired.",
-    "Includes the previous beta's taught wake filtering, echo cancellation, wake-word interruption, typed input, and on-screen reasoning preview.",
+    "A presence orb shows listening, thinking, tool work, speaking, and input states. Reduced-motion settings keep it static.",
+    "Live transcription previews appear during voice capture on supported speech models. Tool progress and streamed captions stay visible in a more stable overlay.",
+    "Wake-word interruption works during confirmation prompts. Device changes restart the prompt, and a bare 'please' no longer approves an action.",
+    "Typed input supports numbered choices, file tools suggest nearby names, and long tool results can be reread without repeating the operation.",
+    "More reliable context compaction and streaming, clearer separation of trusted instructions from retrieved data, and bundled task playbooks.",
+    "Retains beta.2's evidence-backed local memory, with search, retrieval, forgetting, and verified migration from older versions.",
   ],
 };

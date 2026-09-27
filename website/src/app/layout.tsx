@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Instrument_Sans } from "next/font/google";
+import { MarketingHeader } from "@/components/marketing-header";
+import { MarketingFooter } from "@/components/marketing-footer";
+import { pageMetadata, siteDescription, siteName, siteTitle, siteUrl } from "@/lib/site";
 import "./globals.css";
 
 const instrument = Instrument_Sans({
@@ -9,10 +12,9 @@ const instrument = Instrument_Sans({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
-  title: "Boris — A voice assistant that can actually help",
-  description: "A Windows-first, open-source voice assistant with local speech, useful tools, memory, and approvals.",
-  applicationName: "Boris Assistant",
+  ...pageMetadata({ title: siteTitle, description: siteDescription, path: "/" }),
+  metadataBase: new URL(siteUrl),
+  applicationName: siteName,
   icons: {
     icon: [
       { url: "/boris-logo.svg", type: "image/svg+xml" },
@@ -21,20 +23,17 @@ export const metadata: Metadata = {
     shortcut: "/boris-icon.png",
     apple: "/boris-icon.png",
   },
-  openGraph: {
-    title: "Boris — A voice assistant that can actually help",
-    description: "Local voice, your choice of model, and tools that ask before they act.",
-    type: "website",
-    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "Boris voice assistant" }],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Boris — A voice assistant that can actually help",
-    description: "Local voice, your choice of model, and tools that ask before they act.",
-    images: ["/og.png"],
-  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" className={instrument.variable}><body>{children}</body></html>;
+  return (
+    <html lang="en" className={instrument.variable}>
+      <body>
+        <a href="#main-content" className="skip-link">Skip to content</a>
+        <MarketingHeader />
+        {children}
+        <MarketingFooter />
+      </body>
+    </html>
+  );
 }

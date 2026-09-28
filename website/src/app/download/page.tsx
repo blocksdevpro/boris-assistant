@@ -43,9 +43,9 @@ export default function DownloadPage() {
 
       <section id="beta" className="download-release" aria-labelledby="beta-title">
         <div>
-          <span className="channel-label beta-label">Latest published beta</span>
+          <span className="channel-label beta-label">Earlier 1.2 beta</span>
           <h2 id="beta-title">Boris {betaRelease.version}</h2>
-          <p>Released <time dateTime={betaRelease.date}>{betaRelease.dateLabel}</time>. {betaRelease.summary} This is a pre-release and uses an EXE installer only.</p>
+          <p>Released <time dateTime={betaRelease.date}>{betaRelease.dateLabel}</time>. {betaRelease.summary} This earlier preview uses an EXE installer only. Stable {stableRelease.version} includes the same app features.</p>
           <p>Upgrading from beta.1 or earlier can migrate older memory using your configured LLM. Read the <Link href="/releases#beta">migration and privacy notes</Link> before upgrading.</p>
         </div>
         <div className="download-actions">

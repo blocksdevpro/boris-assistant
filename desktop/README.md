@@ -22,15 +22,15 @@ bun run tauri dev
 bun run tauri build
 ```
 
-Windows **1.1.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
+Windows **1.2.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
 `Boris_*_x64_en-US.msi`). Betas stay NSIS-only because MSI/WiX cannot encode
-`1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
+`1.2.0-beta.3` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
-This tree is **`1.2.0-beta.3`** (NSIS only). Download the signed installer from
-[beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3).
-Release notes are in [`.tauri/releases/v1.2.0-beta.3.md`](../.tauri/releases/v1.2.0-beta.3.md).
-Stable **`1.1.0`** lives on **`main`**. See [`.tauri/README.md`](../.tauri/README.md).
+This tree is **`1.2.0`** (NSIS and MSI). Download the signed installers from
+[the stable release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0).
+Release notes are in [`.tauri/releases/v1.2.0.md`](../.tauri/releases/v1.2.0.md).
+See [`.tauri/README.md`](../.tauri/README.md) for the publishing procedure.
 
 ## App updates (Tauri updater)
 

@@ -2,20 +2,21 @@ import { repo } from "@/lib/site";
 
 // Verified against published GitHub releases, not the working-tree changelog.
 export const stableRelease = {
-  version: "1.1.0",
-  date: "2026-08-15",
-  dateLabel: "August 15, 2026",
+  version: "1.2.0",
+  date: "2026-09-28",
+  dateLabel: "September 28, 2026",
   channel: "Stable",
-  url: `${repo}/releases/tag/v1.1.0`,
-  download: `${repo}/releases/download/v1.1.0/Boris_1.1.0_x64-setup.exe`,
-  msi: `${repo}/releases/download/v1.1.0/Boris_1.1.0_x64_en-US.msi`,
-  summary: "Faster voice replies, background research, and a desk for your results.",
+  url: `${repo}/releases/tag/v1.2.0`,
+  download: `${repo}/releases/download/v1.2.0/Boris_1.2.0_x64-setup.exe`,
+  msi: `${repo}/releases/download/v1.2.0/Boris_1.2.0_x64_en-US.msi`,
+  summary: "Live voice feedback, stronger wake detection, and evidence-backed local memory.",
   highlights: [
-    "Speech starts sentence by sentence, with Silero voice activity detection and a responsive Stop action.",
-    "Faster model routing and tool discovery, plus web search without a separate search API key.",
-    "Research can run in background agents. Markdown and code results appear as cards in Home and the voice overlay.",
-    "Optional Start with Windows launches Boris in the tray and starts the voice engine at sign-in.",
-    "Choose Stable or Beta updates in Settings. Stable has both EXE and MSI installers for Windows x64.",
+    "Teach Boris your wake word with four samples. An optional speaker filter and audio cleanup improve wake detection and transcription.",
+    "Interrupt Boris during speech, thinking, or confirmation. Voice prompts recover from device changes and unclear replies.",
+    "A local SQLite store keeps evidence for facts, preferences, and projects, with memory search and explicit forgetting.",
+    "Type exact values, secrets, large pastes, or numbered choices into Home or the overlay when speech is a poor fit.",
+    "Follow voice turns through the presence orb, live transcription previews, tool progress, and streamed captions.",
+    "Built-in playbooks cover coding, debugging, writing, review, and more. Stable offers EXE and MSI installers for Windows x64.",
   ],
 };
 

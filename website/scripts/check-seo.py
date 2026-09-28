@@ -66,7 +66,7 @@ class Page(HTMLParser):
             self.in_schema = False
 
 
-def check(base, origin, beta_version=None):
+def check(base, origin, stable_version=None, beta_version=None):
     def normalized_url(url):
         parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, parts.fragment))
@@ -129,6 +129,17 @@ def check(base, origin, beta_version=None):
     assert "aggregateRating" not in application and "review" not in application, "Unverified review data"
     print("PASS structured data and stable download consistency")
 
+    if stable_version:
+        for path in ("/download", "/releases"):
+            assert f"Boris {stable_version}" in pages[path].h2s, f"{path}: wrong stable heading"
+        repo = "https://github.com/blocksdevpro/boris-assistant"
+        release = f"{repo}/releases/download/v{stable_version}"
+        assert f"{release}/Boris_{stable_version}_x64-setup.exe" in pages["/download"].links, "Stable EXE does not match the release"
+        assert f"{release}/Boris_{stable_version}_x64_en-US.msi" in pages["/download"].links, "Stable MSI does not match the release"
+        assert f"{repo}/releases/tag/v{stable_version}" in pages["/releases"].links, "Wrong stable release link"
+        assert application["softwareVersion"] == stable_version, "Schema stable version is wrong"
+        print(f"PASS published stable {stable_version}: headings, installers, release link, and schema")
+
     if beta_version:
         for path in ("/download", "/releases"):
             assert f"Boris {beta_version}" in pages[path].h2s, f"{path}: wrong beta heading"
@@ -158,6 +169,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", nargs="?", default="http://127.0.0.1:3000")
     parser.add_argument("--origin", default="https://boris.blocksdev.pro")
+    parser.add_argument("--stable-version", help="Expected published stable version")
     parser.add_argument("--beta-version", help="Expected published beta version")
     args = parser.parse_args()
-    check(args.base.rstrip("/"), args.origin.rstrip("/"), args.beta_version)
+    check(args.base.rstrip("/"), args.origin.rstrip("/"), args.stable_version, args.beta_version)

@@ -23,7 +23,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { HowItWorks } from "@/components/how-it-works";
 import { cn } from "@/lib/utils";
 import { repo, siteDescription, siteName, siteUrl } from "@/lib/site";
-import { betaRelease, stableRelease } from "@/lib/releases";
+import { stableRelease } from "@/lib/releases";
 
 const structuredData = {
   "@context": "https://schema.org",
@@ -98,7 +98,7 @@ export default function Home() {
 
         <div className="relative z-10 mx-auto flex max-w-4xl flex-col items-center text-center">
           <Link href="/releases" className="launch-note hero-enter" style={{ "--delay": "0ms" } as React.CSSProperties}>
-            <span /> New in beta: Boris {betaRelease.version} <ArrowRight className="size-3.5" />
+            <span /> Boris {stableRelease.version} is here <ArrowRight className="size-3.5" />
           </Link>
 
           <h1 className="hero-title hero-enter" style={{ "--delay": "80ms" } as React.CSSProperties}>
@@ -147,14 +147,14 @@ export default function Home() {
         <div>
           <p className="story-label"><span /> Latest releases</p>
           <h2>What&apos;s new in Boris</h2>
-          <p>Stable {stableRelease.version} brings faster spoken replies, background research, and result cards. Beta {betaRelease.version} adds live voice feedback and more reliable confirmations.</p>
+          <p>Stable {stableRelease.version} brings live voice feedback, stronger wake detection, and evidence-backed local memory to Windows.</p>
           <Link href="/releases" className="text-link">Read the release notes <ArrowRight size={16} /></Link>
         </div>
         <div>
-          <span className="channel-label">Beta {betaRelease.version}</span>
+          <span className="channel-label">Stable {stableRelease.version}</span>
           <h3>Live feedback while Boris works.</h3>
-          <p>{betaRelease.summary} A new presence orb follows the conversation, while the overlay keeps captions and current work visible.</p>
-          <Link href="/download#beta" className="text-link">Explore the Windows beta <ArrowRight size={16} /></Link>
+          <p>A presence orb follows the conversation while live captions and tool progress keep current work visible. Type when speaking is a poor fit.</p>
+          <Link href="/download" className="text-link">Download Boris {stableRelease.version} <ArrowRight size={16} /></Link>
         </div>
       </section>
 
@@ -274,8 +274,8 @@ export default function Home() {
             <p>Boris can search the web, read and work with files, search optional memory, and run system actions within its capability preset and workspace controls. Risky actions pause for your approval. Research results and code can appear as on-screen cards.</p>
           </details>
           <details>
-            <summary>What changes in the latest beta?</summary>
-            <p>Boris {betaRelease.version} adds a presence orb, live transcription previews, tool progress, and more reliable confirmations and context handling. It retains evidence-backed local memory. Upgrading from beta.1 or earlier can send older memory to your configured LLM for migration. See <Link href="/releases#beta">the beta release notes</Link> for details and how to disable it.</p>
+            <summary>What changed in Boris {stableRelease.version}?</summary>
+            <p>Boris {stableRelease.version} adds a presence orb, live transcription previews, tool progress, stronger wake detection, and evidence-backed local memory. Upgrading from beta.1 or earlier can send older memory to your configured LLM for migration. See <Link href="/releases#stable">the stable release notes</Link> for details and how to disable it.</p>
           </details>
         </div>
       </section>

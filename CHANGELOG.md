@@ -7,6 +7,30 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 No changes yet.
 
+## [1.2.0] - 2026-09-28
+
+Stable release of the 1.2 line. The application code matches
+[1.2.0-beta.3]; this release uses a numeric version and adds the Windows x64
+MSI alongside the signed NSIS installer.
+
+### Highlights
+
+- Taught wake filtering, audio cleanup, and wake-word interruption while Boris
+  is speaking, thinking, or asking for confirmation.
+- A local SQLite memory store with evidence-backed recall and forgetting.
+  Legacy memory migrates only after refinement and verification succeed.
+- On-screen input for secrets, exact values, large pastes, and numbered choices.
+  Live transcription, tool progress, streamed captions, and a presence orb
+  make voice turns easier to follow.
+- Safer confirmation prompts, lossless context compaction, stronger separation
+  of trusted instructions from retrieved data, and bundled agent playbooks.
+
+See the [beta.1], [beta.2], and [beta.3] entries for the detailed changes.
+The one-time legacy-memory migration can send historical content to Boris's
+configured LLM provider. See the
+[release notes](.tauri/releases/v1.2.0.md) before upgrading from beta.1 or
+earlier.
+
 ## [1.2.0-beta.3] - 2026-09-27
 
 Third 1.2 beta. Stable **1.1.x** stays on `main`. Windows x64, NSIS only.
@@ -525,6 +549,10 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.2.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0
+[beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3
+[beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2
+[beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1
 [1.2.0-beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3
 [1.2.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2
 [1.2.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1

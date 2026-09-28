@@ -42,8 +42,23 @@ assert.equal(
   "Embedded updater public key must match the checked-in public key",
 );
 const notes = `.tauri/releases/v${version}.md`;
-assert.ok(read(notes).includes(`## Boris ${version}`), `Missing version heading in ${notes}`);
+const releaseNotes = read(notes);
+assert.ok(releaseNotes.includes(`## Boris ${version}`), `Missing version heading in ${notes}`);
+for (const filename of [
+  `Boris_${version}_x64-setup.exe`,
+  ...(!version.includes("-beta.") ? [`Boris_${version}_x64_en-US.msi`] : []),
+]) {
+  assert.ok(releaseNotes.includes(filename), `Missing ${filename} in ${notes}`);
+}
 assert.ok(read("CHANGELOG.md").includes(`## [${version}]`), "Missing versioned changelog entry");
+assert.ok(
+  read(".tauri/README.md").includes(`### Release build: ${version}`),
+  "Signing guide must describe this release",
+);
+assert.ok(
+  read("README.md").includes(`| **This tree** | **${version}** |`),
+  "README source version must match this release",
+);
 
 console.log(`Release metadata verified: Boris ${version} (${config.bundle.targets.join(", ")})`);
 console.log("Signing and installer smoke tests remain separate release steps.");

@@ -37,9 +37,9 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 
 | Channel | Version | Get it |
 |---|---|---|
-| **Stable** | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
+| **Stable** | [1.2.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
 | **Beta** | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — NSIS |
-| **This tree** | **1.2.0-beta.3** | Beta release source — NSIS only |
+| **This tree** | **1.2.0** | Stable release source — NSIS and MSI |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -49,13 +49,13 @@ Workspace crates are `publish = false`. They ship inside the desktop app, not on
 
 Windows 10 or 11, x64, with a working mic and speakers.
 
-1. Download **`Boris_*_x64-setup.exe`** from [Releases](https://github.com/blocksdevpro/boris-assistant/releases) (1.1.0 on `main` also ships an MSI; `next` betas are NSIS only).
+1. Download **`Boris_*_x64-setup.exe`** or the MSI from [Releases](https://github.com/blocksdevpro/boris-assistant/releases). Betas ship NSIS only.
 2. Run the installer. Your `~/.boris` data (keys, models, memory, skills) lives outside the install directory and is untouched by reinstalls.
 3. On first launch, finish **model install** and set an [OpenRouter](https://openrouter.ai/) API key in Settings.
 
 Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → General → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
 
-Windows **1.1.0** (on `main`) ships NSIS and MSI. Pre-release betas ship NSIS only because WiX/MSI cannot encode labels such as `1.1.0-beta.1`.
+Windows **1.2.0** ships NSIS and MSI. Pre-release betas ship NSIS only because WiX/MSI cannot encode labels such as `1.2.0-beta.3`.
 
 Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log`.
 
@@ -64,10 +64,10 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 ## Features
 
 - **Boris memory** — a local SQLite evidence ledger for facts, preferences,
-  projects, past events, lifecycle-aware recall, and explicit forgetting *(1.2 beta.2)*
+  projects, past events, lifecycle-aware recall, and explicit forgetting
 
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback, with wake barge-in while talking, thinking, or confirming
-- **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn *(1.2 beta)*
+- **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
 - **Voice island** — always-on-top overlay with live captions, interim transcripts during capture, and current tool progress
 - **Presence orb** — a phase-aware orb on Home, the overlay, startup, and Teach Voice (listening / transcribing / thinking / searching / working / speaking / confirm / fault); honors reduced-motion with a static fallback
@@ -283,7 +283,7 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
 
 ---
 
-## Boris memory (1.2.0-beta.2)
+## Boris memory (1.2)
 
 When memory is enabled, Boris uses
 `~/.boris/memory/memory.sqlite` as its single local source of truth. It keeps
@@ -291,7 +291,7 @@ conversation evidence separate from small retrievable facts, preferences,
 projects, and past events. `memory_search` retrieves active evidence-backed
 records; `forget_memory` permanently removes explicitly requested memory.
 
-On the first launch of beta.2 or later, Boris imports the old `profile.json`, global and
+Starting with beta.2, the first 1.2 launch imports the old `profile.json`, global and
 workspace `MEMORY.md`, and legacy session `memory.md` files. Each excerpt is
 refined with your configured LLM and written into the SQLite store. Only after
 every source has been refined and verified does Boris delete those obsolete
@@ -299,7 +299,7 @@ files and the old derived `search.sqlite` index. A failed or timed-out
 refinement leaves all legacy files untouched for a later retry.
 
 The one-time refinement sends historical memory to the LLM provider you have
-configured for Boris. Set `BORIS_MEMORY=0` before the first launch of beta.2 or later to
+configured for Boris. Set `BORIS_MEMORY=0` before the first 1.2 launch to
 skip both canonical memory and migration.
 
 ## Agent skills
@@ -343,7 +343,7 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 | | |
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
-| Current stable | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
+| Current stable | [1.2.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0) — local memory, taught wake filtering, live transcription, tool progress, and safer confirmations |
 | Current beta | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — presence orb, live transcription and tool progress, safer confirmations, and context reliability |
-| Git `main` | Stable line (`1.1.x`) |
-| Git `next` | Beta release line; this checkout is `1.2.0-beta.3` |
+| Git `main` | Stable line (`1.2.x`) |
+| Git `next` | Next beta line (`1.3.0-beta.N` after promotion) |

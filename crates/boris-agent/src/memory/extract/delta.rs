@@ -10,6 +10,8 @@ pub struct ProfileDelta {
     pub preferences_add: Vec<String>,
     pub facts_add: Vec<UserFact>,
     pub facts_remove_query: Vec<String>,
+    pub forget_preferred_name: bool,
+    pub forget_all: bool,
     pub ongoing_add: Vec<String>,
     pub ongoing_replace: Option<Vec<String>>,
 }
@@ -21,11 +23,19 @@ impl ProfileDelta {
             && self.preferences_add.is_empty()
             && self.facts_add.is_empty()
             && self.facts_remove_query.is_empty()
+            && !self.forget_preferred_name
+            && !self.forget_all
             && self.ongoing_add.is_empty()
             && self.ongoing_replace.is_none()
     }
 
     pub fn apply(self, profile: &mut UserProfile) {
+        if self.forget_all {
+            profile.forget_all();
+        }
+        if self.forget_preferred_name {
+            profile.forget_matching("name");
+        }
         if let Some(n) = self.preferred_name {
             profile.set_preferred_name(n);
         }

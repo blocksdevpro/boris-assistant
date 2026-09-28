@@ -1,23 +1,37 @@
-//! Post-tool system reminders (Grok-style, short for voice).
+//! Post-tool host reminders (Grok-style, short for voice).
 //!
-//! Appended to the tool observation so the model sees a nudge in the same
-//! turn without a separate API round-trip.
+//! This module selects reminder text only. Context insertion keeps the raw
+//! tool observation unchanged and emits host guidance as a separate control.
 
 /// Optional reminder text to append after a tool observation.
 pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
-    let err = observation.starts_with("Error:");
+    let err = observation.starts_with("Error:") || observation.starts_with("Error [");
     match tool_name {
         "load_skill" if !err => Some(load_skill_reminder(observation)),
         "list_skills" if !err && observation.contains("skill(s)") => Some(
-            "When a skill matches the user request, call load_skill before freestyling."
-                .into(),
+            "Load a skill only when its full description matches the user's intent.".into(),
         ),
         "bash" if err => Some(
-            "Shell failed. Read the error, fix the command or path, and retry only if useful."
+            "Shell failed. Read the error, fix the command or cwd, and retry with a different command. \
+             Do not repeat the exact same failing call. For files/search use file_read/grep/glob, not bash."
+                .into(),
+        ),
+        "bash" if observation.contains("Command was not run.") => Some(
+            "Call the dedicated tool named in the observation now (file_read, grep, glob, or list_dir). \
+             Do not wrap it in bash."
+                .into(),
+        ),
+        "grep" if !err && observation.contains("No matches found") => Some(
+            "Empty grep is not done. Drop glob/type, set -i true, simplify or escape the regex, \
+             or search a parent path. Batch alternate greps in one message."
+                .into(),
+        ),
+        "glob" if !err && observation.contains("No files matched") => Some(
+            "Empty glob is not done. Try '**/*.ext', list_dir on a parent, or a simpler pattern."
                 .into(),
         ),
         "todo_write" if !err => Some(
-            "Continue executing remaining open todos until done or you need a real user decision."
+            "Use the list as working memory. User intent controls scope, and optional todos may be removed."
                 .into(),
         ),
         "present_artifact" if !err => Some(
@@ -59,13 +73,12 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
 }
 
 fn load_skill_reminder(observation: &str) -> String {
-    let base = "Follow this skill's steps with tools. Track multi-step work with todo_write. \
-                Keep spoken replies short.";
+    let base = "Apply only the skill guidance relevant to the request. Use todo_write only when it helps track real work. \
+                Keep spoken replies short and stop when the requested result is complete.";
     // Research skill body (heading / name) -> multi-query nudge.
     if observation_looks_like_research_skill(observation) {
         format!(
-            "{base} Research: wave 1 multi web_search (3-5 angles), fetch candidates, \
-             wave 2 if needed. Parent verifies critical hits with web_fetch."
+            "{base} Research depth follows uncertainty and stakes. Verify critical claims with primary sources."
         )
     } else {
         base.into()
@@ -102,17 +115,18 @@ fn is_empty_or_weak_search(observation: &str) -> bool {
         || observation.lines().filter(|l| !l.trim().is_empty()).count() <= 2
 }
 
-/// Attach a reminder as a trailing `<system-reminder>` block when present.
-pub fn with_reminder(tool_name: &str, observation: String) -> String {
-    match reminder_for(tool_name, &observation) {
-        Some(r) => format!("{observation}\n\n<system-reminder>\n{r}\n</system-reminder>"),
-        None => observation,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render selected text for concise content assertions. Production code
+    /// inserts this text as a separate context message.
+    fn with_reminder(tool_name: &str, observation: String) -> String {
+        match reminder_for(tool_name, &observation) {
+            Some(reminder) => format!("<system-reminder>\n{reminder}\n</system-reminder>"),
+            None => observation,
+        }
+    }
 
     #[test]
     fn load_skill_gets_reminder() {
@@ -122,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn load_research_skill_gets_multi_query_reminder() {
+    fn load_research_skill_gets_evidence_reminder() {
         let out = with_reminder(
             "load_skill",
             "---\nname: research\nversion: 3\n---\n# Research\n\nwave 1 searches\n".into(),
@@ -130,8 +144,8 @@ mod tests {
         assert!(out.contains("<system-reminder>"));
         assert!(out.contains("todo_write"));
         assert!(
-            out.contains("web_search") || out.contains("wave 1") || out.contains("multi"),
-            "expected research multi-query nudge, got {out}"
+            out.contains("primary sources") || out.contains("uncertainty"),
+            "expected evidence-quality nudge, got {out}"
         );
     }
 
@@ -191,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn bracket_error_prefix_also_suppresses_success_reminder() {
+        // Matches `ToolObservation::to_provider_text` ("Error [code]: …") and
+        // `loop_::observation_looks_ok` conventions.
+        let s = "Error [invalid_args]: missing command. Fix the arguments and retry.".to_string();
+        assert_eq!(with_reminder("file_write", s.clone()), s);
+        // `bash` errors still get the shell-retry reminder, but must be
+        // detected as an error (not the success/batch path).
+        let out = with_reminder("bash", "Error [timeout]: timed out".into());
+        assert!(out.contains("Shell failed"));
+    }
+
+    #[test]
     fn unknown_tool_unchanged() {
         let s = "hello".to_string();
         assert_eq!(with_reminder("get_time", s.clone()), s);
@@ -225,6 +251,26 @@ mod tests {
         );
         assert!(out.contains("<system-reminder>"));
         assert!(out.contains("Aggregate") || out.contains("fetch") || out.contains("person"));
+    }
+
+    #[test]
+    fn empty_grep_gets_retry_reminder() {
+        let out = with_reminder(
+            "grep",
+            "<workspace_result path=\"/tmp\">\nNo matches found\n</workspace_result>\nNo matches for pattern 'TODO' under /tmp.".into(),
+        );
+        assert!(out.contains("<system-reminder>"));
+        assert!(out.contains("Empty grep") || out.contains("-i") || out.contains("glob"));
+    }
+
+    #[test]
+    fn bash_steer_gets_dedicated_tool_reminder() {
+        let out = with_reminder(
+            "bash",
+            "Command was not run.\nDo not use bash to read files. Call file_read...".into(),
+        );
+        assert!(out.contains("<system-reminder>"));
+        assert!(out.contains("file_read") || out.contains("dedicated"));
     }
 
     #[test]

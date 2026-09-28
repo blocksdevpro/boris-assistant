@@ -11,7 +11,7 @@
 //! | [`files`] / [`glob`] / [`grep`] | filesystem |
 //! | [`web`] | web_search, web_fetch |
 //! | [`bash`] | shell |
-//! | [`skills_tools`] / [`memory_tools`] / [`subagent`] / [`tool_search`] | advanced |
+//! | [`skills_tools`] / [`memory`] / [`subagent`] / [`tool_search`] | advanced |
 //!
 //! Hosts (pipeline / desktop) should call [`register_builtin_tools`] once after
 //! constructing [`crate::Agent`] with a [`BuiltinToolPaths`] pointing at `~/.boris`.
@@ -19,10 +19,13 @@
 pub mod artifacts;
 pub mod bash;
 pub mod clipboard;
+pub mod collect_input;
 pub mod files;
 pub mod fs_common;
 pub mod glob;
 pub mod grep;
+pub mod mcp;
+pub mod memory;
 pub mod memory_tools;
 pub mod notes;
 pub mod open_tool;
@@ -33,6 +36,7 @@ pub mod subagent;
 pub mod system;
 pub mod time;
 pub mod todo;
+pub mod tool_output;
 pub mod tool_search;
 pub mod web;
 
@@ -51,7 +55,7 @@ use crate::tools::files::FsRoots;
 pub struct BuiltinToolPaths {
     /// Notes file path.
     pub notes_path: PathBuf,
-    /// Durable personal profile JSON (`~/.boris/memory/profile.json`).
+    /// Legacy profile input used only if a canonical memory store is unavailable.
     pub profile_path: PathBuf,
     /// Default write sandbox (`~/.boris/sandbox`).
     pub sandbox_root: PathBuf,
@@ -124,6 +128,19 @@ pub fn artifact_tools_at(artifacts_dir: &Path) -> Vec<Box<dyn Tool>> {
     artifacts::artifact_tools_at(artifacts_dir)
 }
 
+/// Spilled output reread — always registered (including VoiceSafe), like plan tools.
+///
+/// `get_tool_output` pages `{store_dir}/tool_*.log` files written when an
+/// observation is truncated, so follow-ups don't re-run the original tool.
+pub fn output_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+    output_tools_at(&paths.sandbox_root.join("tool_outputs"))
+}
+
+/// Output tools bound to `{session_dir}/tool_outputs` (or a sandbox fallback).
+pub fn output_tools_at(dir: &Path) -> Vec<Box<dyn Tool>> {
+    tool_output::output_tools_at(dir)
+}
+
 /// OS surface: system info, open, clipboard (power-tool wave).
 pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
@@ -176,6 +193,25 @@ pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
         cwd_roots,
         paths.sandbox_root.clone(),
     ))]
+}
+
+/// Register already-discovered MCP tools (async discovery via [`mcp::discover_mcp_tools`]).
+///
+/// Host pattern (pipeline startup, `Full` only):
+/// ```ignore
+/// let cfgs = boris_agent::tools::mcp::load_mcp_configs(&home);
+/// let tools = boris_agent::tools::mcp::discover_mcp_tools(&cfgs).await;
+/// boris_agent::tools::register_mcp_tools(&mut agent, tools, preset);
+/// ```
+/// Capability filtering still applies (Web kind → VoiceSafe/LocalPower drop).
+pub fn register_mcp_tools(
+    agent: &mut Agent,
+    tools: Vec<mcp::McpTool>,
+    preset: CapabilityPreset,
+) {
+    let boxed: Vec<Box<dyn Tool>> = tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>).collect();
+    let filtered = filter_tools_for_preset(boxed, preset);
+    agent.register_tools(filtered);
 }
 
 /// Alias for [`bash_tools`].
@@ -253,6 +289,8 @@ pub fn register_builtin_tools_with_preset(
     // taught the model to call todo_write → "unknown tool" hard-fail loop.
     tools.extend(plan_tools(&paths));
     tools.extend(artifact_tools(&paths));
+    tools.extend(output_tools(&paths));
+    tools.push(Box::new(collect_input::CollectInputTool));
     tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {
@@ -271,15 +309,25 @@ fn try_profile_tools(
     paths: &BuiltinToolPaths,
     llm_extract: bool,
 ) -> Vec<Box<dyn Tool>> {
-    match agent.enable_personal_context(&paths.profile_path, llm_extract) {
+    // Once a canonical memory store is active, profile extraction state is
+    // persisted inside it. `profile.json` is therefore legacy input only.
+    let profile_store = agent
+        .memory_store()
+        .map(crate::memory::ProfileStore::canonical)
+        .unwrap_or_else(|| crate::memory::ProfileStore::new(paths.profile_path.clone()));
+    match agent.enable_personal_context_with_store(profile_store.clone(), llm_extract) {
         Ok(profile) => vec![
-            Box::new(profile::SaveUserFactTool::with_path(
+            Box::new(profile::SaveUserFactTool::new(
                 profile.clone(),
-                paths.profile_path.clone(),
+                profile_store.clone(),
             )),
-            Box::new(profile::UpdateUserProfileTool::with_path(
+            Box::new(profile::UpdateUserProfileTool::new(
                 profile.clone(),
-                paths.profile_path.clone(),
+                profile_store.clone(),
+            )),
+            Box::new(profile::ForgetUserMemoryTool::new(
+                profile.clone(),
+                profile_store,
             )),
             Box::new(profile::GetUserContextTool::new(profile)),
         ],
@@ -318,6 +366,7 @@ mod tests {
         tools.extend(builtin_tools(&paths));
         tools.extend(plan_tools(&paths));
         tools.extend(artifact_tools(&paths));
+        tools.extend(output_tools(&paths));
         tools.extend(os_tools(&paths));
         tools.extend(fs_tools(&paths));
         tools.extend(web_tools());
@@ -341,6 +390,7 @@ mod tests {
         let mut tools = builtin_tools(&paths);
         tools.extend(plan_tools(&paths));
         tools.extend(artifact_tools(&paths));
+        tools.extend(output_tools(&paths));
         // power_tools=false for VoiceSafe (no os/fs/web/bash).
         let tools = filter_tools_for_preset(tools, CapabilityPreset::VoiceSafe);
         let names: Vec<_> = tools.iter().map(|t| t.name().to_string()).collect();

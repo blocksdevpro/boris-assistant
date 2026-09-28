@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    optional_string, require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
-    ToolMeta, ToolRisk,
+    optional_string, optional_u64_strict, require_object, truncate_tool_result, Permission, Tool,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
 
@@ -36,10 +36,14 @@ pub(crate) fn sort_entries(entries: &mut [(String, String)]) {
     entries.sort_by_key(|entry| entry.0.to_ascii_lowercase());
 }
 
+/// Marker prefix shared by the listing footer and its tests so an
+/// invisible codepoint mismatch can never desync them again.
+pub(crate) const LIST_TRUNCATED_PREFIX: &str = "…[truncated";
+
 /// Format a directory listing for the model.
 ///
-/// `entries` are `(name, kind)` pairs already sorted. Applies `limit` and optional
-/// truncation marker.
+/// `entries` are `(name, kind)` pairs already sorted. Applies `limit` with a
+/// head+tail-style count footer when truncated.
 pub(crate) fn format_listing(
     path_display: &str,
     entries: &[(String, String)],
@@ -64,7 +68,9 @@ pub(crate) fn format_listing(
         lines.join("\n")
     );
     if truncated {
-        out.push_str("\n…[truncated]");
+        out.push_str(&format!(
+            "\n{LIST_TRUNCATED_PREFIX}; showing {shown_len} of {total} entries — narrow the path or raise limit to {total}]"
+        ));
     }
     out
 }
@@ -91,7 +97,8 @@ impl Tool for ListDirTool {
 
     fn description(&self) -> &str {
         "List files and folders in a directory under allowed paths. \
-         Defaults to the Boris sandbox. Returns name + type (dir/file)."
+         Use this instead of bash ls/dir/Get-ChildItem. Defaults to the Boris sandbox. \
+         Returns name + type (dir/file). For name patterns across a tree, use glob."
     }
 
     fn parameters(&self) -> Value {
@@ -103,8 +110,8 @@ impl Tool for ListDirTool {
                     "description": "Directory to list (default: sandbox root). Relative paths are under the sandbox."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Max entries (default 80, max 200)"
+                    "type": "integer",
+                    "description": "Max entries (default 80, max 200). Must be an integer; floats are rejected."
                 }
             },
             "required": []
@@ -128,7 +135,7 @@ impl Tool for ListDirTool {
         let raw = optional_string(obj, "path")
             .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
         let path = resolve_under_roots(&raw, &self.roots.readers())?;
-        let limit = clamp_list_limit(obj.get("limit").and_then(|v| v.as_u64()));
+        let limit = clamp_list_limit(optional_u64_strict(obj, "limit")?);
 
         let meta = tokio::fs::metadata(&path)
             .await
@@ -215,7 +222,7 @@ mod tests {
         assert!(out.contains("file\tf0"));
         assert!(out.contains("file\tf1"));
         assert!(!out.contains("f4"));
-        assert!(out.contains("…[truncated]"));
+        assert!(out.contains(LIST_TRUNCATED_PREFIX));
     }
 
     #[test]
@@ -223,7 +230,42 @@ mod tests {
         let entries = vec![("a.txt".into(), "file".into())];
         let out = format_listing("/s", &entries, 10);
         assert!(out.contains("1 of 1 entries"));
-        assert!(!out.contains("…[truncated]"));
+        assert!(!out.contains(LIST_TRUNCATED_PREFIX));
+    }
+
+    #[test]
+    fn schema_uses_integer_for_limit() {
+        let (roots, _dir) = crate::tools::files::test_util::temp_roots();
+        let tool = ListDirTool::new(roots);
+        let schema = tool.parameters();
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+    }
+
+    #[tokio::test]
+    async fn float_limit_rejected_string_accepted() {
+        use serde_json::json;
+        let (roots, dir) = crate::tools::files::test_util::temp_roots();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let tool = ListDirTool::new(roots);
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"limit": 2.5}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("integer"), "got: {}", err.message);
+        // Numeric string reaches strict coerce.
+        let out = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"limit": "10"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("a.txt"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

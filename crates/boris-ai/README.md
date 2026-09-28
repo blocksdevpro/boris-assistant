@@ -11,7 +11,8 @@ src/
   message.rs         content + tool_calls helpers (private, internal use only)
   model_pref.rs      model@provider / provider list (private module; re-exported fns)
   usage.rs           TokenUsage + logging (private module; TokenUsage re-exported)
-  stream.rs          optional mpsc event helper — public module, not crate-root re-exported
+  request.rs         RequestStage / CompleteOptions — per-call reasoning + token budgets (re-exported)
+  stream.rs          mpsc event helper — public module; LlmStreamEvent also re-exported at root
   providers/
     openrouter/
       client.rs      construction / timeouts / base URL / session
@@ -30,20 +31,28 @@ whose public items are re-exported from the crate root. Prefer
 ```rust
 use boris_ai::{
     LlmClient, OpenRouterClient, LlmError, LlmErrorKind,
-    TokenUsage, parse_provider_list, split_model_and_provider,
+    TokenUsage, LlmStreamEvent, CompleteOptions, RequestStage,
+    parse_provider_list, split_model_and_provider,
     ReasoningConfig, ReasoningEffort,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_BASE_URL, DEFAULT_MODEL,
-    DEFAULT_MAX_TOKENS,
+    DEFAULT_MAX_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
 };
 ```
 
-`boris-agent` re-exports the same core surface so desktop/pipeline can keep
-`boris_agent::OpenRouterClient`.
+`boris-agent` re-exports most of the same surface (`LlmClient`,
+`OpenRouterClient`, errors, `TokenUsage`, `LlmStreamEvent`,
+`CompleteOptions`, `RequestStage`, reasoning types, provider helpers,
+`DEFAULT_MAX_TOKENS`, `DEFAULT_CONTEXT_WINDOW_TOKENS`) so desktop/pipeline
+can keep `boris_agent::OpenRouterClient` — except the timeout / base-URL /
+default-model constants, which stay `boris_ai`-only.
 
 ## Behaviour notes
 
 - `complete` tries **SSE first**, then falls back to a single JSON response if
   the stream fails or yields an empty (no text, no tools) payload.
+- Tool-planning and complex stages send `reasoning.exclude = false` so thinking
+  tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
+  them. Reasoning is never assembled into `content`.
 - Assistant `content` is normalized to a **string** for the agent loop.
 - `session_id` is sent as JSON and as `x-session-id` on **both** streaming and
   blocking requests (OpenRouter sticky routing / prompt-cache hits).
@@ -58,6 +67,10 @@ use boris_ai::{
   split across two TCP chunks decodes correctly instead of corrupting into
   replacement characters on both halves.
 - SSE assembly flushes a final unterminated line when the byte stream ends.
+- SSE assembly treats incremental `delta` payloads as appends and canonical
+  `message` payloads as replacements, so streams that send both do not glue
+  duplicated text; tool calls rebuild by position and snapshots only cover
+  content with no prior delta.
 - Multi-line SSE events are **not** reassembled (single-line `data:` only).
 - Default model (`DEFAULT_MODEL`) is owned by this crate as a last-resort
   fallback when the host passes `None`; product defaults should set a model

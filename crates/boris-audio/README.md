@@ -1,6 +1,6 @@
 # boris-audio
 
-Real-time duplex audio for Boris: capture → 16 kHz mono, TTS mono → device playback.
+Real-time duplex audio for Boris: capture → 16 kHz mono → HPF/AGC/AEC, TTS mono → device playback.
 
 ## Public surface
 
@@ -20,16 +20,22 @@ Historical paths still work:
 
 | Path | RT callback | Worker |
 |------|-------------|--------|
-| Input | f32 convert + `try_send` only | resample + fan-out |
-| Output | pull samples + drain detect (`try_send` events) | command recv + oneshot resample |
+| Input | f32 convert + `try_send` only | resample → HPF/AGC/AEC → fan-out |
+| Output | pull samples + drain detect (`try_send` events) | command recv + oneshot resample + AEC far-end |
 
 Never block inside cpal callbacks.
+
+After resample, the input worker runs a WebRTC APM (sonora): high-pass, AGC2, and AEC3. TTS PCM is copied to 16 kHz and fed as the AEC far-end, in lockstep with capture frames. Noise suppression stays off — it tends to hurt Parakeet. `BORIS_AUDIO_FRONTEND=0` bypasses the APM for debugging.
 
 `AudioService::play` returns `Result` via non-blocking `try_send` (queue full / worker gone).
 Streamed `append` uses a short bounded enqueue wait. `finish_job` is a reliable,
 bounded, worker-acknowledged control transition; event-loop hosts can use
 `request_finish_job` to retry/poll without blocking command handling.
-`OutputEvent::Started` means samples are queued for the device callback, not that the first sample has hit the DAC.
+`pause` / `resume` are the same acknowledged control path: the device writes
+silence while paused and keeps leftover PCM so speech can continue from the
+cut. `stop` / `Flush` still discard the job.
+`OutputEvent::Started` means the first real sample was written in the device
+callback (audible after driver buffer latency), not that it has hit the DAC.
 
 ## Tests
 

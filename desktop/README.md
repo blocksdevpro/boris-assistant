@@ -22,13 +22,15 @@ bun run tauri dev
 bun run tauri build
 ```
 
-Windows **1.1.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
+Windows **1.2.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
 `Boris_*_x64_en-US.msi`). Betas stay NSIS-only because MSI/WiX cannot encode
-`1.1.0-beta.1` — the pre-release label must be numeric. The updater uses the NSIS
+`1.2.0-beta.3` — the pre-release label must be numeric. The updater uses the NSIS
 installer either way.
 
-The current release-prep tree on **`main`** is **`1.1.0`**. The **`next`**
-branch is the 1.2 beta line. See [`.tauri/README.md`](../.tauri/README.md).
+This tree is **`1.2.0`** (NSIS and MSI). Download the signed installers from
+[the stable release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0).
+Release notes are in [`.tauri/releases/v1.2.0.md`](../.tauri/releases/v1.2.0.md).
+See [`.tauri/README.md`](../.tauri/README.md) for the publishing procedure.
 
 ## App updates (Tauri updater)
 
@@ -66,7 +68,9 @@ go to disk. On another PC after install:
 %USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log
 ```
 
-What gets logged by default (**DEBUG** for all `boris_*` crates):
+What gets logged by default (**DEBUG** for the desktop, pipeline, audio,
+sense, agent, STT/TTS, core, and inference crates — `boris_ai` stays at
+`warn` unless `RUST_LOG`/`BORIS_LOG` overrides):
 
 1. **Boot diagnostics** — exe path, sidecar DLLs (`onnxruntime.dll` / `DirectML.dll`),
    `~/.boris` layout, model dir listings, preflight, mic/speaker list
@@ -99,11 +103,11 @@ Override home with `BORIS_HOME` if you need logs elsewhere.
 Wake-word and Silero VAD inference use the `ort` crate. On Windows, `build.rs` stages
 `onnxruntime.dll` / `DirectML.dll` (from `target/{profile}/` after ort's
 `copy-dylibs`, or the pyke download cache) into `src-tauri/resources/ort/`.
-Tauri `bundle.resources` then installs those DLLs **next to** `Boris.exe`
+Tauri `bundle.resources` then installs those DLLs **next to** `boris.exe`
 so a clean machine does not need a separate ORT install.
 
 **Verify after install (or open the NSIS/MSI payload):** `onnxruntime.dll`
-and/or `DirectML.dll` sit beside the app executable.
+and `DirectML.dll` sit beside the app executable.
 
 ## Add UI components
 
@@ -111,15 +115,12 @@ and/or `DirectML.dll` sit beside the app executable.
 bunx shadcn@latest add <component>
 ```
 
-## Layout
+## Code map
 
-```text
-desktop/
-├── src/                 # React frontend
-│   ├── components/ui/   # shadcn components
-│   ├── lib/utils.ts
-│   └── App.tsx
-└── src-tauri/           # Tauri / Rust host
-```
+Start with [the desktop architecture guide](docs/ARCHITECTURE.md) when you need
+to find a behavior or trace a bug. It maps the UI, IPC bridge, native commands,
+and the handoff to the voice pipeline.
 
-Workspace member: `desktop/src-tauri` (see root `Cargo.toml`).
+The Tauri host is the Cargo workspace member at `src-tauri`. Voice behavior and
+model work belong to `crates/boris-pipeline` and its dependencies, outside this
+desktop refactor.

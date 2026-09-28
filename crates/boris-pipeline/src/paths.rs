@@ -21,8 +21,9 @@
 //!         artifacts/         # visual cards: index.json + `{slug}-{id}.{ext}`
 //!         subagents/         # child subagent artifacts
 //!   memory/
-//!     MEMORY.md              # single global curated knowledge
-//!     profile.json
+//!     memory.sqlite          # canonical evidence + record store
+//!     MEMORY.md              # legacy migration input, removed after verification
+//!     profile.json           # legacy migration input, removed after verification
 //!     notes.jsonl
 //!     desktop/               # workspace bucket when no project cwd
 //!       MEMORY.md            # workspace-scoped curated notes (not per-chat logs)
@@ -32,7 +33,9 @@
 //!     audit/                 # legacy global audit (unused by engine)
 //!       tool_calls.jsonl
 //!   models/
-//!     parakeet/ | supertone/ | livekit/ | silero/
+//!     parakeet/ | supertone/ | livekit/ | silero/ | speaker/
+//!   speaker/
+//!     live.json              # wake liveness enroll (takes + embeddings)
 //!   state/
 //!     workspace/             # default agent write root (was top-level sandbox/)
 //! ```
@@ -121,6 +124,19 @@ pub fn livekit_dir() -> PathBuf {
     models_dir().join("livekit")
 }
 
+pub fn speaker_dir() -> PathBuf {
+    boris_home().join("speaker")
+}
+
+/// CAM++ ONNX used for wake identity (separate from [`speaker_dir`] enroll JSON).
+pub fn speaker_model_dir() -> PathBuf {
+    models_dir().join("speaker")
+}
+
+pub fn speaker_embed_model_path() -> PathBuf {
+    speaker_model_dir().join("campplus_lm.onnx")
+}
+
 pub fn silero_dir() -> PathBuf {
     models_dir().join("silero")
 }
@@ -156,7 +172,7 @@ pub fn traces_dir() -> PathBuf {
     boris_home().join("traces")
 }
 
-/// Append-only engine trace stream consumed by `cargo xtask trace-report`.
+/// Append-only engine trace stream: one JSON object per turn.
 pub fn turn_traces_path() -> PathBuf {
     traces_dir().join("turns.jsonl")
 }
@@ -182,6 +198,12 @@ pub fn audit_path() -> PathBuf {
 
 pub fn memory_dir() -> PathBuf {
     boris_home().join("memory")
+}
+
+/// Canonical local-first memory database. It replaces the Markdown/profile
+/// files as Boris's runtime memory source of truth.
+pub fn memory_store_path() -> PathBuf {
+    memory_dir().join("memory.sqlite")
 }
 
 pub fn notes_path() -> PathBuf {
@@ -249,6 +271,7 @@ pub fn ensure_model_dirs() -> std::io::Result<()> {
         supertone_voices_dir(),
         livekit_dir(),
         silero_dir(),
+        speaker_model_dir(),
     ] {
         fs::create_dir_all(&d)?;
     }

@@ -89,6 +89,11 @@ pub enum InvokeResult {
         /// Short speakable prompt for the voice UI.
         speak_prompt: String,
     },
+    /// Pause for typed / pasted input; tool was not executed.
+    NeedsInput {
+        pending: PendingToolCall,
+        speak_prompt: String,
+    },
     /// Hard deny — engine should feed this as an error observation.
     Denied {
         /// Human-readable deny reason.

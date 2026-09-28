@@ -75,6 +75,24 @@ impl LlmError {
         Self::with_kind(LlmErrorKind::Provider, message)
     }
 
+    /// Local client configuration / construction failure (invalid proxy env,
+    /// TLS backend, timeout setup, …) — the request never reached the network.
+    ///
+    /// Mapped to [`LlmErrorKind::Other`] (not `Http`): no HTTP exchange was
+    /// attempted. No new `LlmErrorKind` variant is introduced so downstream
+    /// exhaustive matches keep compiling.
+    pub fn config(message: impl Into<String>) -> Self {
+        Self::with_kind(LlmErrorKind::Other, message)
+    }
+
+    /// Caller-side request shape failure (`messages` / `tools` validation).
+    ///
+    /// Mapped to [`LlmErrorKind::Other`] for the same exhaustiveness reason as
+    /// [`Self::config`]; the message text names the offending field.
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::with_kind(LlmErrorKind::Other, message)
+    }
+
     fn with_kind(kind: LlmErrorKind, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -215,7 +233,13 @@ mod tests {
         assert_eq!(LlmError::http("h").kind(), LlmErrorKind::Http);
         assert_eq!(LlmError::parse("p").kind(), LlmErrorKind::Parse);
         assert_eq!(LlmError::provider("p").kind(), LlmErrorKind::Provider);
+        assert_eq!(LlmError::config("c").kind(), LlmErrorKind::Other);
+        assert_eq!(LlmError::invalid_request("i").kind(), LlmErrorKind::Other);
         assert_eq!(LlmErrorKind::Timeout.as_str(), "timeout");
+        assert_eq!(LlmErrorKind::Http.as_str(), "http");
+        assert_eq!(LlmErrorKind::Parse.as_str(), "parse");
+        assert_eq!(LlmErrorKind::Provider.as_str(), "provider");
+        assert_eq!(LlmErrorKind::Other.as_str(), "other");
     }
 
     #[test]

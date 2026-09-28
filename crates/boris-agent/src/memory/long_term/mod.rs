@@ -49,6 +49,8 @@ pub const SESSION_PATH_PREFIX: &str = "session/";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryHit {
     pub path: String,
+    /// Corpus that produced the hit (`global`, `workspace`, or `session`).
+    pub source: String,
     pub score: u32,
     pub snippet: String,
 }
@@ -383,6 +385,7 @@ impl LongTermMemory {
                         .into_iter()
                         .map(|h| MemoryHit {
                             path: h.path,
+                            source: h.source,
                             score: h.score,
                             snippet: h.snippet,
                         })

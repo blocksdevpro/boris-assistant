@@ -3,6 +3,25 @@
 //! Validates the shapes Boris tools actually advertise: `type`, `properties`,
 //! `required`, and nested object/array/string/number/integer/boolean. Does
 //! **not** coerce malformed JSON or non-objects to `{}`.
+//!
+//! # Subset limitations
+//!
+//! This is intentionally a small subset of JSON Schema, not a full validator:
+//! `enum`, `additionalProperties`, `oneOf`/`anyOf`, `pattern`, numeric ranges,
+//! and string lengths are **not** enforced here. Tool `execute` bodies must
+//! enforce their own value checks (empty strings, numeric clamps, float
+//! rejection via [`crate::tool::strict_u64`]) and return
+//! `invalid_args` for bad values.
+//!
+//! Lenient alias fields (grep `-B`/`-A`/`-C`/`head_limit`/`ignore_case`/…)
+//! deliberately **omit** `type` in their schemas: the validator accepts any
+//! JSON shape when `type` is missing, so numeric strings (`"3"`), floats
+//! (`12.0`), and `"true"` reach the lenient `coerce_*` path in
+//! [`crate::tool::args`] instead of being rejected up front as
+//! `type_mismatch`. Strict integer fields (`offset`/`limit`/`timeout`/…)
+//! use `"type": "integer"` so floats and strings fail fast at validation,
+//! with a second strict check in `execute` for direct calls that bypass the
+//! runtime validator.
 
 use serde_json::Value;
 

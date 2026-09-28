@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::error::ToolError;
-use super::meta::ToolMeta;
+use super::meta::{ToolMeta, ToolRisk};
 
 /// Capability the LLM may invoke during the engine tool loop.
 ///
@@ -25,8 +25,8 @@ use super::meta::ToolMeta;
 ///
 /// That policy runtime enforces gates purely from what [`Tool::meta`] declares
 /// (`Permission`s, `ToolRisk`, `requires_confirmation`) — it never inspects
-/// `execute`'s actual behavior. The default `meta()` is deliberately
-/// permissive (`Safe`, no permissions, no confirmation); see [`Tool::meta`]'s
+/// `execute`'s actual behavior. The default `meta()` is default-deny-ish
+/// (`Moderate`, no permissions, requires confirmation); see [`Tool::meta`]'s
 /// own doc comment before implementing a tool with real side effects.
 ///
 /// # Async
@@ -54,8 +54,9 @@ pub trait Tool: Send + Sync {
 
     /// Risk / permission / timeout metadata for the tool runtime.
     ///
-    /// Default: [`ToolMeta::safe_default`]. Override for any tool that writes,
-    /// networks, or needs confirmation. Production tools should set
+    /// Default: [`ToolMeta::deny_default`] (`Moderate`, `Other`, no permissions,
+    /// requires confirmation). Override with accurate `Permission`s and `ToolRisk`
+    /// for every tool. Production tools should set
     /// [`.read_only(...)`](ToolMeta::read_only) so wave scheduling can fan them out.
     ///
     /// # Safety
@@ -63,16 +64,18 @@ pub trait Tool: Send + Sync {
     /// The runtime's hard gates (path allowlists, [`crate::runtime::ShellPolicy`],
     /// [`crate::runtime::NetworkPolicy`]) and HITL confirmation are **only as
     /// strong as the `Permission`s and `risk` a tool declares here** — they never
-    /// inspect what `execute` actually does. The default (`Safe` risk, no
-    /// permissions, no confirmation) is **deliberately permissive**: an
-    /// implementation that forgets to override `meta()` is silently exempted
-    /// from every hard gate and auto-allowed with no user prompt, even if
-    /// `execute` reads the filesystem, makes network calls, or shells out.
+    /// inspect what `execute` actually does. The default (`Moderate` risk, no
+    /// permissions, requires confirmation) is **default-deny-ish**: an
+    /// implementation that forgets to override `meta()` pauses for HITL instead
+    /// of being silently auto-allowed, even if `execute` only reads local facts.
     /// Any tool that touches the filesystem, network, clipboard, or shell —
     /// or has other side effects a user would want to approve — **must**
     /// override `meta()` with accurate `Permission`s and `ToolRisk`.
+    /// `#[must_use]` on the returned [`ToolMeta`] is not enforceable on trait
+    /// defaults; treat a missing `meta()` override as a bug and add explicit
+    /// `meta()` to every production tool.
     fn meta(&self) -> ToolMeta {
-        ToolMeta::safe_default()
+        ToolMeta::with_risk(ToolRisk::Moderate).confirm(true)
     }
 
     /// Progressive listing opt-in. Default **`false`**.
@@ -94,4 +97,41 @@ pub trait Tool: Send + Sync {
         ctx: &crate::tool_context::ToolCallContext,
         args: Value,
     ) -> Result<String, ToolError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolKind;
+
+    struct DefaultMetaTool;
+
+    #[async_trait]
+    impl Tool for DefaultMetaTool {
+        fn name(&self) -> &str {
+            "default_meta_probe"
+        }
+        fn description(&self) -> &str {
+            "probe"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{},"required":[]})
+        }
+        async fn execute(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: Value,
+        ) -> Result<String, ToolError> {
+            Ok("ok".into())
+        }
+    }
+
+    #[test]
+    fn default_meta_is_deny_ish() {
+        let m = DefaultMetaTool.meta();
+        assert_eq!(m.risk, ToolRisk::Moderate);
+        assert!(m.requires_confirmation);
+        assert_eq!(m.kind, ToolKind::Other);
+        assert!(!m.is_read_only());
+    }
 }

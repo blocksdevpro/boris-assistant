@@ -55,6 +55,17 @@ pub(super) fn extract_reply_text(response: &Value) -> String {
     }
 }
 
+/// Display-only note attached to a tool-call response. Never sent to TTS.
+pub(super) fn extract_tool_note(response: &Value) -> Option<String> {
+    let content = extract_reply_text(response);
+    if content.is_empty() || crate::speech_sanitize::contains_tool_markup(&content) {
+        return None;
+    }
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let note = log_preview(&compact, 180);
+    (!note.is_empty()).then_some(note)
+}
+
 /// Truncate for event previews (Unicode-char-aware, not byte-sliced).
 pub(super) fn log_preview(s: &str, max: usize) -> String {
     let mut chars = s.chars();
@@ -70,6 +81,20 @@ pub(super) fn log_preview(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_note_uses_same_response_content_without_speech() {
+        let response = json!({
+            "content": "I'll check the status path, then update the overlay.\n",
+            "tool_calls": [{"id": "c1", "function": {"name": "file_read", "arguments": "{}"}}]
+        });
+        assert_eq!(
+            extract_tool_note(&response).as_deref(),
+            Some("I'll check the status path, then update the overlay.")
+        );
+        assert!(extract_tool_note(&json!({"content": null})).is_none());
+        assert!(extract_tool_note(&json!({"content": "<invoke>file_read</invoke>"})).is_none());
+    }
 
     #[test]
     fn parse_tool_calls_reads_id_name_and_args() {

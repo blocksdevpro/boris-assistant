@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use boris_agent::maintenance::MaintenanceHandle;
 use boris_agent::trace::TraceEvent;
-use boris_agent::TurnTrace;
+use boris_agent::{MaintenanceHandle, TurnTrace};
 use serde_json::Value;
 
 /// Per-iteration trace guard. Every exit path (`continue`, `return`, or normal

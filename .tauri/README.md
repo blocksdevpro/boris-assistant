@@ -59,11 +59,40 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/boris.key)"
 Tauri writes updater artifacts next to the normal installers (e.g.
 `Boris_*_x64-setup.exe` + `.sig` under `target/release/bundle/nsis/`).
 
+### Release build: 1.2.0
+
+The product manifests and Cargo lockfile are set to `1.2.0`.
+[Release notes](releases/v1.2.0.md) cover the stable GitHub release. The
+signed build produces `Boris_1.2.0_x64-setup.exe`,
+`Boris_1.2.0_x64_en-US.msi`, and their `.sig` files.
+
+Run `bun run verify:release` from `desktop/` before signing. It checks product
+versions, the locked Cargo metadata, installer targets, the updater public key,
+and the release-note and changelog headings. It does not read the private key
+or create a signed installer.
+
+Before publishing:
+
+1. Confirm the changelog date matches the publication date. Land the release
+   commit on `main` and tag that commit `v1.2.0`. Build from the tagged
+   source so the tag identifies the code in the installers.
+2. Run the signed build above and test both installers. Check that the NSIS
+   updater signature verifies with `.tauri/boris.key.pub`.
+3. Run `bun run release:manifest <UTC-timestamp>` from `desktop/`, using
+   an ISO 8601 time such as `2026-09-28T09:00:00Z`. It creates `latest.json`
+   beside the NSIS installer using the version, release notes, and complete
+   generated signature. Its URL points to `v1.2.0`.
+4. Create a normal GitHub release for `v1.2.0`. Attach both installers,
+   both signatures, and `latest.json`. Mark the release Latest and leave the
+   rolling `beta` pre-release in place.
+5. Once the release and assets are available, update
+   `website/src/lib/releases.ts` to list 1.2.0 as the current Stable release.
+
 ## Branches
 
 | Git branch | Holds | Product version | Installers |
 |---|---|---|---|
-| **`main`** | Current **stable** line | Numeric (`1.1.0`, `1.1.1`, …) | NSIS + MSI |
+| **`main`** | Current **stable** line | Numeric (`1.2.0`, `1.2.1`, …) | NSIS + MSI |
 | **`next`** | Next minor **beta** line | `MAJOR.MINOR.PATCH-beta.N` | NSIS only |
 
 The updater still keys off **GitHub Releases**, not these branches:
@@ -77,13 +106,14 @@ release tag; `git push origin beta` would be ambiguous.
 
 ### Day to day
 
-- New 1.2 work lands on **`next`**. Tag `v1.2.0-beta.N` from `next` as a
+- New 1.3 work lands on **`next`**. Tag `v1.3.0-beta.N` from `next` as a
   **pre-release**, then overwrite assets on the rolling `beta` tag.
-- Stable patches (`1.1.1`) land on **`main`**. Tag `v1.1.1` **without**
+- Stable patches (`1.2.1`) land on **`main`**. Tag `v1.2.1` **without**
   `--prerelease`. Cherry-pick the fix onto `next` so it is not lost.
-- Promote: on `next`, bump to numeric `1.2.0` and restore
-  `bundle.targets: ["nsis", "msi"]`. Merge `next` → `main`. Tag `v1.2.0`
-  from `main` as a normal release. Then bump `next` to `1.3.0-beta.1`
+- Promote: on `next`, bump to a numeric version and restore
+  `bundle.targets: ["nsis", "msi"]`. Merge `next` → `main`. Tag the
+  numeric version from `main` as a normal release. Then bump `next`
+  to the next minor beta
   and set targets back to `["nsis"]`.
 
 Default GitHub branch stays **`main`**.
@@ -141,30 +171,20 @@ and put the same version in `latest.json`.
 GitHub **Latest** is the most recently published non-prerelease. The in-app
 **Stable** channel follows `/releases/latest`.
 
-`main` is the **`1.1.0`** clean promote (numeric version, NSIS + MSI).
-Do **not** uncheck Pre-release on `v1.1.0-beta.5` — that would offer
-Stable 1.0.0 installs a build still labeled `1.1.0-beta.5` (NSIS only, no
-MSI).
+This tree is **`1.2.0`** (NSIS and MSI). Promote it by merging the release
+commit from `next` into `main`, then tagging `main`. Do not change the
+pre-release status of beta.3.
 
-The clean promote (`next` → `main`):
+To finish the promotion:
 
-1. On `next`, bump to a numeric version (`1.2.0`) in `package.json`,
-   `tauri.conf.json`, both `Cargo.toml`s, and `CHANGELOG.md`.
-2. Set `bundle.targets` back to `["nsis", "msi"]` (MSI can encode `1.2.0`).
-3. Merge `next` into `main`. Sign-build from `main`, then create
-   **`v1.2.0` without `--prerelease`** and attach installer(s), `.sig`,
-   and `latest.json` whose `url` points at `v1.2.0`.
-4. Leave the rolling `beta` tag as a pre-release. Do not mark it Latest.
-5. On `next`, bump to `1.3.0-beta.1` and set targets back to `["nsis"]`.
-
-Quick-and-dirty (same binary, still labeled beta.5) — **do not use for 1.1.0**:
-
-```powershell
-gh release edit v1.1.0-beta.5 --prerelease=false
-```
-
-That makes `/releases/latest` this tag. Stable Check will offer
-`1.1.0-beta.5` to 1.0.0 users.
+1. Merge this release commit into `next` and then `main`. Tag the
+   resulting `main` commit `v1.2.0`.
+2. Sign-build from the tag. Test the NSIS and MSI installers and create
+   `latest.json` from the NSIS signature.
+3. Publish `v1.2.0` as a normal GitHub release with both installers,
+   signatures, and `latest.json`. Mark it Latest.
+4. Leave the rolling `beta` tag as a pre-release. On `next`, bump to
+   `1.3.0-beta.1` and set targets back to `["nsis"]`.
 
 ## CI secrets
 

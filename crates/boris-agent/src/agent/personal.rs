@@ -27,6 +27,17 @@ impl Agent {
         llm_extract: bool,
     ) -> Result<Arc<Mutex<UserProfile>>, String> {
         let store = ProfileStore::new(profile_path);
+        self.enable_personal_context_with_store(store, llm_extract)
+    }
+
+    /// Attach the extraction working set to an already-selected backing
+    /// store. Desktop uses `ProfileStore::canonical`, keeping this state in
+    /// memory.sqlite rather than writing a second profile.json database.
+    pub fn enable_personal_context_with_store(
+        &mut self,
+        store: ProfileStore,
+        llm_extract: bool,
+    ) -> Result<Arc<Mutex<UserProfile>>, String> {
         let profile = store.load()?;
         let shared = Arc::new(Mutex::new(profile));
         self.personal = Some(PersonalMemory {
@@ -64,6 +75,7 @@ impl Agent {
                 .lock()
                 .map_err(|_| "personal profile lock poisoned".to_string())?;
             profile.turns_seen = profile.turns_seen.saturating_add(1);
+            erase_profile_forgets(&mem.store, &delta)?;
             if changed {
                 delta.apply(&mut profile);
             }
@@ -136,6 +148,8 @@ impl Agent {
                     delta
                         .facts_remove_query
                         .extend(llm_delta.facts_remove_query);
+                    delta.forget_preferred_name |= llm_delta.forget_preferred_name;
+                    delta.forget_all |= llm_delta.forget_all;
                     delta.ongoing_add.extend(llm_delta.ongoing_add);
                     if llm_delta.ongoing_replace.is_some() {
                         delta.ongoing_replace = llm_delta.ongoing_replace;
@@ -174,6 +188,9 @@ impl Agent {
         if let Some(mem) = &self.personal {
             if let Ok(mut p) = mem.profile.lock() {
                 let before_empty = p.is_empty();
+                if let Err(e) = erase_profile_forgets(&mem.store, &delta) {
+                    warn!(error = %e, "failed to erase canonical forgotten memory");
+                }
                 delta.apply(&mut p);
                 if let Err(e) = mem.store.save(&p) {
                     warn!(
@@ -199,13 +216,35 @@ impl Agent {
 
     /// Refresh system prompt when profile tools mutated personal context mid-turn.
     pub(super) fn maybe_refresh_after_tools(&mut self, tools_used: &[String]) {
-        if tools_used
-            .iter()
-            .any(|n| n == "save_user_fact" || n == "update_user_profile" || n == "get_user_context")
-        {
+        if tools_used.iter().any(|n| {
+            n == "save_user_fact"
+                || n == "update_user_profile"
+                || n == "forget_user_memory"
+                || n == "forget_memory"
+                || n == "get_user_context"
+        }) {
             self.refresh_system_prompt();
         }
     }
+}
+
+fn erase_profile_forgets(
+    store: &ProfileStore,
+    delta: &crate::memory::ProfileDelta,
+) -> Result<(), String> {
+    let Some(memory) = store.memory_store() else {
+        return Ok(());
+    };
+    if delta.forget_all {
+        return memory.forget_all();
+    }
+    for query in &delta.facts_remove_query {
+        let _ = memory.forget_matching(query)?;
+    }
+    if delta.forget_preferred_name {
+        let _ = memory.forget_matching("preferred name")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ impl Tool for OpenUrlTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::with_risk(ToolRisk::Dangerous)
             .kind(ToolKind::Web)
-            .permissions(&[Permission::UiControl])
+            .permissions(&[Permission::UiControl, Permission::Network])
             .confirm(true)
             .read_only(false)
             .max_concurrency(1)
@@ -138,5 +138,35 @@ impl Tool for OpenPathTool {
             .map_err(|e| ToolError::failed(format!("failed to open path: {e}")))?;
 
         Ok(truncate_tool_result(format!("Opened path: {path_display}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{decide, NetworkPolicy, PolicyDecision, SandboxConfig};
+
+    #[test]
+    fn open_url_declares_network_and_ui_control() {
+        let perms = OpenUrlTool.meta().permissions;
+        assert!(perms.contains(&Permission::Network));
+        assert!(perms.contains(&Permission::UiControl));
+    }
+
+    #[test]
+    fn network_off_denies_open_url() {
+        let mut cfg = SandboxConfig::default();
+        cfg.network = NetworkPolicy::Off;
+        let meta = OpenUrlTool.meta();
+        let decision = decide(
+            &cfg,
+            &meta,
+            &serde_json::json!({"url": "https://example.com"}),
+            0,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "expected NetworkPolicy::Off to deny open_url, got {decision:?}"
+        );
     }
 }

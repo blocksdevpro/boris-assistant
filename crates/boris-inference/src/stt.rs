@@ -64,6 +64,30 @@ pub trait SpeechToText: Send {
     ///
     /// Empty slices must return `Ok("")` (or empty string) rather than panic.
     fn transcribe(&mut self, audio: &[AudioSample]) -> Result<String>;
+
+    /// Whether the backend can usefully score a growing (prefix) buffer while
+    /// the user is still speaking.
+    ///
+    /// Offline models (e.g. Parakeet TDT) return `true` here when a full
+    /// re-decode of the prefix is cheap enough to run as a *partial*: the
+    /// result is advisory only and the host must still run a final
+    /// [`SpeechToText::transcribe`] at endpoint. Backends with true chunked
+    /// state should also return `true` and override
+    /// [`SpeechToText::transcribe_partial`] with the incremental path.
+    ///
+    /// Default is `false` so existing adapters opt out until measured.
+    fn supports_partials(&self) -> bool {
+        false
+    }
+
+    /// Transcribe a prefix snapshot for live UI / early-endpoint hints.
+    ///
+    /// Default re-decodes via [`SpeechToText::transcribe`]. Hosts must treat
+    /// the output as unstable (may change as more audio arrives) and must not
+    /// skip the final `transcribe`.
+    fn transcribe_partial(&mut self, audio: &[AudioSample]) -> Result<String> {
+        self.transcribe(audio)
+    }
 }
 
 #[cfg(test)]
@@ -149,5 +173,19 @@ mod tests {
         assert_eq!(err.to_string(), "stt down");
         assert!(!boxed.is_loaded());
         assert_eq!(boxed.backend_id(), "unknown");
+    }
+
+    #[test]
+    fn partials_opt_out_by_default() {
+        struct Bare;
+        impl SpeechToText for Bare {
+            fn transcribe(&mut self, _: &[AudioSample]) -> Result<String> {
+                Ok("final".into())
+            }
+        }
+        let mut bare = Bare;
+        assert!(!bare.supports_partials());
+        // Default partial path re-decodes via transcribe.
+        assert_eq!(bare.transcribe_partial(&[0.0]).unwrap(), "final");
     }
 }

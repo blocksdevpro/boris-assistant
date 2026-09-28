@@ -2,8 +2,8 @@
 //!
 //! Dispatch rules:
 //! - Length 1 → sequential path.
-//! - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call needs
-//!   confirmation, fall back to sequential (HITL-safe). Otherwise:
+//! - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call can
+//!   pause for confirmation or input, fall back to sequential. Otherwise:
 //!   - **wave scheduling** (default): read-only wave (parallel, chunked) then
 //!     write wave (sequential)
 //!   - else: legacy parallel path — all auto-allow calls, still chunked by
@@ -65,7 +65,7 @@ pub(super) async fn process_tool_calls(
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
     if calls.len() > 1 {
-        if !batch_needs_confirmation(state, &calls, *confirms_used)? {
+        if !batch_may_pause(state, &calls, *confirms_used)? {
             if config.features.wave_scheduling {
                 tracing::debug!(
                     batch = calls.len(),
@@ -75,7 +75,9 @@ pub(super) async fn process_tool_calls(
                     state,
                     calls,
                     tools_used,
-                    *confirms_used,
+                    tool_rounds,
+                    confirms_used,
+                    user_text,
                     config,
                     emit,
                     cancel,
@@ -91,7 +93,9 @@ pub(super) async fn process_tool_calls(
                 state,
                 calls,
                 tools_used,
-                *confirms_used,
+                tool_rounds,
+                confirms_used,
+                user_text,
                 config,
                 emit,
                 cancel,
@@ -100,7 +104,7 @@ pub(super) async fn process_tool_calls(
         }
         tracing::debug!(
             batch = calls.len(),
-            "tool batch: sequential after optional read-only prefix (HITL in batch)"
+            "tool batch: sequential after optional read-only prefix (pause in batch)"
         );
         let (prefix, rest) = split_auto_readonly_prefix(state, calls, *confirms_used);
         if !prefix.is_empty() {
@@ -109,16 +113,25 @@ pub(super) async fn process_tool_calls(
                 rest = rest.len(),
                 "running auto-approved read-only calls before confirm boundary"
             );
-            run_tool_batch_parallel(
+            // Prefix is auto-allow, but a policy race could still surface a
+            // confirm/input. The parallel path falls back to sequential
+            // internally; if that pauses, propagate the pause.
+            match run_tool_batch_parallel(
                 state,
                 prefix,
                 tools_used,
-                *confirms_used,
+                tool_rounds,
+                confirms_used,
+                user_text,
                 config,
                 emit,
                 cancel.clone(),
             )
-            .await?;
+            .await?
+            {
+                ToolBatchResult::Continue => {}
+                paused @ ToolBatchResult::Paused { .. } => return Ok(paused),
+            }
         }
         if rest.is_empty() {
             return Ok(ToolBatchResult::Continue);
@@ -151,9 +164,9 @@ pub(super) async fn process_tool_calls(
     .await
 }
 
-/// True if any call in the batch would require user confirmation under current policy.
-/// Unknown tools are treated as non-confirm (soft-failed later with an error observation).
-fn batch_needs_confirmation(
+/// True if any call can pause for confirmation or on-screen input.
+/// Unknown tools are treated as non-pausing (soft-failed later with an error observation).
+fn batch_may_pause(
     state: &LoopState<'_>,
     calls: &[RawToolCall],
     confirms_used: u32,
@@ -166,6 +179,9 @@ fn batch_needs_confirmation(
         let Some(tool) = find_tool_opt(state.tools, &call.name) else {
             continue;
         };
+        if tool.meta().collects_input {
+            return Ok(true);
+        }
         if matches!(
             state.runtime.decide_only(tool, &call.args, opts),
             PolicyDecision::NeedsConfirmation { .. }
@@ -275,21 +291,63 @@ async fn run_tool_batch_sequential(
                     emit,
                 );
             }
+            InvokeResult::NeedsInput {
+                pending,
+                speak_prompt,
+            } => {
+                let rest: Vec<RawToolCall> = iter.collect();
+                let pending_turn = PendingTurn {
+                    pending: pending.clone(),
+                    batch_with: Vec::new(),
+                    remaining_calls: rest,
+                    tools_used: tools_used.clone(),
+                    tool_rounds,
+                    confirms_used: *confirms_used,
+                    user_text: user_text.to_string(),
+                    // Enriched by `loop_::agent_loop` / resume paths with the
+                    // live todos path, finish budgets, and accounting. Defaults
+                    // keep direct `process_tool_calls` unit tests working.
+                    todos_file: None,
+                    markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+                    gate_left: 0,
+                    token_accounting: crate::types::TokenAccounting::default(),
+                };
+                return Ok(ToolBatchResult::Paused {
+                    outcome: AgentOutcome::NeedsInput {
+                        text: speak_prompt,
+                        pending,
+                    },
+                    pending_turn,
+                });
+            }
             InvokeResult::NeedsConfirmation {
                 pending,
                 speak_prompt,
             } => {
                 // One HITL decision covers pending + compatible siblings.
+                // Still budget-aware: `collect_confirm_batch` caps siblings so
+                // `confirms_used + batch_with.len()` never exceeds
+                // `max_confirms_per_turn`; overflow stays in `remaining` for a
+                // later prompt.
                 *confirms_used = confirms_used.saturating_add(1);
                 let rest: Vec<RawToolCall> = iter.collect();
                 let first_is_shell = tool.meta().permissions.contains(&Permission::Shell);
-                let (batch_with, remaining) =
-                    collect_confirm_batch(state, pending.risk, first_is_shell, rest)?;
+                let max_confirms = state.runtime.policy().max_confirms_per_turn;
+                let (batch_with, remaining) = collect_confirm_batch(
+                    state,
+                    pending.risk,
+                    first_is_shell,
+                    rest,
+                    *confirms_used,
+                    max_confirms,
+                )?;
                 let batch_size = batch_with.len() + 1;
                 tracing::info!(
                     batch_size,
                     tool = %pending.name,
                     first_is_shell,
+                    confirms_used = *confirms_used,
+                    max_confirms,
                     "HITL batch confirm pause"
                 );
                 let speak_prompt = if batch_with.is_empty() {
@@ -305,6 +363,11 @@ async fn run_tool_batch_sequential(
                     tool_rounds,
                     confirms_used: *confirms_used,
                     user_text: user_text.to_string(),
+                    // Enriched by the loop with live todos/budgets/accounting.
+                    todos_file: None,
+                    markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+                    gate_left: 0,
+                    token_accounting: crate::types::TokenAccounting::default(),
                 };
                 return Ok(ToolBatchResult::Paused {
                     outcome: AgentOutcome::NeedsConfirmation {
@@ -324,11 +387,21 @@ async fn run_tool_batch_sequential(
 ///
 /// Shell tools batch with other shell tools only (never mixed with file writes).
 /// Non-shell tools batch with non-shell only.
+///
+/// Budget-aware batch-HITL: one yes/no prompt still covers `pending` plus the
+/// returned `batch_with`, but the batch is capped so the turn's
+/// `max_confirms_per_turn` is never exceeded by batching alone. If
+/// `confirms_used (already including pending) + batch_with.len() + 1 > max`,
+/// only as many siblings as fit are taken; the overflow stays at the head of
+/// `remaining` for a later prompt. Callers pass the post-increment
+/// `confirms_used` (pending already counted).
 fn collect_confirm_batch(
     state: &LoopState<'_>,
     first_risk: ToolRisk,
     first_is_shell: bool,
     remaining: Vec<RawToolCall>,
+    confirms_used: u32,
+    max_confirms: u32,
 ) -> Result<(Vec<RawToolCall>, Vec<RawToolCall>), AgentError> {
     let mut batch_with = Vec::new();
     let mut iter = remaining.into_iter();
@@ -364,6 +437,24 @@ fn collect_confirm_batch(
         };
         match state.runtime.decide_only(tool, &call.args, opts) {
             PolicyDecision::NeedsConfirmation { .. } => {
+                // Budget-aware split: each batched sibling counts against
+                // `max_confirms_per_turn` even though the UI shows one prompt.
+                // `confirms_used` already includes `pending`.
+                if confirms_used
+                    .saturating_add(batch_with.len() as u32)
+                    .saturating_add(1)
+                    > max_confirms.max(1)
+                {
+                    let mut rest = vec![call];
+                    rest.extend(iter);
+                    tracing::debug!(
+                        confirms_used,
+                        max_confirms,
+                        batched = batch_with.len(),
+                        "HITL batch capped by confirm budget; leaving overflow for later"
+                    );
+                    return Ok((batch_with, rest));
+                }
                 batch_with.push(call);
             }
             _ => {
@@ -447,18 +538,27 @@ fn truncate_voice(s: &str, max_chars: usize) -> String {
 /// Invokes in chunks of `max_parallel_tools` (same clamp as the wave path);
 /// only mutates context after all results are collected, preserving original
 /// call order.
+///
+/// If any call unexpectedly needs confirmation/input (policy race between
+/// preflight and invoke), the whole batch falls back to sequential execution
+/// so the HITL pause is preserved instead of surfacing
+/// `Error: unexpected confirmation...`. The error text is only kept when the
+/// sequential fallback itself reports a mismatch (which cannot pause).
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_batch_parallel(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
     tools_used: &mut Vec<String>,
-    confirms_used: u32,
+    tool_rounds: u32,
+    confirms_used: &mut u32,
+    user_text: &str,
     config: &AgentLoopConfig,
     emit: &EmitFn,
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
     let opts = InvokeOptions {
         skip_confirmation: false,
-        confirms_used,
+        confirms_used: *confirms_used,
     };
     let max_par = clamp_parallel(calls.len(), config.features.max_parallel_tools);
     let mut results: Vec<(u64, InvokeResult)> = Vec::with_capacity(calls.len());
@@ -497,23 +597,53 @@ async fn run_tool_batch_parallel(
         results.extend(chunk_results);
     }
 
+    if results.iter().any(|(_, r)| {
+        matches!(
+            r,
+            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
+        )
+    }) {
+        tracing::warn!(
+            batch = calls.len(),
+            "parallel batch hit unexpected HITL; falling back to sequential"
+        );
+        return run_tool_batch_sequential(
+            state,
+            calls,
+            tools_used,
+            tool_rounds,
+            confirms_used,
+            user_text,
+            config,
+            emit,
+            cancel,
+        )
+        .await;
+    }
+
     commit_batch_results(state, &calls, results, tools_used, emit);
     Ok(ToolBatchResult::Continue)
 }
 
 /// Wave scheduling: parallel read-only wave, then sequential non-read-only.
+///
+/// Same HITL fallback as [`run_tool_batch_parallel`]: an unexpected
+/// confirm/input in either wave re-runs the whole batch sequentially.
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_batch_waves(
     state: &mut LoopState<'_>,
     calls: Vec<RawToolCall>,
     tools_used: &mut Vec<String>,
-    confirms_used: u32,
+    tool_rounds: u32,
+    confirms_used: &mut u32,
+    user_text: &str,
     config: &AgentLoopConfig,
     emit: &EmitFn,
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
     let opts = InvokeOptions {
         skip_confirmation: false,
-        confirms_used,
+        confirms_used: *confirms_used,
     };
     let (read_idx, write_idx) = partition_read_write(&calls, state.tools);
     // Contract with `partition_read_write`: every index in 0..calls.len() lands
@@ -590,6 +720,29 @@ async fn run_tool_batch_waves(
         .into_iter()
         .map(|o| o.expect("every call should have a result"))
         .collect();
+    if results.iter().any(|(_, r)| {
+        matches!(
+            r,
+            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
+        )
+    }) {
+        tracing::warn!(
+            batch = calls.len(),
+            "wave batch hit unexpected HITL; falling back to sequential"
+        );
+        return run_tool_batch_sequential(
+            state,
+            calls,
+            tools_used,
+            tool_rounds,
+            confirms_used,
+            user_text,
+            config,
+            emit,
+            cancel,
+        )
+        .await;
+    }
     commit_batch_results(state, &calls, results, tools_used, emit);
     Ok(ToolBatchResult::Continue)
 }
@@ -671,6 +824,66 @@ mod tests {
             _args: serde_json::Value,
         ) -> Result<String, ToolError> {
             Ok("wrote".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_collect_input_pauses_and_preserves_remaining_calls() {
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(crate::tools::collect_input::CollectInputTool)];
+        let runtime = ToolRuntime::null();
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = vec![
+            RawToolCall {
+                call_id: "input-1".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type the first value.", "label": "First"}),
+            },
+            RawToolCall {
+                call_id: "input-2".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type the second value.", "label": "Second"}),
+            },
+        ];
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+
+        let result = process_tool_calls(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "collect two values",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+
+        match result {
+            ToolBatchResult::Paused {
+                outcome,
+                pending_turn,
+            } => {
+                assert!(matches!(outcome, AgentOutcome::NeedsInput { .. }));
+                assert!(pending_turn.pending.input.is_some());
+                assert_eq!(pending_turn.pending.call_id, "input-1");
+                assert_eq!(pending_turn.remaining_calls.len(), 1);
+                assert_eq!(pending_turn.remaining_calls[0].call_id, "input-2");
+            }
+            ToolBatchResult::Continue => panic!("collect_input batch must pause"),
         }
     }
 
@@ -1024,5 +1237,218 @@ mod tests {
             content.contains("not available"),
             "expected soft-fail observation, got: {content}"
         );
+    }
+
+    #[tokio::test]
+    async fn confirm_batch_is_capped_by_max_confirms_per_turn() {
+        // B3: batch-HITL still shows one prompt but is budget-aware. With
+        // max=2, a 4-tool Dangerous batch must split: pending + 1 sibling in
+        // the first pause, 2 left in `remaining` for a later prompt.
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DangerWrite { name: "w1" }),
+            Arc::new(DangerWrite { name: "w2" }),
+            Arc::new(DangerWrite { name: "w3" }),
+            Arc::new(DangerWrite { name: "w4" }),
+        ];
+        let policy = crate::runtime::SandboxConfig {
+            max_confirms_per_turn: 2,
+            ..Default::default()
+        };
+        let runtime = ToolRuntime::new(policy, Box::new(crate::runtime::NullAuditSink));
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = (1..=4)
+            .map(|i| RawToolCall {
+                call_id: format!("c{i}"),
+                name: format!("w{i}"),
+                args: json!({}),
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = process_tool_calls(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "write four",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+        match result {
+            ToolBatchResult::Paused { pending_turn, .. } => {
+                assert_eq!(pending_turn.pending.name, "w1");
+                // 1 pending + 1 batched = max 2; overflow stays remaining.
+                assert_eq!(
+                    pending_turn.batch_with.len(),
+                    1,
+                    "only as many siblings as fit the confirm budget"
+                );
+                assert_eq!(pending_turn.batch_with[0].name, "w2");
+                assert_eq!(pending_turn.remaining_calls.len(), 2);
+                assert_eq!(pending_turn.remaining_calls[0].name, "w3");
+                assert_eq!(pending_turn.remaining_calls[1].name, "w4");
+                assert_eq!(pending_turn.confirms_used, 1);
+                assert_eq!(confirms_used, 1);
+            }
+            ToolBatchResult::Continue => panic!("expected capped HITL pause"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_falls_back_to_sequential_on_unexpected_confirm() {
+        // B12: force the parallel path with a confirm-needed batch (bypassing
+        // preflight). It must fall back to sequential and pause — never emit
+        // "Error: unexpected confirmation..." text.
+        struct Safe;
+        #[async_trait]
+        impl Tool for Safe {
+            fn name(&self) -> &str {
+                "safe"
+            }
+            fn description(&self) -> &str {
+                "safe"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{},"required":[]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default()
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _args: serde_json::Value,
+            ) -> Result<String, ToolError> {
+                Ok("ok".into())
+            }
+        }
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(Safe), Arc::new(DangerWrite { name: "danger" })];
+        let runtime = ToolRuntime::null();
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = vec![
+            RawToolCall {
+                call_id: "c1".into(),
+                name: "safe".into(),
+                args: json!({}),
+            },
+            RawToolCall {
+                call_id: "c2".into(),
+                name: "danger".into(),
+                args: json!({}),
+            },
+        ];
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        // Direct parallel call (preflight would have routed to sequential).
+        let result = run_tool_batch_parallel(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "fallback",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+        match result {
+            ToolBatchResult::Paused { pending_turn, .. } => {
+                assert_eq!(pending_turn.pending.name, "danger");
+            }
+            ToolBatchResult::Continue => {
+                panic!("parallel fallback must pause, not swallow HITL as error text")
+            }
+        }
+        // No "unexpected confirmation" error text may leak into context.
+        for m in context.messages() {
+            if matches!(m.role, crate::context::Role::Tool) {
+                let s = m.content["content"].as_str().unwrap_or("");
+                assert!(
+                    !s.contains("unexpected confirmation"),
+                    "fallback must not emit parallel-batch error, got: {s}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn waves_fall_back_to_sequential_on_unexpected_input() {
+        // B12 wave path: a collect_input call smuggled into the wave batch
+        // must also fall back to sequential and pause for input.
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(crate::tools::collect_input::CollectInputTool)];
+        let runtime = ToolRuntime::null();
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = vec![
+            RawToolCall {
+                call_id: "i1".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type it.", "label": "L"}),
+            },
+            RawToolCall {
+                call_id: "i2".into(),
+                name: "collect_input".into(),
+                args: json!({"spoken": "Type it.", "label": "L"}),
+            },
+        ];
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = run_tool_batch_waves(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "wave fallback",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+        match result {
+            ToolBatchResult::Paused { pending_turn, .. } => {
+                assert!(pending_turn.pending.input.is_some());
+            }
+            ToolBatchResult::Continue => panic!("wave fallback must pause for input"),
+        }
     }
 }

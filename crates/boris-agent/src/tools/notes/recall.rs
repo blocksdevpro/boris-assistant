@@ -52,8 +52,8 @@ impl Tool for RecallNotesTool {
                     "description": "Optional case-insensitive substring to search for"
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Max notes to return (default 5, max 20)"
+                    "type": "integer",
+                    "description": "Max notes to return (default 5, max 20). Must be an integer; floats are rejected."
                 }
             },
             "required": []

@@ -12,7 +12,7 @@ Product [`TextToSpeech`](boris_inference::TextToSpeech) adapter for
 | Sample format | `f32` in roughly `[-1.0, 1.0]` |
 
 Hosts must resample to the output device when needed
-(`play_source_rate` in the pipeline is typically 44_100).
+(the pipeline plays at 44_100 — see `boris-pipeline` play config).
 
 ## Paths
 
@@ -32,6 +32,10 @@ tts.load()?;
 let pcm = tts.synthesize("Hello.")?;
 ```
 
+Builder defaults: `total_step = 8`, `speed = 1.05`, `silence_duration = 0.0`,
+language `"en"`. Clamps: steps floor at 1, non-finite / non-positive speed
+falls back to `1.0`, non-finite / negative silence falls back to `0.0`.
+
 - `model_dir` — ONNX graph + `tts.json` (Supertonic **3** multilingual).
 - `voice_dir` — `voices/<id>.json` style packs.
 - Voice ids must be simple basenames (no path separators / `..`).
@@ -48,14 +52,14 @@ owned by this adapter (`with_silence_duration`). We pass
 
 ## Tokio / threading
 
-`st-tts` synthesize is `async`. This adapter keeps a **private multi-thread
+`st-tts` synthesize is `async`. This adapter keeps a **private 2-worker
 Tokio runtime** and drives it with `block_on` on the **sync engine thread**.
 
 - **Supported host:** a non-async (or non-entered) OS thread — e.g. the
   pipeline voice engine thread.
 - **Not supported:** calling `synthesize` from inside an already-entered
-  Tokio runtime (nested `block_on` would panic). If `Handle::try_current()`
-  succeeds, synthesis returns an error instead.
+  Tokio runtime. A plain nested `block_on` would panic, so the adapter
+  checks `Handle::try_current()` first and returns `Error::Other` instead.
 
 The runtime is built **lazily** on first `load` / `synthesize` (no panic in
 `with_paths`).
@@ -73,6 +77,7 @@ The runtime is built **lazily** on first `load` / `synthesize` (no panic in
 |--------|--------|
 | `backend_id` | `"supertone"` |
 | `sample_rate` | model rate after load, else `44_100` |
+| `inter_unit_silence_samples` | `silence_duration × sample_rate` (rounded) |
 | `is_loaded` | after successful load |
 
 ## Smoke example

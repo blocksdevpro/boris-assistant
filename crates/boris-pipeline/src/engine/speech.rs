@@ -11,13 +11,14 @@ use std::time::{Duration, Instant};
 
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
-use boris_core::{AudioBuffer, TurnId};
+use boris_core::{ArcAudioBuffer, AudioBuffer, TurnId};
 
 use crate::status::{EngineState, Phase};
 
+use super::barge::{drain_mic, BargeWatch};
 use super::models::{lost_tts, TtsBox};
 use super::picture::Picture;
-use super::playback::{poll_running, PlaybackWait};
+use super::playback::{drain_output_events, poll_running, PlaybackWait};
 use super::EngineCommand;
 
 const EVENT_POLL: Duration = Duration::from_millis(20);
@@ -64,6 +65,8 @@ pub(super) struct StreamedSpeech {
     pub play_ms: u64,
     pub speech_ms: u64,
     pub queued_samples: usize,
+    /// Units not yet appended when playback was paused for barge-in.
+    pub remaining_units: Vec<String>,
 }
 
 fn send_synth_event(
@@ -190,26 +193,29 @@ pub(super) fn stream_reply(
     units: Vec<String>,
     gap_samples: usize,
     turn: TurnId,
+    already_audible: bool,
     audio: &mut AudioService,
     output_events: &mut crossbeam_channel::Receiver<OutputEvent>,
     cmd_rx: &mpsc::Receiver<EngineCommand>,
     running: &mut bool,
     picture: &mut Picture,
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    mut barge: Option<&mut BargeWatch<'_>>,
 ) -> StreamedSpeech {
     let started_at = Instant::now();
     let source_rate = audio.source_rate();
-    let (join, cancel, synth_events) = match spawn_synth(tts, units) {
-        SpawnedSynth::Running {
-            join,
-            cancel,
-            events,
-        } => (join, cancel, events),
-        SpawnedSynth::Failed { tts, message } => {
+    let all_units = units;
+    if already_audible {
+        picture.set_phase(Phase::Talking);
+    }
+
+    let (join, cancel, synth_events, mut synthesis_done, mut held_tts) = if all_units.is_empty() {
+        if !already_audible {
             return StreamedSpeech {
                 tts,
                 wait: PlaybackWait::Aborted,
-                error: Some(message),
-                played: false,
+                error: Some("TTS produced no playable audio".into()),
+                played: already_audible,
                 tts_first_ms: 0,
                 audio_started_ms: None,
                 audio_drained_ms: None,
@@ -217,13 +223,43 @@ pub(super) fn stream_reply(
                 play_ms: 0,
                 speech_ms: started_at.elapsed().as_millis() as u64,
                 queued_samples: 0,
+                remaining_units: Vec::new(),
             };
+        }
+        // Resume after barge-in with only leftover PCM — no more sentences.
+        (None, None, None, true, Some(tts))
+    } else {
+        match spawn_synth(tts, all_units.clone()) {
+            SpawnedSynth::Running {
+                join,
+                cancel,
+                events,
+            } => (Some(join), Some(cancel), Some(events), false, None),
+            SpawnedSynth::Failed { tts, message } => {
+                return StreamedSpeech {
+                    tts,
+                    wait: PlaybackWait::Aborted,
+                    error: Some(message),
+                    played: already_audible,
+                    tts_first_ms: 0,
+                    audio_started_ms: None,
+                    audio_drained_ms: None,
+                    tts_ms: started_at.elapsed().as_millis() as u64,
+                    play_ms: 0,
+                    speech_ms: started_at.elapsed().as_millis() as u64,
+                    queued_samples: 0,
+                    remaining_units: all_units,
+                };
+            }
         }
     };
 
-    while output_events.try_recv().is_ok() {}
+    if !already_audible {
+        // Pre-play drain: a dead event channel here means `play` below fails
+        // and the loop reports `Stopped` — surfaced, not swallowed.
+        drain_output_events(output_events);
+    }
 
-    let mut synthesis_done = false;
     let mut synthesis_error = None;
     let mut tts_first_ms = 0u64;
     let mut tts_done_ms = 0u64;
@@ -235,18 +271,21 @@ pub(super) fn stream_reply(
     let mut drain_by = None;
     let mut finish_retry_started = None;
     let mut finish_ack: Option<crossbeam_channel::Receiver<()>> = None;
+    let mut pause_ack: Option<crossbeam_channel::Receiver<()>> = None;
     let mut finish_applied = false;
     let mut drain_observed = false;
     let mut queued_units = 0usize;
     let mut queued_samples = 0usize;
-    let mut heard_started = false;
+    let mut heard_started = already_audible;
     let mut wait = PlaybackWait::Finished;
     let mut done = false;
 
     while !done {
         let poll = poll_running(cmd_rx, running, audio, output_events, picture);
         if !poll.running {
-            cancel.store(true, Ordering::Release);
+            if let Some(cancel) = cancel.as_ref() {
+                cancel.store(true, Ordering::Release);
+            }
             audio.stop();
             // Make Stop visible immediately even if the current model call
             // needs a moment to return and release its weights.
@@ -256,53 +295,99 @@ pub(super) fn stream_reply(
             break;
         }
         if poll.output_rebuilt {
-            cancel.store(true, Ordering::Release);
+            if let Some(cancel) = cancel.as_ref() {
+                cancel.store(true, Ordering::Release);
+            }
             picture.set_phase(Phase::Armed);
             wait = PlaybackWait::Aborted;
             break;
         }
 
-        loop {
-            match synth_events.try_recv() {
-                Ok(SynthEvent::Unit { index, pcm }) => {
-                    if pcm.is_empty() {
-                        tracing::warn!(%turn, unit = index, "TTS unit produced no samples");
-                        continue;
-                    }
-                    let pcm = pace_unit(pcm, gap_samples, queued_units > 0);
-                    let samples = pcm.len();
-                    if let Err(error) = audio.append(pcm) {
-                        synthesis_error = Some(format!("append TTS unit {}: {error}", index + 1));
-                        cancel.store(true, Ordering::Release);
-                        audio.stop();
-                        wait = PlaybackWait::Aborted;
-                        done = true;
-                        break;
-                    }
-                    if queued_units == 0 {
-                        tts_first_ms = started_at.elapsed().as_millis() as u64;
-                        let now = Instant::now();
-                        audio_queued_at = Some(now);
-                        started_deadline = Some(now + START_TIMEOUT);
-                    }
-                    queued_units += 1;
-                    queued_samples = queued_samples.saturating_add(samples);
+        if pause_ack.is_none() {
+            let hit = match barge.as_mut() {
+                Some(watch) => watch.poll(),
+                None => {
+                    drain_mic(mic);
+                    None
                 }
-                Ok(SynthEvent::Failed { index, message }) => {
-                    tracing::warn!(%turn, unit = index, error = %message, "TTS stream unit failed");
-                    synthesis_error = Some(format!("TTS unit {}: {message}", index + 1));
+            };
+            if hit.is_some() {
+                match audio.request_pause() {
+                    Ok(ack) => {
+                        tracing::info!(%turn, queued_units, "barge-in — pausing leftover speech");
+                        pause_ack = Some(ack);
+                        if let Some(cancel) = cancel.as_ref() {
+                            cancel.store(true, Ordering::Release);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%turn, error = %error, "barge-in pause enqueue failed");
+                    }
                 }
-                Ok(SynthEvent::Done) => {
-                    synthesis_done = true;
-                    tts_done_ms = started_at.elapsed().as_millis() as u64;
+            }
+        }
+        if let Some(ack) = pause_ack.as_ref() {
+            match ack.try_recv() {
+                Ok(()) => {
+                    wait = PlaybackWait::BargedIn;
+                    break;
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    synthesis_done = true;
-                    if tts_done_ms == 0 {
+                    synthesis_error = Some("pause acknowledgement disconnected".into());
+                    audio.stop();
+                    wait = PlaybackWait::Aborted;
+                    break;
+                }
+            }
+        }
+
+        if let Some(synth_events) = synth_events.as_ref() {
+            loop {
+                match synth_events.try_recv() {
+                    Ok(SynthEvent::Unit { index, pcm }) => {
+                        if pcm.is_empty() {
+                            tracing::warn!(%turn, unit = index, "TTS unit produced no samples");
+                            continue;
+                        }
+                        let pcm = pace_unit(pcm, gap_samples, already_audible || queued_units > 0);
+                        let samples = pcm.len();
+                        if let Err(error) = audio.append(pcm) {
+                            synthesis_error =
+                                Some(format!("append TTS unit {}: {error}", index + 1));
+                            if let Some(cancel) = cancel.as_ref() {
+                                cancel.store(true, Ordering::Release);
+                            }
+                            audio.stop();
+                            wait = PlaybackWait::Aborted;
+                            done = true;
+                            break;
+                        }
+                        if queued_units == 0 && !already_audible {
+                            tts_first_ms = started_at.elapsed().as_millis() as u64;
+                            let now = Instant::now();
+                            audio_queued_at = Some(now);
+                            started_deadline = Some(now + START_TIMEOUT);
+                        }
+                        queued_units += 1;
+                        queued_samples = queued_samples.saturating_add(samples);
+                    }
+                    Ok(SynthEvent::Failed { index, message }) => {
+                        tracing::warn!(%turn, unit = index, error = %message, "TTS stream unit failed");
+                        synthesis_error = Some(format!("TTS unit {}: {message}", index + 1));
+                    }
+                    Ok(SynthEvent::Done) => {
+                        synthesis_done = true;
                         tts_done_ms = started_at.elapsed().as_millis() as u64;
                     }
-                    break;
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        synthesis_done = true;
+                        if tts_done_ms == 0 {
+                            tts_done_ms = started_at.elapsed().as_millis() as u64;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -357,13 +442,13 @@ pub(super) fn stream_reply(
             break;
         }
 
-        if synthesis_done && queued_units == 0 {
+        if synthesis_done && queued_units == 0 && !already_audible {
             synthesis_error.get_or_insert_with(|| "TTS produced no playable audio".into());
             wait = PlaybackWait::Aborted;
             break;
         }
 
-        if synthesis_done && finish_ack.is_none() && !finish_applied {
+        if synthesis_done && finish_ack.is_none() && !finish_applied && pause_ack.is_none() {
             let retry_start = *finish_retry_started.get_or_insert_with(Instant::now);
             match audio.request_finish_job() {
                 Ok(ack) => finish_ack = Some(ack),
@@ -437,49 +522,71 @@ pub(super) fn stream_reply(
     }
 
     if wait != PlaybackWait::Finished {
-        cancel.store(true, Ordering::Release);
+        if let Some(cancel) = cancel.as_ref() {
+            cancel.store(true, Ordering::Release);
+        }
     }
 
     // A model inference cannot be preempted safely. While it winds down, keep
     // handling host/device commands instead of blocking in join(). Cancelled
     // jobs get a finite grace; after that the native call is detached and the
     // engine receives a lost-model placeholder rather than hanging forever.
-    let join_deadline =
-        (wait != PlaybackWait::Finished).then(|| Instant::now() + SYNTH_CANCEL_JOIN_GRACE);
-    let synth_exited = wait_for_synth_exit(&join, join_deadline, || {
-        let poll = poll_running(cmd_rx, running, audio, output_events, picture);
-        if !poll.running {
-            audio.stop();
-            picture.engine = EngineState::Off;
-            picture.set_phase(Phase::Off);
-            wait = PlaybackWait::Stopped;
-        } else if poll.output_rebuilt {
-            picture.set_phase(Phase::Armed);
-            wait = PlaybackWait::Aborted;
-        }
-    });
-    let tts = if synth_exited {
-        match join.join() {
-            Ok(Some(tts)) => tts,
-            Ok(None) => {
-                synthesis_error.get_or_insert_with(|| "TTS stream lost model ownership".into());
-                lost_tts()
+    let tts = if let Some(join) = join {
+        let join_deadline =
+            (wait != PlaybackWait::Finished).then(|| Instant::now() + SYNTH_CANCEL_JOIN_GRACE);
+        let synth_exited = wait_for_synth_exit(&join, join_deadline, || {
+            let poll = poll_running(cmd_rx, running, audio, output_events, picture);
+            if !poll.running {
+                audio.stop();
+                picture.engine = EngineState::Off;
+                picture.set_phase(Phase::Off);
+                wait = PlaybackWait::Stopped;
+            } else if poll.output_rebuilt {
+                picture.set_phase(Phase::Armed);
+                wait = PlaybackWait::Aborted;
             }
-            Err(_) => {
-                synthesis_error.get_or_insert_with(|| "TTS stream worker panicked".into());
-                lost_tts()
+        });
+        if synth_exited {
+            match join.join() {
+                Ok(Some(tts)) => tts,
+                Ok(None) => {
+                    synthesis_error.get_or_insert_with(|| "TTS stream lost model ownership".into());
+                    lost_tts()
+                }
+                Err(_) => {
+                    synthesis_error.get_or_insert_with(|| "TTS stream worker panicked".into());
+                    lost_tts()
+                }
             }
+        } else {
+            synthesis_error.get_or_insert_with(|| {
+                format!(
+                    "TTS cancellation exceeded {} ms; detached stuck inference",
+                    SYNTH_CANCEL_JOIN_GRACE.as_millis()
+                )
+            });
+            tracing::error!(%turn, grace_ms = SYNTH_CANCEL_JOIN_GRACE.as_millis() as u64, "detaching stuck TTS inference");
+            // Never `drop(join)` a running native inference: that detaches the
+            // thread AND leaks model ownership (next turn would see `lost_tts`
+            // while weights are still pinned). Park the handle on a reaper
+            // thread that joins (blocking only itself) and drops the returned
+            // model, freeing native resources asynchronously.
+            std::thread::Builder::new()
+                .name("boris-tts-reap".into())
+                .spawn(move || {
+                    let _ = join.join();
+                })
+                .ok();
+            lost_tts()
         }
     } else {
-        synthesis_error.get_or_insert_with(|| {
-            format!(
-                "TTS cancellation exceeded {} ms; detached stuck inference",
-                SYNTH_CANCEL_JOIN_GRACE.as_millis()
-            )
-        });
-        tracing::error!(%turn, grace_ms = SYNTH_CANCEL_JOIN_GRACE.as_millis() as u64, "detaching stuck TTS inference");
-        drop(join);
-        lost_tts()
+        held_tts.take().unwrap_or_else(lost_tts)
+    };
+
+    let remaining_units = if wait == PlaybackWait::BargedIn {
+        all_units.into_iter().skip(queued_units).collect()
+    } else {
+        Vec::new()
     };
 
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -501,6 +608,7 @@ pub(super) fn stream_reply(
             .unwrap_or(0),
         speech_ms: elapsed_ms,
         queued_samples,
+        remaining_units,
     }
 }
 

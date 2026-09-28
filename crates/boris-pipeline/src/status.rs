@@ -16,12 +16,16 @@ pub enum EngineState {
 #[serde(rename_all = "PascalCase")]
 pub enum Phase {
     Off,
+    /// Boot-transient only (`Starting/Quiet` splash). Never re-entered; idle
+    /// voice listens in `On/Armed`. Kept on the wire for old builds.
     Quiet,
     Armed,
     /// Waiting for a freeform user reply without another wake word.
     AwaitingReply,
     /// Waiting for yes/no after a dangerous tool confirmation prompt.
     AwaitingConfirm,
+    /// Waiting for typed / pasted input on the overlay or Home.
+    AwaitingInput,
     Hearing,
     Reading,
     Thinking,
@@ -49,6 +53,11 @@ pub struct ArtifactPeek {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusPicture {
+    /// Monotonic snapshot counter shared by all publishers on the channel.
+    /// Latest-wins + dedupe key: ignore snapshots with `seq <= last_seen`.
+    /// `#[serde(default)]` keeps old recordings/deserializers working.
+    #[serde(default)]
+    pub seq: u64,
     pub engine: EngineState,
     pub phase: Phase,
     /// Error / fault text only (not confirm prompts — those use `activity`).
@@ -60,30 +69,70 @@ pub struct StatusPicture {
     pub said: Option<String>,
     pub mic: DeviceHealth,
     pub speaker: DeviceHealth,
+    /// Display-only turn counter (`TurnId` rendered as decimal). The UI must
+    /// never parse it back or send it anywhere — typed-input correlation uses
+    /// `InputPeek.id` (the agent pending id), not this.
     #[serde(default)]
     pub turn: Option<String>,
     /// Compact progressive status (tool name, confirm summary) for the overlay.
     #[serde(default)]
     pub activity: Option<String>,
+    /// Live model reasoning or a tool progress note. Display-only; never spoken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     /// Estimated context tokens used (chars/4 heuristic).
     #[serde(default)]
     pub context_used: Option<u32>,
     /// Soft context window for the meter (tokens).
     #[serde(default)]
     pub context_limit: Option<u32>,
+    /// Whether context usage is a local estimate rather than provider-reported.
+    #[serde(default)]
+    pub context_estimated: bool,
     /// Overlay glance for the card presented this turn (or the Ready linger
     /// after it). Cleared when the next utterance starts. Body is fetched
     /// separately; the session catalog is the source of truth for Home.
     #[serde(default)]
     pub artifact: Option<ArtifactPeek>,
+    /// Live-mic teach progress. Present while the user is recording takes
+    /// (or just finished). Not a turn — the teach page is the surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_enroll: Option<WakeEnrollPeek>,
+    /// On-screen typed input request. Never includes the typed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputPeek>,
 }
 
-/// Default soft context window for the overlay meter (token estimate).
-pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 500_000;
+/// Field the UI should show while [`Phase::AwaitingInput`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputPeek {
+    pub id: String,
+    /// `exact` | `secret` | `blob` | `choice`
+    pub kind: String,
+    pub label: String,
+    pub spoken: String,
+    pub multiline: bool,
+    pub max_chars: u32,
+    /// Numbered options for `choice` (empty otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+/// Progress for the dedicated “teach your voice” page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeEnrollPeek {
+    pub have: u32,
+    pub want: u32,
+    pub ready: bool,
+    /// Why the last take was rejected (speak closer, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
 
 impl StatusPicture {
     pub fn off() -> Self {
         Self {
+            seq: 0,
             engine: EngineState::Off,
             phase: Phase::Off,
             detail: None,
@@ -99,9 +148,13 @@ impl StatusPicture {
             },
             turn: None,
             activity: None,
+            thinking: None,
             context_used: None,
             context_limit: None,
+            context_estimated: false,
             artifact: None,
+            wake_enroll: None,
+            input: None,
         }
     }
 }

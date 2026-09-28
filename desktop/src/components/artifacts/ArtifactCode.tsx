@@ -35,11 +35,13 @@ export function ArtifactCode({
 
   return (
     <pre
+      aria-label={`${languageKey || "Plain text"} code`}
+      tabIndex={compact ? undefined : 0}
       className={cn(
-        "artifact-code min-w-0 rounded-[10px] bg-[#1e1e1e] px-2.5 py-2 font-mono",
+        "artifact-code artifact-code--premium min-w-0 border border-white/[0.07] bg-[#111214] font-mono text-[#f2f2f7] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] outline-none transition-[border-color,box-shadow] duration-200 focus-visible:border-white/20 focus-visible:ring-2 focus-visible:ring-white/10",
         compact
-          ? "overflow-hidden whitespace-pre-wrap break-words text-[11px] leading-[1.4]"
-          : "max-h-[420px] overflow-auto whitespace-pre text-[13px] leading-[1.5]",
+          ? "overflow-hidden rounded-[8px] px-2.5 py-2 whitespace-pre-wrap break-words text-[11px] leading-[1.5]"
+          : "max-h-[440px] overflow-auto rounded-[12px] px-4 py-3.5 whitespace-pre text-[13px] leading-[1.6] selection:bg-blue-400/25",
       )}
     >
       <code

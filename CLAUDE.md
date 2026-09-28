@@ -25,7 +25,7 @@ cargo test -p boris-agent some_test_name -- --nocapture
 # Typecheck a crate with feature flags
 cargo check -p boris-pipeline --features stt-parakeet,tts-supertone
 
-# Full product build (needs wake ONNX + frontend toolchain — see "Build gotcha" below)
+# Full product build (wake/VAD ONNX are tracked assets — no extra setup)
 cargo check -p boris-desktop
 ```
 
@@ -43,9 +43,9 @@ bun run tauri build    # release build
 bun run build           # tsc + vite build (frontend only)
 ```
 
-### Build gotcha: wake model required to compile `boris-desktop`
+### Build note: wake/VAD models are tracked assets
 
-`boris-desktop` embeds the wake-word ONNX via `include_bytes!` from `assets/models/livekit/boris-large.onnx`. That path is **gitignored** — a bare clone cannot `cargo check -p boris-desktop` or run the desktop app until you place that file locally. Pure library crates (`boris-core` … `boris-pipeline --lib`) don't need it.
+`boris-desktop` embeds the wake-word ONNX via `include_bytes!` from `assets/models/livekit/boris-large.onnx` and the Silero graph from `assets/models/silero/silero_vad.onnx`. Both are tracked in git (`.gitignore` un-ignores them), so a bare clone can `cargo check -p boris-desktop` directly. Only the extra `boris-medium` / `just-boris` classifier variants stay gitignored.
 
 ## Architecture
 
@@ -72,12 +72,12 @@ boris-stt-parakeet  boris-tts-supertone
                     (boris-tts-kokoro = experimental, unused by product)
               │
               ▼
-         boris-core (shared types / errors, dependency-free)
+          boris-core  (shared types / errors, only thiserror)
 ```
 
 | Crate | Role |
 |-------|------|
-| `boris-core` | Shared audio type aliases, `TurnId`, foundation `Error`/`Result`. Deliberately dependency-free (no cpal/ORT/HTTP/Tokio) so it compiles everywhere. |
+| `boris-core` | Shared audio type aliases, `TurnId`, foundation `Error`/`Result`. Only `thiserror` (no cpal/ORT/HTTP/Tokio) so it compiles everywhere. |
 | `boris-audio` | cpal capture/playback; resample to 16 kHz mono. RT audio callbacks only `try_send` — never block inside a cpal callback. |
 | `boris-sense` | VAD (Silero ONNX via `ort`) + wake-word (LiveKit open-wake-word ONNX via `ort`). `init_onnx_runtime()` must be called once before constructing wake or VAD sessions. |
 | `boris-inference` | Object-safe `SpeechToText`/`TextToSpeech` trait ports only — no concrete models. |
@@ -107,11 +107,11 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 - `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
 - `NetworkPolicy::Open` still SSRF-blocks loopback/RFC1918/link-local/metadata hosts on `web_fetch`; residual DNS-rebinding risk is documented in code, not solved.
 - HITL (human-in-the-loop) pauses dangerous tool calls for yes/no; after approval the runtime still enforces hard path/shell/network gates.
-- **Wave scheduling** (default): one assistant turn can return many `tool_calls`; read-only tools run in parallel waves (`max_parallel_tools`, default 16), writes run sequentially. Falls back to legacy `join_all` or fully sequential HITL-safe mode depending on config/risk. Tunable via `BORIS_WAVE_SCHEDULING`, `BORIS_MAX_PARALLEL_TOOLS`, `BORIS_MAX_CONFIRMS`, `BORIS_TRUSTED`.
+- **Wave scheduling** (default): one assistant turn can return many `tool_calls`; read-only tools run in parallel waves (`max_parallel_tools`, default 16), writes run sequentially. Falls back to `max_parallel_tools`-bounded legacy `join_all` or fully sequential HITL-safe mode depending on config/risk. Tunable via `BORIS_WAVE_SCHEDULING`, `BORIS_MAX_PARALLEL_TOOLS`, `BORIS_MAX_CONFIRMS`, `BORIS_TRUSTED`.
 
 ### `boris-pipeline` engine phases
 
-`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no). Wake scoring, VAD capture, STT, agent, and TTS all run inline on the single engine thread; status snapshots (`StatusPicture`) are pushed to the UI. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
+`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
 
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 
@@ -123,13 +123,15 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
   models/        # parakeet/, supertone/onnx/, supertone/voices/, optional livekit/ + silero/ seeds
   sessions/      # transcripts + per-session artifacts/
-  memory/        # long-term markdown memory
+  memory/        # memory.sqlite canonical store + optional notes.jsonl
   skills/        # skill playbooks
-  logs/          # boris-desktop.*.log (packaged Windows builds have no console)
-  workspace/     # sandboxed agent workspace
+  logs/          # boris.YYYY-MM-DD.log (packaged Windows builds have no console)
+  traces/        # turns.jsonl per-turn latency traces
+  speaker/       # live.json — wake liveness enroll (acoustic takes)
+  state/workspace/ # sandboxed agent workspace
 ```
 
-Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the repo's gitignored `assets/`.
+Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the repo's `assets/` (only the wake classifier + Silero graph are tracked there).
 
 ### Key environment variables
 
@@ -143,14 +145,21 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_MEMORY` | `0` disables long-term memory |
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
+| `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
+| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
+| `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
+| `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
+| `BORIS_TTS_VOICE` | TTS voice id |
+| `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
+| `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` / `BORIS_PIN_PROVIDER` | OpenRouter host order / pinning |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |
 
 Dev secrets go in `.env` (copy from `.env.example`), gitignored.
 
 ## Working conventions
 
-- **Keep low-level crates thin.** `boris-core` has zero heavy deps by design; `boris-inference` has no `ort`/vendor SDKs/Tokio; adapters map failures to `boris_core::Error` at the trait edge. Don't add HTTP/ORT/Tokio deps to a crate whose README says it's deliberately kept small.
+- **Keep low-level crates thin.** `boris-core` has only `thiserror` by design; `boris-inference` has no `ort`/vendor SDKs/Tokio; adapters map failures to `boris_core::Error` at the trait edge. Don't add HTTP/ORT/Tokio deps to a crate whose README says it's deliberately kept small.
 - **Import from crate roots**, not internal modules, unless the crate's own README says otherwise (e.g. `boris-agent` marks nested modules public for the pipeline but not a stability guarantee).
 - **Never block inside a cpal RT callback** (`boris-audio`) — convert/`try_send` only; do real work on the worker thread.
 - Each crate has its own `README.md` with a more detailed module map, public API, and design notes — read the relevant one before making non-trivial changes in that crate.

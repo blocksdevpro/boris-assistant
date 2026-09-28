@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use boris_ai::TokenUsage;
+
 /// Coarse outcome label for metrics / UI (no payload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TurnOutcomeKind {
@@ -11,6 +13,8 @@ pub enum TurnOutcomeKind {
     Silent,
     /// Tool loop paused for HITL confirmation.
     NeedsConfirm,
+    /// Tool loop paused for typed / pasted input.
+    NeedsInput,
 }
 
 impl TurnOutcomeKind {
@@ -20,6 +24,7 @@ impl TurnOutcomeKind {
             Self::Speak => "speak",
             Self::Silent => "silent",
             Self::NeedsConfirm => "needs_confirm",
+            Self::NeedsInput => "needs_input",
         }
     }
 }
@@ -47,4 +52,13 @@ pub struct TurnReport {
     pub outcome: TurnOutcomeKind,
     /// Rough serialized size of the conversation context dump after the turn.
     pub approx_chars_in: usize,
+    /// Best available size of the largest provider request this invocation.
+    pub context_used_tokens: u32,
+    /// Configured combined prompt + completion window for the active model.
+    pub context_limit_tokens: Option<u32>,
+    /// True when `context_used_tokens` is the local serialized-input estimate
+    /// rather than provider-reported usage.
+    pub context_estimated: bool,
+    /// Provider-reported usage summed across every completion in this invocation.
+    pub token_usage: Box<TokenUsage>,
 }

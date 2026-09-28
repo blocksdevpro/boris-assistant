@@ -177,7 +177,7 @@ impl Tool for TodoWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Update the multi-step todo list. Pass items as a JSON array of {id, content, status} where status is pending or done. Replaces the whole list."
+        "Update the multi-step todo list. Provide items or merge_json (one required): items as a JSON array of {id, content, status} where status is pending or done (aliases completed/complete map to done). Replaces the whole list."
     }
 
     fn parameters(&self) -> Value {
@@ -231,7 +231,7 @@ impl Tool for TodoWriteTool {
             parse_items_value(arr)?
         } else {
             return Err(ToolError::invalid_args(
-                "provide items array or merge_json string",
+                "provide items array or merge_json string (one is required): e.g. {\"items\": [{\"id\": \"1\", \"content\": \"x\", \"status\": \"pending\"}]}",
             ));
         };
 
@@ -272,8 +272,13 @@ fn parse_items_value(arr: &[Value]) -> Result<Vec<TodoItem>, ToolError> {
             .unwrap_or("pending")
             .to_ascii_lowercase();
         let status = match status_s.as_str() {
+            "pending" => TodoStatus::Pending,
             "done" | "completed" | "complete" => TodoStatus::Done,
-            _ => TodoStatus::Pending,
+            other => {
+                return Err(ToolError::invalid_args(format!(
+                    "items[{i}].status `{other}` is unknown; use pending or done (aliases: completed, complete)"
+                )));
+            }
         };
         out.push(TodoItem {
             id,
@@ -348,6 +353,39 @@ mod tests {
             .unwrap();
         assert!(listed.contains("exact path"));
 
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn empty_args_rejected_with_helpful_text() {
+        let dir = std::env::temp_dir().join(format!("boris-todo-empty-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let write = TodoWriteTool::new(&dir);
+        let err = write
+            .execute(&crate::tool_context::ToolCallContext::new("t"), json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("items"));
+        assert!(err.message.contains("merge_json"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn unknown_status_rejected() {
+        let dir = std::env::temp_dir().join(format!("boris-todo-status-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let write = TodoWriteTool::new(&dir);
+        let err = write
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"items": [{"id": "1", "content": "x", "status": "in_progress"}]}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("pending"));
+        assert!(err.message.contains("done"));
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

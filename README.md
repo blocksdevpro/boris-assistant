@@ -37,9 +37,9 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 
 | Channel | Version | Get it |
 |---|---|---|
-| **Stable** | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.2.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) | [Current beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) — NSIS |
-| **This tree** | **1.1.0** | Source / signed `bun run tauri build` |
+| **Stable** | [1.2.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
+| **Beta** | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — NSIS |
+| **This tree** | **1.2.0** | Stable release source — NSIS and MSI |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 
@@ -49,13 +49,13 @@ Workspace crates are `publish = false`. They ship inside the desktop app, not on
 
 Windows 10 or 11, x64, with a working mic and speakers.
 
-1. Download **`Boris_*_x64-setup.exe`** (or the MSI) from [Releases](https://github.com/blocksdevpro/boris-assistant/releases).
-2. Run the installer (you can install 1.2.0-beta.1 over 1.1.0 or an earlier beta).
+1. Download **`Boris_*_x64-setup.exe`** or the MSI from [Releases](https://github.com/blocksdevpro/boris-assistant/releases). Betas ship NSIS only.
+2. Run the installer. Your `~/.boris` data (keys, models, memory, skills) lives outside the install directory and is untouched by reinstalls.
 3. On first launch, finish **model install** and set an [OpenRouter](https://openrouter.ai/) API key in Settings.
 
-Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
+Signed in-app updates poll GitHub Releases. **Stable** follows the latest non-prerelease. **Beta** follows versioned `v*-beta.N` pre-releases (the rolling [`beta`](https://github.com/blocksdevpro/boris-assistant/releases/tag/beta) tag still holds `latest.json` for the installer download). Pick the channel in **Settings → General → Updates → Channel**. The check reads the Releases API first so it stays fast; the asset CDN is only used when a newer build is listed.
 
-Windows **1.1.0 ships NSIS and MSI**. Pre-release betas ship NSIS only because WiX/MSI cannot encode a label like `1.1.0-beta.1`.
+Windows **1.2.0** ships NSIS and MSI. Pre-release betas ship NSIS only because WiX/MSI cannot encode labels such as `1.2.0-beta.3`.
 
 Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.YYYY-MM-DD.log`.
 
@@ -63,18 +63,25 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 
 ## Features
 
-- **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback
+- **Boris memory** — a local SQLite evidence ledger for facts, preferences,
+  projects, past events, lifecycle-aware recall, and explicit forgetting
+
+- **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback, with wake barge-in while talking, thinking, or confirming
+- **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn
 - **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
-- **Voice island** — always-on-top overlay for listening / thinking / speaking, plus live captions
-- **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos
+- **Voice island** — always-on-top overlay with live captions, interim transcripts during capture, and current tool progress
+- **Presence orb** — a phase-aware orb on Home, the overlay, startup, and Teach Voice (listening / transcribing / thinking / searching / working / speaking / confirm / fault); honors reduced-motion with a static fallback
+- **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos, and recovery hints for misheard file names
+- **On-screen input** — masked secrets, exact values, large pastes, and numbered choices; secrets stay out of transcripts
+- **Scoped skill playbooks** — bundled playbooks for coding, debugging, design, review, research, writing, mentoring, and skill authoring, loaded only when a request matches
 - **Async research** — background subagents with poll/join/cancel and read-only tool isolation
 - **Capability presets** — `voice_safe` / `local_power` / `full` plus path policy and human approval for risky work
 - **Local models** — LiveKit-style wake, Silero VAD, NVIDIA Parakeet STT, and Supertone TTS
 - **Your model** — OpenRouter (OpenAI-compatible) via `boris-ai`; audio stays on the machine
 - **Web search without a key** — DuckDuckGo + Wikipedia by default; an Exa key is an optional upgrade *(1.1)*
 - **Session artifacts** — markdown and code cards on the overlay and Home desk; spoken replies stay short *(1.1)*
-- **Local diagnostics** — durable turn traces with `cargo xtask trace-report` p50/p95 summaries
-- **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace
+- **Local diagnostics** — durable per-turn latency traces under `~/.boris/traces/turns.jsonl`
+- **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace, speaker teach
 
 ---
 
@@ -85,12 +92,17 @@ Armed  →  wake  →  Hearing  →  Reading  →  Thinking  →  Talking  →  
    │                    │           │            │            │
    │                    VAD        Parakeet     agent +      Supertone
    │                                           tools         playback
-   └──────── AwaitingConfirm (HITL yes / no) ─────────────────┘
+   └──────── AwaitingConfirm (HITL yes/no) · AwaitingInput (typed) ─┘
 ```
 
 The engine thread owns voice state and turn ordering. Reusable loader threads
 preload STT/TTS, final speech is produced sentence-by-sentence while playback
-continues, and durable transcript/memory/trace work runs on maintenance lanes.
+continues, and durable memory/trace work runs on maintenance lanes (the
+transcript append stays in the turn path). Voice confirmations follow the same
+HITL budget as the agent (`max_confirms_per_turn`, default 12), support wake
+barge-in mid-prompt, and feed post-confirm tool rounds back into the context
+meter, turn trace, and artifact peek. Status snapshots carry a monotonic `seq`
+for latest-wins UI ordering.
 This keeps Stop and device-switch commands responsive without turning the
 pipeline into an unbounded worker mesh.
 
@@ -109,7 +121,7 @@ pipeline into an unbounded worker mesh.
 ┌─────────────────────────────────────────────────────────────┐
 │  boris-pipeline  — ordered voice loop + bounded workers     │
 │    Off → Quiet → Armed → Hearing → Reading → Thinking       │
-│         → Talking → AwaitingReply / AwaitingConfirm         │
+│  → Talking → AwaitingReply / AwaitingConfirm / AwaitingInput │
 └───────┬───────────────┬───────────────┬─────────────────────┘
         │               │               │
         ▼               ▼               ▼
@@ -140,7 +152,7 @@ pipeline into an unbounded worker mesh.
 | [`boris-tts-supertone`](crates/boris-tts-supertone) | Product TTS (default) |
 | [`boris-tts-kokoro`](crates/boris-tts-kokoro) | Experimental Kokoro adapter |
 | [`boris-ai`](crates/boris-ai) | LLM client plane (OpenRouter) |
-| [`boris-agent`](crates/boris-agent) | Tool runtime, policy, memory, sessions, artifacts |
+| [`boris-agent`](crates/boris-agent) | Tool runtime, policy, memory, sessions, skills |
 | [`boris-pipeline`](crates/boris-pipeline) | Desktop voice engine + `~/.boris` + model install |
 | [`boris-desktop`](desktop/src-tauri) | Tauri shell, tray, overlay, updater, packaging |
 
@@ -250,7 +262,7 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
 | `BORIS_FAST_MODEL` | Fast model id |
 | `BORIS_CAPABILITY` | `voice_safe` \| `local_power` \| `full` |
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate-risk tools |
-| `BORIS_MEMORY` | `0` disables long-term memory |
+| `BORIS_MEMORY` | `0` disables canonical Boris memory and migration |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |
 
 ### User data (`~/.boris`)
@@ -260,14 +272,49 @@ Common runtime vars (full list in [`boris-pipeline`](crates/boris-pipeline/READM
   config.toml      # prefs
   auth.json        # secrets (plaintext)
   models/          # STT / TTS weights
-  sessions/        # transcripts + per-session artifacts/
-  memory/          # long-term notes
+  sessions/        # transcripts, artifacts/, and tool_outputs/
+  memory/          # memory.sqlite canonical store + optional notes.jsonl
   skills/          # skill playbooks
-  logs/            # boris-desktop.*.log
-  workspace/       # sandboxed agent workspace
+  logs/            # boris.YYYY-MM-DD.log
+  traces/          # turns.jsonl per-turn latency traces
+  speaker/         # live.json — wake liveness enroll (acoustic takes)
+  state/workspace/ # sandboxed agent workspace
 ```
 
 ---
+
+## Boris memory (1.2)
+
+When memory is enabled, Boris uses
+`~/.boris/memory/memory.sqlite` as its single local source of truth. It keeps
+conversation evidence separate from small retrievable facts, preferences,
+projects, and past events. `memory_search` retrieves active evidence-backed
+records; `forget_memory` permanently removes explicitly requested memory.
+
+Starting with beta.2, the first 1.2 launch imports the old `profile.json`, global and
+workspace `MEMORY.md`, and legacy session `memory.md` files. Each excerpt is
+refined with your configured LLM and written into the SQLite store. Only after
+every source has been refined and verified does Boris delete those obsolete
+files and the old derived `search.sqlite` index. A failed or timed-out
+refinement leaves all legacy files untouched for a later retry.
+
+The one-time refinement sends historical memory to the LLM provider you have
+configured for Boris. Set `BORIS_MEMORY=0` before the first 1.2 launch to
+skip both canonical memory and migration.
+
+## Agent skills
+
+Boris installs bundled starter playbooks in `~/.boris/skills` and loads their
+short descriptions into the agent catalog. It loads a full `SKILL.md` only when
+the user's intent matches that skill; mentioning a related keyword alone is not
+enough. Project skills under `.boris/skills/<name>/SKILL.md` take precedence
+over same-named user skills.
+
+The bundled playbooks cover `get-things-done`, `research`, `daily-brief`,
+`remember-this`, `build-code`, `debug-root-cause`, `explain-code`,
+`investigate-why`, `design-change`, `review-change`, `technical-writing`,
+`mentor`, and `create-skill`. Bundled files carry frontmatter versions so stock
+playbooks can receive updates while versioned customizations are preserved.
 
 ## Security
 
@@ -296,7 +343,7 @@ Public product versions follow [semver](https://semver.org/). See [CHANGELOG.md]
 | | |
 |---|---|
 | First stable | [1.0.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.0.0) — 2026-08-12 |
-| Current stable | [1.1.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.1.0) — faster routing/tools, streamed speech, async research, Silero VAD, and durable traces |
-| Current beta | [1.2.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.1) — taught wake filtering, audio front end, barge-in, typed input, and live reasoning |
-| Git `main` | Stable line (`1.1.x`) — this tree is `1.1.0` |
-| Git `next` | Beta line (`1.2.0-beta.N`) |
+| Current stable | [1.2.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0) — local memory, taught wake filtering, live transcription, tool progress, and safer confirmations |
+| Current beta | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — presence orb, live transcription and tool progress, safer confirmations, and context reliability |
+| Git `main` | Stable line (`1.2.x`) |
+| Git `next` | Next beta line (`1.3.0-beta.N` after promotion) |

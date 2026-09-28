@@ -1,19 +1,18 @@
 //! One-time engine thread setup: audio, wake, STT/TTS shells, agent + tools.
 
-use boris_agent::session::store::SessionStore;
-use boris_agent::{Agent, SandboxConfig};
+use boris_agent::{Agent, BuiltinToolPaths, SandboxConfig, SessionStore};
 use boris_audio::output::OutputEvent;
 use boris_audio::service::AudioService;
 use boris_core::ArcAudioBuffer;
 use boris_inference::TextToSpeech;
-use boris_sense::{init_onnx_runtime, LivekitWakeWord, SileroVad, SILERO_SPEECH_THRESHOLD};
+use boris_sense::{
+    init_onnx_runtime, LivekitWakeWord, SileroVad, SpeakerEmbedder, SILERO_SPEECH_THRESHOLD,
+};
 
 use crate::config::PipelineConfig;
 use crate::error::{PipelineError, Result};
 use crate::paths;
-use crate::status::{
-    DeviceHealth, EngineState, Phase, StatusPicture, DEFAULT_CONTEXT_LIMIT_TOKENS,
-};
+use crate::status::{DeviceHealth, EngineState, Phase, StatusPicture};
 
 use super::llm::{
     build_openrouter_client, looks_like_non_agent_model, resolve_model_and_provider,
@@ -46,6 +45,12 @@ pub(super) struct EngineRuntime {
     pub tts_model_dir: std::path::PathBuf,
     pub system_prompt: String,
     pub residency: super::models::ModelResidency,
+    pub liveness: crate::liveness::WakeLiveness,
+    /// Wake-word barge-in while Talking or Thinking.
+    pub barge_in: bool,
+    /// Voice HITL budget mirrored from agent policy (pipeline loop must not
+    /// cap below what the policy allows — see `outcome::resolve_agent_outcome`).
+    pub max_confirms_per_turn: u32,
     #[allow(dead_code)]
     pub maintenance: boris_agent::MaintenanceWorker,
 }
@@ -58,9 +63,8 @@ pub(super) fn init_runtime(
     let init_started = std::time::Instant::now();
     tracing::info!("engine thread entered run()");
     if config.voice_barge_in {
-        tracing::warn!(
-            "saved voice_barge_in is ignored: microphone-only VAD cannot safely distinguish \
-             the user from Boris's speaker echo without acoustic echo cancellation"
+        tracing::info!(
+            "wake-word barge-in enabled (talking: mixed-window wake + close-talk; thinking: wake + live-mic gate)"
         );
     }
     publish_starting(&status_tx, &config);
@@ -162,10 +166,15 @@ pub(super) fn init_runtime(
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
-        context_limit: Some(DEFAULT_CONTEXT_LIMIT_TOKENS),
+        context_limit: Some(config.context_window_tokens),
+        context_estimated: true,
         artifact: None,
+        wake_enroll: None,
+        input: None,
         status_tx,
+        latest: std::sync::Arc::new(std::sync::Mutex::new(StatusPicture::off())),
         phase_started: std::time::Instant::now(),
     };
     picture.publish();
@@ -192,12 +201,19 @@ pub(super) fn init_runtime(
         tts_model_dir: config.tts_model_dir,
         system_prompt: config.system_prompt,
         residency: super::models::ModelResidency::parse(&config.model_residency),
+        liveness: crate::liveness::WakeLiveness::load(
+            config.ignore_speaker_playback,
+            load_speaker_embedder(),
+        ),
+        barge_in: config.voice_barge_in,
+        max_confirms_per_turn: config.max_confirms_per_turn.max(1),
         maintenance,
     })
 }
 
 fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: &PipelineConfig) {
     let _ = status_tx.send(StatusPicture {
+        seq: 0,
         engine: EngineState::Starting,
         phase: Phase::Quiet,
         detail: Some("initializing…".into()),
@@ -213,9 +229,13 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
         context_limit: None,
+        context_estimated: false,
         artifact: None,
+        wake_enroll: None,
+        input: None,
     });
 }
 
@@ -337,6 +357,39 @@ fn load_vad(
     }
 }
 
+/// Optional CAM++ bytes from `~/.boris/models/speaker/`. Missing file is fine.
+fn load_speaker_embedder() -> Option<SpeakerEmbedder> {
+    let path = paths::speaker_embed_model_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => {
+            tracing::warn!(path = %path.display(), "speaker embed model is empty");
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(
+                path = %path.display(),
+                "no CAM++ speaker model — identity uses brightness until Install models"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "speaker embed model unreadable");
+            return None;
+        }
+    };
+    match SpeakerEmbedder::try_new(&bytes) {
+        Ok(e) => {
+            tracing::info!(bytes = bytes.len(), "CAM++ speaker embedder loaded");
+            Some(e)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "CAM++ speaker embedder failed to load");
+            None
+        }
+    }
+}
+
 /// `BORIS_VAD_THRESHOLD` in (0, 1]; default 0.5.
 fn vad_threshold_from_env() -> f32 {
     match std::env::var("BORIS_VAD_THRESHOLD") {
@@ -359,7 +412,12 @@ fn fault(
     config: &PipelineConfig,
     detail: impl Into<String>,
 ) {
+    // Terminal by design: the engine thread exits after `init_runtime` fails.
+    // Recovery is host-side — drop the `Engine` and construct a new one
+    // (usually after Install models / device fix). The Fault snapshot stays
+    // up so the UI can show the reason instead of a silent Off.
     let _ = status_tx.send(StatusPicture {
+        seq: 1,
         engine: EngineState::Fault,
         phase: Phase::Off,
         detail: Some(detail.into()),
@@ -375,9 +433,13 @@ fn fault(
         },
         turn: None,
         activity: None,
+        thinking: None,
         context_used: None,
         context_limit: None,
+        context_estimated: false,
         artifact: None,
+        wake_enroll: None,
+        input: None,
     });
 }
 
@@ -422,6 +484,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         pin,
         &session_id,
         true, // high reasoning for multi-step / tools
+        config.context_window_tokens,
     );
     let fast = build_openrouter_client(
         &config.openrouter_api_key,
@@ -430,6 +493,7 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         pin,
         &session_id,
         false, // medium reasoning for simple facts
+        config.context_window_tokens,
     );
     let client: Box<dyn boris_agent::LlmClient> =
         if fast_model == strong_model && strong_provider_raw == fast_provider_raw {
@@ -461,18 +525,35 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         tracing::warn!(error = %e, "ensure agent workspace/audit dirs failed");
     }
 
+    // Enable the canonical store before personal tools are constructed. This
+    // makes their profile/extraction state live in memory.sqlite instead of
+    // creating or updating legacy profile.json.
+    if config.long_term_memory {
+        match agent.enable_memory_store(paths::memory_store_path()) {
+            Ok(_) => tracing::info!(
+                store = %paths::memory_store_path().display(),
+                "canonical memory store enabled"
+            ),
+            Err(e) => tracing::warn!(error = %e, "canonical memory enable failed"),
+        }
+    }
+
     let preset = config.capability_preset;
     // One shared roots config for runtime policy and BuiltinToolPaths so sandbox
     // / data roots never diverge (Grok layout: state/workspace + memory/sessions).
-    let mut sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
+    let sandbox = SandboxConfig::for_desktop_mvp(paths::boris_home());
     // Trusted auto-allow for Moderate tools + sandbox file writes (notes, workspace…).
     // Shell / open URL still confirm. Env `BORIS_TRUSTED` overrides config.
     let trusted = config.trusted_auto_moderate;
-    sandbox = sandbox.with_trusted_auto_moderate(trusted);
     // Multi-tool HITL budget (default 12). Env `BORIS_MAX_CONFIRMS` overrides config.
     let max_confirms = config.max_confirms_per_turn.max(1);
-    sandbox = sandbox.with_max_confirms_per_turn(max_confirms);
-    let tool_paths = boris_agent::tools::BuiltinToolPaths {
+    let sandbox = sandbox
+        .with_trusted_auto_moderate(trusted)
+        .with_max_confirms_per_turn(max_confirms);
+    // Enforce the load-bearing order at the type level: preset lockdown threads
+    // into `configure_runtime` below (VoiceSafe/LocalPower ⇒ Off/Denied).
+    let mut sandbox = preset.apply_to_sandbox_owned(sandbox);
+    let tool_paths = BuiltinToolPaths {
         notes_path: paths::notes_path(),
         profile_path: paths::profile_path(),
         sandbox_root: sandbox.sandbox_root.clone(),
@@ -483,11 +564,12 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     };
 
     // Core + (optional) power tools filtered by capability preset + personal context.
-    // Applies `preset` to `sandbox` internally (network/shell lockdown for
-    // VoiceSafe/LocalPower) — must run before `configure_runtime` below so the
-    // registered toolset and the enforced sandbox policy never diverge.
+    // `register_builtin_tools_with_preset` also applies `preset` to `sandbox`
+    // internally (network/shell lockdown for VoiceSafe/LocalPower — idempotent
+    // with the owned apply above) — must run before `configure_runtime` below
+    // so the registered toolset and the enforced sandbox policy never diverge.
     let power = preset.wants_power_tools();
-    boris_agent::tools::register_builtin_tools_with_preset(
+    boris_agent::register_builtin_tools_with_preset(
         &mut agent,
         tool_paths,
         true,
@@ -513,15 +595,34 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     agent.enable_skills(loaded);
 
     if config.long_term_memory {
-        match agent
-            .enable_long_term_memory_with_sessions(paths::memory_dir(), Some(paths::sessions_dir()))
-        {
-            Ok(_) => tracing::info!(
-                memory_md = %paths::memory_md_path().display(),
-                sessions = %paths::sessions_dir().display(),
-                "long-term markdown memory enabled (global MEMORY + per-session memory.md)"
-            ),
-            Err(e) => tracing::warn!(error = %e, "long-term memory enable failed"),
+        let legacy_paths = boris_agent::LegacyMemoryPaths {
+            profile_path: paths::profile_path(),
+            memory_root: paths::memory_dir(),
+            sessions_root: paths::sessions_dir(),
+        };
+        // Read-only pre-check so the log shows WHAT migration will ingest
+        // (or that there is nothing legacy left) instead of a silent queue.
+        match boris_agent::discover_legacy_memory(&legacy_paths) {
+            Ok(plan) if plan.is_empty() => {
+                tracing::info!("no legacy memory files to migrate");
+            }
+            Ok(plan) => {
+                tracing::info!(
+                    sources = plan.source_ids().len(),
+                    retires = plan.files_to_retire.len(),
+                    has_profile = plan.profile.is_some(),
+                    "legacy memory discovered; queueing migration"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "legacy memory discovery failed; migration still attempted");
+            }
+        }
+        if let Err(e) = agent.migrate_legacy_memory(legacy_paths) {
+            tracing::warn!(
+                error = %e,
+                "legacy memory migration was not queued; legacy files remain untouched"
+            );
         }
     }
 
@@ -529,7 +630,14 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     agent.enable_subagents();
 
     // Tool runtime flags. Defaults: wave scheduling on, progressive listing on.
-    let mut features = boris_agent::ToolRuntimeFeatures::default();
+    // The remaining listing knobs are pinned explicitly so adoption of new
+    // `ToolRuntimeFeatures` fields (force_list_all / core_tools) is deliberate,
+    // not default-accidental.
+    let mut features = boris_agent::ToolRuntimeFeatures {
+        force_list_all: false,
+        core_tools: None,
+        ..Default::default()
+    };
     if env_flag_false("BORIS_PROGRESSIVE_TOOLS") {
         features.progressive_listing = false;
     }

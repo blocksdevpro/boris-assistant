@@ -64,10 +64,21 @@ pub(super) fn build_list_ctx(
 }
 
 /// OpenAI-style tools array for the LLM, or `null` when nothing is listable.
-pub(super) fn tools_json_for_llm(tools: &[Arc<dyn Tool>], list_ctx: &ListToolsContext) -> Value {
+///
+/// Returns `(payload, pruned_count)` where `pruned_count` is the number of
+/// listed definitions dropped to fit `MAX_TOOL_SCHEMA_CHARS`. Callers that
+/// build LLM requests (see `loop_::round::complete_round`) must surface a
+/// non-zero count: `tool_search` is already retained as the last-resort
+/// escape hatch, and a `warn!` with the count keeps the silent prune visible.
+/// The pruning itself is silent on the wire — the model only sees the
+/// retained definitions and can recover via `tool_search`.
+pub(super) fn tools_json_for_llm(
+    tools: &[Arc<dyn Tool>],
+    list_ctx: &ListToolsContext,
+) -> (Value, usize) {
     let listed = filter_listed_tools(tools, list_ctx);
     if listed.is_empty() {
-        return Value::Null;
+        return (Value::Null, 0);
     }
     let mut list: Vec<(&Arc<dyn Tool>, Value, usize, i32)> = listed
         .iter()
@@ -122,14 +133,25 @@ pub(super) fn tools_json_for_llm(tools: &[Arc<dyn Tool>], list_ctx: &ListToolsCo
         list.remove(index);
     }
 
-    if list.len() < listed_before {
+    let pruned = listed_before.saturating_sub(list.len());
+    if pruned > 0 {
         tracing::debug!(
             listed_before,
             listed_after = list.len(),
+            pruned,
             pruned_core,
             schema_chars = serialized_definitions_len(&list),
             schema_budget_chars = MAX_TOOL_SCHEMA_CHARS,
             "pruned tool definitions to request schema budget"
+        );
+        // Silent on the wire but visible in logs: the model can still recover
+        // via `tool_search`, which the loop above retains as the last resort.
+        tracing::warn!(
+            pruned,
+            pruned_core,
+            listed_after = list.len(),
+            schema_budget_chars = MAX_TOOL_SCHEMA_CHARS,
+            "tool definitions pruned to schema budget; model may need tool_search to discover dropped tools"
         );
     }
     if pruned_core > 0 {
@@ -140,12 +162,15 @@ pub(super) fn tools_json_for_llm(tools: &[Arc<dyn Tool>], list_ctx: &ListToolsCo
         );
     }
     if list.is_empty() {
-        return Value::Null;
+        return (Value::Null, pruned);
     }
-    Value::Array(
-        list.into_iter()
-            .map(|(_, definition, _, _)| definition)
-            .collect(),
+    (
+        Value::Array(
+            list.into_iter()
+                .map(|(_, definition, _, _)| definition)
+                .collect(),
+        ),
+        pruned,
     )
 }
 
@@ -192,6 +217,10 @@ pub(super) fn build_tool_invocation(
 }
 
 /// Context message content for a tool observation.
+///
+/// Test-only helper for building `Role::Tool` message payloads; production
+/// observations go through [`Context::push_tool_result`].
+#[cfg(test)]
 pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -> Value {
     json!({ "tool_call_id": call_id, "content": content.into() })
 }
@@ -300,7 +329,19 @@ pub(super) fn commit_tool_observation(
         duration_ms,
     });
     tools_used.push(call.name.clone());
-    context.push(Role::Tool, tool_observation_json(&call.call_id, content));
+    push_tool_result_messages(context, &call.name, &call.call_id, content, ok);
+}
+
+/// Store an unmodified tool observation, followed by any host-authored nudge
+/// as a separate control message with explicit provenance.
+pub(super) fn push_tool_result_messages(
+    context: &mut Context,
+    tool_name: &str,
+    call_id: &str,
+    content: String,
+    ok: bool,
+) {
+    context.push_tool_result(tool_name, call_id, content, ok);
 }
 
 /// Structured completion line so each tool call has a wall-clock in the log.
@@ -316,7 +357,7 @@ pub(super) fn observation_text_from_invoke(result: InvokeResult) -> Option<Strin
     match result {
         InvokeResult::Observation(s) => Some(s),
         InvokeResult::Denied { reason } => Some(format!("Error: {reason}")),
-        InvokeResult::NeedsConfirmation { .. } => None,
+        InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => None,
     }
 }
 
@@ -398,7 +439,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = tools_json_for_llm(&tools, &ctx);
+        let (payload, pruned) = tools_json_for_llm(&tools, &ctx);
         let names = payload
             .as_array()
             .unwrap()
@@ -413,6 +454,10 @@ mod tests {
             "actual-use activation must outrank an unselected tool"
         );
         assert!(!names.contains(&"low_priority_tool"));
+        assert_eq!(
+            pruned, 1,
+            "one low-priority definition must be reported pruned"
+        );
     }
 
     #[test]
@@ -428,13 +473,14 @@ mod tests {
             }),
         ];
 
-        let payload = tools_json_for_llm(&tools, &ListToolsContext::default());
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
         assert_eq!(
             payload.as_array().map(Vec::len),
             Some(1),
             "retain as many core definitions as fit"
         );
+        assert_eq!(pruned, 1, "core prune must report the dropped definition");
     }
 
     #[test]
@@ -444,9 +490,10 @@ mod tests {
             description: "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1),
         })];
 
-        let payload = tools_json_for_llm(&tools, &ListToolsContext::default());
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(payload.is_null());
         assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+        assert_eq!(pruned, 1, "oversized lone definition counts as pruned");
     }
 
     #[test]
@@ -554,5 +601,51 @@ mod tests {
         });
         assert!(!ok);
         assert!(text.contains("unexpected confirmation"));
+    }
+
+    #[test]
+    fn pruning_retains_tool_search_as_last_resort_and_reports_count() {
+        // tool_search must survive pruning so the model can discover dropped
+        // tools; the pruned count lets `complete_round` log a budget-aware warn.
+        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
+            name: "tool_search".into(),
+            description: "search".into(),
+        })];
+        for i in 0..6 {
+            tools.push(Arc::new(LargeDefinitionTool {
+                name: format!("filler-{i}"),
+                description: "x".repeat(20_000),
+            }));
+        }
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
+        assert!(pruned >= 1, "expected at least one prune, got {pruned}");
+        let names = payload
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d["function"]["name"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // tool_search is the last-resort discovery hatch: it is only dropped
+        // when even it alone exceeds the budget (covered above).
+        if !payload.is_null() {
+            assert!(
+                names.contains(&"tool_search"),
+                "tool_search must be retained when anything fits, got {names:?}"
+            );
+        }
+        assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+    }
+
+    #[test]
+    fn no_prune_reports_zero() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
+            name: "get_time".into(),
+            description: "core".into(),
+        })];
+        let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
+        assert_eq!(pruned, 0);
+        assert!(payload.is_array());
     }
 }

@@ -18,6 +18,7 @@ export type Phase =
   | "Armed"
   | "AwaitingReply"
   | "AwaitingConfirm"
+  | "AwaitingInput"
   | "Hearing"
   | "Reading"
   | "Thinking"
@@ -63,6 +64,8 @@ export type ArtifactCard = {
 
 /** Mirrors `boris_pipeline::StatusPicture`. */
 export type StatusPicture = {
+  /** Tauri's process-wide snapshot counter, including stop/restart transitions. */
+  seq?: number;
   engine: EngineState;
   phase: Phase;
   detail?: string | null;
@@ -73,12 +76,38 @@ export type StatusPicture = {
   turn?: string | null;
   /** Progressive tool / confirm chip (compact). */
   activity?: string | null;
-  /** Estimated context tokens used (chars/4). */
+  /** Live model reasoning or a tool progress note. Display-only. */
+  thinking?: string | null;
+  /** Provider-reported context tokens, or a local estimate when flagged below. */
   context_used?: number | null;
-  /** Soft context window for the meter. */
+  /** Configured combined prompt + completion model window. */
   context_limit?: number | null;
+  /** True when context_used is the chars/4 fallback estimate. */
+  context_estimated?: boolean;
   /** This-turn overlay glance (cleared on the next utterance). Body is separate. */
   artifact?: ArtifactPeek | null;
+  /** Live-mic teach progress (dedicated teach page). */
+  wake_enroll?: WakeEnrollPeek | null;
+  /** On-screen typed input request. Never includes the typed value. */
+  input?: InputPeek | null;
+};
+
+/** Mirrors `boris_pipeline::InputPeek`. */
+export type InputPeek = {
+  id: string;
+  kind: "exact" | "secret" | "blob" | string;
+  label: string;
+  spoken: string;
+  multiline: boolean;
+  max_chars: number;
+};
+
+/** Mirrors `boris_pipeline::WakeEnrollPeek`. */
+export type WakeEnrollPeek = {
+  have: number;
+  want: number;
+  ready: boolean;
+  hint?: string | null;
 };
 
 /** Device list entry from `list_input_devices` / `list_output_devices`. */
@@ -113,7 +142,7 @@ export type ModelsStatus = {
   base_url_override: string | null;
 };
 
-export type ModelComponent = "parakeet" | "supertone";
+export type ModelComponent = "parakeet" | "supertone" | "speaker";
 
 export type DownloadFileStatus =
   | "starting"
@@ -174,8 +203,10 @@ export type AppSettings = {
   tts_voice_id: string;
   /** STT/TTS RAM policy. */
   model_residency: "low_memory" | "balanced" | "low_latency";
-  /** Reserved compatibility setting; hidden until echo-safe barge-in exists. */
+  /** Say the wake word while Boris is talking to pause leftover speech. */
   voice_barge_in: boolean;
+  /** Ignore TV / Translate / TTS out of a speaker after a live enroll. */
+  ignore_speaker_playback: boolean;
   /** Long-term markdown memory. */
   long_term_memory: boolean;
   /**
@@ -196,6 +227,8 @@ export type AppSettings = {
   overlay_position: "top_center" | "top_left" | "top_right";
   /** Overlay size as a percentage, clamped to 75-125. */
   overlay_scale_percent: number;
+  /** Chord that submits typed overlay/Home input. */
+  typed_input_submit: "enter" | "ctrl_enter";
   /** Start the engine when the app opens. */
   start_engine_on_launch: boolean;
   /** Launch at Windows sign-in (silent, engine on, no main window). */
@@ -207,6 +240,11 @@ export type AppSettings = {
 };
 
 /** Which GitHub Releases feed the desktop updater polls. */
+export type LivenessStatus = {
+  enrolled: boolean;
+  takes: number;
+};
+
 export type UpdateChannel = "stable" | "beta";
 
 export function normalizeUpdateChannel(
@@ -228,7 +266,8 @@ export const EMPTY_SETTINGS: AppSettings = {
   output_device: "",
   tts_voice_id: "M4",
   model_residency: "balanced",
-  voice_barge_in: false,
+  voice_barge_in: true,
+  ignore_speaker_playback: true,
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
@@ -236,6 +275,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   overlay_caption_mode: "full",
   overlay_position: "top_center",
   overlay_scale_percent: 100,
+  typed_input_submit: "enter",
   start_engine_on_launch: false,
   start_with_windows: false,
   update_channel: "stable",
@@ -282,6 +322,7 @@ export const PROVIDER_PRESETS: { id: string; label: string }[] = [
 
 /** Safe default before Rust emits anything. */
 export const OFF_STATUS: StatusPicture = {
+  seq: 0,
   engine: "Off",
   phase: "Off",
   detail: null,
@@ -291,9 +332,13 @@ export const OFF_STATUS: StatusPicture = {
   speaker: { label: "—", ok: false },
   turn: null,
   activity: null,
+  thinking: null,
   context_used: null,
   context_limit: null,
+  context_estimated: false,
   artifact: null,
+  wake_enroll: null,
+  input: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -302,6 +347,7 @@ export function normalizeStatus(
 ): StatusPicture {
   if (!raw) return { ...OFF_STATUS };
   return {
+    seq: typeof raw.seq === "number" && Number.isFinite(raw.seq) ? raw.seq : 0,
     engine: raw.engine ?? "Off",
     phase: raw.phase ?? "Off",
     detail: raw.detail ?? null,
@@ -311,9 +357,13 @@ export function normalizeStatus(
     speaker: raw.speaker ?? OFF_STATUS.speaker,
     turn: raw.turn ?? null,
     activity: raw.activity ?? null,
+    thinking: raw.thinking ?? null,
     context_used: raw.context_used ?? null,
     context_limit: raw.context_limit ?? null,
+    context_estimated: raw.context_estimated ?? false,
     artifact: raw.artifact ?? null,
+    wake_enroll: raw.wake_enroll ?? null,
+    input: raw.input ?? null,
   };
 }
 
@@ -336,7 +386,8 @@ export function normalizeSettings(
     output_device: raw?.output_device ?? "",
     tts_voice_id: raw?.tts_voice_id?.trim() || "M4",
     model_residency: normalizeResidency(raw?.model_residency),
-    voice_barge_in: raw?.voice_barge_in ?? false,
+    voice_barge_in: raw?.voice_barge_in ?? true,
+    ignore_speaker_playback: raw?.ignore_speaker_playback ?? true,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
@@ -351,6 +402,7 @@ export function normalizeSettings(
         ? raw.overlay_position
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
+    typed_input_submit: normalizeTypedInputSubmit(raw?.typed_input_submit),
     start_engine_on_launch: raw?.start_engine_on_launch ?? false,
     start_with_windows: raw?.start_with_windows ?? false,
     update_channel: normalizeUpdateChannel(raw?.update_channel),
@@ -361,6 +413,13 @@ export function normalizeSettings(
 function normalizeOverlayScale(raw: number | null | undefined): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
   return Math.min(125, Math.max(75, Math.round(raw / 5) * 5));
+}
+
+function normalizeTypedInputSubmit(
+  raw: string | null | undefined,
+): AppSettings["typed_input_submit"] {
+  const t = raw?.trim().toLowerCase().replace(/[+-]/g, "_");
+  return t === "ctrl_enter" ? "ctrl_enter" : "enter";
 }
 
 function normalizeResidency(
@@ -382,10 +441,11 @@ export function settingsToWire(settings: AppSettings): AppSettings {
   return normalizeSettings(settings);
 }
 
-/** Format token counts for the overlay meter: `233K / 500K`. */
+/** Format token counts for the overlay meter; estimated usage is prefixed with `~`. */
 export function formatContextMeter(
   used: number | null | undefined,
   limit: number | null | undefined,
+  estimated = false,
 ): string | null {
   if (used == null || limit == null || limit <= 0) return null;
   const fmt = (n: number) => {
@@ -393,5 +453,5 @@ export function formatContextMeter(
     if (n >= 1000) return `${Math.round(n / 1000)}K`;
     return `${n}`;
   };
-  return `${fmt(used)} / ${fmt(limit)}`;
+  return `${estimated ? "~" : ""}${fmt(used)} / ${fmt(limit)}`;
 }

@@ -49,7 +49,7 @@ fn default_model_residency() -> String {
 }
 
 fn default_barge_in() -> bool {
-    false
+    true
 }
 
 fn normalize_model_residency(raw: String) -> String {
@@ -75,6 +75,17 @@ fn default_overlay_position() -> String {
 
 fn default_overlay_scale_percent() -> u16 {
     100
+}
+
+fn default_typed_input_submit() -> String {
+    "enter".into()
+}
+
+fn normalize_typed_input_submit(raw: String) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "ctrl_enter" | "ctrl-enter" | "ctrl+enter" => "ctrl_enter".into(),
+        _ => default_typed_input_submit(),
+    }
 }
 
 fn default_update_channel() -> String {
@@ -127,10 +138,15 @@ pub struct AppSettings {
     /// STT/TTS RAM policy: `low_memory` | `balanced` | `low_latency`.
     #[serde(default = "default_model_residency")]
     pub model_residency: String,
-    /// Reserved compatibility flag; ignored until echo-safe barge-in exists.
+    /// Say the wake word while Boris is talking or working.
+    /// Talking: silence / "continue" resumes leftover speech; a new request starts a turn.
+    /// Thinking: silence keeps the turn; "stop" cancels; a new request replaces it.
     #[serde(default = "default_barge_in")]
     pub voice_barge_in: bool,
-    /// Markdown long-term memory tools + session logs.
+    /// Ignore TV / Translate / TTS coming out of a speaker after enroll.
+    #[serde(default = "default_true")]
+    pub ignore_speaker_playback: bool,
+    /// Canonical evidence-backed memory (legacy config key retained for compatibility).
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
     /// Auto-allow moderate tools + trusted sandbox file writes.
@@ -152,6 +168,9 @@ pub struct AppSettings {
     /// Overlay scale percentage, clamped to 75..=125.
     #[serde(default = "default_overlay_scale_percent")]
     pub overlay_scale_percent: u16,
+    /// Chord that submits typed overlay/Home input: `enter` | `ctrl_enter`.
+    #[serde(default = "default_typed_input_submit")]
+    pub typed_input_submit: String,
     /// Auto-start the engine when the desktop app opens.
     #[serde(default)]
     pub start_engine_on_launch: bool,
@@ -182,6 +201,7 @@ impl Default for AppSettings {
             tts_voice_id: default_tts_voice(),
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
+            ignore_speaker_playback: true,
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
@@ -189,6 +209,7 @@ impl Default for AppSettings {
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
+            typed_input_submit: default_typed_input_submit(),
             start_engine_on_launch: false,
             start_with_windows: false,
             update_channel: default_update_channel(),
@@ -232,6 +253,7 @@ impl std::fmt::Debug for AppSettings {
             .field("overlay_caption_mode", &self.overlay_caption_mode)
             .field("overlay_position", &self.overlay_position)
             .field("overlay_scale_percent", &self.overlay_scale_percent)
+            .field("typed_input_submit", &self.typed_input_submit)
             .field("start_engine_on_launch", &self.start_engine_on_launch)
             .field("start_with_windows", &self.start_with_windows)
             .field("update_channel", &self.update_channel)
@@ -297,6 +319,8 @@ struct SpeechSection {
     model_residency: String,
     #[serde(default = "default_barge_in")]
     voice_barge_in: bool,
+    #[serde(default = "default_true")]
+    ignore_speaker_playback: bool,
 }
 
 impl Default for SpeechSection {
@@ -305,6 +329,7 @@ impl Default for SpeechSection {
             tts_voice_id: default_tts_voice(),
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
+            ignore_speaker_playback: true,
         }
     }
 }
@@ -339,6 +364,8 @@ struct UiSection {
     overlay_position: String,
     #[serde(default = "default_overlay_scale_percent")]
     overlay_scale_percent: u16,
+    #[serde(default = "default_typed_input_submit")]
+    typed_input_submit: String,
     #[serde(default)]
     start_engine_on_launch: bool,
     #[serde(default)]
@@ -354,6 +381,7 @@ impl Default for UiSection {
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
+            typed_input_submit: default_typed_input_submit(),
             start_engine_on_launch: false,
             start_with_windows: false,
             update_channel: default_update_channel(),
@@ -384,6 +412,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     };
     out.model_residency = normalize_model_residency(cfg.speech.model_residency);
     out.voice_barge_in = cfg.speech.voice_barge_in;
+    out.ignore_speaker_playback = cfg.speech.ignore_speaker_playback;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
@@ -391,6 +420,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.overlay_caption_mode = normalize_overlay_caption_mode(cfg.ui.overlay_caption_mode);
     out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
     out.overlay_scale_percent = cfg.ui.overlay_scale_percent.clamp(75, 125);
+    out.typed_input_submit = normalize_typed_input_submit(cfg.ui.typed_input_submit);
     out.start_engine_on_launch = cfg.ui.start_engine_on_launch;
     out.start_with_windows = cfg.ui.start_with_windows;
     out.update_channel = normalize_update_channel(cfg.ui.update_channel);
@@ -522,6 +552,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         },
         model_residency: normalize_model_residency(settings.model_residency.clone()),
         voice_barge_in: settings.voice_barge_in,
+        ignore_speaker_playback: settings.ignore_speaker_playback,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
@@ -533,6 +564,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         overlay_caption_mode: normalize_overlay_caption_mode(settings.overlay_caption_mode.clone()),
         overlay_position: normalize_overlay_position(settings.overlay_position.clone()),
         overlay_scale_percent: settings.overlay_scale_percent.clamp(75, 125),
+        typed_input_submit: normalize_typed_input_submit(settings.typed_input_submit.clone()),
         start_engine_on_launch: settings.start_engine_on_launch,
         start_with_windows: settings.start_with_windows,
         update_channel: normalize_update_channel(settings.update_channel.clone()),
@@ -1009,6 +1041,7 @@ mod tests {
             tts_voice_id: "M4".into(),
             model_residency: "balanced".into(),
             voice_barge_in: false,
+            ignore_speaker_playback: true,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
@@ -1016,6 +1049,7 @@ mod tests {
             overlay_caption_mode: "assistant".into(),
             overlay_position: "top_right".into(),
             overlay_scale_percent: 115,
+            typed_input_submit: "ctrl_enter".into(),
             start_engine_on_launch: true,
             start_with_windows: true,
             update_channel: "beta".into(),
@@ -1063,6 +1097,7 @@ mod tests {
         assert_eq!(loaded.overlay_caption_mode, "assistant");
         assert_eq!(loaded.overlay_position, "top_right");
         assert_eq!(loaded.overlay_scale_percent, 115);
+        assert_eq!(loaded.typed_input_submit, "ctrl_enter");
         assert!(loaded.start_engine_on_launch);
         assert!(loaded.start_with_windows);
         assert_eq!(loaded.update_channel, "beta");

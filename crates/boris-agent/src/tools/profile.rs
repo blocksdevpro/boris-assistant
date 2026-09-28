@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use crate::memory::profile::{FactCategory, UserFact, UserProfile};
 use crate::memory::store::ProfileStore;
 use crate::tool::{
-    optional_string, require_object, require_string, truncate_tool_result, Permission, Tool,
-    ToolError, ToolKind, ToolMeta, ToolRisk,
+    optional_bool, optional_string, optional_u64, require_object, require_string,
+    truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 
 /// Shared mutable profile used by tools + engine (same process).
@@ -70,6 +70,14 @@ impl Tool for SaveUserFactTool {
                 "category": {
                     "type": "string",
                     "description": "identity | preference | project | relationship | habit | other"
+                },
+                "memory_key": {
+                    "type": "string",
+                    "description": "Stable semantic slot for corrections, e.g. home_city or preferred_editor"
+                },
+                "expires_in_days": {
+                    "type": "integer",
+                    "description": "Optional lifetime for temporary facts"
                 }
             },
             "required": ["fact"]
@@ -98,11 +106,104 @@ impl Tool for SaveUserFactTool {
         if fact.trim().len() < 3 {
             return Err(ToolError::invalid_args("fact too short"));
         }
+        let memory_key = optional_string(obj, "memory_key");
+        let expires_in_days = optional_u64(obj, "expires_in_days");
         with_profile(&self.profile, &self.store, |p| {
-            p.add_or_refresh_fact(UserFact::new(fact, category, "tool"));
+            let mut record = UserFact::new(fact, category, "tool");
+            if let Some(key) = memory_key {
+                record = record.with_memory_key(key);
+            }
+            if let Some(days) = expires_in_days {
+                const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+                record.expires_at_ms = Some(
+                    crate::memory::now_ms().saturating_add(days.min(3_650).saturating_mul(DAY_MS)),
+                );
+            }
+            p.add_or_refresh_fact(record);
             Ok(())
         })?;
         Ok(truncate_tool_result("Saved user fact.".into()))
+    }
+}
+
+/// Honor explicit correction/privacy requests without erasing the audit trail.
+pub struct ForgetUserMemoryTool {
+    profile: SharedProfile,
+    store: ProfileStore,
+}
+
+impl ForgetUserMemoryTool {
+    pub fn new(profile: SharedProfile, store: ProfileStore) -> Self {
+        Self { profile, store }
+    }
+
+    pub fn with_path(profile: SharedProfile, path: impl Into<PathBuf>) -> Self {
+        Self::new(profile, ProfileStore::new(path))
+    }
+}
+
+#[async_trait]
+impl Tool for ForgetUserMemoryTool {
+    fn name(&self) -> &str {
+        "forget_user_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Forget personal memory only when the human explicitly asks. Provide query or all=true (one required). Matching facts are tombstoned for audit and excluded from future context. Use all=true only for an explicit request to forget everything."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Fact or topic to forget" },
+                "all": { "type": "boolean", "description": "Forget all personal context" }
+            },
+            "required": []
+        })
+    }
+
+    fn meta(&self) -> ToolMeta {
+        ToolMeta::with_risk(ToolRisk::Moderate)
+            .kind(ToolKind::Memory)
+            .permissions(&[Permission::FsWrite])
+            .read_only(false)
+            .max_concurrency(1)
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        args: Value,
+    ) -> Result<String, ToolError> {
+        let obj = require_object(&args)?;
+        let all = optional_bool(obj, "all").unwrap_or(false);
+        let query = optional_string(obj, "query").unwrap_or_default();
+        if !all && query.trim().is_empty() {
+            return Err(ToolError::invalid_args(
+                "provide query or all=true (one is required): e.g. {\"query\": \"topic\"} or {\"all\": true}",
+            ));
+        }
+        // Profile JSON used tombstones. The canonical store is the runtime
+        // source of truth, so an explicit forget must erase it there first.
+        if let Some(memory) = self.store.memory_store() {
+            if all {
+                memory.forget_all().map_err(ToolError::failed)?;
+            } else {
+                let _ = memory.forget_matching(&query).map_err(ToolError::failed)?;
+            }
+        }
+        let changed = with_profile(&self.profile, &self.store, |profile| {
+            if all {
+                profile.forget_all();
+                Ok(profile.facts.len())
+            } else {
+                Ok(profile.forget_matching(&query))
+            }
+        })?;
+        Ok(truncate_tool_result(format!(
+            "Forgot personal memory ({changed} matching record(s))."
+        )))
     }
 }
 
@@ -129,7 +230,8 @@ impl Tool for UpdateUserProfileTool {
     }
 
     fn description(&self) -> &str {
-        "Update the user's profile fields: preferred_name, address_as, or a preference line. \
+        "Update the user's profile fields: preferred_name, address_as, preference, or ongoing. \
+         Provide at least one of preferred_name, address_as, preference, ongoing (one required). \
          Call when they say their name, how to address them, or a lasting preference."
     }
 
@@ -190,7 +292,7 @@ impl Tool for UpdateUserProfileTool {
             }
             if !changed {
                 return Err(ToolError::invalid_args(
-                    "provide preferred_name, address_as, preference, and/or ongoing",
+                    "provide preferred_name, address_as, preference, and/or ongoing (at least one is required)",
                 ));
             }
             Ok(())
@@ -250,6 +352,9 @@ impl Tool for GetUserContextTool {
         if guard.is_empty() {
             return Ok("No personal context stored yet.".into());
         }
+        // render_block is already an untrusted `<personal_context>` envelope
+        // (banner + escaped closers); return it directly so the model treats
+        // stored facts as data, not instructions.
         Ok(truncate_tool_result(guard.render_block(2000)))
     }
 }
@@ -270,6 +375,7 @@ mod tests {
         let path = std::env::temp_dir().join("boris-profile-meta-test.json");
         let save = SaveUserFactTool::with_path(profile.clone(), &path);
         let update = UpdateUserProfileTool::with_path(profile.clone(), &path);
+        let forget = ForgetUserMemoryTool::with_path(profile.clone(), &path);
         let get = GetUserContextTool::new(profile);
 
         let save_m = save.meta();
@@ -281,9 +387,54 @@ mod tests {
         assert_eq!(update_m.read_only, Some(false));
         assert_eq!(update_m.max_concurrency, Some(1));
 
+        let forget_m = forget.meta();
+        assert_eq!(forget_m.read_only, Some(false));
+        assert!(forget_m.permissions.contains(&Permission::FsWrite));
+
         let get_m = get.meta();
         assert_eq!(get_m.read_only, Some(true));
         assert!(get_m.permissions.contains(&Permission::FsRead));
         assert!(get_m.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn forget_empty_rejected_with_helpful_text() {
+        let profile = dummy_profile();
+        let path = std::env::temp_dir().join(format!(
+            "boris-profile-forget-{}-{}.json",
+            std::process::id(),
+            crate::memory::now_ms()
+        ));
+        let tool = ForgetUserMemoryTool::with_path(profile, &path);
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("c"),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("query"));
+        assert!(err.message.contains("all=true"));
+    }
+
+    #[tokio::test]
+    async fn update_empty_rejected_with_helpful_text() {
+        let profile = dummy_profile();
+        let path = std::env::temp_dir().join(format!(
+            "boris-profile-update-{}-{}.json",
+            std::process::id(),
+            crate::memory::now_ms()
+        ));
+        let tool = UpdateUserProfileTool::with_path(profile, &path);
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("c"),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+        assert!(err.message.contains("preferred_name"));
     }
 }

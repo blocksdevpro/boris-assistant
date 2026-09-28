@@ -15,6 +15,7 @@
 //! | [`llm`] | OpenRouter model routing |
 //! | [`device_switch`] | Mic / speaker switches |
 //! | [`picture`] | Status publisher → UI |
+//! | [`think`] | Agent turn off-thread + thinking barge-in |
 //! | [`util`] | Small pure helpers |
 //!
 //! # Turn loop
@@ -23,8 +24,9 @@
 //! Start → Armed → (wake | await reply) → hear → read → think → talk → Armed → …
 //! ```
 //!
-//! Wake scoring, VAD capture, STT, agent, and TTS are **called inline** on the
-//! engine thread (or briefly block it). Status is pushed for the UI. Hosts send
+//! Wake scoring, VAD capture, STT, and TTS stay on the engine thread. The
+//! agent turn runs on a scoped thread during Thinking so the engine can still
+//! service Stop and wake barge-in. Status is pushed for the UI. Hosts send
 //! [`EngineCommand`] via [`EngineHandle`].
 //!
 //! # Shutdown contract
@@ -41,6 +43,7 @@
 
 mod activity;
 mod artifact;
+mod barge;
 mod confirm;
 mod device_switch;
 mod llm;
@@ -51,14 +54,14 @@ mod playback;
 mod session;
 mod setup;
 mod speech;
+mod think;
 mod turn_trace;
 mod util;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use boris_agent::session::types::SessionId;
-use boris_agent::{AgentEvent, AgentOutcome};
+use boris_agent::{AgentErrorKind, AgentEvent, AgentOutcome, SessionId};
 use boris_audio::AUDIO_TARGET_RATE;
 use boris_core::TurnId;
 
@@ -67,18 +70,22 @@ use crate::error::{PipelineError, Result};
 use crate::hear::{self, CaptureKind, HearBreak};
 use crate::status::{EngineState, Phase, StatusPicture};
 
-use activity::activity_label;
+use activity::{activity_label, is_tool_chip, note_tool_start};
 use artifact::peek_current;
+use barge::{decide_barge_listen, BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
     join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
     release_voice_models,
 };
-use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve};
-use playback::{poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait};
+use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve, ResolveDone};
+use playback::{
+    drain_output_events, poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait,
+};
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
+use think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
 use turn_trace::TurnTraceGuard;
 use util::{speakable_reply_units, transcript_usable};
 
@@ -90,13 +97,39 @@ pub(super) const MIC_QUEUE: usize = 256;
 /// Multi-step voice chores need more than a couple of back-and-forths.
 const MAX_FOLLOW_UPS: u32 = 24;
 
+/// A barge-in starts a fresh user turn. Thinking replacements additionally
+/// carry the cancelled objective as host-only reference, never as user text.
+struct PendingBargeTurn {
+    user_text: String,
+    interrupted_text: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum EngineCommand {
     Start,
     Stop,
     Shutdown,
-    SwitchInput { device_id: String },
-    SwitchOutput { device_id: String },
+    SwitchInput {
+        device_id: String,
+    },
+    SwitchOutput {
+        device_id: String,
+    },
+    /// Next `takes` wake hits train the live-mic profile (not a turn).
+    StartWakeEnroll {
+        takes: u32,
+    },
+    /// Forget the stored live-mic profile.
+    ClearWakeProfile,
+    /// Typed / pasted value for a pending collect_input pause.
+    SubmitInput {
+        id: String,
+        value: String,
+    },
+    /// User dismissed the on-screen input field.
+    CancelInput {
+        id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -122,6 +155,32 @@ impl EngineHandle {
 
     pub fn shutdown(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::Shutdown)
+    }
+
+    pub fn start_wake_enroll(
+        &self,
+        takes: u32,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::StartWakeEnroll { takes })
+    }
+
+    pub fn clear_wake_profile(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::ClearWakeProfile)
+    }
+
+    pub fn submit_input(
+        &self,
+        id: String,
+        value: String,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::SubmitInput { id, value })
+    }
+
+    pub fn cancel_input(
+        &self,
+        id: String,
+    ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::CancelInput { id })
     }
 }
 
@@ -270,6 +329,7 @@ fn on_hear_break(
             on_soft_stop();
             LoopReact::Continue
         }
+        HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile => LoopReact::Continue,
         HearBreak::Disconnected => {
             end_session(
                 &rt.store,
@@ -278,8 +338,58 @@ fn on_hear_break(
                 &mut rt.agent,
             );
             release_voice_models(rt.stt.as_mut(), rt.tts.as_mut(), "disconnected");
+            rt.picture.mark_devices_dead();
             rt.picture.set_phase(Phase::Off);
             LoopReact::Exit
+        }
+    }
+}
+
+/// Pause leftover speech is already applied. Listen; resume / stop / new turn.
+fn listen_after_barge(
+    rt: &mut EngineRuntime,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    expect_reply: bool,
+) -> std::result::Result<BargeDecision, HearBreak> {
+    rt.picture.set_phase(Phase::Hearing);
+    rt.picture.activity = Some("barge-in · listening".into());
+    rt.picture.publish();
+    hear::settle_after_barge(&rt.mic, cmd_rx, running)?;
+    let clip = hear::capture_utterance(
+        &rt.mic,
+        &mut rt.vad,
+        cmd_rx,
+        running,
+        CaptureKind::AfterWake,
+    )?;
+    let crop = hear::crop_speech(&mut rt.vad, &clip);
+    if crop.speech_hops < 10 {
+        tracing::info!(
+            hops = crop.speech_hops,
+            "barge-in listen was silence — resume"
+        );
+        rt.picture.clear_activity();
+        return Ok(BargeDecision::Resume);
+    }
+
+    if let Err(e) = rt.stt.load() {
+        tracing::warn!(error = %e, "barge-in stt load failed — resuming leftover");
+        rt.picture.clear_activity();
+        return Ok(BargeDecision::Resume);
+    }
+
+    rt.picture.set_phase(Phase::Reading);
+    match rt.stt.transcribe(&clip) {
+        Ok(text) => {
+            tracing::info!(%text, hops = crop.speech_hops, "barge-in heard");
+            rt.picture.clear_activity();
+            Ok(decide_barge_listen(crop.speech_hops, &text, expect_reply))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "barge-in stt failed — resuming leftover");
+            rt.picture.clear_activity();
+            Ok(BargeDecision::Resume)
         }
     }
 }
@@ -312,6 +422,9 @@ fn run(
     let mut active_session: Option<SessionId> = None;
     // How many agent messages are already on disk for `active_session`.
     let mut transcript_len: usize = 0;
+    let mut enroll_left: u32 = 0;
+    // Confirmed barge-in; next loop starts a clean turn without another wake.
+    let mut pending_barge_turn: Option<PendingBargeTurn> = None;
 
     loop {
         let mut sess = SessionRefs {
@@ -333,6 +446,10 @@ fn run(
                     rt.picture.detail = None;
                     rt.picture.activity = None;
                     rt.picture.artifact = None;
+                    // A fresh Start re-marks devices alive: a prior
+                    // disconnect-dead flag must not linger once the host
+                    // restarts the engine on (possibly fixed) devices.
+                    rt.picture.mark_devices_alive();
 
                     // STT/TTS stay unloaded until a turn needs them (preloaded one
                     // step ahead during capture / agent — never kept for Armed idle).
@@ -369,6 +486,26 @@ fn run(
                 ) => {
                     apply_device_cmd(&mut rt, cmd);
                 }
+                Ok(EngineCommand::StartWakeEnroll { takes }) => {
+                    enroll_left = takes.clamp(2, 8);
+                    tracing::info!(
+                        takes = enroll_left,
+                        "wake enroll queued (start engine to record)"
+                    );
+                    rt.picture
+                        .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                            have: 0,
+                            want: enroll_left,
+                            ready: false,
+                            hint: None,
+                        }));
+                }
+                Ok(EngineCommand::ClearWakeProfile) => {
+                    rt.liveness.clear();
+                    rt.picture.set_wake_enroll(None);
+                    tracing::info!("wake liveness profile cleared");
+                }
+                Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
             }
             continue;
         }
@@ -376,7 +513,17 @@ fn run(
         // ── Entry: wake OR freeform follow-up (no second wake) ─────────────
         // Keep last `heard` + `said` while idle so Conversation shows the full
         // last turn (not just Boris). Clear both only when a new utterance starts.
-        let capture_kind = if await_reply {
+        let barge_turn = pending_barge_turn.take();
+        let capture_kind = if barge_turn.is_some() {
+            follow_up_depth = 0;
+            await_reply = false;
+            rt.picture.detail = None;
+            rt.picture.turn = None;
+            rt.picture.clear_activity();
+            rt.picture.said = None;
+            rt.picture.heard = None;
+            CaptureKind::AfterWake
+        } else if await_reply {
             rt.picture.detail = None;
             rt.picture.turn = None;
             rt.picture.clear_activity();
@@ -412,21 +559,136 @@ fn run(
             rt.picture.turn = None;
             rt.picture.clear_activity();
             rt.picture.set_phase(Phase::Armed);
-
-            match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
-                Ok(()) => {}
-                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
-                    LoopReact::Continue => continue,
-                    LoopReact::Exit => return Ok(()),
-                },
+            if enroll_left > 0 {
+                let have = rt.liveness.take_count() as u32;
+                rt.picture
+                    .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                        have,
+                        want: have + enroll_left,
+                        ready: false,
+                        hint: None,
+                    }));
             }
+
+            let wake_window =
+                match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
+                    Ok(w) => w,
+                    Err(HearBreak::StartWakeEnroll { takes }) => {
+                        enroll_left = takes.clamp(2, 8);
+                        continue;
+                    }
+                    Err(HearBreak::ClearWakeProfile) => {
+                        rt.liveness.clear();
+                        enroll_left = 0;
+                        rt.picture.set_wake_enroll(None);
+                        continue;
+                    }
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                };
 
             if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
             }
+
+            let crop = hear::crop_speech(&mut rt.vad, &wake_window);
+            if enroll_left > 0 {
+                let want = rt.liveness.take_count() as u32 + enroll_left;
+                match rt.liveness.add_take(&crop.pcm, crop.speech_hops, want) {
+                    Ok(p) => {
+                        enroll_left = want.saturating_sub(p.have);
+                        tracing::info!(
+                            have = p.have,
+                            want = p.want,
+                            ready = p.ready,
+                            "wake enroll take"
+                        );
+                        if p.ready {
+                            enroll_left = 0;
+                        }
+                        rt.picture
+                            .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                                have: p.have,
+                                want: p.want,
+                                ready: p.ready,
+                                hint: None,
+                            }));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wake enroll take rejected");
+                        let have = rt.liveness.take_count() as u32;
+                        rt.picture
+                            .set_wake_enroll(Some(crate::status::WakeEnrollPeek {
+                                have,
+                                want,
+                                ready: false,
+                                hint: Some(e),
+                            }));
+                    }
+                }
+                if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 500) {
+                    match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    }
+                }
+                continue;
+            }
+
+            match rt.liveness.classify(&crop.pcm, crop.speech_hops) {
+                crate::liveness::WakeOrigin::Playback { z } => {
+                    tracing::info!(
+                        z,
+                        hops = crop.speech_hops,
+                        "wake rejected — speaker playback"
+                    );
+                    if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
+                        match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                            LoopReact::Continue => continue,
+                            LoopReact::Exit => return Ok(()),
+                        }
+                    }
+                    continue;
+                }
+                crate::liveness::WakeOrigin::Mismatch { z } => {
+                    tracing::info!(
+                        z,
+                        hops = crop.speech_hops,
+                        "wake rejected — not the taught voice"
+                    );
+                    if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
+                        match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                            LoopReact::Continue => continue,
+                            LoopReact::Exit => return Ok(()),
+                        }
+                    }
+                    continue;
+                }
+                crate::liveness::WakeOrigin::TooShort => {
+                    tracing::info!(
+                        hops = crop.speech_hops,
+                        "wake rejected — no speech in window"
+                    );
+                    if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 250) {
+                        match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                            LoopReact::Continue => continue,
+                            LoopReact::Exit => return Ok(()),
+                        }
+                    }
+                    continue;
+                }
+                crate::liveness::WakeOrigin::Live => {
+                    tracing::debug!(hops = crop.speech_hops, "wake accepted — live speech");
+                }
+                crate::liveness::WakeOrigin::Unknown => {}
+            }
+
             // New user turn — drop previous line now that we're listening again.
             rt.picture.said = None;
             rt.picture.heard = None;
+            rt.picture.wake_enroll = None;
             CaptureKind::AfterWake
         };
 
@@ -449,82 +711,147 @@ fn run(
         // Overlay glance is this-turn only. The session catalog / Home desk
         // still keep the last card; a new utterance must not resurrect it.
         rt.picture.artifact = None;
-        // Hearing only while the mic is actually recording (not during STT).
-        // Preload STT in parallel — should be ready by the time capture ends.
-        rt.picture.set_phase(Phase::Hearing);
-        tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
 
-        let stt_job = rt.stt_loader.load(rt.stt);
-        let capture =
-            hear::capture_utterance(&rt.mic, &mut rt.vad, &cmd_rx, &mut running, capture_kind);
-        turn_trace.mark("speech_end", None);
-        let (stt_owned, stt_load) = join_stt_load(stt_job);
-        rt.stt = stt_owned;
+        let (text, stt_ms, interrupted_text) = if let Some(barge) = barge_turn {
+            let text = barge.user_text;
+            turn_trace.mark("barge_in_turn", None);
+            tracing::info!(%turn, %text, "turn begin — barge-in transcript");
+            rt.picture.heard = Some(text.clone());
+            rt.picture.publish();
+            (text, 0u64, barge.interrupted_text)
+        } else {
+            // Hearing only while the mic is actually recording (not during STT).
+            rt.picture.set_phase(Phase::Hearing);
+            let partial_cfg = crate::partials::PartialConfig::from_env();
+            // Live partials need the model in place *during* capture, so they
+            // only run when STT is already warm (balanced/low_latency after
+            // the first turn). Cold turns keep the preload-then-decode path
+            // below so capture still overlaps the load.
+            let streaming = partial_cfg.enabled
+                && rt.stt.is_loaded()
+                && !matches!(capture_kind, CaptureKind::AwaitConfirm);
 
-        let clip = match capture {
-            Ok(c) => c,
-            Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
-                follow_up_depth = 0;
-            }) {
-                LoopReact::Continue => continue,
-                LoopReact::Exit => return Ok(()),
-            },
-        };
-
-        if go_off_if_not_running(&mut rt, &mut sess, running) {
-            continue;
-        }
-
-        if let Err(e) = stt_load {
-            turn_trace.mark(
-                "stt_load_error",
-                Some(serde_json::json!({ "error": e.to_string() })),
-            );
-            tracing::error!(error = %e, %turn, "stt load failed");
-            crate::diagnostics::log_model_load_failure("parakeet", &rt.stt_model_dir, &e);
-            let _ = rt.stt.unload();
-            rt.picture.detail = Some(format!("stt load: {e}"));
-            follow_up_depth = 0;
-            rt.picture.set_phase(Phase::Armed);
-            continue;
-        }
-
-        // Leave Hearing as soon as the mic stops — STT is "Reading", not listening.
-        rt.picture.set_phase(Phase::Reading);
-        let stt_t = std::time::Instant::now();
-        let text = match rt.stt.transcribe(&clip) {
-            Ok(t) => t,
-            Err(e) => {
-                turn_trace.mark(
-                    "stt_error",
-                    Some(serde_json::json!({ "error": e.to_string() })),
+            let clip = if streaming {
+                tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ live STT partials)");
+                let mut partial_count = 0u32;
+                let capture = hear::capture_utterance_with_partials(
+                    &rt.mic,
+                    &mut rt.vad,
+                    &cmd_rx,
+                    &mut running,
+                    capture_kind,
+                    &partial_cfg,
+                    rt.stt.as_mut(),
+                    |text, snapshot_samples| {
+                        partial_count += 1;
+                        turn_trace.mark(
+                            "stt_partial",
+                            Some(serde_json::json!({
+                                "n": partial_count,
+                                "chars": text.chars().count(),
+                                "snapshot_samples": snapshot_samples,
+                            })),
+                        );
+                        // Live overlay line; the final transcribe below stays
+                        // authoritative and republishes.
+                        rt.picture.heard = Some(text.to_string());
+                        rt.picture.publish();
+                    },
                 );
-                tracing::error!(error = %e, %turn, "stt failed");
-                let _ = rt.stt.unload();
-                rt.picture.detail = Some(format!("stt: {e}"));
-                follow_up_depth = 0;
-                rt.picture.set_phase(Phase::Armed);
+                turn_trace.mark("speech_end", None);
+                match capture {
+                    Ok(c) => c,
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                    }) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                }
+            } else {
+                // Preload STT in parallel — should be ready by the time capture ends.
+                tracing::info!(%turn, ?capture_kind, "turn begin — hearing (+ STT preload)");
+
+                let stt_job = rt.stt_loader.load(rt.stt);
+                let capture = hear::capture_utterance(
+                    &rt.mic,
+                    &mut rt.vad,
+                    &cmd_rx,
+                    &mut running,
+                    capture_kind,
+                );
+                turn_trace.mark("speech_end", None);
+                let (stt_owned, stt_load) = join_stt_load(stt_job);
+                rt.stt = stt_owned;
+
+                let clip = match capture {
+                    Ok(c) => c,
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                    }) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    },
+                };
+
+                if let Err(e) = stt_load {
+                    turn_trace.mark(
+                        "stt_load_error",
+                        Some(serde_json::json!({ "error": e.to_string() })),
+                    );
+                    tracing::error!(error = %e, %turn, "stt load failed");
+                    crate::diagnostics::log_model_load_failure("parakeet", &rt.stt_model_dir, &e);
+                    let _ = rt.stt.unload();
+                    rt.picture.detail = Some(format!("stt load: {e}"));
+                    follow_up_depth = 0;
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+                clip
+            };
+
+            if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
             }
+
+            // Leave Hearing as soon as the mic stops — STT is "Reading", not listening.
+            rt.picture.set_phase(Phase::Reading);
+            let stt_t = std::time::Instant::now();
+            let text = match rt.stt.transcribe(&clip) {
+                Ok(t) => t,
+                Err(e) => {
+                    turn_trace.mark(
+                        "stt_error",
+                        Some(serde_json::json!({ "error": e.to_string() })),
+                    );
+                    tracing::error!(error = %e, %turn, "stt failed");
+                    let _ = rt.stt.unload();
+                    rt.picture.detail = Some(format!("stt: {e}"));
+                    follow_up_depth = 0;
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+            };
+            // Low-memory evicts STT now; balanced/low-latency keep it warm.
+            maybe_unload_stt(rt.stt.as_mut(), turn, rt.residency);
+            let stt_ms = stt_t.elapsed().as_millis() as u64;
+            turn_trace.span(
+                "stt",
+                stt_ms,
+                Some(serde_json::json!({ "clip_samples": clip.len() })),
+            );
+            tracing::info!(
+                %turn,
+                stt_ms,
+                clip_samples = clip.len(),
+                clip_ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
+                "stt done"
+            );
+            rt.picture.heard = Some(text.clone());
+            rt.picture.publish();
+            tracing::info!(%turn, %text, "heard");
+            (text, stt_ms, None)
         };
-        // Low-memory evicts STT now; balanced/low-latency keep it warm.
-        maybe_unload_stt(rt.stt.as_mut(), turn, rt.residency);
-        let stt_ms = stt_t.elapsed().as_millis() as u64;
-        turn_trace.span(
-            "stt",
-            stt_ms,
-            Some(serde_json::json!({ "clip_samples": clip.len() })),
-        );
-        tracing::info!(
-            %turn,
-            stt_ms,
-            clip_samples = clip.len(),
-            clip_ms = (clip.len() as u64 * 1000) / AUDIO_TARGET_RATE as u64,
-            "stt done"
-        );
-        rt.picture.heard = Some(text.clone());
-        rt.picture.publish();
-        tracing::info!(%turn, %text, "heard");
 
         // Host guard: skip agent on empty / whitespace / junk transcripts.
         if !transcript_usable(&text) {
@@ -535,7 +862,9 @@ fn run(
                 alnum = text.chars().filter(|c| c.is_alphanumeric()).count(),
                 "skipping empty/junk transcript — not calling agent"
             );
-            rt.picture.detail = Some("didn't catch that".into());
+            rt.picture.activity = Some("didn't catch that — wake me and try again".into());
+            // Hint goes to `activity`, not `detail`: the overlay renders
+            // `detail` as an error and a missed utterance is transient.
             // If we were in a follow-up, one soft retry is enough; then re-arm.
             if matches!(capture_kind, CaptureKind::AwaitReply) && follow_up_depth < MAX_FOLLOW_UPS {
                 await_reply = true;
@@ -577,41 +906,46 @@ fn run(
             rt.agent.set_session_id(Some(sid.to_string()));
         }
 
-        // Live tool activity → overlay. Snapshot freezes non-activity fields so
-        // mid-turn events do not clobber heard/said with a stale full rebuild.
-        let activity_base = std::sync::Arc::new(std::sync::Mutex::new(StatusPicture {
-            engine: rt.picture.engine,
-            phase: rt.picture.phase,
-            detail: rt.picture.detail.clone(),
-            heard: rt.picture.heard.clone(),
-            said: rt.picture.said.clone(),
-            mic: rt.picture.mic.clone(),
-            speaker: rt.picture.speaker.clone(),
-            turn: rt.picture.turn.map(|t| t.to_string()),
-            activity: None,
-            context_used: rt.picture.context_used,
-            context_limit: rt.picture.context_limit,
-            artifact: rt.picture.artifact.clone(),
-        }));
+        // Agent events and the engine publish through the same current status.
+        // A later tool event therefore inherits fresh phase, device, input,
+        // artifact, and fault fields instead of replaying a turn-start copy.
         let activity_tx = rt.picture.status_tx.clone();
-        let base_w = activity_base.clone();
-        // Recent tool names (for "thinking · after web_search" style labels).
-        let recent_tools = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let recent_w = recent_tools.clone();
+        let activity_latest = rt.picture.latest.clone();
+        let activity_turn = turn.to_string();
+        let activity_events_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let activity_events_enabled_w = activity_events_enabled.clone();
+        let wave = std::sync::Arc::new(std::sync::Mutex::new(boris_agent::ActivityWave::default()));
+        let wave_w = wave.clone();
+        let thought_t = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let thought_w = thought_t.clone();
         let art_store = rt.store.clone();
         let art_sid = (*sess.active_session).clone();
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
-            // Track tools for post-tool thinking labels.
-            if let AgentEvent::ToolExecutionStart { tool_name, .. } = ev {
-                if let Ok(mut g) = recent_w.lock() {
-                    if !g.iter().any(|t| t == tool_name) {
-                        g.push(tool_name.clone());
-                    }
-                    while g.len() > 4 {
-                        g.remove(0);
-                    }
+            if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            // Track consecutive tool starts for same-kind collapse.
+            if let AgentEvent::ToolExecutionStart {
+                tool_name,
+                args_summary,
+                ..
+            } = ev
+            {
+                if let Ok(mut w) = wave_w.lock() {
+                    note_tool_start(&mut w, tool_name, args_summary);
+                }
+                if let Ok(mut t) = thought_w.lock() {
+                    *t = std::time::Instant::now();
+                }
+            }
+            if let AgentEvent::TurnStart { .. } = ev {
+                if let Ok(mut t) = thought_w.lock() {
+                    *t = std::time::Instant::now();
+                }
+                if let Ok(mut w) = wave_w.lock() {
+                    w.reset();
                 }
             }
             if let AgentEvent::ToolExecutionEnd {
@@ -623,32 +957,158 @@ fn run(
                 if tool_name == "present_artifact" {
                     if let Some(sid) = art_sid.as_ref() {
                         if let Some(peek) = peek_current(&art_store, sid) {
-                            if let Ok(mut base) = base_w.lock() {
-                                base.artifact = Some(peek);
+                            if let Ok(mut latest) = activity_latest.lock() {
+                                if latest.turn.as_deref() == Some(activity_turn.as_str()) {
+                                    latest.artifact = Some(peek);
+                                }
                             }
                         }
                     }
                 }
             }
-            let tools_snapshot = recent_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            let Some(label) = activity_label(ev, &tools_snapshot) else {
+            if let AgentEvent::ToolNote { text } = ev {
+                let Ok(mut latest) = activity_latest.lock() else {
+                    return;
+                };
+                if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                    return;
+                }
+                latest.thinking = Some(picture::truncate_thinking(text));
+                picture::send_locked(&mut latest, &activity_tx);
+                return;
+            }
+            if let AgentEvent::Reasoning { preview } = ev {
+                let Ok(mut latest) = activity_latest.lock() else {
+                    return;
+                };
+                if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                    return;
+                }
+                // The agent sends a rolling tail. Keep its newest characters
+                // when narrowing the status payload for the overlay.
+                latest.thinking = Some(picture::truncate_thinking(preview));
+                let elapsed = thought_w
+                    .lock()
+                    .ok()
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default();
+                let thought = boris_agent::describe_thought(elapsed);
+                // Don't clobber a live tool chip with the think timer.
+                let busy_tool = latest.activity.as_deref().is_some_and(is_tool_chip);
+                if !busy_tool {
+                    latest.activity = Some(format!("thinking · {thought}"));
+                } else if latest.activity.is_none() {
+                    latest.activity = Some("thinking…".into());
+                }
+                picture::send_locked(&mut latest, &activity_tx);
+                return;
+            }
+            // Confirmation and typed input replace the current note.
+            if matches!(
+                ev,
+                AgentEvent::NeedsConfirmation { .. } | AgentEvent::NeedsInput { .. }
+            ) {
+                if let Ok(mut latest) = activity_latest.lock() {
+                    if latest.turn.as_deref() == Some(activity_turn.as_str()) {
+                        latest.thinking = None;
+                    }
+                }
+            }
+            let wave_snapshot = wave_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            let Some(label) = activity_label(ev, &wave_snapshot) else {
                 return;
             };
-            let Ok(base) = base_w.lock() else {
+            let Ok(mut latest) = activity_latest.lock() else {
                 return;
             };
-            let mut snap = base.clone();
-            snap.activity = Some(label);
-            let _ = activity_tx.send(snap);
+            if latest.turn.as_deref() != Some(activity_turn.as_str()) {
+                return;
+            }
+            latest.activity = Some(label);
+            picture::send_locked(&mut latest, &activity_tx);
         });
 
-        let outcome = rt.agent_rt.block_on(rt.agent.prompt_with_report(&text));
+        let work = match interrupted_text.as_deref() {
+            Some(previous) => AgentWork::Replacement {
+                user_text: &text,
+                interrupted_text: Some(previous),
+            },
+            None => AgentWork::Prompt(&text),
+        };
+        // Cancellation is cooperative. If the old turn finishes while the user
+        // is still dictating an interruption, restore this pre-turn state so the
+        // discarded answer cannot leak into the next model request.
+        let turn_checkpoint = rt.agent.checkpoint();
+        let think = run_thinking(ThinkCtx {
+            agent: &mut rt.agent,
+            agent_rt: &rt.agent_rt,
+            mic: &rt.mic,
+            wake: &mut rt.wake,
+            vad: &mut rt.vad,
+            stt: &mut rt.stt,
+            liveness: &mut rt.liveness,
+            barge_in: rt.barge_in,
+            audio: &mut rt.audio,
+            output_events: &mut rt.output_events,
+            picture: &mut rt.picture,
+            activity_events_enabled: activity_events_enabled.clone(),
+            cmd_rx: &cmd_rx,
+            running: &mut running,
+            work,
+            turn,
+        });
         let (tts_owned, tts_load) = join_tts_load(tts_job);
         rt.tts = tts_owned;
 
-        let (outcome, report) = match outcome {
-            Ok(pair) => pair,
-            Err(e) => {
+        let (outcome, report) = match think {
+            ThinkResolve::Stopped => {
+                turn_trace.mark("thinking_stopped", None);
+                unsub();
+                rt.agent.abort();
+                go_off_session(&mut rt, &mut sess);
+                continue;
+            }
+            ThinkResolve::StopTurn => {
+                turn_trace.mark("thinking_barge_stop", None);
+                unsub();
+                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.picture.clear_activity();
+                maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                follow_up_depth = 0;
+                await_reply = false;
+                rt.picture.set_phase(Phase::Armed);
+                continue;
+            }
+            ThinkResolve::TakeTurn(next) => {
+                let interrupted_text = rt.picture.heard.clone();
+                turn_trace.mark(
+                    "thinking_barge_take_turn",
+                    Some(serde_json::json!({ "text": next })),
+                );
+                unsub();
+                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.picture.clear_activity();
+                pending_barge_turn = Some(PendingBargeTurn {
+                    user_text: next,
+                    interrupted_text,
+                });
+                follow_up_depth = 0;
+                await_reply = false;
+                continue;
+            }
+            ThinkResolve::Finished(Ok(pair)) => pair,
+            ThinkResolve::Finished(Err(e)) if e.kind() == AgentErrorKind::Cancelled => {
+                turn_trace.mark("thinking_cancelled", None);
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                follow_up_depth = 0;
+                await_reply = false;
+                rt.picture.set_phase(Phase::Armed);
+                continue;
+            }
+            ThinkResolve::Finished(Err(e)) => {
                 turn_trace.span(
                     "agent_error",
                     agent_t.elapsed().as_millis() as u64,
@@ -666,16 +1126,20 @@ fn run(
                 rt.picture.publish();
                 if rt.tts.load().is_ok() {
                     if let Ok(pcm) = rt.tts.synthesize(recovery) {
-                        while rt.output_events.try_recv().is_ok() {}
+                        drain_output_events(&rt.output_events);
                         if let Err(e) = rt.audio.play(pcm) {
                             tracing::error!(error = %e, "recovery play failed");
                         }
+                        // No barge watch: this is a fire-and-forget error line
+                        // with no listener following — a wake word during it
+                        // is caught by the next Armed wait.
                         let _ = wait_playback_started(
                             &mut rt.output_events,
                             &cmd_rx,
                             &mut running,
                             &mut rt.audio,
                             &mut rt.picture,
+                            None,
                         );
                         wait_playback_or_stop(
                             &mut rt.output_events,
@@ -683,6 +1147,7 @@ fn run(
                             &mut running,
                             &mut rt.audio,
                             &mut rt.picture,
+                            None,
                         );
                     }
                     let _ = rt.tts.unload();
@@ -694,26 +1159,41 @@ fn run(
         };
         // Live tool labels already mirrored; keep a soft chip until speech/confirm.
         if !report.tools_used.is_empty() {
-            rt.picture.activity = Some(format!("{} tools", report.tools_used.len()));
+            rt.picture.activity = Some(boris_agent::summarize_tools_used(&report.tools_used));
         }
         if report.tools_used.iter().any(|n| n == "present_artifact") {
             if let Some(sid) = sess.active_session.as_ref() {
-                rt.picture.artifact = peek_current(&rt.store, sid);
+                match peek_current(&rt.store, sid) {
+                    Some(peek) => rt.picture.artifact = Some(peek),
+                    None => tracing::debug!(
+                        %turn,
+                        "present_artifact ran but index peek missed (flush race?)"
+                    ),
+                }
             }
         }
         if !report.tools_used.is_empty() || rt.picture.artifact.is_some() {
             rt.picture.publish();
         }
-        rt.picture.update_context_from_chars(report.approx_chars_in);
+        rt.picture.update_context(
+            report.context_used_tokens,
+            report.context_limit_tokens,
+            report.context_estimated,
+        );
 
         // Resolve HITL confirmations (voice yes/no) before final speech.
+        let original_heard = rt.picture.heard.clone();
+        let max_confirms = rt.max_confirms_per_turn;
         let mut confirm = ConfirmCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
             tts: &mut rt.tts,
             stt: &mut rt.stt,
             mic: &rt.mic,
+            wake: &mut rt.wake,
             vad: &mut rt.vad,
+            liveness: &mut rt.liveness,
+            barge_in: rt.barge_in,
             audio: &mut rt.audio,
             output_events: &mut rt.output_events,
             cmd_rx: &cmd_rx,
@@ -722,7 +1202,13 @@ fn run(
             store: &rt.store,
             active_session: sess.active_session,
             transcript_len: sess.transcript_len,
+            original_heard,
+            activity_events_enabled: activity_events_enabled.clone(),
+            turn_checkpoint,
             turn,
+            max_confirms,
+            residency: rt.residency,
+            last_resume_report: None,
         };
         let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
             OutcomeResolve::Stopped => {
@@ -734,7 +1220,64 @@ fn run(
                 follow_up_depth = 0;
                 continue;
             }
-            OutcomeResolve::Done(o) => o,
+            OutcomeResolve::TakeTurn {
+                user_text,
+                interrupted_text,
+            } => {
+                turn_trace.mark(
+                    "confirm_barge_take_turn",
+                    Some(serde_json::json!({ "text": user_text })),
+                );
+                unsub();
+                rt.agent.abort();
+                rt.picture.clear_activity();
+                pending_barge_turn = Some(PendingBargeTurn {
+                    user_text,
+                    interrupted_text,
+                });
+                follow_up_depth = 0;
+                await_reply = false;
+                continue;
+            }
+            OutcomeResolve::Done(done) => {
+                let ResolveDone {
+                    outcome,
+                    resume_report,
+                } = *done;
+                // A confirm/input resume ran more tool rounds after the initial
+                // report: refresh the meter (already updated inside the resume)
+                // and fold the resume rounds into the trace so they are not
+                // invisible to latency/tool accounting.
+                if let Some(resume) = resume_report {
+                    rt.picture.update_context(
+                        resume.context_used_tokens,
+                        resume.context_limit_tokens,
+                        resume.context_estimated,
+                    );
+                    // A card presented during the resume must reach the overlay
+                    // too — the pre-confirm peek above predates those tools.
+                    if resume.tools_used.iter().any(|n| n == "present_artifact") {
+                        if let Some(sid) = sess.active_session.as_ref() {
+                            match peek_current(&rt.store, sid) {
+                                Some(peek) => rt.picture.artifact = Some(peek),
+                                None => tracing::debug!(
+                                    %turn,
+                                    "resume presented artifact but index peek missed"
+                                ),
+                            }
+                        }
+                    }
+                    turn_trace.span(
+                        "agent_resume",
+                        resume.duration.as_millis() as u64,
+                        Some(serde_json::json!({
+                            "tool_rounds": resume.tool_rounds,
+                            "tools": resume.tools_used,
+                        })),
+                    );
+                }
+                outcome
+            }
         };
         unsub(); // full turn finished (or speech path next)
 
@@ -777,6 +1320,14 @@ fn run(
                     false,
                 )
             }
+            AgentOutcome::NeedsInput { .. } => {
+                tracing::warn!(%turn, "unresolved input after resolve pass");
+                (
+                    "I needed you to type something and lost the thread. Wake me and try again."
+                        .to_string(),
+                    false,
+                )
+            }
         };
 
         if let Some(ref sid) = *sess.active_session {
@@ -814,6 +1365,10 @@ fn run(
             tracing::error!(error = %e, %turn, "tts load failed");
             crate::diagnostics::log_model_load_failure("supertone", &rt.tts_model_dir, &e);
             let _ = rt.tts.unload();
+            // The reply was already published as `said` above, but it will
+            // never be spoken — clear it so the overlay doesn't show text
+            // the user never heard.
+            rt.picture.said = None;
             rt.picture.detail = Some(format!("tts load: {e}"));
             follow_up_depth = 0;
             rt.picture.set_phase(Phase::Armed);
@@ -823,27 +1378,110 @@ fn run(
         // Split at sentence boundaries; synth/play the first unit while later
         // units synthesize. Never speak until we have a final spoken answer
         // (tool-call turns already finished above).
-        let units = speakable_reply_units(&reply);
+        let mut units = speakable_reply_units(&reply);
         let gap_samples = rt.tts.inter_unit_silence_samples();
 
         // Decide follow-up before playback. Balanced and low-latency retain
         // both models across an active follow-up chain; low-memory reloads STT
         // while the next utterance is captured.
         let will_await = expect_reply && follow_up_depth < MAX_FOLLOW_UPS;
-        let tts = std::mem::replace(&mut rt.tts, lost_tts());
         let speech_trace_start_ms = turn_trace.elapsed_ms();
-        let speech = stream_reply(
-            tts,
-            units,
-            gap_samples,
-            turn,
-            &mut rt.audio,
-            &mut rt.output_events,
-            &cmd_rx,
-            &mut running,
-            &mut rt.picture,
-        );
-        rt.tts = speech.tts;
+        let mut already_audible = false;
+        let mut barge_terminal = false;
+        let mut speech;
+        loop {
+            let tts = std::mem::replace(&mut rt.tts, lost_tts());
+            let barge_on = rt.barge_in;
+            let mut watch = if barge_on {
+                Some(BargeWatch::new(&rt.mic, &mut rt.wake))
+            } else {
+                None
+            };
+            speech = stream_reply(
+                tts,
+                units,
+                gap_samples,
+                turn,
+                already_audible,
+                &mut rt.audio,
+                &mut rt.output_events,
+                &cmd_rx,
+                &mut running,
+                &mut rt.picture,
+                &rt.mic,
+                watch.as_mut(),
+            );
+            rt.tts = speech.tts;
+            if speech.wait != PlaybackWait::BargedIn {
+                break;
+            }
+            turn_trace.mark("barge_in_pause", None);
+            tracing::info!(
+                %turn,
+                leftover = speech.remaining_units.len(),
+                "speech paused for barge-in"
+            );
+            match listen_after_barge(&mut rt, &cmd_rx, &mut running, will_await) {
+                Ok(BargeDecision::Resume) => {
+                    tracing::info!(%turn, "barge-in resume — leftover speech");
+                    turn_trace.mark("barge_in_resume", None);
+                    if let Err(error) = rt.audio.resume() {
+                        tracing::warn!(%turn, error = %error, "resume leftover speech failed");
+                        rt.audio.stop();
+                        speech.wait = PlaybackWait::Aborted;
+                        speech.error = Some(error.to_string());
+                        break;
+                    }
+                    units = speech.remaining_units;
+                    already_audible = speech.played || already_audible;
+                    rt.picture.set_phase(Phase::Talking);
+                    continue;
+                }
+                Ok(BargeDecision::StopTalking) => {
+                    tracing::info!(%turn, "barge-in stop — discarding leftover");
+                    turn_trace.mark("barge_in_stop", None);
+                    rt.audio.stop();
+                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.clear_activity();
+                    rt.picture.set_phase(Phase::Armed);
+                    barge_terminal = true;
+                    break;
+                }
+                Ok(BargeDecision::TakeTurn(text)) => {
+                    tracing::info!(%turn, %text, "barge-in new turn — discarding leftover");
+                    turn_trace.mark("barge_in_take_turn", None);
+                    rt.audio.stop();
+                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                    // `heard` still holds this turn's original utterance:
+                    // speech never overwrites it. Carry it so the next turn's
+                    // replacement quotes the real request, not nothing.
+                    let interrupted_text = rt.picture.heard.clone();
+                    pending_barge_turn = Some(PendingBargeTurn {
+                        user_text: text,
+                        interrupted_text,
+                    });
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.clear_activity();
+                    speech.wait = PlaybackWait::Aborted;
+                    break;
+                }
+                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                    follow_up_depth = 0;
+                    await_reply = false;
+                }) {
+                    LoopReact::Continue => {
+                        rt.audio.stop();
+                        maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                        speech.wait = PlaybackWait::Aborted;
+                        break;
+                    }
+                    LoopReact::Exit => return Ok(()),
+                },
+            }
+        }
         maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
         let tts_ms = speech.tts_ms;
         let play_ms = speech.play_ms;
@@ -878,13 +1516,19 @@ fn run(
             queued_samples = speech.queued_samples,
             "streamed speech complete"
         );
+        if pending_barge_turn.is_some() || barge_terminal {
+            continue;
+        }
         match speech.wait {
             PlaybackWait::Stopped => {
                 turn_trace.mark("audio_stopped", None);
                 go_off_session(&mut rt, &mut sess);
                 continue;
             }
-            PlaybackWait::Aborted => {
+            PlaybackWait::Aborted | PlaybackWait::BargedIn => {
+                // `BargedIn` is consumed inside the speak loop above and never
+                // reaches here; the joint arm keeps the match total without a
+                // production `unreachable!` if that ever changes.
                 turn_trace.mark("audio_aborted", None);
                 let detail = speech
                     .error

@@ -2,7 +2,8 @@
 //!
 //! # Boundaries
 //!
-//! - **In scope:** "wake score?" / "is this frame speech?" + ORT init helpers.
+//! - **In scope:** "wake score?" / "is this frame speech?" / "playback-like?"
+//!   + ORT init helpers.
 //! - **Out of scope:** threads, session policy, STT/TTS, agent tools.
 //!
 //! The voice engine owns the capture loop and decides when to call these ports.
@@ -11,8 +12,9 @@
 //!
 //! | Feature | Default | Enables |
 //! |---------|---------|---------|
-//! | `vad`   | yes     | Silero VAD (`SileroVad`, needs ORT) |
-//! | `wake`  | yes     | LiveKit wake-word + ORT init |
+//! | `vad`     | yes     | Silero VAD (`SileroVad`, needs ORT) |
+//! | `wake`    | yes     | LiveKit wake-word + ORT init |
+//! | `speaker` | yes     | Live-vs-loudspeaker acoustics + CAM++ embeddings (ORT) |
 //!
 //! Desktop / pipeline use the default feature set. `--features vad` without
 //! `wake` still needs native ONNX Runtime. `--no-default-features` builds
@@ -26,6 +28,8 @@ pub mod vad;
 
 #[cfg(any(feature = "wake", feature = "vad"))]
 pub mod ort;
+#[cfg(feature = "speaker")]
+pub mod speaker;
 #[cfg(feature = "wake")]
 pub mod wake;
 
@@ -46,6 +50,11 @@ pub use vad::{
 
 #[cfg(any(feature = "wake", feature = "vad"))]
 pub use ort::init_onnx_runtime;
+#[cfg(feature = "speaker")]
+pub use speaker::{
+    compute_acoustic_feat, AcousticFeat, AcousticModel, SpeakerEmbedder, Voiceprint, COSINE_REJECT,
+    ENROLL_COSINE_MIN, MATCH_Z_REJECT, PLAYBACK_Z_REJECT,
+};
 #[cfg(feature = "wake")]
 pub use wake::{
     LiveKitWakeWord, LivekitWakeWord, WakeWord, WAKEWORD_PROCESSING_INTERVAL, WAKEWORD_THRESHOLD,

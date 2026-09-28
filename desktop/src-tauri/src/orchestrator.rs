@@ -90,9 +90,49 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> MutexGuard
     })
 }
 
+/// The pipeline counter restarts for each engine. Keep its arrival order
+/// separate from the process-wide sequence exposed to the UI.
+struct StatusMirrorState {
+    picture: StatusPicture,
+    generation: u64,
+    last_pipeline_seq: Option<u64>,
+}
+
+impl StatusMirrorState {
+    fn new() -> Self {
+        Self {
+            picture: StatusPicture::off(),
+            generation: 0,
+            last_pipeline_seq: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.generation += 1;
+        self.last_pipeline_seq = None;
+        let mut off = StatusPicture::off();
+        off.seq = self.picture.seq + 1;
+        self.picture = off;
+    }
+
+    fn accept(&mut self, generation: u64, mut picture: StatusPicture) -> Option<StatusPicture> {
+        if generation != self.generation
+            || self
+                .last_pipeline_seq
+                .is_some_and(|last| picture.seq <= last)
+        {
+            return None;
+        }
+        self.last_pipeline_seq = Some(picture.seq);
+        picture.seq = self.picture.seq + 1;
+        self.picture = picture.clone();
+        Some(picture)
+    }
+}
+
 /// Shared app state: engine handle + latest status snapshot + device prefs.
 pub struct AppState {
-    status: Arc<Mutex<StatusPicture>>,
+    status: Arc<Mutex<StatusMirrorState>>,
     handle: Mutex<Option<EngineHandle>>,
     /// Join handle + shutdown sender; taken on teardown / rebuild.
     engine: Mutex<Option<Engine>>,
@@ -106,7 +146,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            status: Arc::new(Mutex::new(StatusPicture::off())),
+            status: Arc::new(Mutex::new(StatusMirrorState::new())),
             handle: Mutex::new(None),
             engine: Mutex::new(None),
             live_llm: Mutex::new(None),
@@ -116,7 +156,14 @@ impl AppState {
     }
 
     pub fn status(&self) -> StatusPicture {
-        lock_or_recover(&self.status, "status").clone()
+        lock_or_recover(&self.status, "status").picture.clone()
+    }
+
+    /// Dispatch while holding the mirror lock so Stop cannot emit an older
+    /// snapshot after a new engine has already published its first status.
+    pub fn with_status(&self, dispatch: impl FnOnce(StatusPicture)) {
+        let status = lock_or_recover(&self.status, "status");
+        dispatch(status.picture.clone());
     }
 
     /// Model paths / readiness for the UI Start gate (`boris_pipeline::paths`).
@@ -289,7 +336,13 @@ impl AppState {
         *lock_or_recover(&self.live_llm, "live_llm") = Some(fingerprint);
         info!("engine thread spawned");
 
-        Self::spawn_status_mirror(self.status.clone(), status_rx, on_status);
+        let generation = {
+            let mut status = lock_or_recover(&self.status, "status");
+            status.generation += 1;
+            status.last_pipeline_seq = None;
+            status.generation
+        };
+        Self::spawn_status_mirror(self.status.clone(), generation, status_rx, on_status);
         Ok(())
     }
 
@@ -311,12 +364,13 @@ impl AppState {
         }
 
         // Channel is closed after join; mirror thread exits. Reset UI snapshot.
-        *lock_or_recover(&self.status, "status") = StatusPicture::off();
+        lock_or_recover(&self.status, "status").reset();
     }
 
     /// Background thread: cache each snapshot and forward to the UI emit callback.
     fn spawn_status_mirror(
-        status_cache: Arc<Mutex<StatusPicture>>,
+        status_cache: Arc<Mutex<StatusMirrorState>>,
+        generation: u64,
         status_rx: std::sync::mpsc::Receiver<StatusPicture>,
         on_status: Arc<dyn Fn(StatusPicture) + Send + Sync + 'static>,
     ) {
@@ -328,8 +382,12 @@ impl AppState {
                     phase = ?picture.phase,
                     "status snapshot"
                 );
-                *lock_or_recover(&status_cache, "status") = picture.clone();
-                on_status(picture);
+                let mut status = lock_or_recover(&status_cache, "status");
+                if let Some(picture) = status.accept(generation, picture) {
+                    // Keep the native overlay and Tauri event in the same order
+                    // as the cached snapshots, including across engine rebuilds.
+                    on_status(picture);
+                }
             }
             warn!("status channel closed — mirror thread exiting");
         });
@@ -390,6 +448,26 @@ impl AppState {
         Ok(())
     }
 
+    pub fn submit_input(&self, id: String, value: String) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("engine is not running".into());
+        };
+        handle
+            .submit_input(id, value)
+            .map_err(|e| format!("submit input: {e}"))
+    }
+
+    pub fn cancel_input(&self, id: String) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("engine is not running".into());
+        };
+        handle
+            .cancel_input(id)
+            .map_err(|e| format!("cancel input: {e}"))
+    }
+
     pub fn switch_output(&self, device_id: String) -> Result<(), String> {
         if device_id.trim().is_empty() {
             return Err("empty output device id".into());
@@ -411,6 +489,24 @@ impl AppState {
         Ok(())
     }
 
+    pub fn start_wake_enroll(&self, takes: u32) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("Start Boris first, then say Boris a few times.".into());
+        };
+        handle
+            .start_wake_enroll(takes)
+            .map_err(|e| format!("wake enroll: {e}"))
+    }
+
+    pub fn clear_wake_profile(&self) -> Result<(), String> {
+        if let Some(handle) = lock_or_recover(&self.handle, "handle").as_ref() {
+            let _ = handle.clear_wake_profile();
+        }
+        boris_pipeline::clear_liveness_profile();
+        Ok(())
+    }
+
     pub fn list_inputs() -> Vec<DeviceDto> {
         let list = devices::list_input_devices();
         debug!(count = list.len(), "list_input_devices");
@@ -427,5 +523,71 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boris_pipeline::{ArtifactPeek, EngineState, InputPeek, Phase};
+
+    #[test]
+    fn status_mirror_orders_arrivals_and_restart_snapshots() {
+        let mut mirror = StatusMirrorState::new();
+        mirror.generation = 1;
+
+        let mut thinking = StatusPicture::off();
+        thinking.seq = 3;
+        thinking.engine = EngineState::On;
+        thinking.phase = Phase::Thinking;
+        thinking.mic.ok = false;
+        thinking.artifact = Some(ArtifactPeek {
+            id: "card".into(),
+            title: "Notes".into(),
+            kind: "markdown".into(),
+            language: None,
+            path: "notes.md".into(),
+        });
+        let accepted = mirror.accept(1, thinking.clone()).unwrap();
+        assert_eq!(accepted.seq, 1);
+        assert_eq!(accepted.phase, Phase::Thinking);
+        assert!(!accepted.mic.ok);
+        assert_eq!(accepted.artifact, thinking.artifact);
+
+        let mut older = thinking.clone();
+        older.seq = 2;
+        older.phase = Phase::Hearing;
+        assert!(mirror.accept(1, older).is_none());
+        assert_eq!(mirror.picture.phase, Phase::Thinking);
+
+        let mut input = thinking;
+        input.seq = 4;
+        input.phase = Phase::AwaitingInput;
+        input.input = Some(InputPeek {
+            id: "prompt".into(),
+            kind: "secret".into(),
+            label: "API key".into(),
+            spoken: "Paste it".into(),
+            multiline: false,
+            max_chars: 100,
+            options: Vec::new(),
+        });
+        assert_eq!(mirror.accept(1, input.clone()).unwrap().input, input.input);
+
+        mirror.reset();
+        assert_eq!(mirror.picture.seq, 3);
+        assert_eq!(mirror.picture.engine, EngineState::Off);
+        assert!(mirror.accept(1, input).is_none());
+
+        let mut starting = StatusPicture::off();
+        starting.engine = EngineState::Starting;
+        assert_eq!(mirror.accept(2, starting).unwrap().seq, 4);
+        let mut fault = StatusPicture::off();
+        fault.seq = 1;
+        fault.engine = EngineState::Fault;
+        fault.detail = Some("model failed".into());
+        let accepted_fault = mirror.accept(2, fault).unwrap();
+        assert_eq!(accepted_fault.seq, 5);
+        assert_eq!(accepted_fault.detail.as_deref(), Some("model failed"));
     }
 }

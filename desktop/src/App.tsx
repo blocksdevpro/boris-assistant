@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StatusPreviewProvider } from "@/bridge/useStatus";
 import { OFF_STATUS, type StatusPicture } from "@/bridge";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
+import { BorisOrb } from "@/components/presence";
 import { StartupScreen } from "@/components/StartupScreen";
 import { logger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -17,9 +18,38 @@ const OverlayWindow = lazy(() =>
 
 type Surface = "main" | "overlay";
 
+function SurfaceFallback({
+  label,
+  transparent = false,
+}: {
+  label: string;
+  transparent?: boolean;
+}) {
+  return (
+    <div
+      className="surface-loader"
+      data-transparent={transparent || undefined}
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+    >
+      <BorisOrb state="starting" size="md" />
+      <span className="surface-loader__label">{label}</span>
+    </div>
+  );
+}
+
 const OverlayFixtureMatrix = lazy(
   () => import("@/preview/OverlayFixtureMatrix"),
 );
+const OverlayDebugHarness = import.meta.env.DEV
+  ? lazy(() => import("@/preview/OverlayDebugHarness"))
+  : null;
+
+function isOverlayDebugHarness(): boolean {
+  if (!import.meta.env.DEV || isTauriRuntime()) return false;
+  return new URLSearchParams(window.location.search).get("overlay-debug") === "1";
+}
 
 function isOverlayFixtureMatrix(): boolean {
   if (!import.meta.env.DEV || isTauriRuntime()) return false;
@@ -62,6 +92,7 @@ function resolveSurface(): Surface {
 
 function App() {
   const [surface] = useState<Surface>(resolveSurface);
+  const overlayDebug = isOverlayDebugHarness();
   const fixtureMatrix = isOverlayFixtureMatrix();
   const startupPreview = isStartupPreview();
   const fixtureName = devFixtureName();
@@ -117,15 +148,21 @@ function App() {
     };
   }, [surface]);
 
+  if (overlayDebug && OverlayDebugHarness) {
+    return (
+      <AppErrorBoundary>
+        <Suspense fallback={<SurfaceFallback label="Preparing overlay lab" />}>
+          <OverlayDebugHarness />
+        </Suspense>
+      </AppErrorBoundary>
+    );
+  }
+
   if (fixtureMatrix) {
     return (
       <AppErrorBoundary>
         <Suspense
-          fallback={
-            <div className="flex h-screen items-center justify-center bg-[#111114] text-sm text-white/50">
-              Loading fixture matrix…
-            </div>
-          }
+          fallback={<SurfaceFallback label="Preparing preview gallery" />}
         >
           <OverlayFixtureMatrix />
         </Suspense>
@@ -142,26 +179,20 @@ function App() {
   }
 
   if (fixtureName && !fixtureStatus) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-        Loading fixture…
-      </div>
-    );
+    return <SurfaceFallback label="Preparing preview" />;
   }
 
   const surfaceView =
     surface === "overlay" ? (
       <Suspense
         fallback={
-          <div className="flex h-screen items-center justify-center bg-transparent text-sm text-black/40">
-            Loading overlay…
-          </div>
+          <SurfaceFallback label="Waking Boris" transparent />
         }
       >
         <OverlayWindow />
       </Suspense>
     ) : (
-      <Suspense fallback={null}>
+      <Suspense fallback={<SurfaceFallback label="Opening Boris" />}>
         <MainWindow />
       </Suspense>
     );
@@ -183,6 +214,7 @@ function App() {
           <div
             className="startup-app-shell"
             data-revealed={startupRevealed || startupComplete}
+            inert={!startupRevealed && !startupComplete}
           >
             {surfaceContent}
           </div>

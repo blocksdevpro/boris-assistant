@@ -22,18 +22,35 @@ pub fn parse_provider_list(raw: &str) -> Vec<String> {
 ///
 /// Provider-only fields in settings take precedence when both are set; this is a
 /// convenience so a single string can carry both.
+///
+/// - Splits on the **earliest** of `@` / `|` (so `"a@b|c"` → model `a`,
+///   provider `b|c`).
+/// - A trailing separator with no provider (`"model@"`, `"model|"`) returns
+///   the stripped model with no provider.
+/// - The provider part is trimmed and lowercased for consistency with
+///   [`parse_provider_list`]; the model id keeps its original case (model ids
+///   are case-sensitive paths like `google/gemini-2.5-flash-lite`).
 pub fn split_model_and_provider(raw: &str) -> (String, Option<String>) {
     let raw = raw.trim();
     if raw.is_empty() {
         return (String::new(), None);
     }
-    for sep in ['@', '|'] {
-        if let Some((model, provider)) = raw.split_once(sep) {
-            let model = model.trim();
-            let provider = provider.trim();
-            if !model.is_empty() && !provider.is_empty() {
-                return (model.to_string(), Some(provider.to_string()));
+    // '@' and '|' are single-byte ASCII, so byte indices always sit on char
+    // boundaries and slicing here is safe.
+    let sep = match (raw.find('@'), raw.find('|')) {
+        (Some(a), Some(p)) => Some(a.min(p)),
+        (Some(a), None) => Some(a),
+        (None, Some(p)) => Some(p),
+        (None, None) => None,
+    };
+    if let Some(idx) = sep {
+        let model = raw[..idx].trim();
+        let provider = raw[idx + 1..].trim();
+        if !model.is_empty() {
+            if provider.is_empty() {
+                return (model.to_string(), None);
             }
+            return (model.to_string(), Some(provider.to_ascii_lowercase()));
         }
     }
     (raw.to_string(), None)
@@ -75,9 +92,33 @@ mod tests {
         assert!(m.is_empty());
         assert!(p.is_none());
 
-        // Incomplete forms stay as model-only
+        // Incomplete forms keep the stripped model with no provider
         let (m, p) = split_model_and_provider("model@");
-        assert_eq!(m, "model@");
+        assert_eq!(m, "model");
         assert!(p.is_none());
+
+        let (m, p) = split_model_and_provider("model|");
+        assert_eq!(m, "model");
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn split_model_lowercases_provider_and_prefers_earliest_separator() {
+        let (m, p) = split_model_and_provider("google/gemini-2.5-flash-lite@CoreWeave");
+        assert_eq!(m, "google/gemini-2.5-flash-lite");
+        assert_eq!(p.as_deref(), Some("coreweave"));
+
+        let (m, p) = split_model_and_provider("openai/gpt-4o| DeepInfra/Turbo ");
+        assert_eq!(m, "openai/gpt-4o");
+        assert_eq!(p.as_deref(), Some("deepinfra/turbo"));
+
+        // Earliest of '@' / '|' wins, regardless of loop order.
+        let (m, p) = split_model_and_provider("a@b|c");
+        assert_eq!(m, "a");
+        assert_eq!(p.as_deref(), Some("b|c"));
+
+        let (m, p) = split_model_and_provider("a|b@c");
+        assert_eq!(m, "a");
+        assert_eq!(p.as_deref(), Some("b@c"));
     }
 }

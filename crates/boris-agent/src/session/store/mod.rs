@@ -316,7 +316,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Replace chat_history with the full current agent context (after prune/compact).
+    /// Replace chat_history with a full canonical agent-history snapshot.
     pub fn write_messages(
         &self,
         id: &SessionId,
@@ -340,8 +340,8 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Sync agent context to disk: append when growing, rewrite when pruned
-    /// **or** when the equal-length snapshot has different content.
+    /// Sync canonical agent history to disk: append when growing, rewriting
+    /// only for explicit reset/replacement or a changed equal-length snapshot.
     ///
     /// `already_persisted` is the number of messages previously written from this
     /// live context. Returns the new persisted count (`messages.len()`).

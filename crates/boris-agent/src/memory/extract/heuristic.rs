@@ -1,6 +1,6 @@
 //! High-precision, zero-cost extraction from the user utterance.
 
-use crate::memory::profile::{FactCategory, UserFact};
+use crate::memory::profile::{now_ms, FactCategory, UserFact};
 
 use super::delta::ProfileDelta;
 
@@ -12,6 +12,43 @@ pub fn extract_heuristic(user_text: &str) -> ProfileDelta {
         return delta;
     }
     let lower = raw.to_ascii_lowercase();
+
+    // Explicit deletion requests are lifecycle events, not physical removal.
+    if [
+        "forget everything about me",
+        "forget everything you know about me",
+        "clear all my memory",
+        "delete all my personal data",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+    {
+        delta.forget_all = true;
+        return delta;
+    }
+    if ["forget my name", "delete my name", "remove my name"]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        delta.forget_preferred_name = true;
+    }
+    if let Some(query) = [
+        "forget that ",
+        "forget about ",
+        "please forget ",
+        "remove from memory ",
+        "delete from memory ",
+        "i no longer ",
+    ]
+    .iter()
+    .find_map(|prefix| capture_after(&lower, raw, &[*prefix]))
+    {
+        if query.len() >= 3 {
+            delta.facts_remove_query.push(query);
+        }
+    }
+
+    let expiry = inferred_expiry_ms(&lower);
 
     // Name patterns.
     if let Some(name) = capture_after(&lower, raw, &["my name is ", "i am ", "i'm ", "im "]) {
@@ -59,11 +96,14 @@ pub fn extract_heuristic(user_text: &str) -> ProfileDelta {
     ] {
         if let Some(rest) = capture_after(&lower, raw, &[prefix]) {
             if rest.len() >= 3 {
-                delta.facts_add.push(UserFact::new(
-                    format!("Works on / building: {rest}"),
-                    FactCategory::Project,
-                    "heuristic",
-                ));
+                delta.facts_add.push(
+                    UserFact::new(
+                        format!("Works on / building: {rest}"),
+                        FactCategory::Project,
+                        "heuristic",
+                    )
+                    .with_expiry_ms(expiry),
+                );
                 delta.ongoing_add.push(rest);
             }
         }
@@ -73,16 +113,31 @@ pub fn extract_heuristic(user_text: &str) -> ProfileDelta {
     for prefix in ["i'm a ", "i am a ", "i'm an ", "i am an "] {
         if let Some(rest) = capture_after(&lower, raw, &[prefix]) {
             if looks_like_role(&rest) {
-                delta.facts_add.push(UserFact::new(
-                    format!("Is a {rest}"),
-                    FactCategory::Identity,
-                    "heuristic",
-                ));
+                delta.facts_add.push(
+                    UserFact::new(format!("Is a {rest}"), FactCategory::Identity, "heuristic")
+                        .with_expiry_ms(expiry),
+                );
             }
         }
     }
 
     delta
+}
+
+fn inferred_expiry_ms(lower: &str) -> Option<u64> {
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    let days = if lower.contains("today") || lower.contains("for the day") {
+        1
+    } else if lower.contains("this week") {
+        7
+    } else if lower.contains("this month") || lower.contains("for now") {
+        30
+    } else if lower.contains("temporarily") || lower.contains("temporary") {
+        14
+    } else {
+        return None;
+    };
+    Some(now_ms().saturating_add(days * DAY_MS))
 }
 
 pub(super) fn capture_after(lower: &str, original: &str, prefixes: &[&str]) -> Option<String> {
@@ -161,5 +216,14 @@ mod tests {
         assert!(looks_like_name("Mary-Jane"));
         assert!(!looks_like_name("tired"));
         assert!(!looks_like_name("one two three four"));
+    }
+
+    #[test]
+    fn heuristic_extracts_forgetting_and_temporary_expiry() {
+        let forget = extract_heuristic("Please forget that I live in Paris");
+        assert_eq!(forget.facts_remove_query, vec!["I live in Paris"]);
+
+        let temporary = extract_heuristic("I'm working on a launch this week");
+        assert!(temporary.facts_add[0].expires_at_ms.is_some());
     }
 }

@@ -1,21 +1,19 @@
 # boris-pipeline
 
-Desktop voice engine for Boris: **one engine thread**, sequential turns, UI status
-snapshots. Not a worker mesh and not a Session FSM.
+Desktop voice engine for Boris: sequential turns with **single-threaded turn
+ordering** plus bounded helpers, UI status snapshots. Not a worker mesh and
+not a Session FSM.
 
 ## Turn loop
 
 ```text
-                    ┌──────────────────────────────────────────┐
-                    │              Engine thread               │
-                    └──────────────────────────────────────────┘
-                                      │
-         Start ──► Armed ──► (wake word) ──► Hearing ──► Reading
-                                      │                      │
-                                      │                      ▼
-                              AwaitingReply ◄── Talking ◄── Thinking
-                                      │                      │
-                                      └──────── (agent) ─────┘
+          Start ──► Armed ──► (wake word) ──► Hearing ──► Reading
+                                       │                      │
+                                       │                      ▼
+                               AwaitingReply ◄── Talking ◄── Thinking
+                                       │                      │
+                                       └──────── (agent) ─────┘
+                    (AwaitingConfirm / AwaitingInput can interrupt a turn)
 ```
 
 | Phase | Meaning |
@@ -25,37 +23,66 @@ snapshots. Not a worker mesh and not a Session FSM.
 | `Armed` | Listening for wake |
 | `AwaitingReply` | Freeform follow-up (no second wake) |
 | `AwaitingConfirm` | Yes/no after a dangerous tool |
+| `AwaitingInput` | Typed/pasted overlay/Home input |
 | `Hearing` | Mic capture + VAD |
 | `Reading` | STT |
 | `Thinking` | Agent + tools (+ TTS synth) |
 | `Talking` | Playback started |
 
-Wake scoring, VAD capture, STT, and agent orchestration run on the single
-engine thread. Sentence TTS inference is handed to one turn-scoped producer so
-the engine can continue servicing Stop/device-switch commands and audio events;
-the engine remains the sole owner of phases and playback state. Reusable STT
-and TTS loader threads live for the engine lifetime instead of being recreated
-per turn. Status is pushed for the UI.
+Wake scoring, VAD capture, and STT run inline on the engine thread. The agent
+turn runs on a scoped thread during Thinking so the engine can still service
+Stop and barge-in. Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
+helper thread fed by one turn-scoped producer;
+the engine remains the sole owner of phases and playback state. Bounded helpers
+(a 2-worker Tokio runtime, a maintenance worker, two reusable model loaders)
+stay off the speech-critical path. While Talking,
+a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
+ liveness is not used — leftover TTS in the mic looks like a speaker); silence
+ or “continue” resumes from the cut. While Thinking, the same toggle uses wake
+ plus the Armed live-mic gate; work keeps running until STT decides. Silence
+ or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
+ request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Confirm prompts
+ and re-asks use the same barge watch: a wake word mid-prompt stops playback
+ and listens for the yes/no instead of auto-denying. Voice confirms follow
+ the agent HITL budget (`max_confirms_per_turn`, default 12 via
+ `BORIS_MAX_CONFIRMS`); post-confirm tool rounds update the context meter,
+ the turn trace, and the artifact peek. Mid-confirm device switches re-speak
+ the prompt on the new device, wake-enroll yields the turn, and disconnects
+ mark devices dead until the next Start. Reusable STT
+ and TTS loader threads live for the engine lifetime instead of being recreated
+ per turn. Status is pushed for the UI (latest-wins by monotonic `seq`;
+activity is capped at 160 chars, the reasoning tail at 512, and the thinking
+tail is kept across Hearing/Reading so the overlay does not flicker).
+Engine and agent event publishers update the same locked snapshot before it is
+sequenced. The desktop drops snapshots from old engine generations.
 
-`low_memory` releases the outgoing model at each STT→TTS handoff. `balanced`
+When Parakeet is warm, freeform capture can re-decode the recorded audio prefix
+and show interim text in the overlay. Those partials are advisory; the final
+decode remains authoritative. Stable partials can shorten the silence wait.
+Confirmation captures skip partial decoding. Set `BORIS_STT_PARTIALS=0` to
+disable this behavior. See the environment variable table for cadence and
+capture-length controls.
+
+ `low_memory` releases the outgoing model at each STT→TTS handoff (including
+ confirm captures). `balanced`
 keeps models warm through an active turn or follow-up chain, then releases both
 when Boris returns to idle. `low_latency` may keep both loaded for the powered-on
 session.
 
 Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
-maintenance lane. Generation latency excludes audible playback. Summarize p50
-and p95 locally with `cargo xtask trace-report` (or add `--json`).
+maintenance lane. Generation latency excludes audible playback. Read the JSONL
+directly for local p50/p95 summaries.
 
 ## Public surface
 
 | Type | Role |
 |------|------|
 | [`Engine`](src/engine/mod.rs) | Owns the engine thread join handle |
-| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch) |
+| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch / wake enroll / typed input) |
 | [`PipelineConfig`](src/config.rs) / [`LlmPrefs`](src/config.rs) | Host spawn configuration |
-| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types) |
+| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail; `seq` is the latest-wins order key) |
 | [`AppSettings`](src/settings.rs) | Prefs + API key (`config.toml` + `auth.json`) |
-| [`PipelineError`](src/error.rs) | Typed errors for settings / install / init |
+| [`PipelineError`](src/error.rs) | Typed errors (settings / install / init / IO / other) |
 
 ### Spawn
 
@@ -65,9 +92,9 @@ use boris_pipeline::{Engine, LlmPrefs, PipelineConfig};
 let prefs = LlmPrefs::new(api_key)
     .model("google/gemini-2.5-flash-lite")
     .fast_model("google/gemini-2.5-flash-lite");
-let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes, vad_bytes);
+let config = PipelineConfig::with_llm(prefs, 44_100, wakeword_bytes.to_vec(), vad_bytes.to_vec());
 let (engine, handle, status_rx) = Engine::spawn(config)?;
-handle.start()?;
+handle.start().expect("engine command channel open");
 // … mirror status_rx to UI …
 engine.shutdown_and_join(); // preferred on host exit
 ```
@@ -92,11 +119,15 @@ Override root with `BORIS_HOME`.
     supertone/onnx/    # TTS graphs
     supertone/voices/  # M4.json
     silero/            # optional seed of embedded Silero VAD ONNX
-  sessions/desktop/    # voice session transcripts + artifacts/
-  memory/              # long-term markdown memory
+    livekit/           # optional seed of embedded wake classifier
+    speaker/           # optional CAM++ speaker model
+  sessions/desktop/    # transcripts, artifacts/, and tool_outputs/
+  memory/              # memory.sqlite canonical store + optional notes.jsonl
   skills/              # skill playbooks
-  logs/                # boris-desktop.*.log
-  workspace/           # sandboxed agent workspace
+  logs/                # boris.YYYY-MM-DD.log
+  traces/              # turns.jsonl per-turn latency traces
+  speaker/             # live.json — wake liveness enroll (acoustic takes)
+  state/workspace/     # sandboxed agent workspace
 ```
 
 `save_settings` unconditionally rewrites `[models]`, `[capability]`, `[audio]`, `[speech]`,
@@ -107,12 +138,26 @@ unknown keys outside those managed sections are preserved on save (see `save_set
 managed table in `config.toml` — anything the desktop settings UI can persist ends up in one
 of the sections above.
 
+## Boris memory
+
+When `BORIS_MEMORY` is enabled, the engine opens
+`~/.boris/memory/memory.sqlite` before it registers personal-memory tools.
+Every completed turn is durably ingested as evidence, and proactive recall plus
+memory tools use active records from that store.
+
+On beta.2's first launch, the engine queues a background import of legacy
+`profile.json`, `MEMORY.md`, workspace memory, and session `memory.md` files.
+The configured LLM refines each source into canonical records. Legacy files are
+deleted only after all sources are refined and verified; a failed migration
+leaves them in place for a later retry.
+
 ## Model downloads (`download.rs`)
 
 Each catalog entry enforces a `min_bytes` floor and a mandatory pinned SHA-256
-digest. Downloads and existing model files are hashed before being accepted; a
-mismatch is discarded or reinstalled. Default Hugging Face sources use pinned
-commit revisions.
+digest. Fresh downloads are hashed before being accepted; a mismatch is
+discarded or reinstalled. Already-installed files are skipped by `min_bytes`
+size only (no re-hash, to avoid freezing the UI). Default Hugging Face
+sources use pinned commit revisions.
 
 `BORIS_MODEL_BASE_URL` accepts only `https://` mirrors. Mirror responses must
 still match the catalog hash.
@@ -129,11 +174,27 @@ still match the catalog hash.
 | `BORIS_FAST_PROVIDER` | Fast host order |
 | `BORIS_PIN_PROVIDER` | `1` = no host fallback |
 | `BORIS_CAPABILITY` | `voice_safe` \| `local_power` \| `full` |
-| `BORIS_MEMORY` | `0` disables long-term memory |
+| `BORIS_MEMORY` | `0` disables canonical Boris memory and legacy migration |
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate tools |
+| `BORIS_MAX_CONFIRMS` | HITL confirm budget per turn (default 12) |
+| `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
+| `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter |
+| `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
+| `BORIS_TTS_VOICE` | TTS voice id |
+| `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
+| `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` | OpenRouter host order |
+| `BORIS_PIN_PROVIDER` | `1` = no host fallback |
+| `EXA_API_KEY` / `BORIS_EXA_API_KEY` | Exa search upgrade key |
 | `BORIS_MODEL_BASE_URL` | Mirror base for `install_models` |
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
+| `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
+| `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
+| `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
+| `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |
+| `BORIS_STT_PARTIAL_MIN_MS` | Recorded audio before the first partial, 500–10000 ms (default 1500) |
+| `BORIS_STT_PARTIAL_MAX` | Prefix re-decodes per turn, 1–24 (default 3) |
+| `BORIS_MAX_UTTERANCE_SECS` | Freeform capture cap in seconds, 15–180 (default 30; confirms stay 8) |
 | `BORIS_LOG` / `RUST_LOG` | Logging filters (host) |
 
 ## Features
@@ -173,5 +234,8 @@ not in this crate’s unit suite.
 | `config` | `PipelineConfig` / `LlmPrefs` |
 | `devices` | Device list DTOs |
 | `diagnostics` | Startup environment dump |
+| `artifacts` | Session artifact store |
+| `liveness` | Taught-wake liveness enroll + scoring |
+| `env_util` | Env-var parsing helpers |
 | `error` | `PipelineError` |
 | `prompt` | System prompt text |

@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
-    ToolMeta, ToolRisk,
+    optional_u64_strict, require_object, require_string, truncate_tool_result, Permission, Tool,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::did_you_mean_suffix;
 
 use super::{FsRoots, DEFAULT_READ_LINES, MAX_READ_BYTES, MAX_READ_LINES};
 
@@ -36,6 +37,89 @@ pub(crate) fn parse_read_window(offset: Option<u64>, limit: Option<u64>) -> Read
 /// Heuristic: treat as binary if any NUL byte appears in the first 512 bytes.
 pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(512).any(|&b| b == 0)
+}
+
+/// Media type sniffed from magic bytes / extension (no new deps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Pdf,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Gif => "gif",
+            Self::Webp => "webp",
+            Self::Bmp => "bmp",
+            Self::Pdf => "pdf",
+        }
+    }
+
+    pub fn is_image(self) -> bool {
+        !matches!(self, Self::Pdf)
+    }
+}
+
+/// Sniff image / PDF from magic bytes (extension is only a tiebreak).
+pub(crate) fn sniff_media(bytes: &[u8]) -> Option<MediaKind> {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some(MediaKind::Png);
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"\xff\xd8\xff" {
+        return Some(MediaKind::Jpeg);
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return Some(MediaKind::Gif);
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(MediaKind::Webp);
+    }
+    if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
+        return Some(MediaKind::Bmp);
+    }
+    if bytes.len() >= 5 && &bytes[0..5] == b"%PDF-" {
+        return Some(MediaKind::Pdf);
+    }
+    None
+}
+
+/// Build a voice-sized envelope for images / PDFs.
+///
+/// The tool trait returns `String` only (no binary attachments like OpenCode),
+/// so we return a structured placeholder the model + host can act on:
+/// desktop shows the file via `open_path`, voice speaks the summary.
+pub(crate) fn format_media_envelope(
+    kind: MediaKind,
+    path_display: &str,
+    byte_len: usize,
+) -> String {
+    let kb = byte_len / 1024.max(1);
+    if kind.is_image() {
+        format!(
+            "<untrusted_image type={} path=\"{path_display}\" bytes={byte_len}>\n\
+             Image file ({}, ~{kb} KB). I cannot read pixels as text — \
+             use open_path to show it on screen, then describe what the user asks about. \
+             Speak a one-line summary, never base64.\n\
+             </untrusted_image>",
+            kind.as_str(),
+            kind.as_str(),
+        )
+    } else {
+        format!(
+            "<untrusted_document type=pdf path=\"{path_display}\" bytes={byte_len}>\n\
+             PDF file (~{kb} KB). Text extraction is not built in — \
+             use open_path to show it, or ask the user to paste the relevant pages. \
+             Summarize for speech.\n\
+             </untrusted_document>"
+        )
+    }
 }
 
 /// Result of slicing a file into a line window for display.
@@ -150,8 +234,9 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file under allowed paths. Returns numbered lines (LINE\\tcontent). \
-         Use offset/limit for large files. Relative paths resolve under the sandbox."
+        "Read a text file under allowed paths. Returns numbered lines (`LINE\\tcontent`). \
+         Use this instead of bash cat/head/tail/type/Get-Content. \
+         Use offset/limit for large files (offset is 1-based). Relative paths resolve under the sandbox."
     }
 
     fn parameters(&self) -> Value {
@@ -163,12 +248,12 @@ impl Tool for ReadFileTool {
                     "description": "Absolute or relative path to read"
                 },
                 "offset": {
-                    "type": "number",
-                    "description": "1-based start line (default 1)"
+                    "type": "integer",
+                    "description": "1-based start line (default 1). Must be an integer; floats are rejected."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Max lines to return (default 200, max 2000)"
+                    "type": "integer",
+                    "description": "Max lines to return (default 200, max 2000). Must be an integer; floats are rejected."
                 }
             },
             "required": ["path"]
@@ -191,14 +276,17 @@ impl Tool for ReadFileTool {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let path = resolve_under_roots(&raw, &self.roots.readers())?;
+        // Strict integers: floats and non-numeric strings become invalid_args
+        // (never a silent default). Numeric strings ("42") are accepted.
         let window = parse_read_window(
-            obj.get("offset").and_then(|v| v.as_u64()),
-            obj.get("limit").and_then(|v| v.as_u64()),
+            optional_u64_strict(obj, "offset")?,
+            optional_u64_strict(obj, "limit")?,
         );
 
         if !path.exists() {
+            let hint = did_you_mean_suffix(&path, 3);
             return Err(ToolError::failed(format!(
-                "File not found: {}",
+                "File not found: {}{hint}",
                 path.display()
             )));
         }
@@ -206,8 +294,19 @@ impl Tool for ReadFileTool {
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| ToolError::failed(format!("read {}: {e}", path.display())))?;
+        // Images / PDFs get a structured envelope (not a binary error) so the
+        // model can show via open_path + speak a summary.
+        if let Some(kind) = sniff_media(&bytes) {
+            return Ok(truncate_tool_result(format_media_envelope(
+                kind,
+                &path.display().to_string(),
+                bytes.len(),
+            )));
+        }
         if looks_binary(&bytes) {
-            return Err(ToolError::failed("File appears to be binary"));
+            return Err(ToolError::failed(
+                "File appears to be binary. If this is an image or PDF, the envelope above applies; otherwise use open_path to show it.",
+            ));
         }
         let content = String::from_utf8(bytes)
             .map_err(|_| ToolError::failed("File appears to be binary (invalid UTF-8)"))?;
@@ -243,6 +342,27 @@ mod tests {
         assert!(!looks_binary(b"hello world"));
         assert!(looks_binary(b"abc\0def"));
         assert!(!looks_binary(&[]));
+    }
+
+    #[test]
+    fn sniff_media_magic() {
+        assert_eq!(
+            sniff_media(b"\x89PNG\r\n\x1a\nrest"),
+            Some(MediaKind::Png)
+        );
+        assert_eq!(sniff_media(b"\xff\xd8\xff123"), Some(MediaKind::Jpeg));
+        assert_eq!(sniff_media(b"GIF89a123"), Some(MediaKind::Gif));
+        assert_eq!(sniff_media(b"%PDF-1.7 hi"), Some(MediaKind::Pdf));
+        assert_eq!(sniff_media(b"hello world"), None);
+    }
+
+    #[test]
+    fn media_envelope_shape() {
+        let s = format_media_envelope(MediaKind::Png, "/s/a.png", 2048);
+        assert!(s.contains("<untrusted_image"));
+        assert!(s.contains("open_path"));
+        let s = format_media_envelope(MediaKind::Pdf, "/s/a.pdf", 4096);
+        assert!(s.contains("<untrusted_document"));
     }
 
     #[test]
@@ -371,6 +491,68 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("exceeds"));
+    }
+
+    #[test]
+    fn schema_uses_integer_for_offset_limit() {
+        let tool = ReadFileTool::new(crate::tools::files::FsRoots {
+            sandbox: std::path::PathBuf::from("/tmp"),
+            data: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+        });
+        let schema = tool.parameters();
+        assert_eq!(schema["properties"]["offset"]["type"], "integer");
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn truncate_by_read_budget_is_multibyte_safe() {
+        // Emoji are 4 bytes / 1 char: truncation must count chars, never split UTF-8.
+        let emoji = "🎉".repeat(50);
+        let out = truncate_by_read_budget(emoji.clone(), 10);
+        assert_eq!(out.chars().take(10).collect::<String>().len() > 0, true);
+        assert!(out.starts_with(&"🎉".repeat(10)));
+        assert!(out.ends_with("\n…[truncated by bytes]"));
+        // No panic on split boundary; output minus marker is exactly 10 chars.
+        let body = out.strip_suffix("\n…[truncated by bytes]").unwrap();
+        assert_eq!(body.chars().count(), 10);
+        // Mixed content with emoji mid-line.
+        let mixed = format!("line1\n{}\nline3\n", "🚀".repeat(30));
+        let out = truncate_by_read_budget(mixed, 12);
+        assert!(out.contains("…[truncated by bytes]"));
+        // Must still be valid UTF-8 (Rust String guarantees it; char-count check).
+        assert!(out.is_ascii() == false);
+        assert!(out.chars().count() <= 12 + "\n…[truncated by bytes]".chars().count());
+    }
+
+    #[tokio::test]
+    async fn float_offset_limit_rejected_not_silent_default() {
+        let (roots, dir) = crate::tools::files::test_util::temp_roots();
+        std::fs::write(dir.join("a.txt"), "a\nb\nc\n").unwrap();
+        let read = ReadFileTool::new(roots);
+        for args in [
+            json!({"path": "a.txt", "limit": 2.5}),
+            json!({"path": "a.txt", "offset": 1.2}),
+        ] {
+            let err = read
+                .execute(&crate::tool_context::ToolCallContext::new("t"), args)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+            assert!(err.message.contains("integer"), "got: {}", err.message);
+        }
+        // Numeric strings are accepted via strict coerce.
+        let out = read
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({"path": "a.txt", "limit": "2"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("1\ta"));
+        assert!(out.contains("2\tb"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

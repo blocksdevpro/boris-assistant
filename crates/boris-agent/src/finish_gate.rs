@@ -11,6 +11,80 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// Budget for finish-gate re-entries within one user turn.
+///
+/// The two counters are independent:
+/// - `markup` guards tool-markup-only speech re-prompts (model dumped
+///   `<invoke>` XML into `content` instead of using API `tool_calls`).
+/// - `gate` guards research / local-work / todo reminders after a
+///   content-only reply.
+///
+/// They were previously a single shared counter (init 3), so a markup
+/// rejection consumed research budget and vice versa. Splitting keeps a
+/// chatty markup slip from starving real research follow-ups.
+///
+/// Batch-HITL note: one yes/no prompt may cover several sibling tools, but
+/// the confirm budget is still per-tool aware (see `loop_::tool_batch`).
+/// Likewise this budget is per re-entry, not per tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishGateBudget {
+    /// Remaining markup-only re-prompts.
+    pub markup: u32,
+    /// Remaining research / local-work / todo re-entries.
+    pub gate: u32,
+}
+
+impl FinishGateBudget {
+    /// Fresh-turn markup budget: at most two markup re-prompts.
+    pub const MARKUP_INIT: u32 = 2;
+    /// Fresh-turn finish-gate budget: at most three research/todo re-entries.
+    pub const GATE_INIT: u32 = 3;
+
+    /// Fresh turn: full markup + gate budgets.
+    pub fn fresh() -> Self {
+        Self {
+            markup: Self::MARKUP_INIT,
+            gate: Self::GATE_INIT,
+        }
+    }
+
+    /// No re-entries (gates fully disabled).
+    pub fn none() -> Self {
+        Self { markup: 0, gate: 0 }
+    }
+
+    /// Post-HITL resume: keep markup budget, disable research/todo gate so an
+    /// approval cannot loop back into finish-gate nudges.
+    pub fn post_hitl(markup_left: u32) -> Self {
+        Self {
+            markup: markup_left,
+            gate: 0,
+        }
+    }
+
+    /// Legacy single-counter mapping (`finish_gate_left: u32`).
+    ///
+    /// `0` disables both; any non-zero value keeps the full markup budget and
+    /// uses the legacy value as the gate budget. Fresh turns should prefer
+    /// [`Self::fresh`].
+    pub fn from_legacy(left: u32) -> Self {
+        if left == 0 {
+            Self::none()
+        } else {
+            Self {
+                markup: Self::MARKUP_INIT,
+                gate: left,
+            }
+        }
+    }
+}
+
+impl Default for FinishGateBudget {
+    fn default() -> Self {
+        Self::fresh()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TodoItem {
     #[serde(default)]
@@ -164,6 +238,32 @@ pub fn should_research_gate_with(
     }
     let coverage = crate::task::EvidenceCoverage::from_tools(tools_used, useful_results);
     !coverage.meets(traits.research_depth)
+}
+
+/// True when the user asked for local workspace work and no file/search/shell
+/// tools ran this turn.
+pub fn should_local_work_gate(user_text: &str, tools_used: &[String]) -> bool {
+    let traits = crate::task::classify_task(user_text);
+    if !traits.is_workspace_job(user_text) {
+        return false;
+    }
+    !tools_used.iter().any(|n| {
+        matches!(
+            n.as_str(),
+            "grep" | "glob" | "file_read" | "list_dir" | "bash" | "file_edit" | "file_write"
+        )
+    })
+}
+
+/// System-reminder when local workspace work was under-tooled.
+pub fn local_work_gate_reminder() -> String {
+    "<system-reminder>\n\
+     This is local workspace work. Use grep, glob, list_dir, and file_read \
+     (not bash cat/grep/find, not web_search) before answering. \
+     Batch independent searches and reads in one multi-tool message. \
+     Do not claim you looked unless tool output says so.\n\
+     </system-reminder>"
+        .to_string()
 }
 
 /// System-reminder when research was under-tooled after a content-only reply.
@@ -497,5 +597,50 @@ mod tests {
             "Need more hints.",
             &[]
         ));
+    }
+
+    #[test]
+    fn local_work_gate_on_undertooled_file_ask() {
+        assert!(should_local_work_gate(
+            "find the function in src/main.rs",
+            &[]
+        ));
+        assert!(!should_local_work_gate(
+            "find the function in src/main.rs",
+            &[s("grep")]
+        ));
+        assert!(!should_local_work_gate("what time is it", &[]));
+        assert!(!should_local_work_gate("find Jane Doe on LinkedIn", &[]));
+        let reminder = local_work_gate_reminder();
+        assert!(reminder.contains("grep"));
+        assert!(reminder.contains("<system-reminder>"));
+    }
+
+    #[test]
+    fn finish_gate_budget_splits_markup_and_gate() {
+        // B4: fresh turn gets independent budgets; legacy 0 disables both.
+        let fresh = FinishGateBudget::fresh();
+        assert_eq!(fresh.markup, FinishGateBudget::MARKUP_INIT);
+        assert_eq!(fresh.gate, FinishGateBudget::GATE_INIT);
+        assert_eq!(FinishGateBudget::MARKUP_INIT, 2);
+        assert_eq!(FinishGateBudget::GATE_INIT, 3);
+
+        assert_eq!(
+            FinishGateBudget::none(),
+            FinishGateBudget { markup: 0, gate: 0 }
+        );
+        assert_eq!(
+            FinishGateBudget::from_legacy(0),
+            FinishGateBudget::none(),
+            "legacy 0 disables both"
+        );
+        let mapped = FinishGateBudget::from_legacy(3);
+        assert_eq!(mapped.gate, 3);
+        assert_eq!(mapped.markup, FinishGateBudget::MARKUP_INIT);
+
+        // Post-HITL keeps markup, forces gate to 0.
+        let post = FinishGateBudget::post_hitl(1);
+        assert_eq!(post.markup, 1);
+        assert_eq!(post.gate, 0);
     }
 }

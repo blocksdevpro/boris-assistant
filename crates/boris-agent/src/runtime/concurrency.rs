@@ -12,7 +12,10 @@ use crate::tool::Tool;
 #[derive(Clone)]
 pub struct ConcurrencyGate {
     global: Arc<Semaphore>,
-    per_tool: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
+    /// Per-tool semaphore plus the `max` it was created with. When a tool
+    /// re-registers with a different `max` (e.g. config reload), the entry is
+    /// recreated so the gate does not freeze at the first-seen limit.
+    per_tool: Arc<std::sync::Mutex<HashMap<String, (Arc<Semaphore>, u32)>>>,
 }
 
 pub struct ConcurrencyPermits {
@@ -29,10 +32,19 @@ impl ConcurrencyGate {
     }
 
     fn tool_sem(&self, name: &str, max: u32) -> Arc<Semaphore> {
+        let want = max.max(1);
         let mut map = self.per_tool.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(name.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(max.max(1) as usize)))
-            .clone()
+        match map.get(name) {
+            Some((sem, stored)) if *stored == want => sem.clone(),
+            _ => {
+                // First-seen or limit changed: (re)create. Outstanding permits
+                // hold the old `Arc`, so in-flight work still drains correctly;
+                // new acquires use the fresh limit.
+                let sem = Arc::new(Semaphore::new(want as usize));
+                map.insert(name.to_string(), (sem.clone(), want));
+                sem
+            }
+        }
     }
 
     pub async fn acquire(&self, tool_name: &str, tool_max: u32) -> ConcurrencyPermits {
@@ -78,6 +90,11 @@ pub fn partition_read_write(
 }
 
 /// Cap how many read-only futures we start at once.
+///
+/// `max_parallel` is the host-configured ceiling (default 16 via
+/// `ToolRuntimeFeatures::max_parallel_tools`, env `BORIS_MAX_PARALLEL_TOOLS`).
+/// Returns `min(n, max(1))`: never zero (at least one wave runs), never above
+/// the ceiling. Pure function — no scheduling state, safe to call per wave.
 pub fn clamp_parallel(n: usize, max_parallel: u32) -> usize {
     n.min(max_parallel.max(1) as usize)
 }
@@ -224,5 +241,32 @@ mod tests {
         let mut all: Vec<usize> = r.iter().chain(w.iter()).copied().collect();
         all.sort_unstable();
         assert_eq!(all, (0..calls.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn per_tool_limit_updates_on_reregister() {
+        // The gate must not freeze at the first-seen max: re-registering the
+        // same tool with a different limit recreates the semaphore.
+        let gate = ConcurrencyGate::new(16);
+        let first = gate.tool_sem("flex", 1);
+        assert_eq!(first.available_permits(), 1);
+        let same = gate.tool_sem("flex", 1);
+        assert_eq!(same.available_permits(), 1);
+        let grown = gate.tool_sem("flex", 4);
+        assert_eq!(
+            grown.available_permits(),
+            4,
+            "re-register with max=4 must recreate the semaphore, not reuse max=1"
+        );
+        let shrunk = gate.tool_sem("flex", 2);
+        assert_eq!(shrunk.available_permits(), 2);
+    }
+
+    #[test]
+    fn clamp_parallel_never_zero_never_above_ceiling() {
+        assert_eq!(clamp_parallel(0, 16), 0);
+        assert_eq!(clamp_parallel(100, 16), 16);
+        assert_eq!(clamp_parallel(4, 0), 1, "max=0 clamps to min 1");
+        assert_eq!(clamp_parallel(4, 16), 4);
     }
 }

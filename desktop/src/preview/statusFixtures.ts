@@ -2,11 +2,20 @@ import { normalizeStatus, type StatusPicture } from "@/bridge";
 
 export type StatusFixtureName =
   | "off"
+  | "starting"
   | "ready"
+  | "awaiting-reply"
   | "hearing"
   | "reading"
   | "thinking"
+  | "thinking-long"
   | "thinking-tool"
+  | "tool-failure"
+  | "barge-listening"
+  | "barge-transcribing"
+  | "barge-switching"
+  | "barge-stopping"
+  | "typed-input"
   | "confirm"
   | "talking"
   | "fault"
@@ -45,9 +54,20 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     mic: { label: "Microphone unavailable", ok: false },
     speaker: { label: "Speaker unavailable", ok: false },
   }),
+  fixture("starting", "Starting", {
+    engine: "Starting",
+    phase: "Off",
+    detail: "Initializing voice models…",
+  }),
   fixture("ready", "Ready", {
     engine: "On",
     phase: "Armed",
+  }),
+  fixture("awaiting-reply", "Awaiting reply", {
+    engine: "On",
+    phase: "AwaitingReply",
+    said: "Would you like the shorter version or the detailed one?",
+    turn: "preview-awaiting-reply",
   }),
   fixture("hearing", "Hearing", {
     engine: "On",
@@ -65,14 +85,84 @@ export const STATUS_FIXTURES: readonly StatusFixture[] = [
     phase: "Thinking",
     heard: "Summarize my notes from today.",
     activity: "Thinking…",
+    thinking:
+      "Notes first, then a short spoken brief. Pull the three decisions and skip anything that looks like a raw dump.",
     turn: "preview-thinking",
+  }),
+  fixture("thinking-long", "Thinking · long stream", {
+    engine: "On",
+    phase: "Thinking",
+    heard: "Turn this messy brief into an ordered launch checklist.",
+    activity: "Thinking…",
+    thinking:
+      "Start with the decisions that can block the launch. Group the remaining work by owner, keep dependencies close to the tasks they affect, and separate required checks from optional polish. The overlay should preserve the newest lines without growing beyond its glanceable reading budget.",
+    turn: "preview-thinking-long",
   }),
   fixture("thinking-tool", "Thinking · tool", {
     engine: "On",
     phase: "Thinking",
     heard: "Check the forecast before my trip.",
-    activity: "tool · web_search · weather in Bengaluru",
+    activity: "tool · Searching weather in Bengaluru",
+    thinking: "I'll check the forecast before suggesting a departure time.",
     turn: "preview-tool",
+  }),
+  fixture("tool-failure", "Thinking · tool failed", {
+    engine: "On",
+    phase: "Thinking",
+    heard: "Check the latest train times.",
+    activity: "fail · web_search",
+    turn: "preview-tool-failure",
+  }),
+  fixture("barge-listening", "Barge-in · listening", {
+    engine: "On",
+    phase: "Hearing",
+    activity: "barge-in · listening",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-listening",
+  }),
+  fixture("barge-transcribing", "Barge-in · transcribing", {
+    engine: "On",
+    phase: "Reading",
+    activity: "barge-in · transcribing",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-transcribing",
+  }),
+  fixture("barge-switching", "Barge-in · switching", {
+    engine: "On",
+    phase: "Thinking",
+    activity: "barge-in · switching",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-switching",
+  }),
+  fixture("barge-stopping", "Barge-in · stopping", {
+    engine: "On",
+    phase: "Thinking",
+    activity: "barge-in · stopping",
+    heard: "the interrupted request",
+    said: "A stale draft response",
+    thinking: "Stale reasoning from the interrupted task.",
+    turn: "preview-barge-stopping",
+  }),
+  fixture("typed-input", "Typed input", {
+    engine: "On",
+    phase: "AwaitingInput",
+    said: "Paste the API key on screen. I will not read it back.",
+    activity: "input · API key",
+    input: {
+      id: "preview-input",
+      kind: "secret",
+      label: "API key",
+      spoken: "Paste the API key on screen. I will not read it back.",
+      multiline: false,
+      max_chars: 2048,
+    },
+    turn: "preview-input",
   }),
   fixture("confirm", "Confirm", {
     engine: "On",

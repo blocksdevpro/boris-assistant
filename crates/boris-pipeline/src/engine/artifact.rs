@@ -1,7 +1,6 @@
 //! Map the session artifact catalog onto a UI peek (no body).
 
-use boris_agent::session::types::SessionId;
-use boris_agent::session::SessionStore;
+use boris_agent::{SessionId, SessionStore};
 
 use crate::status::ArtifactPeek;
 
@@ -22,7 +21,7 @@ pub(super) fn peek_current(store: &SessionStore, id: &SessionId) -> Option<Artif
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boris_agent::session::artifacts::{ArtifactKind, ArtifactStore, PresentRequest};
+    use boris_agent::{ArtifactKind, ArtifactStore, PresentRequest};
 
     #[test]
     fn peek_none_when_empty() {

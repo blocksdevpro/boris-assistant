@@ -2,7 +2,7 @@
  * Stable Tauri IPC names for the desktop host.
  *
  * **Contract:** these string values must match Rust:
- * - commands → `desktop/src-tauri/src/commands.rs` (`#[tauri::command]` fn names)
+ * - commands → `desktop/src-tauri/src/commands/*.rs` (`#[tauri::command]` fn names)
  * - events   → `commands::EVENT_*` / `overlay_win::EVENT_*` constants
  *
  * Rename only in an atomic host + bridge PR.
@@ -14,10 +14,15 @@ export const COMMANDS = {
   preflightCheck: "preflight_check",
   startEngine: "start_engine",
   stopEngine: "stop_engine",
+  wakeLivenessStatus: "wake_liveness_status",
+  startWakeEnroll: "start_wake_enroll",
+  clearWakeProfile: "clear_wake_profile",
   listInputDevices: "list_input_devices",
   listOutputDevices: "list_output_devices",
   switchInput: "switch_input",
   switchOutput: "switch_output",
+  submitInput: "submit_input",
+  cancelInput: "cancel_input",
   modelsStatus: "models_status",
   downloadModels: "download_models",
   getSettings: "get_settings",

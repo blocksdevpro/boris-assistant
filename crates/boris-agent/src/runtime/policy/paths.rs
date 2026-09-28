@@ -6,10 +6,25 @@
 //! existing ancestor) and re-check [`path_is_within`] on the real path so a
 //! symlink under an allowed root cannot point outside.
 //!
-//! **Residual TOCTOU**: a path may change (symlink retarget, mount) between
-//! this policy check and a later open/write in the tool body. Tools should
-//! still resolve under roots; policy cannot eliminate the race without
-//! openat-style O_NOFOLLOW everywhere.
+//! **Residual TOCTOU**: a path may change (symlink retarget, mount, rename)
+//! between this policy check and a later open/write in the tool body. Policy
+//! cannot eliminate the race without openat-style `O_NOFOLLOW` everywhere, so
+//! tools must treat policy as a pre-check, not a guarantee:
+//!
+//! - Prefer [`resolve_under_roots`] over [`resolve_in_roots`] when opening
+//!   files: it re-canonicalizes the parent **after** the initial containment
+//!   check ([`re_resolve_after_open`]) and re-verifies containment, shrinking
+//!   (not closing) the race window.
+//! - For session `cwd` fallbacks, use [`path_within_root`] (same
+//!   canonicalizing containment) instead of a lexical `starts_with`, which is
+//!   case-sensitive and `..`/symlink-blind.
+//! - Env scrubbing and denylists elsewhere in policy are likewise best-effort;
+//!   HITL confirmation is the authoritative control.
+//!
+//! TODO(policy): `tools/bash/exec.rs` session-`cwd` fallback currently does a
+//! lexical check — it should call [`path_within_root`] here instead. Left as a
+//! TODO because `tools/*` is owned by another group (do NOT edit `exec.rs`
+//! from this slice).
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -271,6 +286,103 @@ pub fn resolve_in_roots(config: &SandboxConfig, raw: &str, write: bool) -> Resul
     resolve_policy_candidate(config, raw)
 }
 
+/// Policy-side canonicalizing containment for session `cwd` fallbacks.
+///
+/// Unlike a lexical `starts_with` (case-sensitive, `..`/symlink-blind), this
+/// resolves `..` lexically, strips Windows `\\?\` verbatim prefixes,
+/// best-effort canonicalizes both sides (real path when it exists, nearest
+/// existing ancestor + lexical suffix otherwise), and compares
+/// case-insensitively on Windows via [`path_is_within`].
+///
+/// Intended for `tools/bash/exec.rs`-style `cwd` checks:
+/// `path_within_root(&cwd_joined_candidate, &sandbox_root)`.
+/// Returns `false` for empty/relative candidates that cannot be proven inside
+/// an absolute root (fail-closed).
+///
+/// TODO(policy): migrate `tools/bash/exec.rs` `cwd` fallback to call this
+/// helper (left as TODO — `tools/*` is read-only for this slice).
+pub fn path_within_root(candidate: &Path, root: &Path) -> bool {
+    if candidate.as_os_str().is_empty() || root.as_os_str().is_empty() {
+        return false;
+    }
+    let cand = resolve_path_for_policy(candidate)
+        .unwrap_or_else(|_| strip_verbatim_for_compare(candidate.to_path_buf()));
+    let base = resolve_path_for_policy(root)
+        .unwrap_or_else(|_| strip_verbatim_for_compare(root.to_path_buf()));
+    // Fail closed on relative candidates vs absolute roots: `path_is_within`
+    // already returns false there, but be explicit for readability.
+    path_is_within(&cand, &base)
+}
+
+/// Strip `\\?\` for direct compares when canonicalize/normalize is unavailable.
+fn strip_verbatim_for_compare(p: PathBuf) -> PathBuf {
+    strip_windows_verbatim(p)
+}
+
+/// Best-effort re-resolve of a path's parent after a policy check.
+///
+/// Canonicalizes the parent (when it exists) and re-appends the file name so
+/// a symlink swap between check and open is more likely to be noticed by a
+/// second containment check. Still racy by construction (no `O_NOFOLLOW`
+/// open); callers must document the residual TOCTOU and keep HITL as the
+/// authoritative control.
+pub fn re_resolve_after_open(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("empty path".into());
+    }
+    let parent = path.parent();
+    let file = path.file_name();
+    match (parent, file) {
+        (Some(par), Some(name)) => {
+            if let Some(canon_par) = try_canonicalize(par) {
+                let mut out = canon_par;
+                out.push(name);
+                return normalize_path(&out);
+            }
+            // Parent missing (not yet created): fall back to full resolve.
+            resolve_path_for_policy(path)
+        }
+        _ => resolve_path_for_policy(path),
+    }
+}
+
+/// TOCTOU-hardened (best-effort) resolve under sandbox roots.
+///
+/// 1. Runs the normal containment check ([`check_path_allowed`] via
+///    [`resolve_in_roots`] semantics).
+/// 2. Re-canonicalizes the parent via [`re_resolve_after_open`].
+/// 3. Re-verifies containment of the re-resolved path.
+///
+/// Still racy (symlink retarget between step 3 and the caller's open), but
+/// narrows the window versus a single pre-check. Always `#[must_use]` the
+/// returned path (do not use the pre-check input) and keep HITL authoritative.
+///
+/// `#[must_use]` is on the function so callers cannot accidentally discard
+/// the re-verified path and open the unchecked original.
+#[must_use = "use the re-verified path; the input is only pre-check"]
+pub fn resolve_under_roots(
+    config: &SandboxConfig,
+    raw: &str,
+    write: bool,
+) -> Result<PathBuf, String> {
+    let access = if write {
+        PathAccess::Write
+    } else {
+        PathAccess::Read
+    };
+    // Step 1: pre-check.
+    check_path_allowed(config, raw, access)?;
+    let resolved = resolve_policy_candidate(config, raw)?;
+    // Step 2: re-resolve parent after check.
+    let rechecked = re_resolve_after_open(&resolved)?;
+    // Step 3: re-verify containment of the re-resolved path.
+    let rechecked_str = rechecked.to_string_lossy().into_owned();
+    // `check_path_allowed` joins relative inputs under the sandbox root; our
+    // `rechecked` is absolute so it is checked as-is.
+    check_path_allowed(config, &rechecked_str, access)?;
+    Ok(rechecked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,8 +504,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn symlink_escape_denied_when_supported() {
-        // Create dir with a symlink pointing outside; policy should reject if
-        // Windows allows symlink creation for this user.
+        // Create dir with a symlink pointing outside; policy must reject when
+        // Windows allows symlink creation for this user (strict: no allow-Ok).
         let base = std::env::temp_dir().join(format!("boris-symlink-test-{}", std::process::id()));
         let sandbox = base.join("sandbox");
         let outside = base.join("outside");
@@ -430,15 +542,113 @@ mod tests {
             link.clone()
         };
         let result = check_path_allowed(&cfg, probe.to_str().unwrap_or(""), PathAccess::Read);
-        // Canonical target should fall outside sandbox → deny (or ok only if
-        // still within after strip — assert deny for true escapes).
-        if let Ok(()) = result {
-            // If Windows reports the link path still under sandbox without resolving,
-            // ensure resolve at least ran without panic.
-            let _ = resolve_path_for_policy(&probe);
-        } else {
-            assert!(result.is_err());
-        }
+        // Strict: a true symlink escape must deny. The old weak form allowed
+        // Ok as "resolve ran without panic" — that hid escapes.
+        assert!(
+            result.is_err(),
+            "symlink escape must deny, got Ok for probe {probe:?}"
+        );
+        // The hardened wrapper must deny too.
+        let hardened = resolve_under_roots(&cfg, probe.to_str().unwrap_or(""), false);
+        assert!(
+            hardened.is_err(),
+            "resolve_under_roots must deny symlink escape, got {hardened:?}"
+        );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_escape_denied_on_unix() {
+        let base =
+            std::env::temp_dir().join(format!("boris-symlink-test-unix-{}", std::process::id()));
+        let sandbox = base.join("sandbox");
+        let outside = base.join("outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&sandbox).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        fs::write(&secret, "x").unwrap();
+        let link = sandbox.join("escape_link");
+        if std::os::unix::fs::symlink(&outside, &link).is_err() {
+            let _ = fs::remove_dir_all(&base);
+            return;
+        }
+        let cfg = test_sandbox_cfg(sandbox.clone());
+        let probe = link.join("secret.txt");
+        let result = check_path_allowed(&cfg, probe.to_str().unwrap_or(""), PathAccess::Read);
+        assert!(
+            result.is_err(),
+            "symlink escape must deny, got Ok for probe {probe:?}"
+        );
+        let hardened = resolve_under_roots(&cfg, probe.to_str().unwrap_or(""), false);
+        assert!(
+            hardened.is_err(),
+            "resolve_under_roots must deny symlink escape, got {hardened:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn path_within_root_canonicalizes_and_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("boris-within-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sandbox")).unwrap();
+        let root = dir.join("sandbox");
+        // Direct child is within.
+        assert!(path_within_root(&root.join("a.txt"), &root));
+        // `..` escape is not within.
+        assert!(!path_within_root(
+            &root.join("..").join("outside.txt"),
+            &root
+        ));
+        // Lexical `..` that folds back inside is within (documents that we
+        // resolve `..` rather than doing a raw starts_with).
+        assert!(path_within_root(
+            &root.join("sub").join("..").join("a.txt"),
+            &root
+        ));
+        // Empty / relative candidates fail closed against an absolute root.
+        assert!(!path_within_root(Path::new(""), &root));
+        // Case behavior follows `path_is_within` (case-insensitive on Windows).
+        #[cfg(windows)]
+        {
+            let upper = PathBuf::from(root.to_string_lossy().to_uppercase());
+            assert!(path_within_root(&upper.join("a.txt"), &root));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_under_roots_allows_inside_and_denies_outside() {
+        let dir = std::env::temp_dir().join(format!("boris-under-roots-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sandbox")).unwrap();
+        let sandbox = dir.join("sandbox");
+        let cfg = test_sandbox_cfg(sandbox.clone());
+        fs::write(sandbox.join("ok.txt"), "hi").unwrap();
+        let ok = resolve_under_roots(&cfg, sandbox.join("ok.txt").to_str().unwrap(), false);
+        assert!(ok.is_ok(), "inside root must resolve: {ok:?}");
+        // Re-resolved path must be the must-use return value (still within).
+        let p = ok.unwrap();
+        assert!(path_within_root(&p, &sandbox));
+        let outside = dir.join("evil.txt");
+        fs::write(&outside, "x").unwrap();
+        let bad = resolve_under_roots(&cfg, outside.to_str().unwrap(), false);
+        assert!(bad.is_err(), "outside root must deny: {bad:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn re_resolve_after_open_recanonicalizes_parent() {
+        let dir = std::env::temp_dir().join(format!("boris-reresolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sandbox")).unwrap();
+        let file = dir.join("sandbox").join("note.txt");
+        fs::write(&file, "hi").unwrap();
+        let again = re_resolve_after_open(&file).unwrap();
+        assert!(path_is_within(&again, &dir.join("sandbox")));
+        assert!(re_resolve_after_open(Path::new("")).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -2,30 +2,41 @@
  * Desktop IPC bridge — the only UI entrypoint into the Tauri host.
  *
  * Import from `@/bridge` in windows/components. Do not `invoke` host commands
- * ad-hoc except for logger plumbing (`frontend_log` / `get_log_path`).
+ * ad-hoc except for logger plumbing (`frontend_log` / `get_log_path`). Put
+ * command implementations under `commands/`, grouped by their IPC topic.
  */
 
 export { invokeErrorMessage } from "./errors";
 export { COMMANDS, EVENTS, type CommandName, type EventName } from "./ipc";
 export {
-  downloadModels,
-  getModelsStatus,
-  getSessionArtifact,
-  getSettings,
   getStatus,
-  listInputDevices,
-  listOutputDevices,
-  listSessionArtifacts,
-  onModelsProgress,
   onStatus,
   preflightCheck,
-  saveSettings,
   startEngine,
   stopEngine,
+  submitInput,
+  cancelInput,
+  wakeLivenessStatus,
+  startWakeEnroll,
+  clearWakeProfile,
+  type StartEngineOptions,
+} from "./commands/engine";
+export {
+  listInputDevices,
+  listOutputDevices,
   switchInput,
   switchOutput,
-  type StartEngineOptions,
-} from "./status";
+} from "./commands/devices";
+export {
+  downloadModels,
+  getModelsStatus,
+  onModelsProgress,
+} from "./commands/models";
+export { getSettings, saveSettings } from "./commands/settings";
+export {
+  getSessionArtifact,
+  listSessionArtifacts,
+} from "./commands/artifacts";
 export { useStatus } from "./useStatus";
 export {
   EMPTY_SETTINGS,
@@ -38,6 +49,7 @@ export {
   PROVIDER_PRESETS,
   settingsToWire,
   type AppSettings,
+  type LivenessStatus,
   type UpdateChannel,
   type ArtifactCard,
   type ArtifactListItem,
@@ -53,4 +65,6 @@ export {
   type Phase,
   type PreflightReport,
   type StatusPicture,
+  type WakeEnrollPeek,
+  type InputPeek,
 } from "./types";

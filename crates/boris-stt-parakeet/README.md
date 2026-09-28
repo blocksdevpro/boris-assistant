@@ -14,11 +14,16 @@ Point [`ParakeetStt::with_model_dir`] at a directory that contains:
 | `nemo128.onnx` | yes | Mel preprocessor |
 | `vocab.txt` | yes | Must include `<blk>` blank token |
 
-Product install path: `~/.boris/models/parakeet` (or workspace
-`assets/models/parakeet` for local dev).
+FP16 and Int4 installs use the matching `.fp16.` / `.int4.` filename
+suffixes; the load preflight requires the exact encoder/decoder pair for the
+selected quantization.
+
+Product install path: `~/.boris/models/parakeet` (legacy
+`ParakeetStt::new()` reads workspace `assets/models/parakeet` for local dev
+and is deprecated — prefer `with_model_dir`).
 
 Quantization defaults to **Int8** (matches shipped product weights). Use
-[`ParakeetStt::with_quantization`] for FP32 installs.
+[`ParakeetStt::with_quantization`] for FP32 / FP16 / Int4 installs.
 
 ## Usage
 
@@ -36,7 +41,8 @@ let text = stt.transcribe(&pcm_mono_f32_16khz)?;
 
 - Prefer explicit `load()` (engine preloads while capturing).
 - `transcribe` also lazy-loads if unloaded.
-- Missing / incomplete model dir → `Error::Config`.
+- Missing / incomplete model dir → `Error::Config` (preflight); ONNX
+  open / transcribe failures after preflight → `Error::Other`.
 - Empty audio → `Ok("")` without calling the model.
 
 ### Trait methods

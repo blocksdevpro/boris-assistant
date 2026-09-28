@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 tracing    = { workspace = true }
 
 serde       = { version = "1", features = ["derive"] }
+regex       = "1"
 chrono      = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait = { workspace = true }
 futures     = { version = "0.3", default-features = false, features = ["std", "async-await", "alloc"] }

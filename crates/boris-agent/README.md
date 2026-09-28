@@ -22,20 +22,26 @@ use boris_agent::{
 };
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = OpenRouterClient::from_env()?; // or construct with key + model
+# let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+# let model = std::env::var("OPENROUTER_MODEL").ok();
+let client = OpenRouterClient::new(api_key, model); // host reads the key env itself
 let home = dirs_next_home().join(".boris"); // host-specific home
 let mut sandbox = SandboxConfig::for_desktop_mvp(&home)
     .with_trusted_auto_moderate(true);
 
 let mut agent = Agent::new(Box::new(client), "You are Boris, a concise voice assistant.");
+agent.enable_memory_store(home.join("memory/memory.sqlite"))?;
 
 // Register tools BEFORE configure_runtime: register_builtin_tools_with_preset
 // mutates `sandbox` in place via `CapabilityPreset::apply_to_sandbox` (network/shell
-// lockdown for VoiceSafe/LocalPower), so preset and sandbox can never drift apart.
+// lockdown for VoiceSafe/LocalPower), so registration and the policy handed to
+// `configure_runtime` start consistent.
 register_builtin_tools_with_preset(
     &mut agent,
     BuiltinToolPaths {
         notes_path: home.join("memory/notes.jsonl"),
+        // Legacy input for one-time migration; canonical runtime state is in
+        // memory.sqlite because enable_memory_store was called above.
         profile_path: home.join("memory/profile.json"),
         sandbox_root: home.join("sandbox"),
         data_roots: vec![home.join("memory"), home.join("sessions")],
@@ -59,6 +65,10 @@ match agent.prompt("What time is it?").await? {
         println!("confirm: {text} ({})", pending.name);
         // host: resume_confirmation(&pending.id, approved)
     }
+    AgentOutcome::NeedsInput { text, pending } => {
+        println!("input: {text} ({})", pending.name);
+        // host: resume_input(&pending.id, value)
+    }
 }
 # Ok(())
 # }
@@ -70,6 +80,90 @@ Nested modules are public for the pipeline but are not a stability guarantee.
 
 LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 
+## Canonical memory
+
+Hosts should call `enable_memory_store` before registering built-in tools. It
+creates the local `memory.sqlite` store and makes the profile/extraction
+working set, turn evidence, retrieved records, and memory tools use that one
+database. The Desktop host also queues the verified migration of legacy
+`profile.json`, `MEMORY.md`, and session `memory.md` inputs.
+
+Migration first stages each source and refines it with the configured LLM. It
+only deletes a legacy source after all of its excerpts are refined and verified
+in SQLite. Failure leaves the old files in place for retry.
+
+## Skills
+
+Skills are `SKILL.md` playbooks with `name` and `description` frontmatter.
+`ensure_default_skills` installs the bundled starter set under
+`<boris_home>/skills` and upgrades a stock file when its frontmatter version is
+behind the bundled version (legacy stock files without a version upgrade too;
+user forks are left alone). `load_skills` discovers project skills by walking
+up from the working directory through every `.boris/skills` to the git root,
+then user skills from `<boris_home>/skills`, followed by any explicit extra
+paths; the first skill with a given name wins.
+
+Only skill names and descriptions enter the prompt, as a bounded JSON
+`<skills_catalog_data>` user-role envelope paired with a small static trusted
+`SKILLS_SYSTEM_POLICY`. `load_skill` reads a
+full body on demand, so specialized guidance does not expand every turn. The
+bundled set includes task execution, research, daily briefs, remembering,
+coding, root-cause debugging, code explanation, design rationale (`investigate-why`),
+design, change review,
+technical writing, mentoring, and skill creation. User intent controls whether
+a matching playbook is loaded, and optional steps such as todos, research, or
+artifacts are used only when they help produce the requested result.
+
+## Tool inputs and results
+
+`collect_input` supports exact values, secrets, large pastes, and numbered
+choices. A choice can include up to four short options for the host to speak;
+the returned number is resolved to its option before the agent resumes. Hosts
+should bind secrets to the masked input field. Secret observations are redacted
+when transcripts are persisted.
+
+When a host binds a session with `Agent::bind_session`, tool results that exceed
+their result-size budget are saved under that session's `tool_outputs/` directory.
+The agent receives a `get_tool_output` hint and can reread the saved result by
+path and character offset instead of running the tool again. The store caps each
+file at 256K characters and removes files older than seven days on a best-effort
+basis.
+
+File tools offer close sibling-name suggestions when a path is not found. They
+do not choose a suggested path automatically. `file_read` recognizes common
+image and PDF formats, but it does not inspect image pixels or extract PDF
+text; the host can open the file on screen. `web_fetch` retries a likely
+Cloudflare or bot-protection response once.
+
+## Optional MCP host integration
+
+Hosts can load stdio MCP server definitions from `~/.boris/mcp.json`, discover
+their tools with `discover_mcp_tools`, and register them with
+`register_mcp_tools`. By default, only read-suggestive tool names register.
+The file accepts either a `servers` array or an `mcpServers` object. Set
+`allow_writes` in a server config to register other names. MCP calls use the
+network permission, stay outside the read-only class, and always require human
+confirmation. Capability presets still filter them. Results are marked as
+untrusted data and truncated before they enter the agent context.
+
+The Desktop host does not configure MCP servers. This API is for hosts that
+choose to add that integration.
+
+## Context, prompt hardening, and compaction
+
+Trusted system content stays separate from untrusted user-role data:
+personal context, the skills catalog, retrieved records, and task evidence are
+wired as user-role messages (the small memory hint rides in the system prompt),
+and tool observations arrive as raw text with
+pending `<system-reminder>` controls flushed as their own message only once
+the batch resolves. Token estimates run over serialized message JSON.
+Summary compaction is lossless — only complete oldest turns fold into a
+single `Summary` message and the unsummarized tail is never deleted — with
+hysteresis before LLM compaction and smaller mechanical fallbacks. Requests
+estimated past the input budget fail fast with `AgentErrorKind::InputTooLarge`
+before any provider call. Summary-maintenance turns are forced onto the fast
+tier with an explicit cap.
+
 ## Security model
 
 | Layer | What it does |
@@ -80,7 +174,7 @@ LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 | **ShellPolicy** | `Denied` · `Allowlist` (binary/prefix) · `OpenConfirm`. Bash deny list is best-effort; **HITL is authoritative**. Windows prefers Git Bash (`bash -c`, no login profile); WSL `System32\bash.exe` is skipped. PowerShell fallback uses `-ExecutionPolicy Bypass` for usability only. |
 | **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backends (DuckDuckGo + Wikipedia, or Exa when a key is set) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
-| **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset. |
+| **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset (and only when risk ≤ Moderate with no confirm flag). |
 
 Desktop MVP: `SandboxConfig::for_desktop_mvp` opens network + shell-with-confirm and grants common user document roots for read.
 
@@ -92,8 +186,8 @@ There is **no hard cap** on count per message. The loop processes the full batch
 | Mode | When | Behavior |
 |------|------|----------|
 | **wave scheduling** (default) | batch auto-allowed | read-only tools run in parallel waves (`max_parallel_tools`, default **16**); writes run sequential |
-| **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` at once |
-| **sequential** | any call needs confirm, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
+| **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` in `max_parallel_tools`-bounded chunks (never unbounded) |
+| **sequential** | any call needs confirm, collects typed input, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
 
 Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
 HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).
@@ -113,11 +207,11 @@ src/
   agent/               stateful host API
   loop_/               pure ReAct (complete → tools → events)
   runtime/             policy, timeout, audit, HITL, listing
-  tool/                Tool trait, ToolMeta, arg helpers, truncation
-  tools/               builtin tools (files, web, bash, notes, …)
-  session/             SessionStore + transcript + artifacts/
-  memory/              profile + long-term MEMORY.md
-  skills/              load, catalog, defaults
+  tool/                Tool trait, ToolMeta, arg helpers, truncation, output store
+  tools/               built-in tools (files, web, bash, notes) + MCP
+  session/             SessionStore + transcript + artifacts/ + tool_outputs/
+  memory/              canonical ledger + legacy migration support
+  skills/              load, catalog, defaults, frontmatter
   …
 ```
 

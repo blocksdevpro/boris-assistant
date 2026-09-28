@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
+use crate::error::truncate_error_body;
 use crate::message::{
     append_stream_content_delta, assistant_message_from_stream, extract_text_content,
 };
@@ -31,6 +32,7 @@ struct ToolCallAcc {
 #[derive(Debug, Clone, Default)]
 pub(super) struct StreamDelta {
     pub content: String,
+    pub reasoning: String,
     pub tool_deltas: Vec<ToolDelta>,
     pub usage: Option<TokenUsage>,
 }
@@ -44,7 +46,37 @@ pub(super) struct ToolDelta {
     pub arguments_delta: String,
 }
 
+/// True when a tool delta carries no new information at all.
+///
+/// Used by the stream caller (`complete.rs`) to keep fully-empty fragments
+/// out of payload detection: a bare `{"index": 0}` heartbeat must not mark
+/// the stream as "saw payload" or trigger `FirstDelta`.
+pub(crate) fn tool_delta_is_empty(delta: &ToolDelta) -> bool {
+    delta.id.is_none() && delta.name.is_none() && delta.arguments_delta.is_empty()
+}
+
 impl ToolCallAcc {
+    fn from_message(tc: &Value) -> Self {
+        let function = tc.get("function");
+        Self {
+            id: tc
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: function
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            arguments: function
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+
     fn apply_delta(&mut self, tc: &Value) -> ToolDelta {
         let mut id_out = None;
         let mut name_out = None;
@@ -80,6 +112,10 @@ impl ToolCallAcc {
     }
 
     fn into_json(self, index: u32) -> Value {
+        // Synthetic `call_{index}` ids fill gaps when a provider streams no
+        // tool-call id. The id scheme is load-bearing for transcripts/tests, so
+        // it stays as-is; the blocking path is normalized the same way (A4:
+        // empty `tool_calls` omitted, `content` always a string) for parity.
         let id = if self.id.is_empty() {
             format!("call_{index}")
         } else {
@@ -125,6 +161,12 @@ pub(super) struct StreamAssembler {
     tools: BTreeMap<u32, ToolCallAcc>,
     role: String,
     last_usage: Option<TokenUsage>,
+    /// Whether each payload kind has already been exposed as an incremental
+    /// event. A later full `message` is a canonical snapshot, not another
+    /// delta, so it must not be emitted as duplicate content/tool fragments.
+    emitted_content: bool,
+    emitted_reasoning: bool,
+    emitted_tools: bool,
     /// Set when an event carries a top-level `error` object instead of a
     /// normal delta (e.g. a mid-stream provider error). Callers should check
     /// this after each ingested chunk and abort the stream if set.
@@ -155,6 +197,9 @@ impl StreamAssembler {
     }
 
     /// Same as [`Self::ingest_event`] but returns newly appended fragments.
+    /// A provider-supplied full `message` replaces the assembled snapshot; it
+    /// is only surfaced as an incremental event when no earlier delta of that
+    /// payload kind was emitted.
     pub(super) fn ingest_event_delta(&mut self, event: &Value) -> StreamDelta {
         let mut delta = StreamDelta::default();
         // A well-formed SSE payload can carry a top-level `error` object
@@ -162,6 +207,19 @@ impl StreamAssembler {
         // Surface it instead of silently dropping the event, which used to
         // leave the stream to "succeed" with an empty assembled message.
         if let Some(err) = event.get("error") {
+            // Abort even when the event also carries valid choices: mixing a
+            // provider error with a partial draft risks acting on a payload
+            // the provider already disowned.
+            let choices_len = event
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            tracing::warn!(
+                error = %truncate_error_body(&err.to_string()),
+                choices_len,
+                "SSE event carries top-level error; aborting stream assembly"
+            );
             self.error = Some(err.clone());
             return delta;
         }
@@ -172,40 +230,75 @@ impl StreamAssembler {
             delta.usage = Some(u);
         }
 
+        if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
+            if choices.len() > 1 {
+                tracing::warn!(
+                    choices_len = choices.len(),
+                    "SSE event carries multiple choices; only choices[0] is assembled"
+                );
+            }
+        }
         let Some(choice) = event.get("choices").and_then(|c| c.get(0)) else {
             return delta;
         };
 
-        // Prefer incremental delta; some providers also emit a full `message`.
-        let Some(piece) = choice.get("delta").or_else(|| choice.get("message")) else {
-            return delta;
-        };
+        // Some OpenAI-compatible providers finish a delta stream with a full
+        // `message` snapshot. Treat that snapshot as canonical. Appending it
+        // after prior deltas glues two answer drafts together (for example,
+        // `first answer?Second answer`).
+        //
+        // When one choice carries BOTH a `delta` and a `message` whose
+        // `tool_calls` are non-empty, the snapshot is ingested FIRST and the
+        // delta merged on top: ignoring the delta would drop argument bytes,
+        // while ignoring the snapshot would drop the canonical tool list.
+        let message_with_tools = choice.get("message").filter(|m| {
+            !m.is_null()
+                && m.get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty())
+        });
+        match (choice.get("delta"), message_with_tools) {
+            (Some(piece), Some(message)) if !piece.is_null() => {
+                self.ingest_message_snapshot(message, &mut delta);
+                self.ingest_incremental_piece(piece, &mut delta);
+            }
+            (Some(piece), _) if !piece.is_null() => {
+                self.ingest_incremental_piece(piece, &mut delta);
+            }
+            (_, Some(message)) => {
+                self.ingest_message_snapshot(message, &mut delta);
+            }
+            _ => {
+                if let Some(message) = choice.get("message") {
+                    if !message.is_null() {
+                        self.ingest_message_snapshot(message, &mut delta);
+                    }
+                }
+            }
+        }
+        delta
+    }
 
+    fn ingest_incremental_piece(&mut self, piece: &Value, delta: &mut StreamDelta) {
         if let Some(r) = piece.get("role").and_then(|r| r.as_str()) {
-            self.role = r.to_string();
+            self.role = r.to_lowercase();
+        }
+
+        append_reasoning_delta(&mut delta.reasoning, piece);
+        if !delta.reasoning.is_empty() {
+            self.emitted_reasoning = true;
         }
 
         if let Some(c) = piece.get("content") {
             let before = self.content.len();
-            // Full `message` objects sometimes carry trimmed-friendly content;
-            // streaming `delta` strings must preserve raw spaces.
-            if choice.get("delta").is_some() {
-                append_stream_content_delta(&mut self.content, c);
-            } else if let Some(s) = c.as_str() {
-                // Non-delta full message: replace/set content once.
-                if self.content.is_empty() {
-                    self.content = s.to_string();
-                } else {
-                    append_stream_content_delta(&mut self.content, c);
-                }
-            } else {
-                let text = extract_text_content(c);
-                if !text.is_empty() {
-                    self.content.push_str(&text);
-                }
-            }
+            append_stream_content_delta(&mut self.content, c);
             if self.content.len() > before {
+                debug_assert!(
+                    self.content.is_char_boundary(before),
+                    "content is only extended with &str chunks, so `before` is a char boundary"
+                );
                 delta.content = self.content[before..].to_string();
+                self.emitted_content = true;
             }
         }
 
@@ -216,11 +309,83 @@ impl StreamAssembler {
                 td.index = idx;
                 delta.tool_deltas.push(td);
             }
+            if !delta.tool_deltas.is_empty() {
+                self.emitted_tools = true;
+            }
         }
-        delta
+    }
+
+    fn ingest_message_snapshot(&mut self, message: &Value, delta: &mut StreamDelta) {
+        if let Some(r) = message.get("role").and_then(|r| r.as_str()) {
+            self.role = r.to_lowercase();
+        }
+
+        let mut reasoning = String::new();
+        append_reasoning_delta(&mut reasoning, message);
+        if !self.emitted_reasoning && !reasoning.is_empty() {
+            delta.reasoning = reasoning;
+            self.emitted_reasoning = true;
+        }
+
+        // `message.content` is the provider's complete canonical value. It
+        // replaces any draft assembled from `delta.content` chunks.
+        self.content = message
+            .get("content")
+            .map(|content| {
+                content
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| extract_text_content(content))
+            })
+            .unwrap_or_default();
+        if !self.emitted_content && !self.content.is_empty() {
+            delta.content = self.content.clone();
+            self.emitted_content = true;
+        }
+
+        // Full assistant messages do not carry streaming indexes reliably, so
+        // rebuild tool state by array position instead of applying them as
+        // fragments to previously accumulated calls.
+        //
+        // Replacement semantics are intentional (pinned by tests): a canonical
+        // snapshot supersedes earlier fragments. Shrinking the set drops prior
+        // drafts, which is worth a warning for diagnosis.
+        let tools_before = self.tools.len();
+        self.tools.clear();
+        if let Some(tcs) = message.get("tool_calls").and_then(|t| t.as_array()) {
+            for (position, tc) in tcs.iter().enumerate() {
+                let idx = tc
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(position as u64) as u32;
+                let call = ToolCallAcc::from_message(tc);
+                if !self.emitted_tools {
+                    delta.tool_deltas.push(ToolDelta {
+                        index: idx,
+                        id: (!call.id.is_empty()).then(|| call.id.clone()),
+                        name: (!call.name.is_empty()).then(|| call.name.clone()),
+                        arguments_delta: call.arguments.clone(),
+                    });
+                }
+                self.tools.insert(idx, call);
+            }
+            if tools_before > 0 && self.tools.len() < tools_before {
+                tracing::warn!(
+                    before = tools_before,
+                    after = self.tools.len(),
+                    "message snapshot dropped previously accumulated tool calls"
+                );
+            }
+            if !delta.tool_deltas.is_empty() {
+                self.emitted_tools = true;
+            }
+        }
     }
 
     /// Snapshot completed tool calls (id + name + full arguments string).
+    ///
+    /// Uses the same synthetic `call_{index}` fallback as [`finish`](Self::finish);
+    /// see [`ToolCallAcc::into_json`] for why the scheme is frozen.
     #[allow(dead_code)]
     pub(super) fn completed_tools(&self) -> Vec<(u32, String, String, String)> {
         self.tools
@@ -280,6 +445,49 @@ pub(super) fn flush_sse_buffer(buffer: &mut Vec<u8>, mut on_data: impl FnMut(&st
     if !line.is_empty() {
         dispatch_sse_line(line, &mut on_data);
     }
+}
+
+/// Pull incremental thinking text from OpenRouter / OpenAI-compatible deltas.
+///
+/// Prefers the string `reasoning` field, then `reasoning_content`, then
+/// `reasoning_details[].text` (Anthropic-style via OpenRouter). Never mixed
+/// into assembled `content` — this is display-only.
+fn append_reasoning_delta(sink: &mut String, piece: &Value) {
+    if let Some(s) = string_delta(piece.get("reasoning")) {
+        sink.push_str(s);
+        return;
+    }
+    if let Some(s) = string_delta(piece.get("reasoning_content")) {
+        sink.push_str(s);
+        return;
+    }
+    let Some(details) = piece.get("reasoning_details").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for detail in details {
+        // `text` + `summary` fragments arrive without separators; join with a
+        // space so words from adjacent details are not glued together.
+        let s = string_delta(detail.get("text")).or_else(|| string_delta(detail.get("summary")));
+        if let Some(s) = s {
+            push_reasoning_fragment(sink, s);
+        }
+    }
+}
+
+/// Append one reasoning fragment, separating it from prior text with a space
+/// unless whitespace already separates them.
+fn push_reasoning_fragment(sink: &mut String, fragment: &str) {
+    if !sink.is_empty()
+        && !sink.ends_with(char::is_whitespace)
+        && !fragment.starts_with(char::is_whitespace)
+    {
+        sink.push(' ');
+    }
+    sink.push_str(fragment);
+}
+
+fn string_delta(value: Option<&Value>) -> Option<&str> {
+    value.and_then(|v| v.as_str()).filter(|s| !s.is_empty())
 }
 
 fn dispatch_sse_line(line: &str, on_data: &mut impl FnMut(&str)) {
@@ -348,6 +556,91 @@ mod tests {
             msg["tool_calls"][0]["function"]["arguments"],
             "{\"c\":\"ls\"}"
         );
+    }
+
+    #[test]
+    fn full_message_replaces_streamed_draft_instead_of_concatenating() {
+        let mut a = StreamAssembler::new();
+        let first = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "role": "assistant", "content": "First answer?" } }]
+        }));
+        assert_eq!(first.content, "First answer?");
+
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Final answer."
+                }
+            }]
+        }));
+
+        assert!(
+            snapshot.content.is_empty(),
+            "a canonical snapshot must not be replayed as another delta"
+        );
+        assert_eq!(a.finish()["content"], "Final answer.");
+    }
+
+    #[test]
+    fn full_message_without_prior_deltas_is_exposed_once() {
+        let mut a = StreamAssembler::new();
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Only answer."
+                }
+            }]
+        }));
+        assert_eq!(snapshot.content, "Only answer.");
+
+        let repeated = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Only answer."
+                }
+            }]
+        }));
+        assert!(repeated.content.is_empty());
+        assert_eq!(a.finish()["content"], "Only answer.");
+    }
+
+    #[test]
+    fn full_message_replaces_streamed_tool_fragments() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "draft-call",
+                        "function": { "name": "todo_", "arguments": "{\"draft\":" }
+                    }]
+                }
+            }]
+        }));
+        let snapshot = a.ingest_event_delta(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "final-call",
+                        "type": "function",
+                        "function": { "name": "todo_read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        }));
+
+        assert!(snapshot.tool_deltas.is_empty());
+        let msg = a.finish();
+        assert_eq!(msg["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(msg["tool_calls"][0]["id"], "final-call");
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "todo_read");
+        assert_eq!(msg["tool_calls"][0]["function"]["arguments"], "{}");
     }
 
     #[test]
@@ -483,6 +776,164 @@ mod tests {
         }));
         let msg = a.finish();
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_time");
+    }
+
+    #[test]
+    fn reasoning_string_does_not_enter_content() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "reasoning": "Need to look this up. " } }]
+        }));
+        assert_eq!(delta.reasoning, "Need to look this up. ");
+        assert!(delta.content.is_empty());
+
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{ "delta": { "reasoning_content": "Then search. ", "content": "On it." } }]
+        }));
+        // First field (`reasoning`) is absent, so `reasoning_content` is used.
+        assert_eq!(delta.reasoning, "Then search. ");
+        assert_eq!(delta.content, "On it.");
+        assert_eq!(a.finish()["content"], "On it.");
+    }
+
+    #[test]
+    fn reasoning_details_text_is_collected() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "Step one."
+                    }]
+                }
+            }]
+        }));
+        assert_eq!(delta.reasoning, "Step one.");
+        assert!(delta.content.is_empty());
+    }
+
+    #[test]
+    fn delta_and_message_with_tools_merge() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "{\"extra\":1}" }
+                    }]
+                },
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "snap-call",
+                        "type": "function",
+                        "function": { "name": "todo_read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        }));
+        // Snapshot ingested first, delta arguments merged on top.
+        assert!(!delta.tool_deltas.is_empty());
+        let msg = a.finish();
+        assert_eq!(msg["tool_calls"][0]["id"], "snap-call");
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "todo_read");
+        assert!(
+            msg["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .contains("extra"),
+            "delta arguments must merge onto the snapshot, got: {}",
+            msg["tool_calls"][0]["function"]["arguments"]
+        );
+    }
+
+    #[test]
+    fn delta_without_snapshot_tools_keeps_delta_only_behavior() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": { "content": "Hi" },
+                "message": { "role": "assistant", "content": "Ignored draft" }
+            }]
+        }));
+        // No tool_calls in the message → legacy path: delta wins, snapshot ignored.
+        assert_eq!(a.finish()["content"], "Hi");
+    }
+
+    #[test]
+    fn extra_choices_are_ignored_but_first_assembles() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [
+                { "delta": { "content": "one" } },
+                { "delta": { "content": "two" } }
+            ]
+        }));
+        assert_eq!(delta.content, "one");
+        assert_eq!(a.finish()["content"], "one");
+    }
+
+    #[test]
+    fn role_is_lowercased() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({
+            "choices": [{ "delta": { "role": "ASSISTANT", "content": "hi" } }]
+        }));
+        assert_eq!(a.finish()["role"], "assistant");
+
+        let mut b = StreamAssembler::new();
+        b.ingest_event(&json!({
+            "choices": [{ "message": { "role": "Assistant", "content": "hi" } }]
+        }));
+        assert_eq!(b.finish()["role"], "assistant");
+    }
+
+    #[test]
+    fn reasoning_details_text_and_summary_join_with_space() {
+        let mut a = StreamAssembler::new();
+        let delta = a.ingest_event_delta(&json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "Step one." },
+                        { "type": "reasoning.summary", "summary": "Step two." }
+                    ]
+                }
+            }]
+        }));
+        assert_eq!(delta.reasoning, "Step one. Step two.");
+        assert!(delta.content.is_empty());
+    }
+
+    #[test]
+    fn tool_delta_is_empty_unit() {
+        assert!(tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: String::new(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: "{}".into(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: Some("c1".into()),
+            name: None,
+            arguments_delta: String::new(),
+        }));
+        assert!(!tool_delta_is_empty(&ToolDelta {
+            index: 0,
+            id: None,
+            name: Some("bash".into()),
+            arguments_delta: String::new(),
+        }));
     }
 
     #[test]

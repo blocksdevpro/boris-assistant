@@ -12,7 +12,6 @@ members = [
     "crates/boris-tts-supertone",
     "crates/boris-pipeline",
     "desktop/src-tauri",
-    "xtask",
 ]
 
 [workspace.package]
@@ -43,7 +42,7 @@ boris-pipeline    = { path = "crates/boris-pipeline" }
 # Root package is intentionally not a voice host. Product entrypoint: boris-desktop.
 [package]
 name         = "boris-assistant"
-version      = "1.1.0"
+version      = "1.2.0"
 edition      = "2021"
 rust-version = "1.97"
 description  = "Boris Assistant workspace (retired CLI stub; product host is boris-desktop)"

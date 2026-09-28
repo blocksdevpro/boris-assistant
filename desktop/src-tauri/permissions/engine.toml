@@ -1,4 +1,4 @@
-# ACL for app-level Tauri commands (boris host commands.rs).
+# ACL for app-level Tauri commands (boris host src/commands/*.rs).
 
 [[permission]]
 identifier = "allow-get-status"
@@ -41,6 +41,16 @@ description = "Switch speaker device"
 commands.allow = ["switch_output"]
 
 [[permission]]
+identifier = "allow-submit-input"
+description = "Send typed overlay or Home input to the engine"
+commands.allow = ["submit_input"]
+
+[[permission]]
+identifier = "allow-cancel-input"
+description = "Cancel a typed overlay or Home input request"
+commands.allow = ["cancel_input"]
+
+[[permission]]
 identifier = "allow-models-status"
 description = "Read local STT/TTS model install status"
 commands.allow = ["models_status"]
@@ -79,6 +89,21 @@ commands.allow = ["list_session_artifacts"]
 identifier = "allow-get-session-artifact"
 description = "Read one session visual card (meta + body)"
 commands.allow = ["get_session_artifact"]
+
+[[permission]]
+identifier = "allow-wake-liveness-status"
+description = "Read whether a live-mic wake profile is enrolled"
+commands.allow = ["wake_liveness_status"]
+
+[[permission]]
+identifier = "allow-start-wake-enroll"
+description = "Record live Boris takes for the speaker-playback filter"
+commands.allow = ["start_wake_enroll"]
+
+[[permission]]
+identifier = "allow-clear-wake-profile"
+description = "Delete the live-mic wake profile"
+commands.allow = ["clear_wake_profile"]
 
 [[permission]]
 identifier = "allow-check-app-update"

@@ -90,8 +90,8 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": { "type": "string" },
                 "limit": {
-                    "type": "number",
-                    "description": "Max results (default 8, max 8)"
+                    "type": "integer",
+                    "description": "Max results (default 8, max 8). Must be an integer; floats are rejected."
                 }
             },
             "required": ["query"]
@@ -119,7 +119,7 @@ impl Tool for WebSearchTool {
         if query.trim().is_empty() {
             return Err(ToolError::invalid_args("query is empty"));
         }
-        let limit = parse_search_limit(obj.get("limit"));
+        let limit = parse_search_limit(obj.get("limit"))?;
         let query = query.trim();
 
         // Optional Exa upgrade. Failures (including bad keys) fall through so a
@@ -327,7 +327,10 @@ fn truncate_err_body(s: &str) -> String {
 }
 
 fn format_results(query: &str, results: &[SearchHit]) -> String {
-    let mut out = format!("Search results for: {query}\n");
+    let mut out = format!(
+        "Search results for: {query} (showing {} of up to {MAX_SEARCH}):\n",
+        results.len()
+    );
     for (i, r) in results.iter().enumerate() {
         out.push_str(&format!(
             "{}. {} — {}\n   {}\n",
@@ -337,15 +340,27 @@ fn format_results(query: &str, results: &[SearchHit]) -> String {
             r.snippet
         ));
     }
+    if results.len() >= MAX_SEARCH {
+        out.push_str(&format!(
+            "…[showing {MAX_SEARCH} of up to {MAX_SEARCH}; narrow the query for more specific hits]"
+        ));
+    }
     out
 }
 
 /// Parse `limit` from tool args: default [`MAX_SEARCH`], clamped to `[1, MAX_SEARCH]`.
-pub(crate) fn parse_search_limit(v: Option<&Value>) -> usize {
-    v.and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(MAX_SEARCH)
-        .clamp(1, MAX_SEARCH)
+///
+/// Strict integers only: floats and non-numeric strings return `invalid_args`
+/// instead of silently falling back to the default. Numeric strings (`"3"`)
+/// are accepted.
+pub(crate) fn parse_search_limit(v: Option<&Value>) -> Result<usize, ToolError> {
+    match v {
+        None | Some(Value::Null) => Ok(MAX_SEARCH),
+        Some(val) => {
+            let n = crate::tool::strict_u64(val, "limit")?;
+            Ok((n as usize).clamp(1, MAX_SEARCH))
+        }
+    }
 }
 
 /// One search result hit.
@@ -363,11 +378,45 @@ mod tests {
 
     #[test]
     fn parse_search_limit_defaults_and_clamps() {
-        assert_eq!(parse_search_limit(None), MAX_SEARCH);
-        assert_eq!(parse_search_limit(Some(&json!(3))), 3);
-        assert_eq!(parse_search_limit(Some(&json!(0))), 1);
-        assert_eq!(parse_search_limit(Some(&json!(99))), MAX_SEARCH);
-        assert_eq!(parse_search_limit(Some(&json!("nope"))), MAX_SEARCH);
+        assert_eq!(parse_search_limit(None).unwrap(), MAX_SEARCH);
+        assert_eq!(parse_search_limit(Some(&json!(3))).unwrap(), 3);
+        assert_eq!(parse_search_limit(Some(&json!(0))).unwrap(), 1);
+        assert_eq!(parse_search_limit(Some(&json!(99))).unwrap(), MAX_SEARCH);
+        assert_eq!(parse_search_limit(Some(&json!("3"))).unwrap(), 3);
+    }
+
+    #[test]
+    fn parse_search_limit_rejects_floats_and_bad_strings() {
+        for v in [json!(2.5), json!(8.0), json!("nope"), json!(true)] {
+            let err = parse_search_limit(Some(&v)).unwrap_err();
+            assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
+            assert!(
+                err.message.contains("limit") || err.message.contains("integer"),
+                "got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn schema_uses_integer_for_limit_and_results_have_footer() {
+        let t = WebSearchTool::default();
+        assert_eq!(t.parameters()["properties"]["limit"]["type"], "integer");
+        let hits = vec![
+            SearchHit {
+                title: "A".into(),
+                url: "https://a.example".into(),
+                snippet: "s".into(),
+            },
+            SearchHit {
+                title: "B".into(),
+                url: "https://b.example".into(),
+                snippet: "s".into(),
+            },
+        ];
+        let out = format_results("q", &hits);
+        assert!(out.contains("showing 2 of up to"));
+        assert!(out.contains("Search results for: q"));
     }
 
     #[test]

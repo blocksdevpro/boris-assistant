@@ -16,11 +16,13 @@ use boris_ai::LlmClient;
 use tracing::{info, warn};
 
 use crate::memory::{
-    extract_heuristic, extract_with_llm, should_llm_extract, MemoryIndex, ProfileStore,
+    discover_legacy_memory, extract_heuristic, extract_with_llm, merge_legacy_profile,
+    retire_legacy_files, should_llm_extract, LegacyMemoryPaths, MemoryIndex, ProfileStore,
     SessionMemoryTarget, UserProfile,
 };
 use crate::session::store::{SessionStore, SyncCursor};
 use crate::session::types::SessionId;
+use crate::tools::memory::SharedMemoryStore;
 use crate::tools::memory_tools::SharedLongTermMemory;
 use crate::trace::TurnTrace;
 
@@ -33,6 +35,22 @@ const LLM_EXTRACT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// One unit of post-turn work.
 pub enum MaintenanceJob {
+    /// Canonical durable evidence write for every completed turn.
+    IngestMemory {
+        store: SharedMemoryStore,
+        session_id: Option<String>,
+        user: String,
+        assistant: String,
+    },
+    /// One-shot replacement migration. The legacy files are kept unless all
+    /// sources finish the AI refinement pass and verification succeeds.
+    MigrateLegacyMemory {
+        memory: SharedMemoryStore,
+        profile_store: ProfileStore,
+        profile: Arc<Mutex<UserProfile>>,
+        paths: LegacyMemoryPaths,
+        client: Arc<dyn LlmClient>,
+    },
     AppendTurn {
         ltm: SharedLongTermMemory,
         target: SessionMemoryTarget,
@@ -85,7 +103,10 @@ pub enum MaintenanceJob {
 impl MaintenanceJob {
     fn is_durable(&self) -> bool {
         match self {
-            Self::AppendTurn { .. } | Self::SyncSession { .. } | Self::AppendTrace { .. } => true,
+            Self::IngestMemory { .. }
+            | Self::AppendTurn { .. }
+            | Self::SyncSession { .. }
+            | Self::AppendTrace { .. } => true,
             #[cfg(test)]
             Self::TestDurableBlock { .. } => true,
             _ => false,
@@ -427,6 +448,21 @@ fn run_worker(lane: Arc<JobLane>, with_runtime: bool) {
 
 fn run_job(job: MaintenanceJob, rt: Option<&tokio::runtime::Runtime>) -> Result<(), String> {
     match job {
+        MaintenanceJob::IngestMemory {
+            store,
+            session_id,
+            user,
+            assistant,
+        } => store
+            .ingest_turn(session_id.as_deref(), &user, &assistant)
+            .map(|_| ()),
+        MaintenanceJob::MigrateLegacyMemory {
+            memory,
+            profile_store,
+            profile,
+            paths,
+            client,
+        } => run_legacy_migration(memory, profile_store, profile, paths, client, rt),
         MaintenanceJob::AppendTurn {
             ltm,
             target,
@@ -531,10 +567,15 @@ fn run_extract(
 
     if do_llm {
         if let Some(rt) = rt {
-            match rt.block_on(tokio::time::timeout(
-                LLM_EXTRACT_TIMEOUT,
-                extract_with_llm(client.as_ref(), user, assistant, &profile_summary),
-            )) {
+            // `timeout` looks up the current reactor at construction, so it
+            // must run inside `block_on`, not as its argument.
+            match rt.block_on(async {
+                tokio::time::timeout(
+                    LLM_EXTRACT_TIMEOUT,
+                    extract_with_llm(client.as_ref(), user, assistant, &profile_summary),
+                )
+                .await
+            }) {
                 Ok(Ok(llm_delta)) if !llm_delta.is_empty() => {
                     if let Some(n) = llm_delta.preferred_name.clone() {
                         delta.preferred_name = Some(n);
@@ -547,6 +588,8 @@ fn run_extract(
                     delta
                         .facts_remove_query
                         .extend(llm_delta.facts_remove_query);
+                    delta.forget_preferred_name |= llm_delta.forget_preferred_name;
+                    delta.forget_all |= llm_delta.forget_all;
                     delta.ongoing_add.extend(llm_delta.ongoing_add);
                     if llm_delta.ongoing_replace.is_some() {
                         delta.ongoing_replace = llm_delta.ongoing_replace;
@@ -570,6 +613,19 @@ fn run_extract(
         }
     }
 
+    if let Some(memory) = store.memory_store() {
+        if delta.forget_all {
+            memory.forget_all()?;
+        } else {
+            for query in &delta.facts_remove_query {
+                let _ = memory.forget_matching(query)?;
+            }
+            if delta.forget_preferred_name {
+                let _ = memory.forget_matching("preferred name")?;
+            }
+        }
+    }
+
     let mut p = profile
         .lock()
         .map_err(|_| "personal profile lock poisoned".to_string())?;
@@ -577,6 +633,92 @@ fn run_extract(
         delta.apply(&mut p);
     }
     store.save(&p)?;
+    Ok(())
+}
+
+fn run_legacy_migration(
+    memory: SharedMemoryStore,
+    profile_store: ProfileStore,
+    profile: Arc<Mutex<UserProfile>>,
+    paths: LegacyMemoryPaths,
+    client: Arc<dyn LlmClient>,
+    rt: Option<&tokio::runtime::Runtime>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let plan = discover_legacy_memory(&paths)?;
+    if plan.is_empty() {
+        return Ok(());
+    }
+
+    // profile.json is already structured. Merge it first so the refiner has
+    // accurate current context and the legacy file can become deletable only
+    // after its contents have reached SQLite.
+    if let Some(legacy_profile) = plan.profile.clone() {
+        let mut current = profile
+            .lock()
+            .map_err(|_| "personal profile lock poisoned".to_string())?;
+        merge_legacy_profile(&mut current, legacy_profile);
+        profile_store.save(&current)?;
+    }
+
+    let rt = rt.ok_or_else(|| "legacy migration requires the maintenance runtime".to_string())?;
+    for source in &plan.sources {
+        if !memory.stage_legacy_source(&source.id, &source.label, &source.content)? {
+            continue;
+        }
+        let profile_summary = profile
+            .lock()
+            .map_err(|_| "personal profile lock poisoned".to_string())?
+            .render_block(800);
+        let archival_user_text = format!(
+            "Historical Boris memory from {}. Extract only durable user facts, preferences, projects, relationships, habits, corrections, and open commitments. Do not infer anything not supported by this archive.\n\n{}",
+            source.label, source.content
+        );
+        let delta = rt.block_on(async {
+            tokio::time::timeout(
+                LLM_EXTRACT_TIMEOUT,
+                extract_with_llm(client.as_ref(), &archival_user_text, "", &profile_summary),
+            )
+            .await
+        });
+        let mut delta = match delta {
+            Ok(Ok(delta)) => delta,
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "AI refinement failed for legacy memory {}: {e}",
+                    source.path.display()
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "AI refinement timed out for legacy memory {}",
+                    source.path.display()
+                ));
+            }
+        };
+        // An archived sentence such as "forget my old city" is historical
+        // evidence, not a fresh erasure command. Only a live explicit user
+        // request may delete canonical memory.
+        delta.forget_all = false;
+        delta.forget_preferred_name = false;
+        delta.facts_remove_query.clear();
+        if !delta.is_empty() {
+            let mut current = profile
+                .lock()
+                .map_err(|_| "personal profile lock poisoned".to_string())?;
+            delta.apply(&mut current);
+            profile_store.save(&current)?;
+        }
+        memory.mark_legacy_source_refined(&source.id)?;
+    }
+
+    let retired = retire_legacy_files(&memory, &plan)?;
+    info!(
+        sources = plan.sources.len(),
+        retired = retired.len(),
+        ms = started.elapsed().as_millis() as u64,
+        "legacy memory migrated into canonical store"
+    );
     Ok(())
 }
 
@@ -829,5 +971,176 @@ mod tests {
         assert_eq!(traces[0].turn_id, "turn-1");
         assert_eq!(traces[1].turn_id, "turn-2");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn llm_extract_timeout_runs_inside_worker_runtime() {
+        use async_trait::async_trait;
+        use boris_ai::{LlmClient, LlmError};
+        use serde_json::{json, Value};
+
+        struct ExtractClient;
+
+        #[async_trait]
+        impl LlmClient for ExtractClient {
+            async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+                Ok(json!({
+                    "role": "assistant",
+                    "content": r#"{"preferred_name":null,"address_as":null,"preferences_add":["short answers"],"facts_add":[],"facts_remove_query":[],"ongoing_add":[],"ongoing_replace":null}"#
+                }))
+            }
+        }
+
+        let root = temp_root("llm-extract");
+        let path = root.join("profile.json");
+        let store = ProfileStore::new(&path);
+        let profile = Arc::new(Mutex::new(UserProfile::default()));
+
+        let worker = MaintenanceWorker::spawn_with_capacity(8);
+        worker
+            .handle()
+            .submit(MaintenanceJob::ExtractPersonal {
+                store: store.clone(),
+                profile: profile.clone(),
+                llm_extract: true,
+                user: "I always prefer short answers at my job".into(),
+                assistant: "Got it.".into(),
+                tools_used: vec![],
+                client: Arc::new(ExtractClient),
+            })
+            .unwrap();
+        assert!(worker.handle().flush(Duration::from_secs(2)));
+        worker.shutdown();
+
+        let saved = store.load().unwrap();
+        assert_eq!(saved.turns_seen, 1);
+        assert!(
+            saved
+                .preferences
+                .iter()
+                .any(|p| p.contains("short answers")),
+            "expected llm extract to persist a preference, got {saved:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verified_legacy_migration_refines_then_retires_files() {
+        use async_trait::async_trait;
+        use boris_ai::{LlmClient, LlmError};
+        use serde_json::{json, Value};
+
+        struct MigrationClient;
+
+        #[async_trait]
+        impl LlmClient for MigrationClient {
+            async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+                Ok(json!({
+                    "role": "assistant",
+                    "content": r#"{"preferred_name":null,"address_as":null,"preferences_add":["prefers concise answers"],"facts_add":[],"facts_remove_query":[],"ongoing_add":[],"ongoing_replace":null}"#
+                }))
+            }
+        }
+
+        let root = temp_root("legacy-migration");
+        let memory_root = root.join("memory");
+        let sessions_root = root.join("sessions").join("desktop");
+        std::fs::create_dir_all(&sessions_root).unwrap();
+        std::fs::create_dir_all(&memory_root).unwrap();
+        let legacy_markdown = memory_root.join("MEMORY.md");
+        let legacy_profile = memory_root.join("profile.json");
+        std::fs::write(&legacy_markdown, "The user prefers concise answers.").unwrap();
+        let mut old_profile = UserProfile::default();
+        old_profile.set_preferred_name("Ada");
+        ProfileStore::new(&legacy_profile)
+            .save(&old_profile)
+            .unwrap();
+
+        let memory =
+            Arc::new(crate::memory::MemoryStore::open(memory_root.join("memory.sqlite")).unwrap());
+        let profile_store = ProfileStore::canonical(memory.clone());
+        let profile = Arc::new(Mutex::new(UserProfile::default()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        run_legacy_migration(
+            memory.clone(),
+            profile_store,
+            profile,
+            LegacyMemoryPaths {
+                profile_path: legacy_profile.clone(),
+                memory_root: memory_root.clone(),
+                sessions_root,
+            },
+            Arc::new(MigrationClient),
+            Some(&runtime),
+        )
+        .unwrap();
+
+        assert!(!legacy_markdown.exists());
+        assert!(!legacy_profile.exists());
+        assert!(memory
+            .search("concise answers", 5)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.record.text.contains("concise answers")));
+        assert_eq!(
+            memory
+                .load_profile_snapshot()
+                .unwrap()
+                .preferred_name
+                .as_deref(),
+            Some("Ada")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_legacy_refinement_keeps_the_source_files() {
+        use async_trait::async_trait;
+        use boris_ai::{LlmClient, LlmError};
+        use serde_json::{json, Value};
+
+        struct MalformedMigrationClient;
+
+        #[async_trait]
+        impl LlmClient for MalformedMigrationClient {
+            async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+                Ok(json!({"role": "assistant", "content": "not valid extraction json"}))
+            }
+        }
+
+        let root = temp_root("legacy-migration-failure");
+        let memory_root = root.join("memory");
+        let sessions_root = root.join("sessions").join("desktop");
+        std::fs::create_dir_all(&sessions_root).unwrap();
+        std::fs::create_dir_all(&memory_root).unwrap();
+        let legacy_markdown = memory_root.join("MEMORY.md");
+        std::fs::write(&legacy_markdown, "The user prefers concise answers.").unwrap();
+        let memory =
+            Arc::new(crate::memory::MemoryStore::open(memory_root.join("memory.sqlite")).unwrap());
+        let profile_store = ProfileStore::canonical(memory.clone());
+        let profile = Arc::new(Mutex::new(UserProfile::default()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = run_legacy_migration(
+            memory,
+            profile_store,
+            profile,
+            LegacyMemoryPaths {
+                profile_path: memory_root.join("profile.json"),
+                memory_root,
+                sessions_root,
+            },
+            Arc::new(MalformedMigrationClient),
+            Some(&runtime),
+        );
+        assert!(result.is_err());
+        assert!(legacy_markdown.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

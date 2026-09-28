@@ -23,21 +23,56 @@ export class AppErrorBoundary extends Component<Props, State> {
     if (!this.state.error) return this.props.children;
 
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#0b0b0c] p-6 text-white">
-        <div className="w-full max-w-sm rounded-2xl border border-red-300/15 bg-white/[0.04] p-5 shadow-2xl">
-          <p className="text-sm font-semibold">Boris could not draw this window</p>
-          <p className="mt-2 text-sm leading-relaxed text-white/55">
-            Reload the window to try again. If this keeps happening, check the
-            Diagnostics logs in Boris.
+      <main className="main-console flex min-h-screen items-center justify-center p-6 text-white">
+        <section
+          className="boris-material boris-material--elevated boris-surface-enter w-full max-w-[390px] rounded-[22px] p-6"
+          aria-labelledby="app-error-title"
+          aria-describedby="app-error-description"
+        >
+          <div className="flex size-11 items-center justify-center rounded-[14px] border border-red-300/15 bg-red-400/10 text-red-300 shadow-[inset_0_0.5px_0_rgba(255,255,255,0.08)]">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="size-5"
+              aria-hidden="true"
+            >
+              <path d="M12 8v4.5" />
+              <path d="M12 16.25h.01" />
+              <path d="M10.3 3.8 2.6 17.2A2 2 0 0 0 4.35 20h15.3a2 2 0 0 0 1.74-2.8L13.7 3.8a1.96 1.96 0 0 0-3.4 0Z" />
+            </svg>
+          </div>
+
+          <p className="mt-5 text-[11px] font-semibold uppercase tracking-[0.09em] text-white/35">
+            Window interrupted
           </p>
-          <button
-            type="button"
-            className="mt-4 h-9 rounded-lg bg-white px-3 text-sm font-medium text-black transition-colors hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-            onClick={() => window.location.reload()}
+          <h1
+            id="app-error-title"
+            className="mt-1.5 text-[20px] font-semibold tracking-[-0.035em] text-white/95"
           >
-            Reload window
-          </button>
-        </div>
+            Boris couldn’t open this view
+          </h1>
+          <p
+            id="app-error-description"
+            className="mt-2 text-[13px] leading-relaxed text-white/50"
+          >
+            Reload the window to recover. If it happens again, the Diagnostics
+            log can help identify what went wrong.
+          </p>
+
+          <div className="mt-6 flex items-center justify-end">
+            <button
+              type="button"
+              className="inline-flex h-9 items-center justify-center rounded-[10px] bg-white px-4 text-[13px] font-semibold tracking-[-0.01em] text-black shadow-[inset_0_0.5px_0_rgba(255,255,255,0.7),0_1px_3px_rgba(0,0,0,0.25)] transition-[background-color,transform,box-shadow] duration-200 ease-[var(--boris-ease-standard)] hover:bg-white/90 active:scale-[0.975] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-white/25"
+              onClick={() => window.location.reload()}
+            >
+              Reload window
+            </button>
+          </div>
+        </section>
       </main>
     );
   }

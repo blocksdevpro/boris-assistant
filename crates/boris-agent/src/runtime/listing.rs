@@ -95,6 +95,9 @@ impl ActivationTable {
 }
 
 /// Hard-core tool names always listed when progressive is on (if registered).
+///
+/// Work tools (read/search/shell) stay listed even on non-coding turns so the
+/// model can actually execute instead of discovering them via `tool_search`.
 pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "get_time",
     "get_date",
@@ -105,6 +108,16 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "get_system_info",
     "get_user_context",
     "tool_search",
+    "file_read",
+    "file_write",
+    "file_edit",
+    "list_dir",
+    "glob",
+    "grep",
+    "bash",
+    "present_artifact",
+    "get_tool_output",
+    "collect_input",
 ];
 
 /// Feature flags for listing / concurrency / progress (owned by [`crate::Agent`]).
@@ -186,7 +199,40 @@ pub fn is_core_name(name: &str, features: &ToolRuntimeFeatures) -> bool {
 }
 
 /// Filter tools for the model tool list.
+///
+/// Pruning was previously silent; use [`pruned_tool_count`] or
+/// [`filter_listed_tools_with_count`] when the caller must surface how many
+/// definitions were dropped (Group A logs it alongside the schema budget).
 pub fn filter_listed_tools<'a>(
+    tools: &'a [Arc<dyn Tool>],
+    ctx: &ListToolsContext,
+) -> Vec<&'a Arc<dyn Tool>> {
+    filter_listed_tools_with_count(tools, ctx).0
+}
+
+/// Filter tools plus the number pruned (no scoring change).
+///
+/// Returns `(listed, pruned_count)` where `pruned_count = tools.len() -
+/// listed.len()`. Existing callers keep using [`filter_listed_tools`];
+/// new callers (Group A) use this to log the silent prune.
+pub fn filter_listed_tools_with_count<'a>(
+    tools: &'a [Arc<dyn Tool>],
+    ctx: &ListToolsContext,
+) -> (Vec<&'a Arc<dyn Tool>>, usize) {
+    let listed = filter_listed_inner(tools, ctx);
+    let pruned = tools.len().saturating_sub(listed.len());
+    (listed, pruned)
+}
+
+/// Number of tool definitions dropped by progressive listing.
+///
+/// `0` means everything is listed (progressive off, force-list-all, small
+/// registry, or everything selected). Does not change scoring.
+pub fn pruned_tool_count(tools: &[Arc<dyn Tool>], ctx: &ListToolsContext) -> usize {
+    filter_listed_tools_with_count(tools, ctx).1
+}
+
+fn filter_listed_inner<'a>(
     tools: &'a [Arc<dyn Tool>],
     ctx: &ListToolsContext,
 ) -> Vec<&'a Arc<dyn Tool>> {
@@ -353,6 +399,10 @@ mod tests {
                 list: false,
             }),
             Arc::new(Named {
+                name: "web_fetch",
+                list: false,
+            }),
+            Arc::new(Named {
                 name: "bash",
                 list: false,
             }),
@@ -392,7 +442,8 @@ mod tests {
         assert!(listed.contains(&"get_time"));
         assert!(listed.contains(&"list_skills"));
         assert!(listed.contains(&"file_read"));
-        assert!(!listed.contains(&"bash"));
+        assert!(listed.contains(&"bash"));
+        assert!(!listed.contains(&"web_fetch"));
     }
 
     #[test]
@@ -433,5 +484,44 @@ mod tests {
         assert!(t.contains("c"));
         std::thread::sleep(Duration::from_millis(60));
         assert!(t.snapshot().is_empty());
+    }
+
+    #[test]
+    fn pruned_count_matches_listed_difference_without_breaking_callers() {
+        // Build a registry large enough to trigger progressive filtering.
+        let mut many: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(Named {
+                name: "get_time",
+                list: false,
+            }),
+            Arc::new(Named {
+                name: "bash",
+                list: false,
+            }),
+        ];
+        for i in 0..15 {
+            many.push(Arc::new(Named {
+                name: Box::leak(format!("extra_{i}").into_boxed_str()),
+                list: false,
+            }));
+        }
+        let ctx = ListToolsContext {
+            features: ToolRuntimeFeatures {
+                progressive_listing: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let listed = filter_listed_tools(&many, &ctx);
+        let (listed2, pruned) = filter_listed_tools_with_count(&many, &ctx);
+        assert_eq!(listed.len(), listed2.len());
+        assert_eq!(pruned, pruned_tool_count(&many, &ctx));
+        assert_eq!(pruned, many.len().saturating_sub(listed.len()));
+        // Small registry: no prune.
+        let small: Vec<Arc<dyn Tool>> = vec![Arc::new(Named {
+            name: "a",
+            list: false,
+        })];
+        assert_eq!(pruned_tool_count(&small, &ListToolsContext::default()), 0);
     }
 }

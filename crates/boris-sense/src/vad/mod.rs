@@ -27,7 +27,7 @@ pub const VAD_INITIAL_TIMEOUT: Duration = Duration::from_millis(1600);
 /// `VADIterator` uses 100 ms, which is for file segmentation and cuts
 /// mid-clause on a voice loop. WebRTC needed ~900 ms because the GMM flickered
 /// to silence mid-sentence; Silero does not, so we can follow LiveKit.
-pub const VAD_SILENCE_WINDOW: Duration = Duration::from_millis(550);
+pub const VAD_SILENCE_WINDOW: Duration = Duration::from_millis(700);
 
 /// Native Silero hop duration (32 ms at 16 kHz). Not used as a skip interval —
 /// every hop must be scored so the LSTM state stays aligned.

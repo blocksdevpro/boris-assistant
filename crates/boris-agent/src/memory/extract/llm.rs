@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::memory::profile::{FactCategory, UserFact};
+use crate::memory::profile::{now_ms, FactCategory, UserFact};
 use boris_ai::{LlmClient, LlmError};
 
 use super::delta::ProfileDelta;
@@ -22,8 +22,10 @@ Return ONLY a JSON object (no markdown) with this shape:
   "preferred_name": string|null,
   "address_as": string|null,
   "preferences_add": string[],
-  "facts_add": [{"text": string, "category": "identity|preference|project|relationship|habit|other"}],
+  "facts_add": [{"text": string, "category": "identity|preference|project|relationship|habit|other", "memory_key": string|null, "expires_in_days": number|null}],
   "facts_remove_query": string[],
+  "forget_preferred_name": boolean,
+  "forget_all": boolean,
   "ongoing_add": string[],
   "ongoing_replace": string[]|null
 }
@@ -31,6 +33,9 @@ Rules:
 - Only durable facts (name, prefs, projects, people, habits). Not one-off chit-chat.
 - Prefer short factual phrases.
 - If nothing new, return empty arrays and nulls.
+- For corrections/contradictions, use the same stable memory_key as the old value (examples: preferred_editor, home_city). Put the stale value in facts_remove_query only when the user explicitly asks to forget it.
+- Set expires_in_days for temporary facts; omit/null means durable.
+- Forgetting must reflect an explicit human request. Never infer it from silence.
 - Do not invent. Do not quote the assistant persona as user facts.
 - Max 5 facts_add, max 5 preferences_add."#;
 
@@ -70,6 +75,8 @@ pub(super) fn parse_llm_delta(content: &str) -> Result<ProfileDelta, LlmError> {
             .take(5)
             .collect(),
         facts_remove_query: raw.facts_remove_query,
+        forget_preferred_name: raw.forget_preferred_name,
+        forget_all: raw.forget_all,
         ongoing_add: raw.ongoing_add.into_iter().take(5).collect(),
         ongoing_replace: raw
             .ongoing_replace
@@ -83,6 +90,14 @@ pub(super) fn parse_llm_delta(content: &str) -> Result<ProfileDelta, LlmError> {
         }
         let mut fact = UserFact::new(text, FactCategory::parse(&f.category), "llm_extract");
         fact.confidence = 0.65;
+        if let Some(key) = f.memory_key.filter(|key| !key.trim().is_empty()) {
+            fact = fact.with_memory_key(key);
+        }
+        if let Some(days) = f.expires_in_days.filter(|days| *days > 0) {
+            const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+            fact.expires_at_ms =
+                Some(now_ms().saturating_add(days.min(3_650).saturating_mul(DAY_MS)));
+        }
         delta.facts_add.push(fact);
     }
     Ok(delta)
@@ -101,6 +116,10 @@ struct LlmDeltaRaw {
     #[serde(default)]
     facts_remove_query: Vec<String>,
     #[serde(default)]
+    forget_preferred_name: bool,
+    #[serde(default)]
+    forget_all: bool,
+    #[serde(default)]
     ongoing_add: Vec<String>,
     #[serde(default)]
     ongoing_replace: Option<Vec<String>>,
@@ -111,6 +130,10 @@ struct LlmFactRaw {
     text: String,
     #[serde(default)]
     category: String,
+    #[serde(default)]
+    memory_key: Option<String>,
+    #[serde(default)]
+    expires_in_days: Option<u64>,
 }
 
 /// Slice the outermost `{ … }` span (tolerant of markdown fences).

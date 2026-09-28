@@ -40,6 +40,7 @@
 mod exec;
 mod output;
 mod policy;
+mod steer;
 
 pub use exec::BashTool;
 

@@ -39,6 +39,7 @@
 //! HITL confirmation only skips the confirm UI — path/shell/network hard gates
 //! still run after a user grant. See the crate README “Security model” section.
 
+pub mod activity;
 pub mod agent;
 pub mod capability;
 pub mod client;
@@ -71,17 +72,27 @@ pub mod types;
 pub use boris_ai::{
     parse_provider_list, split_model_and_provider, CompleteOptions, LlmClient, LlmError,
     LlmErrorKind, LlmStreamEvent, OpenRouterClient, ReasoningConfig, ReasoningEffort, RequestStage,
-    TokenUsage, DEFAULT_MAX_TOKENS,
+    TokenUsage, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS,
 };
 
-pub use agent::{Agent, AgentOptions};
+pub use activity::{
+    describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
+    Tense, VerbKind,
+};
+pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
-pub use context::{Context, Message, Role};
+pub use context::{
+    Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
+    TaskStateEntry, TaskStatus,
+};
 pub use error::{AgentError, AgentErrorKind};
-pub use loop_::{agent_loop, resume_pending_tool, LoopState};
+pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};
 pub use memory::{
-    FactCategory, LongTermMemory, MemoryHit, MemoryIndex, ProfileStore, UserFact, UserProfile,
+    discover_legacy_memory, merge_legacy_profile, retire_legacy_files, FactCategory, FactStatus,
+    LegacyMemoryPaths, LegacyMemorySource, LegacyMigrationPlan, LongTermMemory, MemoryEvent,
+    MemoryHit, MemoryIndex, MemoryKind, MemoryPrivacy, MemoryRecord, MemoryScope, MemorySearchHit,
+    MemoryStore, NewMemory, ProfileStore, StoredMemoryStatus, UserFact, UserProfile,
     PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
@@ -89,9 +100,9 @@ pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
 pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};
 pub use runtime::{
-    default_user_read_roots, ActivationSet, JsonlAuditSink, ListToolsContext, NetworkPolicy,
-    NullAuditSink, PendingToolCall, ProgressEvent, SandboxConfig, ShellPolicy, ToolRuntime,
-    ToolRuntimeFeatures,
+    default_user_read_roots, ActivationSet, InputKind, JsonlAuditSink, ListToolsContext,
+    NetworkPolicy, NullAuditSink, PendingInput, PendingToolCall, ProgressEvent, SandboxConfig,
+    ShellPolicy, ToolRuntime, ToolRuntimeFeatures,
 };
 pub use session::{
     generate_session_id, messages_fingerprint, ArtifactIndex, ArtifactKind, ArtifactMeta,
@@ -109,13 +120,13 @@ pub use stats::AgentStats;
 pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
     InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolRisk,
-    MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS,
+    ToolOutputStore, MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS, MAX_STORED_CHARS,
 };
 pub use tool_context::ToolCallContext;
 pub use tools::{
     artifact_tools, artifact_tools_at, bash_tools, builtin_tools, fs_tools, os_tools,
-    register_builtin_tools, register_builtin_tools_with_options,
-    register_builtin_tools_with_preset, web_tools, BuiltinToolPaths,
+    output_tools, output_tools_at, register_builtin_tools, register_builtin_tools_with_options,
+    register_builtin_tools_with_preset, register_mcp_tools, web_tools, BuiltinToolPaths,
 };
 pub use trace::{percentile_ms, summarize_traces, TraceSummary, TurnTrace};
 

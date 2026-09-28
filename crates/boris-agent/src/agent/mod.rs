@@ -27,15 +27,16 @@ use boris_ai::LlmClient;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::context::{Context, Message, Role};
-use crate::memory::LongTermMemory;
+use crate::context::{Context, Message, RetrievedMemory, Role, TaskStateCapsule, TaskStatus};
+use crate::memory::{LegacyMemoryPaths, LongTermMemory, MemoryStore};
 use crate::runtime::{
     new_activation_set, ActivationSet, JsonlAuditSink, NullAuditSink, PendingTurn, SandboxConfig,
     ToolRuntime, ToolRuntimeFeatures,
 };
 use crate::skills::{self, LoadedSkills};
 use crate::tool::Tool;
-use crate::tools::memory_tools::{memory_tools, SharedLongTermMemory};
+use crate::tools::memory::{memory_tools as canonical_memory_tools, SharedMemoryStore};
+use crate::tools::memory_tools::{memory_tools as legacy_memory_tools, SharedLongTermMemory};
 use crate::tools::skills_tools::{skill_tools, SharedSkills};
 use crate::types::{AgentEvent, EventListener, DEFAULT_MAX_TOOL_ROUNDS, SKILLS_MAX_TOOL_ROUNDS};
 
@@ -43,6 +44,45 @@ use personal::PersonalMemory;
 
 /// Max characters of user text included in turn-start logs.
 const LOG_PREVIEW_CHARS: usize = 80;
+
+/// Host handle to cancel an in-flight [`Agent::prompt`]. Cheap to clone; the
+/// engine thread keeps one copy while the turn runs on the agent runtime.
+#[derive(Clone, Debug)]
+pub struct TurnCancel {
+    token: CancellationToken,
+}
+
+/// Opaque snapshot of the model-visible conversation state before a turn.
+///
+/// Hosts can restore this when an interruption wins a race with a turn that
+/// has already completed. External tool side effects are intentionally not
+/// rolled back.
+#[derive(Clone)]
+pub struct AgentCheckpoint {
+    context: Context,
+}
+
+impl TurnCancel {
+    fn fresh() -> Self {
+        Self {
+            token: CancellationToken::new(),
+        }
+    }
+
+    /// Ask the loop and in-flight tools to stop. Cooperative: the current LLM
+    /// stream is dropped, bash/web poll the token.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    fn inner(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
 
 /// Stateful voice agent: context, tools, runtime, HITL, personal memory.
 pub struct Agent {
@@ -70,7 +110,10 @@ pub struct Agent {
     cancel: Option<CancellationToken>,
     /// Shared skill registry (catalog + load_skill tool).
     skills: Option<SharedSkills>,
-    /// Cross-session markdown memory (MEMORY.md + session logs).
+    /// Canonical SQLite memory store. This is the only memory path used by the
+    /// desktop host; `long_term` remains only for temporary legacy migration.
+    memory_store: Option<SharedMemoryStore>,
+    /// Legacy Markdown memory retained only for migration/backward compatibility.
     long_term: Option<SharedLongTermMemory>,
     /// Todo finish-gate fires remaining (cap).
     finish_gate_remaining: u32,
@@ -84,6 +127,162 @@ pub struct Agent {
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
     /// Background LTM / extract / index (owned by host or tests).
     maintenance: Option<crate::maintenance::MaintenanceHandle>,
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use boris_ai::{LlmClient, LlmError};
+    use serde_json::Value;
+
+    struct DummyClient;
+
+    #[async_trait]
+    impl LlmClient for DummyClient {
+        async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
+            Ok(serde_json::json!({"role":"assistant","content":"ok"}))
+        }
+    }
+
+    #[test]
+    fn agent_and_turn_cancel_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::Agent>();
+        assert_send::<super::TurnCancel>();
+    }
+
+    #[test]
+    fn persistence_excludes_ephemeral_host_controls() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push(super::Role::User, "hello");
+        agent
+            .context
+            .push_control("<system-reminder>finish</system-reminder>");
+
+        let exported = agent.export_messages_for_persist();
+        assert!(exported
+            .iter()
+            .any(|m| m.origin == crate::MessageOrigin::Human));
+        assert!(!exported
+            .iter()
+            .any(|m| m.origin == crate::MessageOrigin::HostControl));
+    }
+
+    #[test]
+    fn persistence_exports_history_that_model_pruning_removed() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.max_turns = 1;
+        agent.context.push(super::Role::User, "old question");
+        agent.context.push(super::Role::Assistant, "old answer");
+        agent.context.push(super::Role::User, "new question");
+
+        assert!(!agent
+            .context
+            .messages()
+            .iter()
+            .any(|message| message.content == serde_json::json!("old question")));
+        assert!(agent
+            .export_messages_for_persist()
+            .iter()
+            .any(|message| message.content == serde_json::json!("old question")));
+    }
+
+    #[test]
+    fn primary_agent_keeps_more_than_twenty_small_turns_in_model_context() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        for turn in 0..=20 {
+            agent
+                .context
+                .push(super::Role::User, format!("question-{turn}"));
+            agent
+                .context
+                .push(super::Role::Assistant, format!("answer-{turn}"));
+        }
+
+        assert!(agent
+            .context
+            .messages()
+            .iter()
+            .any(|message| message.content == serde_json::json!("question-0")));
+        assert_eq!(
+            agent
+                .context
+                .messages()
+                .iter()
+                .filter(|message| message.origin == crate::MessageOrigin::Human)
+                .count(),
+            21
+        );
+    }
+
+    #[test]
+    fn abort_closes_every_unresolved_tool_call_in_pending_batch() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push(super::Role::User, "run two actions");
+        agent.context.begin_task("run two actions");
+        agent.context.push(
+            super::Role::Assistant,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+                    {"id": "call-2", "type": "function", "function": {"name": "write", "arguments": "{}"}}
+                ]
+            }),
+        );
+        agent.context.push(
+            super::Role::Tool,
+            serde_json::json!({"tool_call_id": "call-1", "content": "done"}),
+        );
+        agent.pending_turn = Some(crate::runtime::PendingTurn {
+            pending: crate::runtime::PendingToolCall::new(
+                "pending-1",
+                "write",
+                serde_json::json!({}),
+                "write",
+                crate::ToolRisk::Dangerous,
+                "call-2",
+            ),
+            batch_with: Vec::new(),
+            remaining_calls: Vec::new(),
+            tools_used: vec!["read".into()],
+            tool_rounds: 1,
+            confirms_used: 1,
+            user_text: "run two actions".into(),
+            // B2/B4 compilation fix (Group A fields): defaults preserve the
+            // abort-clearing behavior under test.
+            todos_file: None,
+            markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+            gate_left: 0,
+            token_accounting: crate::types::TokenAccounting::default(),
+        });
+
+        agent.abort();
+
+        assert!(agent.pending_turn.is_none());
+        assert_eq!(agent.context.task_state().status, crate::TaskStatus::Failed);
+        let persisted = agent.export_messages_for_persist();
+        let call_2 = persisted
+            .iter()
+            .find(|message| {
+                matches!(message.role, super::Role::Tool)
+                    && message.content["tool_call_id"] == serde_json::json!("call-2")
+            })
+            .expect("aborted call must receive a tool observation");
+        assert!(call_2.content["content"]
+            .as_str()
+            .unwrap()
+            .contains("cancelled"));
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|message| matches!(message.role, super::Role::Tool))
+                .count(),
+            2,
+            "the resolved call must not receive a duplicate observation"
+        );
+    }
 }
 
 impl Agent {
@@ -102,7 +301,9 @@ impl Agent {
     }
 
     pub fn from_options(opts: AgentOptions) -> Self {
-        let mut context = Context::new(20);
+        // The primary agent is token-budgeted. A fixed turn cap silently loses
+        // short history before summary compaction has any reason to run.
+        let mut context = Context::new(u32::MAX);
         context.push(Role::System, opts.system_prompt.as_str());
 
         let mut policy = opts.sandbox.unwrap_or_default();
@@ -137,6 +338,7 @@ impl Agent {
             next_listener_id: AtomicU64::new(1),
             cancel: None,
             skills: None,
+            memory_store: None,
             long_term: None,
             finish_gate_remaining: 3,
             sandbox_snapshot,
@@ -258,7 +460,7 @@ impl Agent {
         let shared: SharedLongTermMemory = Arc::new(ltm);
         let already = self.tools.iter().any(|t| t.name() == "memory_search");
         if !already {
-            self.register_tools(memory_tools(shared.clone()));
+            self.register_tools(legacy_memory_tools(shared.clone()));
         }
         self.long_term = Some(shared.clone());
         self.sync_shared_tools();
@@ -273,6 +475,54 @@ impl Agent {
 
     pub fn long_term_memory(&self) -> Option<SharedLongTermMemory> {
         self.long_term.clone()
+    }
+
+    /// Enable Boris's canonical durable memory store.  It replaces the legacy
+    /// Markdown search tools by name, so callers cannot accidentally run both
+    /// retrieval systems in the same turn.
+    pub fn enable_memory_store(
+        &mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<SharedMemoryStore, String> {
+        let store = Arc::new(MemoryStore::open(path)?);
+        // `register_tools` deduplicates by name, replacing legacy
+        // `memory_search` / `memory_get` if the host enabled them earlier.
+        self.register_tools(canonical_memory_tools(store.clone()));
+        self.memory_store = Some(store.clone());
+        self.long_term = None;
+        self.sync_shared_tools();
+        self.refresh_system_prompt();
+        info!(path = %store.path().display(), "canonical memory enabled");
+        Ok(store)
+    }
+
+    pub fn memory_store(&self) -> Option<SharedMemoryStore> {
+        self.memory_store.clone()
+    }
+
+    /// Queue a verified one-time import of the retired Markdown/profile
+    /// memory layout. The maintenance worker keeps the source files unless
+    /// AI refinement and the final database verification both succeed.
+    pub fn migrate_legacy_memory(&self, paths: LegacyMemoryPaths) -> Result<(), String> {
+        let memory = self
+            .memory_store
+            .clone()
+            .ok_or_else(|| "canonical memory store is not enabled".to_string())?;
+        let personal = self
+            .personal
+            .as_ref()
+            .ok_or_else(|| "personal extraction context is not enabled".to_string())?;
+        let maintenance = self
+            .maintenance
+            .as_ref()
+            .ok_or_else(|| "maintenance worker is not enabled".to_string())?;
+        maintenance.submit(crate::maintenance::MaintenanceJob::MigrateLegacyMemory {
+            memory,
+            profile_store: personal.store.clone(),
+            profile: personal.profile.clone(),
+            paths,
+            client: Arc::clone(&self.client),
+        })
     }
 
     /// Install discovered skills: inject catalog into system prompt, register
@@ -404,6 +654,17 @@ impl Agent {
         self.artifacts_dir.as_deref()
     }
 
+    /// Bind or clear the session-local tool-output directory.
+    ///
+    /// When `Some`, re-registers `get_tool_output` against that dir and points
+    /// the runtime spill dir there. When `None`, clears the runtime dir only.
+    pub fn set_output_store_dir(&mut self, dir: Option<PathBuf>) {
+        self.runtime.set_output_store_dir(dir.clone());
+        if let Some(p) = dir {
+            self.register_tools(crate::tools::output_tools_at(&p));
+        }
+    }
+
     /// Bind all session-local paths. Best-effort sequential; no multi-step rollback.
     pub fn bind_session(&mut self, session_dir: &std::path::Path, session_id: &str) {
         self.set_session_id(Some(session_id.to_string()));
@@ -411,6 +672,7 @@ impl Agent {
         let todos = session_dir.join("todos.json");
         self.set_todos_path(Some(todos));
         self.set_artifacts_dir(Some(session_dir.join("artifacts")));
+        self.set_output_store_dir(Some(session_dir.join("tool_outputs")));
         self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
         self.set_subagent_session_root(Some(session_dir.to_path_buf()));
         if let Some(ltm) = &self.long_term {
@@ -448,14 +710,38 @@ impl Agent {
         self.pending_turn.is_some()
     }
 
+    /// Install a cancel token for the next [`Self::prompt`]. The host clones
+    /// the handle and may cancel from another thread while the turn runs.
+    pub fn arm_cancel(&mut self) -> TurnCancel {
+        let handle = TurnCancel::fresh();
+        self.cancel = Some(handle.inner());
+        handle
+    }
+
+    /// Snapshot conversation, task, and retrieval state before starting work.
+    pub fn checkpoint(&self) -> AgentCheckpoint {
+        AgentCheckpoint {
+            context: self.context.clone(),
+        }
+    }
+
+    /// Abandon the current turn and restore a previously captured checkpoint.
+    pub fn restore_checkpoint(&mut self, checkpoint: AgentCheckpoint) {
+        self.abort();
+        self.context = checkpoint.context;
+    }
+
     /// Drop pending HITL state and cancel in-flight loop token.
     pub fn abort(&mut self) {
         if let Some(ct) = self.cancel.take() {
             ct.cancel();
         }
         if self.pending_turn.take().is_some() {
-            info!("pending tool confirmation aborted");
+            let cancelled_calls = self.context.resolve_pending_tool_calls_as_cancelled();
+            self.context.finish_task(TaskStatus::Failed, "");
+            info!(cancelled_calls, "pending tool turn aborted");
         }
+        self.context.clear_host_controls();
         // Do not keep a turn-scoped shell grant after abort — next turn / retry
         // must re-confirm shell.
         self.runtime.clear_turn_grants();
@@ -533,6 +819,24 @@ impl Agent {
         self.runtime.set_policy(p);
     }
 
+    /// Remember a sticky `always allow` pattern (`reply always` in the host UI).
+    ///
+    /// Example: `approve_always("bash:git status*")`. Hard gates still run;
+    /// only the confirm UI is skipped for matching calls.
+    pub fn approve_always(&self, pattern: impl Into<String>) {
+        self.runtime.approve_always(pattern);
+    }
+
+    /// Current sticky approval patterns (host diagnostics).
+    pub fn always_approved_patterns(&self) -> Vec<String> {
+        self.runtime.always_approved_patterns()
+    }
+
+    /// Clear sticky approvals.
+    pub fn clear_always_approved(&self) {
+        self.runtime.clear_always_approved();
+    }
+
     /// Cap HITL confirmations per user turn (multi-tool budget). Minimum 1.
     pub fn set_max_confirms_per_turn(&mut self, n: u32) {
         let n = n.max(1);
@@ -546,9 +850,9 @@ impl Agent {
     pub fn reset(&mut self, system_prompt: &str) {
         self.abort();
         self.base_system_prompt = system_prompt.to_string();
-        self.context.messages.clear();
         let composed = self.composed_system_prompt();
-        self.context.push(Role::System, composed);
+        self.context.reset(composed);
+        self.refresh_system_prompt();
     }
 
     /// Alias for [`Self::reset`].
@@ -562,14 +866,45 @@ impl Agent {
         self.base_system_prompt = system_prompt.to_string();
         let composed = self.composed_system_prompt();
         self.context.load_history(&composed, history);
+        self.refresh_system_prompt();
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        self.context.messages = messages;
+        self.abort();
+        self.context.replace_history(messages);
+        self.refresh_system_prompt();
     }
 
+    /// Canonical transcript, not the compacted model request view. Conversation
+    /// events are append-only; the system row reflects the current prompt.
     pub fn export_messages(&self) -> Vec<Message> {
-        self.context.messages().to_vec()
+        self.context.history().to_vec()
+    }
+
+    pub fn task_state(&self) -> &TaskStateCapsule {
+        self.context.task_state()
+    }
+
+    pub fn set_task_state(&mut self, capsule: TaskStateCapsule) {
+        self.context.set_task_state(capsule);
+    }
+
+    pub fn retrieved_memory(&self) -> &[RetrievedMemory] {
+        self.context.retrieved_memory()
+    }
+
+    /// Same as [`Self::export_messages`] with secret collect_input values stripped.
+    pub fn export_messages_for_persist(&self) -> Vec<Message> {
+        self.export_messages()
+            .into_iter()
+            .filter(|m| m.origin.should_persist())
+            .map(|mut m| {
+                if matches!(m.role, Role::Tool) {
+                    m.content = crate::tools::collect_input::redact_secret_tool_content(&m.content);
+                }
+                m
+            })
+            .collect()
     }
 }
 

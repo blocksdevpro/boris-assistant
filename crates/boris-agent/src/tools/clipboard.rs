@@ -33,8 +33,11 @@ impl Tool for ClipboardGetTool {
     }
 
     fn meta(&self) -> ToolMeta {
-        // Dangerous (not Moderate): clipboard contents are attacker-influenceable
-        // (a user can copy anything, or a prior tool/page can coax a copy) and a
+        // Dangerous (not Moderate) + confirm, but still read_only=true.
+        // The read_only flag is intentional: the tool performs no filesystem /
+        // side-effect write and stays in the read-only wave class. Dangerous
+        // exists because clipboard contents are attacker-influenceable (a user
+        // can copy anything, or a prior tool/page can coax a copy) and a
         // subsequent web_fetch/web_search call can exfiltrate them under
         // NetworkPolicy::Open with no confirmation. Forcing confirmation here
         // (force_confirm_at_or_above defaults to Dangerous, and trusted_auto_moderate's
@@ -106,6 +109,9 @@ impl Tool for ClipboardSetTool {
     }
 
     fn meta(&self) -> ToolMeta {
+        // Moderate without confirm: writing the clipboard is a user-visible,
+        // reversible local effect (no network/shell). Reading (clipboard_get)
+        // is the Dangerous side because it can feed exfiltration.
         ToolMeta::with_risk(ToolRisk::Moderate)
             .kind(ToolKind::Write)
             .permissions(&[Permission::Clipboard])
@@ -159,5 +165,21 @@ mod tests {
             matches!(decision, PolicyDecision::NeedsConfirmation { .. }),
             "expected clipboard_get to require confirmation, got {decision:?}"
         );
+    }
+
+    #[test]
+    fn clipboard_get_stays_read_only_despite_dangerous() {
+        let meta = ClipboardGetTool.meta();
+        assert_eq!(meta.risk, ToolRisk::Dangerous);
+        assert_eq!(meta.read_only, Some(true));
+        assert!(meta.is_read_only());
+    }
+
+    #[test]
+    fn clipboard_set_is_moderate_write_without_confirm() {
+        let meta = ClipboardSetTool.meta();
+        assert_eq!(meta.risk, ToolRisk::Moderate);
+        assert_eq!(meta.read_only, Some(false));
+        assert!(!meta.requires_confirmation);
     }
 }

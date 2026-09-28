@@ -224,6 +224,14 @@ impl SpeechToText for ParakeetStt {
         BACKEND_ID
     }
 
+    /// Parakeet is an offline (full-context) model, but a full re-decode of
+    /// the growing prefix is cheap enough on short voice turns to serve as a
+    /// live partial. Hosts must still run a final `transcribe` at endpoint —
+    /// partials are advisory and may change as audio grows.
+    fn supports_partials(&self) -> bool {
+        true
+    }
+
     fn transcribe(&mut self, audio: &[AudioSample]) -> Result<String> {
         if audio.is_empty() {
             tracing::debug!("parakeet transcribe: empty audio → \"\"");
@@ -321,6 +329,12 @@ mod tests {
         let text = stt.transcribe(&[]).unwrap();
         assert_eq!(text, "");
         assert!(!stt.is_loaded());
+    }
+
+    #[test]
+    fn parakeet_advertises_prefix_partials() {
+        let stt = ParakeetStt::with_model_dir("dir");
+        assert!(SpeechToText::supports_partials(&stt));
     }
 
     #[test]

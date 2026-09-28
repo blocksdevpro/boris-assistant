@@ -95,11 +95,16 @@ mod tests {
     #[test]
     fn concurrent_calls_all_agree() {
         let _ort = lock_ort_for_test();
+        // Finish process-global `ort::init` on this thread first. Racing
+        // `commit()` from eight threads against the 1-thread pool deadlocks
+        // (and also deadlocks any Silero test waiting on `lock_ort_for_test`).
+        let primed = init_onnx_runtime();
         let handles: Vec<_> = (0..8)
             .map(|_| std::thread::spawn(init_onnx_runtime))
             .collect();
         let results: Vec<Result<()>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let first = &results[0];
+        assert_eq!(&primed, first);
         for r in &results {
             assert_eq!(r, first);
         }

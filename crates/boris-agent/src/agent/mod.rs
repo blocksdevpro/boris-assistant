@@ -107,6 +107,7 @@ pub struct Agent {
     /// Event bus: `(listener_id, callback)` — unsubscribe removes by id.
     listeners: Arc<Mutex<Vec<(u64, EventListener)>>>,
     next_listener_id: AtomicU64,
+    debug: Option<Arc<crate::debug::DebugCapture>>,
     cancel: Option<CancellationToken>,
     /// Shared skill registry (catalog + load_skill tool).
     skills: Option<SharedSkills>,
@@ -336,6 +337,7 @@ impl Agent {
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
             listeners: Arc::new(Mutex::new(Vec::new())),
             next_listener_id: AtomicU64::new(1),
+            debug: None,
             cancel: None,
             skills: None,
             memory_store: None,
@@ -771,6 +773,11 @@ impl Agent {
                 g.retain(|(lid, _)| *lid != id);
             }
         }
+    }
+
+    /// Attach an opt-in developer capture shared with the desktop host.
+    pub fn set_debug_capture(&mut self, capture: Arc<crate::debug::DebugCapture>) {
+        self.debug = Some(capture);
     }
 
     fn emit(&self, event: &AgentEvent) {

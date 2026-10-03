@@ -76,6 +76,8 @@ impl LlmPrefs {
 /// Model dirs default to `~/.boris/models/...` (see [`crate::paths`]).
 /// User prefs/secrets load from `config.toml` + `auth.json` via [`crate::settings`].
 pub struct PipelineConfig {
+    /// Optional, process-local developer capture controlled by the host.
+    pub debug_capture: Option<std::sync::Arc<boris_agent::DebugCapture>>,
     pub openrouter_api_key: String,
     /// Strong / primary model id (multi-step agent work).
     pub openrouter_model: Option<String>,
@@ -176,6 +178,7 @@ impl PipelineConfig {
         let context_window_tokens = resolve_context_window_tokens(&prefs);
 
         Self {
+            debug_capture: None,
             openrouter_api_key: prefs.openrouter_api_key,
             openrouter_model: strong,
             openrouter_fast_model: fast,

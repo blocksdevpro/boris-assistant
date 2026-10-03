@@ -33,6 +33,7 @@ export {
   onModelsProgress,
 } from "./commands/models";
 export { getSettings, saveSettings } from "./commands/settings";
+export { getDebugCapture, setDebugCapture, clearDebugCapture, type DebugEvent, type DebugSnapshot } from "./commands/diagnostics";
 export {
   getSessionArtifact,
   listSessionArtifacts,

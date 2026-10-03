@@ -109,6 +109,21 @@ pub(super) async fn complete_round(
         ));
     }
     let messages = state.context.as_json();
+    let request_seq = config.debug.as_ref().and_then(|debug| {
+        debug.record_request(
+            config.turn_id.as_deref(),
+            &format!("{stage:?}"),
+            state.context,
+            &tools_json,
+            request_tokens_est,
+            context_limit,
+            output_reserve,
+        )
+    });
+    let started = Instant::now();
+    let debug = config.debug.clone();
+    let turn_id = config.turn_id.clone();
+    let mut reported_usage = None;
     let emit = emit.clone();
     let mut acc = String::new();
     let mut last_emit = Instant::now();
@@ -117,6 +132,34 @@ pub(super) async fn complete_round(
         let text = match ev {
             LlmStreamEvent::Usage(usage) => {
                 accounting.record_provider_usage(&usage);
+                reported_usage = Some(usage);
+                return;
+            }
+            LlmStreamEvent::ModelSend { model } => {
+                if let Some(debug) = &debug {
+                    debug.record(turn_id.as_deref(), "model_send", json!({
+                        "request_seq": request_seq,
+                        "model": model,
+                    }));
+                }
+                return;
+            }
+            LlmStreamEvent::TransportAttempt { mode } => {
+                if let Some(debug) = &debug {
+                    debug.record(turn_id.as_deref(), "transport_attempt", json!({
+                        "request_seq": request_seq,
+                        "mode": mode,
+                    }));
+                }
+                return;
+            }
+            LlmStreamEvent::FirstDelta { ttfb_ms } => {
+                if let Some(debug) = &debug {
+                    debug.record(turn_id.as_deref(), "first_delta", json!({
+                        "request_seq": request_seq,
+                        "ttfb_ms": ttfb_ms,
+                    }));
+                }
                 return;
             }
             LlmStreamEvent::ReasoningDelta { text } => text,
@@ -139,17 +182,41 @@ pub(super) async fn complete_round(
     let stream = state
         .client
         .complete_stream(messages, tools_json, opts, &mut on_event);
-    let msg = if let Some(ct) = cancel.as_ref() {
+    let result = if let Some(ct) = cancel.as_ref() {
         tokio::select! {
             biased;
             _ = ct.cancelled() => {
-                return Err(AgentError::cancelled("llm cancelled"));
+                Err(AgentError::cancelled("llm cancelled"))
             }
-            msg = stream => msg.map_err(AgentError::from)?,
+            msg = stream => msg.map_err(AgentError::from),
         }
     } else {
-        stream.await.map_err(AgentError::from)?
+        stream.await.map_err(AgentError::from)
     };
+    drop(on_event);
+    if let Some(debug) = &config.debug {
+        match &result {
+            Ok(message) => { debug.record(config.turn_id.as_deref(), "response", json!({
+                "request_seq": request_seq,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "message": message,
+                "usage": reported_usage.as_ref().map(|usage| json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                    "cached_tokens": usage.cached_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                    "reasoning_tokens": usage.reasoning,
+                })),
+            })); }
+            Err(error) => { debug.record(config.turn_id.as_deref(), "request_error", json!({
+                "request_seq": request_seq,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "message": error.to_string(),
+            })); }
+        }
+    }
+    let msg = result?;
     if dirty {
         emit(AgentEvent::Reasoning {
             preview: reasoning_preview(&acc),

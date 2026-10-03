@@ -44,6 +44,7 @@ pub mod agent;
 pub mod capability;
 pub mod client;
 pub mod context;
+pub mod debug;
 pub mod error;
 pub mod eval;
 pub mod finish_gate;
@@ -85,6 +86,7 @@ pub use context::{
     Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
     TaskStateEntry, TaskStatus,
 };
+pub use debug::{DebugCapture, DebugEvent, DebugSnapshot};
 pub use error::{AgentError, AgentErrorKind};
 pub use loop_::{agent_loop, resume_pending_input, resume_pending_tool, LoopState};
 pub use maintenance::{MaintenanceHandle, MaintenanceJob, MaintenanceWorker};

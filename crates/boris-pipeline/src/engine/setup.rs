@@ -520,6 +520,9 @@ fn build_agent(config: &PipelineConfig) -> Agent {
             ))
         };
     let mut agent = Agent::new(client, &config.system_prompt);
+    if let Some(capture) = &config.debug_capture {
+        agent.set_debug_capture(capture.clone());
+    }
     paths::migrate_home_if_needed();
     if let Err(e) = paths::ensure_agent_dirs() {
         tracing::warn!(error = %e, "ensure agent workspace/audit dirs failed");

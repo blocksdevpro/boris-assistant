@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
+  Activity,
   LoaderCircle,
   Settings as SettingsIcon,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
 import { getLogPath, logger } from "@/lib/logger";
 import { toneFor } from "@/lib/phaseVisual";
 import { HomeView } from "./HomeView";
+import { DebugView } from "./DebugView";
 import {
   CAPABILITY_OPTIONS,
   type ModelCheckState,
@@ -324,12 +326,14 @@ export function MainWindow() {
         title={
           view === "settings"
             ? "Settings"
+            : view === "debug"
+              ? "Developer monitor"
             : view === "teach"
               ? "Your voice"
               : "Boris"
         }
         leading={
-          view === "settings" ? (
+          view === "settings" || view === "debug" ? (
             <button
               type="button"
               onClick={() => setView("home")}
@@ -354,6 +358,16 @@ export function MainWindow() {
         }
         trailing={
           view === "home" ? (
+            <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label="Developer monitor"
+              title="Developer monitor"
+              onClick={() => setView("debug")}
+              className="main-settings-button inline-flex size-8 items-center justify-center rounded-[9px] text-white/42 transition-[color,background-color,transform] duration-150 hover:bg-white/[0.07] hover:text-white active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+            >
+              <Activity className="size-4" strokeWidth={1.75} />
+            </button>
             <button
               type="button"
               aria-label="Settings"
@@ -362,6 +376,7 @@ export function MainWindow() {
             >
               <SettingsIcon className="size-4" strokeWidth={1.75} />
             </button>
+            </div>
           ) : undefined
         }
       />
@@ -422,6 +437,8 @@ export function MainWindow() {
                   setView("settings");
                 }}
               />
+            ) : view === "debug" ? (
+              <DebugView status={status} />
             ) : view === "teach" ? (
               <TeachVoiceView
                 status={status}

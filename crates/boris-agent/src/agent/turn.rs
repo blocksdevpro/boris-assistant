@@ -138,12 +138,18 @@ impl Agent {
             // Use the host's original utterance, never an injected user-role
             // research/finish reminder appended later in the same turn.
             task: Some(crate::task::classify_task(user_text)),
+            debug: self.debug.clone(),
         }
     }
 
     fn make_emit(&self) -> crate::types::EmitFn {
         let listeners = std::sync::Arc::clone(&self.listeners);
+        let debug = self.debug.clone();
+        let turn_id = self.turn_id.clone();
         std::sync::Arc::new(move |event: AgentEvent| {
+            if let Some(debug) = &debug {
+                debug.record_agent_event(turn_id.as_deref(), &event);
+            }
             if let Ok(guard) = listeners.lock() {
                 for (_, listener) in guard.iter() {
                     listener(&event);
@@ -229,22 +235,81 @@ impl Agent {
         );
         let mut options = boris_ai::CompleteOptions::for_stage(boris_ai::RequestStage::SimpleVoice);
         options.max_tokens = Some(512);
+        let request_seq = self.debug.as_ref().and_then(|debug| debug.record(
+            self.turn_id.as_deref(),
+            "request",
+            serde_json::json!({
+                "stage": "SummaryCompaction",
+                "messages": [
+                    { "source": "system", "message": messages[0] },
+                    { "source": "compacted history", "message": messages[1] }
+                ],
+                "tools": null,
+                "estimate_tokens": accounting.peak_estimated_request_tokens,
+                "context_limit": context_limit,
+                "output_reserve": 512,
+                "breakdown": {
+                    "system": crate::context::estimate_serialized_tokens(&messages[0].to_string()),
+                    "compacted history": crate::context::estimate_serialized_tokens(&messages[1].to_string())
+                },
+            }),
+        ));
+        let debug = self.debug.clone();
+        let turn_id = self.turn_id.clone();
+        let mut reported_usage = None;
         let mut on_event = |event: boris_ai::LlmStreamEvent| {
-            if let boris_ai::LlmStreamEvent::Usage(usage) = event {
-                accounting.record_provider_usage(&usage);
+            match event {
+                boris_ai::LlmStreamEvent::Usage(usage) => {
+                    accounting.record_provider_usage(&usage);
+                    reported_usage = Some(usage);
+                }
+                boris_ai::LlmStreamEvent::ModelSend { model } => {
+                    if let Some(debug) = &debug {
+                        debug.record(turn_id.as_deref(), "model_send", serde_json::json!({ "request_seq": request_seq, "model": model }));
+                    }
+                }
+                boris_ai::LlmStreamEvent::TransportAttempt { mode } => {
+                    if let Some(debug) = &debug {
+                        debug.record(turn_id.as_deref(), "transport_attempt", serde_json::json!({ "request_seq": request_seq, "mode": mode }));
+                    }
+                }
+                _ => {}
             }
         };
         let stream =
             self.client
                 .complete_stream(messages, serde_json::Value::Null, options, &mut on_event);
-        let msg = tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                return Err(AgentError::cancelled("summary compaction cancelled"));
+                Err(AgentError::cancelled("summary compaction cancelled"))
             }
-            msg = stream => msg.map_err(AgentError::from)?,
+            msg = stream => msg.map_err(AgentError::from),
         };
         drop(on_event);
+        if let Some(debug) = &self.debug {
+            match &result {
+                Ok(message) => { debug.record(self.turn_id.as_deref(), "response", serde_json::json!({
+                    "request_seq": request_seq,
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "message": message,
+                    "usage": reported_usage.as_ref().map(|usage: &boris_ai::TokenUsage| serde_json::json!({
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens,
+                        "cached_tokens": usage.cached_tokens,
+                        "cache_write_tokens": usage.cache_write_tokens,
+                        "reasoning_tokens": usage.reasoning,
+                    })),
+                })); }
+                Err(error) => { debug.record(self.turn_id.as_deref(), "request_error", serde_json::json!({
+                    "request_seq": request_seq,
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "message": error.to_string(),
+                })); }
+            }
+        }
+        let msg = result?;
         let summary = msg
             .get("content")
             .and_then(|c| c.as_str())
@@ -740,6 +805,9 @@ impl Agent {
             AgentOutcome::NeedsInput { .. } => (TaskStatus::WaitingForInput, ""),
         };
         self.context.finish_task(task_status, assistant_task_text);
+        if let Some(debug) = &self.debug {
+            debug.record_history(self.turn_id.as_deref(), &self.context);
+        }
         info!(
             outcome = outcome_label,
             duration_ms = duration.as_millis() as u64,

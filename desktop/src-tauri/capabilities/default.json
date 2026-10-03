@@ -35,6 +35,9 @@
     "allow-save-app-settings",
     "allow-get-log-path",
     "allow-frontend-log",
+    "allow-get-debug-capture",
+    "allow-set-debug-capture",
+    "allow-clear-debug-capture",
     "allow-list-session-artifacts",
     "allow-get-session-artifact",
     "allow-check-app-update"

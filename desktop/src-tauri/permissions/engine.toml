@@ -81,6 +81,21 @@ description = "Write a frontend log line into the desktop log file"
 commands.allow = ["frontend_log"]
 
 [[permission]]
+identifier = "allow-get-debug-capture"
+description = "Read in-memory developer capture events"
+commands.allow = ["get_debug_capture"]
+
+[[permission]]
+identifier = "allow-set-debug-capture"
+description = "Start or pause in-memory developer capture"
+commands.allow = ["set_debug_capture"]
+
+[[permission]]
+identifier = "allow-clear-debug-capture"
+description = "Clear in-memory developer capture events"
+commands.allow = ["clear_debug_capture"]
+
+[[permission]]
 identifier = "allow-list-session-artifacts"
 description = "List visual cards in the active voice session"
 commands.allow = ["list_session_artifacts"]

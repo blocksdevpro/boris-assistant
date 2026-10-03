@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-export type View = "home" | "settings" | "teach";
+export type View = "home" | "settings" | "teach" | "debug";
 
 export type SettingsCategory =
   | "general"

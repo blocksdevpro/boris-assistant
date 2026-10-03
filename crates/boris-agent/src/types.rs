@@ -44,6 +44,8 @@ pub struct AgentLoopConfig {
     pub force_list_all: bool,
     /// Latest user-task traits for routing / listing / finish gates.
     pub task: Option<crate::task::TaskTraits>,
+    /// Optional, process-local developer capture.
+    pub debug: Option<std::sync::Arc<crate::debug::DebugCapture>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -55,6 +57,7 @@ impl Default for AgentLoopConfig {
             features: crate::runtime::ToolRuntimeFeatures::default(),
             force_list_all: false,
             task: None,
+            debug: None,
         }
     }
 }

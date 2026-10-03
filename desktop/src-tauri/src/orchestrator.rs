@@ -17,7 +17,7 @@ use std::thread;
 
 use boris_pipeline::{
     devices, paths, DeviceDto, Engine, EngineCommand, EngineHandle, LlmPrefs, PipelineConfig,
-    PreflightReport, StatusPicture,
+    PreflightReport, StatusPicture, DebugCapture, DebugSnapshot,
 };
 use boris_tts_supertone::SUPERTONE_SAMPLE_RATE;
 use tracing::{debug, error, info, warn};
@@ -132,6 +132,7 @@ impl StatusMirrorState {
 
 /// Shared app state: engine handle + latest status snapshot + device prefs.
 pub struct AppState {
+    debug_capture: Arc<DebugCapture>,
     status: Arc<Mutex<StatusMirrorState>>,
     handle: Mutex<Option<EngineHandle>>,
     /// Join handle + shutdown sender; taken on teardown / rebuild.
@@ -146,6 +147,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            debug_capture: Arc::new(DebugCapture::default()),
             status: Arc::new(Mutex::new(StatusMirrorState::new())),
             handle: Mutex::new(None),
             engine: Mutex::new(None),
@@ -157,6 +159,18 @@ impl AppState {
 
     pub fn status(&self) -> StatusPicture {
         lock_or_recover(&self.status, "status").picture.clone()
+    }
+
+    pub fn debug_snapshot(&self, after: u64) -> DebugSnapshot {
+        self.debug_capture.snapshot(after)
+    }
+
+    pub fn set_debug_capture(&self, enabled: bool) {
+        self.debug_capture.set_enabled(enabled);
+    }
+
+    pub fn clear_debug_capture(&self) {
+        self.debug_capture.clear();
     }
 
     /// Dispatch while holding the mirror lock so Stop cannot emit an older
@@ -323,12 +337,13 @@ impl AppState {
         prefs.openrouter_model_provider = fingerprint.model_provider.clone();
         prefs.openrouter_fast_provider = fingerprint.fast_provider.clone();
         prefs.openrouter_pin_provider = fingerprint.pin_provider;
-        let config = PipelineConfig::with_llm(
+        let mut config = PipelineConfig::with_llm(
             prefs,
             SUPERTONE_SAMPLE_RATE,
             WAKEWORD_MODEL_BYTES.to_vec(),
             VAD_MODEL_BYTES.to_vec(),
         );
+        config.debug_capture = Some(self.debug_capture.clone());
 
         let (engine, handle, status_rx) = Engine::spawn(config).map_err(|e| e.to_string())?;
         *lock_or_recover(&self.engine, "engine") = Some(engine);

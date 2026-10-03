@@ -44,6 +44,7 @@ impl LlmClient for OpenRouterClient {
         on_event(LlmStreamEvent::ModelSend {
             model: self.model.clone(),
         });
+        on_event(LlmStreamEvent::TransportAttempt { mode: "stream" });
         let started = Instant::now();
         let mut first_delta_emitted = false;
         let mut saw_payload_delta = false;
@@ -123,6 +124,7 @@ impl OpenRouterClient {
         on_event: &mut (dyn FnMut(LlmStreamEvent) + Send),
     ) -> Result<Value, LlmError> {
         let started = Instant::now();
+        on_event(LlmStreamEvent::TransportAttempt { mode: "blocking_fallback" });
         match self.complete_blocking_inner(messages, tools, opts).await {
             Ok((message, usage)) => {
                 log_complete(

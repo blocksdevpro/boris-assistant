@@ -15,6 +15,10 @@ pub enum LlmStreamEvent {
     ModelSend {
         model: String,
     },
+    /// A real HTTP attempt. A streaming fallback can emit a second attempt.
+    TransportAttempt {
+        mode: &'static str,
+    },
     /// First content or tool-call delta arrived (time-to-first-byte).
     FirstDelta {
         ttfb_ms: u64,

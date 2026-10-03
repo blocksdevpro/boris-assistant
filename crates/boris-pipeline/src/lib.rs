@@ -50,6 +50,7 @@ pub mod status;
 
 pub use artifacts::{get_session_artifact, list_session_artifacts, ArtifactCard, ArtifactListItem};
 pub use config::{LlmPrefs, PipelineConfig};
+pub use boris_agent::{DebugCapture, DebugSnapshot};
 pub use devices::DeviceDto;
 pub use diagnostics::{log_environment, log_model_load_failure};
 pub use download::{

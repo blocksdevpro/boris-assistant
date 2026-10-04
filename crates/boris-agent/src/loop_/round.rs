@@ -60,7 +60,7 @@ pub(super) async fn complete_round(
     cancel: &Option<CancellationToken>,
     accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
-    let tools_json = if at_cap {
+    let mut tools_json = if at_cap {
         Value::Null
     } else {
         let (payload, pruned) = listed_tools_json(state.tools, config, state.activated);
@@ -73,6 +73,30 @@ pub(super) async fn complete_round(
         }
         payload
     };
+    if state.runtime.artifact_delivery_exhausted() {
+        if let Some(tools) = tools_json.as_array_mut() {
+            tools.retain(|tool| tool["function"]["name"] != "present_artifact");
+        }
+    }
+    let listed_names: Vec<String> = tools_json
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(ToOwned::to_owned))
+        .collect();
+    let listing_changed = state.activated.and_then(|set| {
+        set.lock()
+            .ok()
+            .map(|mut table| table.record_listed(listed_names.iter().cloned()))
+    });
+    if let Some(debug) = &config.debug {
+        debug.record(config.turn_id.as_deref(), "tool_listing", json!({
+            "registered": state.tools.len(), "listed": listed_names.len(), "names": listed_names,
+            "schema_tokens_est": if tools_json.is_null() { 0 } else { crate::context::estimate_serialized_tokens(&tools_json.to_string()) },
+            "availability_changed": listing_changed,
+            "presentation_disabled": state.runtime.artifact_delivery_exhausted(),
+        }));
+    }
     let task = config
         .task
         .unwrap_or_else(|| crate::task::classify_task(user_text));
@@ -137,28 +161,40 @@ pub(super) async fn complete_round(
             }
             LlmStreamEvent::ModelSend { model } => {
                 if let Some(debug) = &debug {
-                    debug.record(turn_id.as_deref(), "model_send", json!({
-                        "request_seq": request_seq,
-                        "model": model,
-                    }));
+                    debug.record(
+                        turn_id.as_deref(),
+                        "model_send",
+                        json!({
+                            "request_seq": request_seq,
+                            "model": model,
+                        }),
+                    );
                 }
                 return;
             }
             LlmStreamEvent::TransportAttempt { mode } => {
                 if let Some(debug) = &debug {
-                    debug.record(turn_id.as_deref(), "transport_attempt", json!({
-                        "request_seq": request_seq,
-                        "mode": mode,
-                    }));
+                    debug.record(
+                        turn_id.as_deref(),
+                        "transport_attempt",
+                        json!({
+                            "request_seq": request_seq,
+                            "mode": mode,
+                        }),
+                    );
                 }
                 return;
             }
             LlmStreamEvent::FirstDelta { ttfb_ms } => {
                 if let Some(debug) = &debug {
-                    debug.record(turn_id.as_deref(), "first_delta", json!({
-                        "request_seq": request_seq,
-                        "ttfb_ms": ttfb_ms,
-                    }));
+                    debug.record(
+                        turn_id.as_deref(),
+                        "first_delta",
+                        json!({
+                            "request_seq": request_seq,
+                            "ttfb_ms": ttfb_ms,
+                        }),
+                    );
                 }
                 return;
             }
@@ -196,24 +232,36 @@ pub(super) async fn complete_round(
     drop(on_event);
     if let Some(debug) = &config.debug {
         match &result {
-            Ok(message) => { debug.record(config.turn_id.as_deref(), "response", json!({
-                "request_seq": request_seq,
-                "duration_ms": started.elapsed().as_millis() as u64,
-                "message": message,
-                "usage": reported_usage.as_ref().map(|usage| json!({
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
-                    "cached_tokens": usage.cached_tokens,
-                    "cache_write_tokens": usage.cache_write_tokens,
-                    "reasoning_tokens": usage.reasoning,
-                })),
-            })); }
-            Err(error) => { debug.record(config.turn_id.as_deref(), "request_error", json!({
-                "request_seq": request_seq,
-                "duration_ms": started.elapsed().as_millis() as u64,
-                "message": error.to_string(),
-            })); }
+            Ok(message) => {
+                debug.record(
+                    config.turn_id.as_deref(),
+                    "response",
+                    json!({
+                        "request_seq": request_seq,
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "message": message,
+                        "usage": reported_usage.as_ref().map(|usage| json!({
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens,
+                            "cached_tokens": usage.cached_tokens,
+                            "cache_write_tokens": usage.cache_write_tokens,
+                            "reasoning_tokens": usage.reasoning,
+                        })),
+                    }),
+                );
+            }
+            Err(error) => {
+                debug.record(
+                    config.turn_id.as_deref(),
+                    "request_error",
+                    json!({
+                        "request_seq": request_seq,
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "message": error.to_string(),
+                    }),
+                );
+            }
         }
     }
     let msg = result?;

@@ -64,13 +64,25 @@ impl DebugCapture {
     }
 
     pub fn snapshot(&self, after: u64) -> DebugSnapshot {
-        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         DebugSnapshot {
             enabled: self.enabled(),
-            oldest_seq: state.events.front().map(|(event, _)| event.seq).unwrap_or(state.seq + 1),
+            oldest_seq: state
+                .events
+                .front()
+                .map(|(event, _)| event.seq)
+                .unwrap_or(state.seq + 1),
             latest_seq: state.seq,
             dropped_events: state.dropped_events,
-            events: state.events.iter().filter(|(event, _)| event.seq > after).map(|(event, _)| event.clone()).collect(),
+            events: state
+                .events
+                .iter()
+                .filter(|(event, _)| event.seq > after)
+                .map(|(event, _)| event.clone())
+                .collect(),
         }
     }
 
@@ -86,15 +98,21 @@ impl DebugCapture {
         let seq = state.seq;
         let event = DebugEvent {
             seq,
-            at_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+            at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             turn_id: turn_id.map(str::to_owned),
             kind: kind.to_owned(),
             data,
         };
-        let bytes = serde_json::to_vec(&event).map(|value| value.len()).unwrap_or(0);
+        let bytes = serde_json::to_vec(&event)
+            .map(|value| value.len())
+            .unwrap_or(0);
         state.bytes = state.bytes.saturating_add(bytes);
         state.events.push_back((event, bytes));
-        while state.events.len() > MAX_EVENTS || (state.bytes > MAX_BYTES && state.events.len() > 1) {
+        while state.events.len() > MAX_EVENTS || (state.bytes > MAX_BYTES && state.events.len() > 1)
+        {
             if let Some((_, removed)) = state.events.pop_front() {
                 state.bytes = state.bytes.saturating_sub(removed);
                 state.dropped_events += 1;
@@ -117,47 +135,59 @@ impl DebugCapture {
             return None;
         }
         let mut breakdown = std::collections::BTreeMap::<&str, usize>::new();
-        let messages: Vec<Value> = context.wire_messages().iter().map(|message| {
-            let source = match message.origin {
-                MessageOrigin::System => "system",
-                MessageOrigin::Human => "human",
-                MessageOrigin::Assistant => "assistant",
-                MessageOrigin::Tool => "tool results",
-                MessageOrigin::HostControl => "host controls",
-                MessageOrigin::Summary | MessageOrigin::CompactedTool => "compacted history",
-                MessageOrigin::Skill => "skills",
-                MessageOrigin::PersonalContext => "personal context",
-                MessageOrigin::TaskState => "task state",
-                MessageOrigin::RetrievedMemory => "retrieved memory",
-                MessageOrigin::DerivedContext => "derived context",
-            };
-            let wire = message.dump();
-            let message_tokens = estimate_serialized_tokens(&wire.to_string());
-            if message.origin == MessageOrigin::DerivedContext {
-                let mut section_tokens = 0;
-                for (name, body) in context.derived_context_sections() {
-                    let tokens = estimate_serialized_tokens(&format!("## {name}\n{body}\n"));
-                    *breakdown.entry(name).or_default() += tokens;
-                    section_tokens += tokens;
+        let messages: Vec<Value> = context
+            .wire_messages()
+            .iter()
+            .map(|message| {
+                let source = match message.origin {
+                    MessageOrigin::System => "system",
+                    MessageOrigin::Human => "human",
+                    MessageOrigin::Assistant => "assistant",
+                    MessageOrigin::Tool => "tool results",
+                    MessageOrigin::HostControl => "host controls",
+                    MessageOrigin::Summary | MessageOrigin::CompactedTool => "compacted history",
+                    MessageOrigin::Skill => "skills",
+                    MessageOrigin::PersonalContext => "personal context",
+                    MessageOrigin::TaskState => "task state",
+                    MessageOrigin::RetrievedMemory => "retrieved memory",
+                    MessageOrigin::DerivedContext => "derived context",
+                };
+                let wire = message.dump();
+                let message_tokens = estimate_serialized_tokens(&wire.to_string());
+                if message.origin == MessageOrigin::DerivedContext {
+                    let mut section_tokens = 0;
+                    for (name, body) in context.derived_context_sections() {
+                        let tokens = estimate_serialized_tokens(&format!("## {name}\n{body}\n"));
+                        *breakdown.entry(name).or_default() += tokens;
+                        section_tokens += tokens;
+                    }
+                    *breakdown.entry("derived framing").or_default() +=
+                        message_tokens.saturating_sub(section_tokens);
+                } else {
+                    *breakdown.entry(source).or_default() += message_tokens;
                 }
-                *breakdown.entry("derived framing").or_default() += message_tokens.saturating_sub(section_tokens);
-            } else {
-                *breakdown.entry(source).or_default() += message_tokens;
-            }
-            json!({ "source": source, "message": wire })
-        }).collect();
+                json!({ "source": source, "message": wire })
+            })
+            .collect();
         if !tools.is_null() {
-            breakdown.insert("tool schemas", estimate_serialized_tokens(&tools.to_string()));
+            breakdown.insert(
+                "tool schemas",
+                estimate_serialized_tokens(&tools.to_string()),
+            );
         }
-        self.record(turn_id, "request", json!({
-            "stage": stage,
-            "messages": messages,
-            "tools": tools,
-            "estimate_tokens": estimate,
-            "context_limit": context_limit,
-            "output_reserve": output_reserve,
-            "breakdown": breakdown,
-        }))
+        self.record(
+            turn_id,
+            "request",
+            json!({
+                "stage": stage,
+                "messages": messages,
+                "tools": tools,
+                "estimate_tokens": estimate,
+                "context_limit": context_limit,
+                "output_reserve": output_reserve,
+                "breakdown": breakdown,
+            }),
+        )
     }
 
     /// Canonical append-only transcript, including messages pruned from the model view.
@@ -165,10 +195,16 @@ impl DebugCapture {
         if !self.enabled() {
             return;
         }
-        let messages: Vec<Value> = context.history().iter().map(|message| json!({
-            "source": format!("{:?}", message.origin),
-            "message": message.dump(),
-        })).collect();
+        let messages: Vec<Value> = context
+            .history()
+            .iter()
+            .map(|message| {
+                json!({
+                    "source": format!("{:?}", message.origin),
+                    "message": message.dump(),
+                })
+            })
+            .collect();
         self.record(turn_id, "history", json!({ "messages": messages }));
     }
 
@@ -178,15 +214,43 @@ impl DebugCapture {
         }
         let (kind, data) = match event {
             AgentEvent::AgentStart => ("agent_start", json!({})),
-            AgentEvent::AgentEnd { outcome } => ("agent_end", json!({ "outcome": format!("{outcome:?}") })),
+            AgentEvent::AgentEnd { outcome } => {
+                ("agent_end", json!({ "outcome": format!("{outcome:?}") }))
+            }
             AgentEvent::TurnStart { round } => ("round_start", json!({ "round": round })),
             AgentEvent::TurnEnd { round } => ("round_end", json!({ "round": round })),
-            AgentEvent::MessageEnd { role, preview } => ("message", json!({ "role": role.to_string(), "preview": preview })),
+            AgentEvent::MessageEnd { role, preview } => (
+                "message",
+                json!({ "role": role.to_string(), "preview": preview }),
+            ),
             AgentEvent::ToolNote { text } => ("tool_note", json!({ "text": text })),
-            AgentEvent::ToolExecutionStart { call_id, tool_name, args_summary } => ("tool_start", json!({ "call_id": call_id, "tool_name": tool_name, "args_summary": args_summary })),
-            AgentEvent::ToolExecutionEnd { call_id, tool_name, ok, duration_ms } => ("tool_end", json!({ "call_id": call_id, "tool_name": tool_name, "ok": ok, "duration_ms": duration_ms })),
+            AgentEvent::ReportFallback { meta, title, .. } => (
+                "report_fallback",
+                json!({
+                    "title": title, "saved": meta.is_some(), "meta": meta,
+                }),
+            ),
+            AgentEvent::ToolExecutionStart {
+                call_id,
+                tool_name,
+                args_summary,
+            } => (
+                "tool_start",
+                json!({ "call_id": call_id, "tool_name": tool_name, "args_summary": args_summary }),
+            ),
+            AgentEvent::ToolExecutionEnd {
+                call_id,
+                tool_name,
+                ok,
+                duration_ms,
+            } => (
+                "tool_end",
+                json!({ "call_id": call_id, "tool_name": tool_name, "ok": ok, "duration_ms": duration_ms }),
+            ),
             AgentEvent::ToolProgress { .. } | AgentEvent::Reasoning { .. } => return,
-            AgentEvent::NeedsConfirmation { pending } => ("confirmation", json!({ "tool": pending.name })),
+            AgentEvent::NeedsConfirmation { pending } => {
+                ("confirmation", json!({ "tool": pending.name }))
+            }
             AgentEvent::NeedsInput { pending } => ("input", json!({ "tool": pending.name })),
             AgentEvent::Error { message } => ("error", json!({ "message": message })),
         };
@@ -202,9 +266,13 @@ mod tests {
     #[test]
     fn opt_in_cursor_and_clear() {
         let capture = DebugCapture::default();
-        assert!(capture.record(Some("turn"), "test", json!({"value": 1})).is_none());
+        assert!(capture
+            .record(Some("turn"), "test", json!({"value": 1}))
+            .is_none());
         capture.set_enabled(true);
-        let first = capture.record(Some("turn"), "test", json!({"value": 1})).unwrap();
+        let first = capture
+            .record(Some("turn"), "test", json!({"value": 1}))
+            .unwrap();
         capture.record(Some("turn"), "test", json!({"value": 2}));
         assert_eq!(capture.snapshot(first).events.len(), 1);
         capture.clear();
@@ -220,11 +288,25 @@ mod tests {
         context.push(Role::System, "system policy");
         context.push(Role::User, "question");
         context.push(Role::Assistant, json!({"content": "", "tool_calls": [{"id": "1", "function": {"name": "lookup", "arguments": "{}"}}]}));
-        context.push(Role::Tool, json!({"tool_call_id": "1", "content": "full tool output"}));
+        context.push(
+            Role::Tool,
+            json!({"tool_call_id": "1", "content": "full tool output"}),
+        );
         let tools = json!([{"type": "function", "function": {"name": "lookup"}}]);
-        capture.record_request(Some("turn-1"), "ToolPlanning", &context, &tools, context.estimate_request_tokens(&tools), 128_000, 4_096);
+        capture.record_request(
+            Some("turn-1"),
+            "ToolPlanning",
+            &context,
+            &tools,
+            context.estimate_request_tokens(&tools),
+            128_000,
+            4_096,
+        );
         let event = capture.snapshot(0).events.pop().unwrap();
-        assert_eq!(event.data["messages"][3]["message"]["content"], "full tool output");
+        assert_eq!(
+            event.data["messages"][3]["message"]["content"],
+            "full tool output"
+        );
         assert!(event.data["breakdown"]["tool results"].as_u64().unwrap() > 0);
         assert!(event.data["breakdown"]["tool schemas"].as_u64().unwrap() > 0);
         assert_eq!(event.data["tools"], tools);

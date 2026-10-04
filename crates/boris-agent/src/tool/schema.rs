@@ -90,23 +90,33 @@ fn validate_value(
     path: &str,
     raw_preview: &str,
 ) -> Result<(), InvalidArgs> {
-    let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) else {
+    let Some(types) = schema.get("type") else {
         // No type constraint — accept.
         return Ok(());
     };
 
-    if !type_matches(expected_type, value) {
+    let expected_types: Vec<&str> = match types {
+        Value::String(ty) => vec![ty.as_str()],
+        Value::Array(types) => types.iter().filter_map(Value::as_str).collect(),
+        _ => return Ok(()),
+    };
+    let Some(expected_type) = expected_types
+        .iter()
+        .copied()
+        .find(|ty| type_matches(ty, value))
+    else {
+        let expected = expected_types.join(" or ");
         return Err(InvalidArgs::new(
             "type_mismatch",
             path,
-            expected_type,
+            &expected,
             format!(
-                "at `{path}`: expected {expected_type}, got {}",
+                "at `{path}`: expected {expected}, got {}",
                 value_type_name(value)
             ),
             raw_preview,
         ));
-    }
+    };
 
     match expected_type {
         "object" => validate_object(schema, value, path, raw_preview),
@@ -200,6 +210,35 @@ mod tests {
     #[test]
     fn accepts_valid_object() {
         assert!(validate_args(&schema(), &json!({"name": "boris", "n": 1}), "{}").is_ok());
+    }
+
+    #[test]
+    fn nullable_types_allow_only_the_advertised_shapes_and_validate_nested_objects() {
+        let schema = json!({"type":"object", "properties":{
+            "id":{"type":["string","null"]},
+            "nested":{"type":["object","null"], "required":["name"], "properties":{"name":{"type":"string"}}}
+        }});
+        for args in [
+            json!({}),
+            json!({"id":null}),
+            json!({"id":""}),
+            json!({"nested":null}),
+            json!({"nested":{"name":"x"}}),
+        ] {
+            validate_args(&schema, &args, &args.to_string()).unwrap();
+        }
+        for args in [
+            json!({"id":42}),
+            json!({"id":[]}),
+            json!({"id":false}),
+            json!({"nested":{}}),
+            json!({"nested":{"name":1}}),
+        ] {
+            assert!(
+                validate_args(&schema, &args, &args.to_string()).is_err(),
+                "{args}"
+            );
+        }
     }
 
     #[test]

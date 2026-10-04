@@ -60,6 +60,7 @@ pub(super) struct Picture {
     pub context_limit: Option<u32>,
     pub context_estimated: bool,
     pub artifact: Option<ArtifactPeek>,
+    pub fallback_report: Option<crate::artifacts::ArtifactCard>,
     pub wake_enroll: Option<WakeEnrollPeek>,
     pub input: Option<InputPeek>,
     pub status_tx: Sender<StatusPicture>,
@@ -92,6 +93,7 @@ impl Picture {
             context_limit: self.context_limit,
             context_estimated: self.context_estimated,
             artifact: self.artifact.clone(),
+            fallback_report: self.fallback_report.clone(),
             wake_enroll: self.wake_enroll.clone(),
             input: self.input.clone(),
         };
@@ -113,6 +115,9 @@ impl Picture {
             }
             if snapshot.artifact.is_none() {
                 snapshot.artifact = latest.artifact.clone();
+            }
+            if snapshot.fallback_report.is_none() {
+                snapshot.fallback_report = latest.fallback_report.clone();
             }
         }
         snapshot.seq = latest.seq;
@@ -177,6 +182,24 @@ impl Picture {
         }
     }
 
+    pub fn clear_artifacts(&mut self) {
+        self.artifact = None;
+        self.fallback_report = None;
+        let mut latest = self.latest.lock().unwrap_or_else(|p| p.into_inner());
+        latest.artifact = None;
+        latest.fallback_report = None;
+    }
+
+    pub fn sync_fallback_report(&mut self) {
+        let latest = self.latest.lock().unwrap_or_else(|p| p.into_inner());
+        if latest.turn == self.turn.map(|turn| turn.to_string()) {
+            self.fallback_report = latest.fallback_report.clone();
+            if self.fallback_report.is_some() {
+                self.artifact = latest.artifact.clone();
+            }
+        }
+    }
+
     /// Rough token estimate (chars/4) for the overlay context meter only.
     /// Zero stays zero — a fresh turn with no provider usage yet is `0`,
     /// not `1`.
@@ -230,6 +253,7 @@ mod tests {
             context_limit: None,
             context_estimated: false,
             artifact: None,
+            fallback_report: None,
             wake_enroll: None,
             input: None,
             status_tx,
@@ -257,11 +281,41 @@ mod tests {
             snapshots[2].thinking.as_deref(),
             Some("Checking the source")
         );
-
         picture.clear_activity();
         let cleared = status_rx.try_recv().unwrap();
         assert_eq!(cleared.seq, 4);
         assert_eq!(cleared.activity, None);
         assert_eq!(cleared.thinking, None);
+
+        {
+            let mut latest = picture.latest.lock().unwrap();
+            latest.fallback_report = Some(crate::ArtifactCard {
+                id: "unsaved-report".into(),
+                title: "Audit".into(),
+                kind: "markdown".into(),
+                language: None,
+                path: String::new(),
+                pinned: false,
+                revision: 1,
+                body: "Full execution evidence".into(),
+            });
+        }
+        picture.update_context(100, None, false);
+        picture.sync_fallback_report();
+        picture.set_phase(Phase::Talking);
+        let spoken = status_rx.try_iter().last().unwrap();
+        assert_eq!(
+            spoken.fallback_report.unwrap().body,
+            "Full execution evidence"
+        );
+        picture.clear_artifacts();
+        picture.set_phase(Phase::Armed);
+        assert!(status_rx
+            .try_iter()
+            .last()
+            .unwrap()
+            .fallback_report
+            .is_none());
+
     }
 }

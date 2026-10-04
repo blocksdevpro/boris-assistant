@@ -45,6 +45,7 @@ pub struct ToolRuntime {
     /// When `None`, truncated observations are returned without a reread hint.
     output_store_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     gate: super::ConcurrencyGate,
+    artifact_failures_this_turn: AtomicU64,
 }
 
 impl ToolRuntime {
@@ -60,6 +61,7 @@ impl ToolRuntime {
             always_approved: std::sync::Mutex::new(Vec::new()),
             output_store_dir: std::sync::Mutex::new(None),
             gate: super::ConcurrencyGate::new(16),
+            artifact_failures_this_turn: AtomicU64::new(0),
         }
     }
 
@@ -93,6 +95,12 @@ impl ToolRuntime {
     pub fn clear_turn_grants(&self) {
         self.shell_granted_this_turn.store(false, Ordering::Relaxed);
         self.shell_grant_turn.store(0, Ordering::Relaxed);
+        self.artifact_failures_this_turn.store(0, Ordering::Relaxed);
+    }
+
+    /// Stop presentation repair after the initial failure and one corrected retry.
+    pub fn artifact_delivery_exhausted(&self) -> bool {
+        self.artifact_failures_this_turn.load(Ordering::Relaxed) >= 2
     }
 
     /// Start a new host turn, auto-clearing a stale shell grant.
@@ -102,7 +110,9 @@ impl ToolRuntime {
     /// Grants issued for `turn` itself are kept. `turn` must be monotonic;
     /// `0` is reserved for "no turn".
     pub fn begin_turn(&self, turn: u64) {
-        self.turn_seq.store(turn, Ordering::Relaxed);
+        if self.turn_seq.swap(turn, Ordering::Relaxed) != turn {
+            self.artifact_failures_this_turn.store(0, Ordering::Relaxed);
+        }
         let grant_turn = self.shell_grant_turn.load(Ordering::Relaxed);
         if self.shell_granted_this_turn.load(Ordering::Relaxed)
             && grant_turn != 0
@@ -324,10 +334,7 @@ impl ToolRuntime {
         let args = args.clone();
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(tool.name(), &args);
-        apply_skip_confirmation(
-            decide(&self.policy, &meta, &args, opts.confirms_used),
-            skip,
-        )
+        apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip)
     }
 
     /// Run policy + optional execute for one tool (async).
@@ -356,17 +363,23 @@ impl ToolRuntime {
                 false,
                 obs.bytes,
             );
-            return InvokeResult::Observation(obs.to_provider_text());
+            let mut text = obs.to_provider_text();
+            if tool.name() == "present_artifact" {
+                self.artifact_failures_this_turn
+                    .fetch_add(1, Ordering::Relaxed);
+                if self.artifact_delivery_exhausted() {
+                    text.push_str("\nPresentation is disabled for this turn after two failures. Finish with a short spoken status; do not retry presentation");
+                }
+            }
+            return InvokeResult::Observation(text);
         }
         let args = inv.args.clone();
 
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(&inv.name, &args);
-        let decision = apply_skip_confirmation(
-            decide(&self.policy, &meta, &args, opts.confirms_used),
-            skip,
-        );
+        let decision =
+            apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip);
 
         match decision {
             PolicyDecision::Deny { reason } => {
@@ -443,7 +456,11 @@ impl ToolRuntime {
             .acquire(tool.name(), meta.effective_max_concurrency())
             .await;
         let started = Instant::now();
-        let result = run_with_timeout(tool, &ctx, args, meta.default_timeout).await;
+        let result = if tool.name() == "present_artifact" && self.artifact_delivery_exhausted() {
+            Err(crate::ToolError::failed("Presentation recovery budget exhausted for this turn. Use the on-screen fallback report and finish with a short spoken status. Do not retry present_artifact"))
+        } else {
+            run_with_timeout(tool, &ctx, args, meta.default_timeout).await
+        };
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let budget = meta.result_char_budget();
@@ -488,7 +505,14 @@ impl ToolRuntime {
                 );
                 InvokeResult::Observation(obs)
             }
-            Err(e) => {
+            Err(mut e) => {
+                if tool.name() == "present_artifact" {
+                    self.artifact_failures_this_turn
+                        .fetch_add(1, Ordering::Relaxed);
+                    if self.artifact_delivery_exhausted() {
+                        e.message.push_str(". Presentation is now disabled for this turn; use the fallback report and do not retry");
+                    }
+                }
                 let timed_out = is_timeout(&e);
                 let kind = if timed_out { "timeout" } else { "error" };
                 let decision = if timed_out { "timeout" } else { decision_label };
@@ -647,10 +671,7 @@ fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(|s| {
-                        let base = s
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .unwrap_or(s);
+                        let base = s.rsplit(['/', '\\']).next().unwrap_or(s);
                         format!(" in {base}")
                     })
                     .unwrap_or_default();
@@ -729,7 +750,7 @@ fn basename(p: &str) -> String {
 fn url_host(url: &str) -> String {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
     let host = after_scheme
-        .split(['/','?', '#'])
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or(after_scheme);
     truncate_voice_chars(host, 32)
@@ -854,6 +875,56 @@ mod tests {
     use std::time::Duration;
 
     struct LongTool;
+
+    #[tokio::test]
+    async fn presentation_recovery_budget_survives_resume_and_resets_for_new_turn() {
+        struct FailingPresentation(AtomicU64);
+        #[async_trait]
+        impl Tool for FailingPresentation {
+            fn name(&self) -> &str {
+                "present_artifact"
+            }
+            fn description(&self) -> &str {
+                "presentation failure"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object"})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().max_concurrency(1)
+            }
+            async fn execute(&self, _: &ToolCallContext, _: Value) -> Result<String, ToolError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(ToolError::failed("delivery failed"))
+            }
+        }
+        let runtime = ToolRuntime::null();
+        let tool = FailingPresentation(AtomicU64::new(0));
+        runtime.begin_turn(1);
+        for call in 0..3 {
+            let result = runtime
+                .invoke(
+                    &tool,
+                    ToolInvocation::new(format!("c{call}"), tool.name(), json!({})),
+                    InvokeOptions::default(),
+                )
+                .await;
+            assert!(matches!(result, InvokeResult::Observation(text) if text.starts_with("Error")));
+            runtime.begin_turn(1);
+        }
+        assert!(runtime.artifact_delivery_exhausted());
+        assert_eq!(tool.0.load(Ordering::Relaxed), 2);
+        runtime.begin_turn(2);
+        assert!(!runtime.artifact_delivery_exhausted());
+        runtime
+            .invoke(
+                &tool,
+                ToolInvocation::new("new", tool.name(), json!({})),
+                InvokeOptions::default(),
+            )
+            .await;
+        assert_eq!(tool.0.load(Ordering::Relaxed), 3);
+    }
 
     #[async_trait]
     impl Tool for LongTool {

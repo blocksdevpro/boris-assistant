@@ -56,6 +56,17 @@ impl ArtifactStore {
 
     /// Create a new card or replace the body of an existing one.
     pub fn present(&self, req: PresentRequest) -> Result<PresentedArtifact, String> {
+        if let Some(id) = req
+            .id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("recovery-"))
+        {
+            let mut recovery = req.clone();
+            recovery.id = Some(id.to_string());
+            let mut out = self.recovery_store().present(recovery)?;
+            mark_recovery(&mut out.meta);
+            return Ok(out);
+        }
         let title = normalize_title(&req.title)?;
         let body = normalize_body(&req.body)?;
         let kind = req.kind;
@@ -66,7 +77,7 @@ impl ArtifactStore {
 
         let (meta, created) = if let Some(raw_id) = req.id.as_deref() {
             let existing = resolve_meta(&index, raw_id)
-                .ok_or_else(|| format!("unknown artifact id `{raw_id}`"))?
+                .ok_or_else(|| format!("unknown artifact id `{raw_id}`. To create a new card, omit id. To revise a card, use an id or filename returned by list_artifacts"))?
                 .clone();
             let mut meta = existing;
             meta.title = title;
@@ -143,6 +154,76 @@ impl ArtifactStore {
             .map_err(|e| format!("read artifact {}: {e}", path.display()))?;
         Ok((meta, body))
     }
+
+    fn recovery_store(&self) -> Self {
+        Self::new(self.dir.join("recovery"))
+    }
+
+    /// Preserve a report independently of the primary catalog after delivery fails.
+    pub fn preserve_report(&self, mut req: PresentRequest) -> Result<PresentedArtifact, String> {
+        req.id = None;
+        let mut out = self.recovery_store().present(req)?;
+        mark_recovery(&mut out.meta);
+        Ok(out)
+    }
+
+    /// Read both catalogs without rewriting a damaged primary index.
+    pub fn load_display_index(&self) -> Result<ArtifactIndex, String> {
+        let primary = self.load_index();
+        let recovery = self.recovery_store().load_index();
+        let (mut index, mut recovery) = match (primary, recovery) {
+            (Ok(primary), Ok(recovery)) => (primary, recovery),
+            (Ok(primary), Err(error)) => {
+                tracing::warn!(%error, "recovery catalog unavailable; keeping primary cards readable");
+                (primary, ArtifactIndex::default())
+            }
+            (Err(error), Ok(recovery)) if !recovery.items.is_empty() => {
+                tracing::warn!(%error, "primary catalog unavailable; using preserved reports");
+                (ArtifactIndex::default(), recovery)
+            }
+            (Err(error), _) => return Err(error),
+        };
+        for meta in &mut recovery.items {
+            mark_recovery(meta);
+        }
+        let primary_current = index.current.as_ref().and_then(|id| index.get(id)).cloned();
+        let recovery_current = recovery
+            .current
+            .as_ref()
+            .and_then(|id| {
+                recovery
+                    .items
+                    .iter()
+                    .find(|m| m.id == format!("recovery-{id}"))
+            })
+            .cloned();
+        index.current = primary_current
+            .into_iter()
+            .chain(recovery_current)
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+            .map(|m| m.id);
+        index.items.extend(recovery.items);
+        Ok(index)
+    }
+
+    pub fn get_display(&self, id: Option<&str>) -> Result<(ArtifactMeta, String), String> {
+        let index = self.load_display_index()?;
+        let id = id
+            .or(index.current.as_deref())
+            .ok_or("no current artifact in this session")?;
+        if let Some(id) = id.strip_prefix("recovery-") {
+            let (mut meta, body) = self.recovery_store().get(Some(id))?;
+            mark_recovery(&mut meta);
+            Ok((meta, body))
+        } else {
+            self.get(Some(id))
+        }
+    }
+}
+
+fn mark_recovery(meta: &mut ArtifactMeta) {
+    meta.id = format!("recovery-{}", meta.id);
+    meta.path = format!("recovery/{}", meta.path);
 }
 
 impl ArtifactStore {

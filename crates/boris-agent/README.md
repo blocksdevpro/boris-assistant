@@ -135,6 +135,26 @@ image and PDF formats, but it does not inspect image pixels or extract PDF
 text; the host can open the file on screen. `web_fetch` retries a likely
 Cloudflare or bot-protection response once.
 
+Optional `list_dir` / `glob` / `grep` roots accept omission, null, or blank as
+the Boris sandbox root; required file targets remain strict. `web_fetch`
+converts content to Markdown after dropping script/style, SVG, and navigation
+subtrees, preserving article links, headings, and code.
+
+Artifact IDs are existing returned references, not model-chosen creation slugs.
+Omitted, null, or blank IDs create a card (`present_artifact`) or read the current
+card (`get_artifact`). An unknown update still fails with a creation hint. After
+an allowed presentation fails, its full report is preserved in an independent
+`artifacts/recovery/` catalog and delivered through an unthrottled host event.
+If saving also fails, the host still receives the full body for on-screen display.
+The runtime permits one corrected retry, then withholds presentation for the
+rest of the turn. Recovery cards remain available through list/get after restart.
+
+Everyday file, shell, web, memory, and artifact tools are always listed when
+registered by the capability preset and within the schema budget. Discovery is
+for long-tail tools. `tool_search` distinguishes actual current availability from
+new activations; debug capture includes a `tool_listing` event with names,
+estimated schema tokens, and availability changes for each model request.
+
 ## Optional MCP host integration
 
 Hosts can load stdio MCP server definitions from `~/.boris/mcp.json`, discover
@@ -153,8 +173,11 @@ choose to add that integration.
 
 Trusted system content stays separate from untrusted user-role data:
 personal context, the skills catalog, retrieved records, and task evidence are
-wired as user-role messages (the small memory hint rides in the system prompt),
-and tool observations arrive as raw text with
+wired as user-role messages after conversation history (the small memory hint
+rides in the system prompt) so changing task evidence does not rewrite the early
+prompt prefix. Ambiguous dictated restrictions (such as repeated negation) are
+kept separately as clarification candidates, not settled constraints.
+Tool observations arrive as raw text with
 pending `<system-reminder>` controls flushed as their own message only once
 the batch resolves. Token estimates run over serialized message JSON.
 Summary compaction is lossless — only complete oldest turns fold into a

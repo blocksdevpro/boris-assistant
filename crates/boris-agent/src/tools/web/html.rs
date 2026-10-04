@@ -72,9 +72,19 @@ pub(crate) fn looks_like_html(bytes: &[u8]) -> bool {
     head.contains("<html") || head.contains("<!doctype html")
 }
 
-/// Convert HTML to readable text: prefer `htmd` markdown, fall back to tag strip.
+/// Convert content DOM to Markdown, dropping entire non-content subtrees.
+/// Never fall back to tag stripping: it retains script/style text.
 pub(crate) fn html_to_text(html: &str) -> String {
-    htmd::convert(html).unwrap_or_else(|_| strip_tags(html))
+    htmd::HtmlToMarkdownBuilder::new()
+        .skip_tags(vec![
+            "head", "script", "style", "noscript", "template", "svg", "canvas", "iframe", "nav",
+            "footer", "aside", "form",
+        ])
+        .build()
+        .convert(html)
+        .unwrap_or_else(|_| {
+            "Unable to extract readable content from this HTML page; try web_search instead.".into()
+        })
 }
 
 #[cfg(test)]
@@ -124,5 +134,43 @@ mod tests {
         let text = html_to_text("<h1>Title</h1><p>Body para</p>");
         assert!(text.to_ascii_lowercase().contains("title") || text.contains("Body"));
         assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn html_to_text_removes_noise_but_preserves_article_links_and_code() {
+        let html = r#"<!doctype html><html><head><script>HEADNOISE</script><style>HEADCSS</style></head>
+            <body><nav>NAVNOISE</nav><main><header><h1>Article title</h1></header>
+            <p>Useful <a href="https://example.com/docs">documentation</a>.</p>
+            <script>const BODYNOISE = `<svg>nested noise</svg>`;</script>
+            <style>BODYCSS { display: none; }</style><svg><title>SVGNOISE</title></svg>
+            <template>TEMPLATENOISE</template><pre><code>let x = "&lt;script&gt;";</code></pre>
+            </main><aside>ASIDENOISE</aside><footer>FOOTERNOISE</footer></body></html>"#;
+        let text = html_to_text(html);
+        for noise in [
+            "HEADNOISE",
+            "HEADCSS",
+            "NAVNOISE",
+            "BODYNOISE",
+            "BODYCSS",
+            "SVGNOISE",
+            "TEMPLATENOISE",
+            "ASIDENOISE",
+            "FOOTERNOISE",
+        ] {
+            assert!(!text.contains(noise), "retained {noise}: {text}");
+        }
+        assert!(text.contains("Article title"));
+        assert!(text.contains("https://example.com/docs"));
+        assert!(text.contains("<script>"));
+        assert!(text.contains("let x"));
+    }
+
+    #[test]
+    fn html_cleaning_handles_mixed_case_and_malformed_markup() {
+        let text = html_to_text(
+            "<MAIN><h1>Title</h1><SCRIPT>NOISE</SCRIPT><p>Keep this<STYLE>CSSNOISE</STYLE>",
+        );
+        assert!(text.contains("Keep this"));
+        assert!(!text.contains("NOISE"));
     }
 }

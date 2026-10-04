@@ -7,7 +7,7 @@ use crate::tool::{
     optional_string, optional_u64_strict, require_object, truncate_tool_result, Permission, Tool,
     ToolError, ToolKind, ToolMeta, ToolRisk,
 };
-use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::resolve_search_root;
 
 use super::{FsRoots, DEFAULT_LIST_LIMIT, MAX_LIST};
 
@@ -106,8 +106,8 @@ impl Tool for ListDirTool {
             "type": "object",
             "properties": {
                 "path": {
-                    "type": "string",
-                    "description": "Directory to list (default: sandbox root). Relative paths are under the sandbox."
+                    "type": ["string", "null"],
+                    "description": "Directory to list. Omitted, null, or blank means the Boris sandbox root, not the process working directory. Relative paths are under the sandbox."
                 },
                 "limit": {
                     "type": "integer",
@@ -132,9 +132,8 @@ impl Tool for ListDirTool {
         args: Value,
     ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
-        let raw = optional_string(obj, "path")
-            .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
-        let path = resolve_under_roots(&raw, &self.roots.readers())?;
+        let raw = optional_string(obj, "path");
+        let path = resolve_search_root(raw.as_deref(), &self.roots.sandbox, &self.roots.readers())?;
         let limit = clamp_list_limit(optional_u64_strict(obj, "limit")?);
 
         let meta = tokio::fs::metadata(&path)

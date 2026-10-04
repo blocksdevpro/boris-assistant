@@ -400,6 +400,7 @@ export function OverlayWindow({
                   <motion.div key={`card-${status.artifact.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
                     <OverlayArtifactCard
                       peek={status.artifact}
+                      fallback={status.fallback_report}
                     />
                   </motion.div>
                 ) : !orbOnly && caption ? (

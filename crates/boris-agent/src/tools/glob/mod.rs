@@ -25,7 +25,7 @@ use crate::tool::{
     Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::files::FsRoots;
-use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::resolve_search_root;
 
 use walk::walk_collect;
 
@@ -64,8 +64,8 @@ impl Tool for GlobTool {
                     "description": "Glob pattern relative to the search root, e.g. '**/*.rs' or '*.txt'"
                 },
                 "path": {
-                    "type": "string",
-                    "description": "Root directory to search (default: sandbox)"
+                    "type": ["string", "null"],
+                    "description": "Root directory to search. Omitted, null, or blank means the Boris sandbox root, not the process working directory."
                 },
                 "limit": {
                     "type": "integer",
@@ -94,9 +94,12 @@ impl Tool for GlobTool {
         if pattern.trim().is_empty() {
             return Err(ToolError::invalid_args("pattern is empty"));
         }
-        let raw_root = optional_string(obj, "path")
-            .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
-        let root = resolve_under_roots(&raw_root, &self.roots.readers())?;
+        let raw_root = optional_string(obj, "path");
+        let root = resolve_search_root(
+            raw_root.as_deref(),
+            &self.roots.sandbox,
+            &self.roots.readers(),
+        )?;
         if !root.is_dir() {
             return Err(ToolError::failed(format!(
                 "not a directory: {}",

@@ -174,7 +174,9 @@ fn current_turn_start(messages: &[Value]) -> Option<usize> {
 
 fn is_control_user_message(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with("<system-reminder>") || text.starts_with("<conversation_summary>")
+    text.starts_with("<system-reminder>")
+        || text.starts_with("<conversation_summary>")
+        || text.starts_with("<derived_context>")
 }
 
 /// Dual-model OpenRouter client with request-local routing.
@@ -473,6 +475,23 @@ pub fn apply_route_hint(client: &dyn LlmClient, user_text: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn trailing_derived_state_does_not_replace_the_user_or_hide_tool_errors() {
+        let messages = json!([
+            {"role":"system", "content":"policy"},
+            {"role":"user", "content":"check this project"},
+            {"role":"assistant", "content":"", "tool_calls":[{"id":"c1"}]},
+            {"role":"tool", "tool_call_id":"c1", "content":"Error: build failed"},
+            {"role":"user", "content":"<derived_context>research unrelated old evidence</derived_context>"}
+        ]);
+        assert_eq!(
+            last_user_text(&messages).as_deref(),
+            Some("check this project")
+        );
+        assert!(round_has_error(&messages));
+        assert!(round_traits_from_messages(&messages, "check this project").has_tool_results);
+    }
 
     #[test]
     fn classifies_time_as_fast() {

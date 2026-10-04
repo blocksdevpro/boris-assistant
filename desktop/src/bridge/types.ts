@@ -86,6 +86,8 @@ export type StatusPicture = {
   context_estimated?: boolean;
   /** This-turn overlay glance (cleared on the next utterance). Body is separate. */
   artifact?: ArtifactPeek | null;
+  /** Full report fallback, including when saving the card failed. Never spoken. */
+  fallback_report?: ArtifactCard | null;
   /** Live-mic teach progress (dedicated teach page). */
   wake_enroll?: WakeEnrollPeek | null;
   /** On-screen typed input request. Never includes the typed value. */

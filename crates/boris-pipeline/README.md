@@ -56,6 +56,13 @@ tail is kept across Hearing/Reading so the overlay does not flicker).
 Engine and agent event publishers update the same locked snapshot before it is
 sequenced. The desktop drops snapshots from old engine generations.
 
+Detailed reports stay on screen while speech remains short. Failed card
+presentation delivers `fallback_report` with the full body to Home and the
+overlay, including when the catalog cannot be read. When storage is writable,
+an independent `artifacts/recovery/` catalog keeps the report across restarts.
+An initial presentation failure permits one corrected retry before the tool is
+withheld for that turn.
+
 When Parakeet is warm, freeform capture can re-decode the recorded audio prefix
 and show interim text in the overlay. Those partials are advisory; the final
 decode remains authoritative. Stable partials can shorten the silence wait.

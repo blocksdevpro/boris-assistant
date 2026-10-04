@@ -1054,7 +1054,12 @@ mod retrieval_tests {
             .unwrap();
         assert_eq!(messages[control_index + 1]["content"], new_objective);
         assert_eq!(messages.last().unwrap()["role"], "user");
-        assert_eq!(messages.last().unwrap()["content"], new_objective);
+        // Mutable host reference data follows the unchanged human history.
+        assert!(messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("<derived_context>"));
+        assert_eq!(messages[messages.len() - 2]["content"], new_objective);
         let task_state = messages
             .iter()
             .find_map(|message| {

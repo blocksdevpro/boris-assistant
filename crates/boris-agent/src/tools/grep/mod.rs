@@ -27,7 +27,7 @@ use crate::tool::{
     require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 use crate::tools::files::FsRoots;
-use crate::tools::fs_common::resolve_under_roots;
+use crate::tools::fs_common::resolve_search_root;
 
 use fallback::rust_grep;
 use query::GrepQuery;
@@ -80,8 +80,8 @@ impl Tool for GrepTool {
                     "description": "The regular expression pattern to search for in file contents (rg --regexp)"
                 },
                 "path": {
-                    "type": "string",
-                    "description": "File or directory to search in (rg pattern -- PATH). Defaults to workspace path."
+                    "type": ["string", "null"],
+                    "description": "File or directory to search in (rg pattern -- PATH). Omitted, null, or blank means the Boris sandbox root, not the process working directory."
                 },
                 "glob": {
                     "type": "string",
@@ -143,11 +143,11 @@ impl Tool for GrepTool {
     ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let query = GrepQuery::parse(obj)?;
-        let raw_path = query
-            .path
-            .clone()
-            .unwrap_or_else(|| self.roots.sandbox.to_string_lossy().into_owned());
-        let search_path = resolve_under_roots(&raw_path, &self.roots.readers())?;
+        let search_path = resolve_search_root(
+            query.path.as_deref(),
+            &self.roots.sandbox,
+            &self.roots.readers(),
+        )?;
         if !search_path.exists() {
             return Ok(format!(
                 "Path not found: {}. Check the path, or glob / list_dir from a parent directory first.",

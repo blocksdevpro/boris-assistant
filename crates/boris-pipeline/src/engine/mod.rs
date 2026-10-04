@@ -445,7 +445,7 @@ fn run(
                     rt.picture.turn = None;
                     rt.picture.detail = None;
                     rt.picture.activity = None;
-                    rt.picture.artifact = None;
+                    rt.picture.clear_artifacts();
                     // A fresh Start re-marks devices alive: a prior
                     // disconnect-dead flag must not linger once the host
                     // restarts the engine on (possibly fixed) devices.
@@ -710,7 +710,7 @@ fn run(
         rt.picture.turn = Some(turn);
         // Overlay glance is this-turn only. The session catalog / Home desk
         // still keep the last card; a new utterance must not resurrect it.
-        rt.picture.artifact = None;
+        rt.picture.clear_artifacts();
 
         let (text, stt_ms, interrupted_text) = if let Some(barge) = barge_turn {
             let text = barge.user_text;
@@ -960,6 +960,7 @@ fn run(
                             if let Ok(mut latest) = activity_latest.lock() {
                                 if latest.turn.as_deref() == Some(activity_turn.as_str()) {
                                     latest.artifact = Some(peek);
+                                    latest.fallback_report = None;
                                 }
                             }
                         }
@@ -975,6 +976,15 @@ fn run(
                 }
                 latest.thinking = Some(picture::truncate_thinking(text));
                 picture::send_locked(&mut latest, &activity_tx);
+                return;
+            }
+            if let AgentEvent::ReportFallback { .. } = ev {
+                let Ok(mut latest) = activity_latest.lock() else {
+                    return;
+                };
+                if artifact::apply_report_fallback(&mut latest, &activity_turn, ev) {
+                    picture::send_locked(&mut latest, &activity_tx);
+                }
                 return;
             }
             if let AgentEvent::Reasoning { preview } = ev {
@@ -1161,7 +1171,10 @@ fn run(
         if !report.tools_used.is_empty() {
             rt.picture.activity = Some(boris_agent::summarize_tools_used(&report.tools_used));
         }
-        if report.tools_used.iter().any(|n| n == "present_artifact") {
+        rt.picture.sync_fallback_report();
+        if report.tools_used.iter().any(|n| n == "present_artifact")
+            && rt.picture.fallback_report.is_none()
+        {
             if let Some(sid) = sess.active_session.as_ref() {
                 match peek_current(&rt.store, sid) {
                     Some(peek) => rt.picture.artifact = Some(peek),
@@ -1249,6 +1262,7 @@ fn run(
                 // and fold the resume rounds into the trace so they are not
                 // invisible to latency/tool accounting.
                 if let Some(resume) = resume_report {
+                    rt.picture.sync_fallback_report();
                     rt.picture.update_context(
                         resume.context_used_tokens,
                         resume.context_limit_tokens,
@@ -1256,7 +1270,9 @@ fn run(
                     );
                     // A card presented during the resume must reach the overlay
                     // too — the pre-confirm peek above predates those tools.
-                    if resume.tools_used.iter().any(|n| n == "present_artifact") {
+                    if resume.tools_used.iter().any(|n| n == "present_artifact")
+                        && rt.picture.fallback_report.is_none()
+                    {
                         if let Some(sid) = sess.active_session.as_ref() {
                             match peek_current(&rt.store, sid) {
                                 Some(peek) => rt.picture.artifact = Some(peek),

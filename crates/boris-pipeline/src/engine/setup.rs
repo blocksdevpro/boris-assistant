@@ -171,6 +171,7 @@ pub(super) fn init_runtime(
         context_limit: Some(config.context_window_tokens),
         context_estimated: true,
         artifact: None,
+        fallback_report: None,
         wake_enroll: None,
         input: None,
         status_tx,
@@ -234,6 +235,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         context_limit: None,
         context_estimated: false,
         artifact: None,
+        fallback_report: None,
         wake_enroll: None,
         input: None,
     });
@@ -438,6 +440,7 @@ fn fault(
         context_limit: None,
         context_estimated: false,
         artifact: None,
+        fallback_report: None,
         wake_enroll: None,
         input: None,
     });

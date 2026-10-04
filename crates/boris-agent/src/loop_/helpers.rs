@@ -207,7 +207,7 @@ pub(super) fn build_tool_invocation(
     inv.cancel = cancel;
     // Stamp process cwd so tools can resolve relative paths without closing over host state.
     inv.cwd = std::env::current_dir().ok();
-    if config.features.progress_events {
+    if config.features.progress_events || call.name == "present_artifact" {
         inv.progress = Some(
             EventProgressSink::new(Arc::clone(emit), call.call_id.clone(), call.name.clone())
                 .into_arc(),

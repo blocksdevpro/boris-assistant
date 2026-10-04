@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Code2, FileText } from "lucide-react";
-import { getSessionArtifact, type ArtifactPeek } from "@/bridge";
+import { getSessionArtifact, type ArtifactCard, type ArtifactPeek } from "@/bridge";
 import { artifactKindOf, clipArtifactBody } from "@/lib/artifactGlance";
 import { isTauriRuntime } from "@/lib/runtime";
 import { ArtifactCode } from "./ArtifactCode";
@@ -22,7 +22,7 @@ const FIXTURE_CODE = `Get-ChildItem .\\photos -File |
  * Glance of the current card inside the overlay island.
  * Click-through: no buttons, no scroll. Full card lives in the main window.
  */
-export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
+export function OverlayArtifactCard({ peek, fallback }: { peek: ArtifactPeek; fallback?: ArtifactCard | null }) {
   const [body, setBody] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<
     "loading" | "ready" | "unavailable"
@@ -30,6 +30,11 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
   const reduceMotion = Boolean(useReducedMotion());
 
   useEffect(() => {
+    if (fallback?.id === peek.id) {
+      setBody(fallback.body);
+      setLoadState("ready");
+      return;
+    }
     let active = true;
     setBody(null);
     setLoadState("loading");
@@ -68,7 +73,7 @@ export function OverlayArtifactCard({ peek }: { peek: ArtifactPeek }) {
     return () => {
       active = false;
     };
-  }, [peek.id, peek.kind]);
+  }, [peek.id, peek.kind, fallback]);
 
   const kind = artifactKindOf(peek.kind);
   const clip = loadState === "ready" && body ? clipArtifactBody(kind, body) : null;

@@ -39,7 +39,7 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search available tools by keyword (e.g. files, web, shell, clipboard) and \
          activate matches for this session. Call this before using tools that are not \
-         already in your tool list. Returns names and required parameters."
+         already in your tool list. Do not search for tools already listed. Returns names and required parameters, distinguishing currently available tools from new activations."
     }
 
     fn parameters(&self) -> Value {
@@ -73,6 +73,7 @@ impl Tool for ToolSearchTool {
     }
 
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
+        let started = std::time::Instant::now();
         let obj = require_object(&args)?;
         let query = require_string(obj, "query")?;
         let query = query.trim().to_ascii_lowercase();
@@ -95,7 +96,7 @@ impl Tool for ToolSearchTool {
         let already: HashSet<String> = self
             .activated
             .lock()
-            .map(|mut g| g.snapshot())
+            .map(|g| g.listed().clone())
             .unwrap_or_default();
 
         let mut scored: Vec<(u32, Arc<dyn Tool>)> = Vec::new();
@@ -107,7 +108,7 @@ impl Tool for ToolSearchTool {
             if score == 0 {
                 continue;
             }
-            // Prefer tools not already activated (slight boost for discovery).
+            // Prefer tools absent from the actual request (slight discovery boost).
             let boost = if already.contains(tool.name()) { 0 } else { 1 };
             scored.push((score + boost, tool));
         }
@@ -121,24 +122,37 @@ impl Tool for ToolSearchTool {
         }
 
         let names: Vec<String> = scored.iter().map(|(_, t)| t.name().to_string()).collect();
-        activate_tools(&self.activated, names.iter().cloned());
+        let new_names: Vec<String> = names
+            .iter()
+            .filter(|name| !already.contains(*name))
+            .cloned()
+            .collect();
+        activate_tools(&self.activated, new_names.iter().cloned());
+        tracing::info!(query = %query, matches = names.len(), newly_activated = new_names.len(),
+            already_available = names.len() - new_names.len(), duration_ms = started.elapsed().as_millis() as u64,
+            "tool discovery");
 
         let mut lines = Vec::new();
         lines.push(format!(
-            "Activated {} tool(s) for this session (available next round):",
-            scored.len()
+            "{} matching tool(s): {} already available in your current tool list; {} newly activated for the next round:",
+            scored.len(), scored.len() - new_names.len(), new_names.len()
         ));
         for (_, tool) in &scored {
             let req = required_param_summary(tool.as_ref());
             lines.push(format!(
-                "- {} — {}{}",
+                "- {} [{}] — {}{}",
                 tool.name(),
+                if already.contains(tool.name()) {
+                    "already available"
+                } else {
+                    "new activation"
+                },
                 short_desc(tool.description()),
                 req
             ));
         }
         lines.push(
-            "Call these tools by name on the next step; full schemas will appear in your tool list."
+            "Use already-available tools directly; do not search again. New schemas appear next round within the request schema budget."
                 .into(),
         );
         Ok(lines.join("\n"))
@@ -238,4 +252,57 @@ fn required_param_summary(tool: &dyn Tool) -> String {
         parts.push(format!("{name}: {ty}"));
     }
     format!(" [required: {}]", parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "file tools"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object", "properties":{}})
+        }
+        async fn execute(&self, _: &ToolCallContext, _: Value) -> Result<String, ToolError> {
+            Ok("ok".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_distinguishes_current_availability_and_does_not_reactivate_core() {
+        let activated = crate::runtime::new_activation_set();
+        activated
+            .lock()
+            .unwrap()
+            .record_listed(["file_read".into()]);
+        let registry = Arc::new(Mutex::new(vec![
+            Arc::new(NamedTool("file_read")) as Arc<dyn Tool>,
+            Arc::new(NamedTool("plugin_file_view")) as Arc<dyn Tool>,
+        ]));
+        let search = ToolSearchTool::new(registry, activated.clone());
+        let out = search
+            .execute(&ToolCallContext::new("c"), json!({"query":"file"}))
+            .await
+            .unwrap();
+        assert!(out.contains("1 already available"));
+        assert!(out.contains("1 newly activated"));
+        assert!(out.contains("file_read [already available]"));
+        let mut table = activated.lock().unwrap();
+        assert!(!table.contains("file_read"));
+        assert!(table.contains("plugin_file_view"));
+        table.record_listed(["file_read".into(), "plugin_file_view".into()]);
+        drop(table);
+        let out = search
+            .execute(&ToolCallContext::new("again"), json!({"query":"file"}))
+            .await
+            .unwrap();
+        assert!(out.contains("0 newly activated"));
+    }
 }

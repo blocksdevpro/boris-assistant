@@ -94,6 +94,9 @@ pub struct StatusPicture {
     /// separately; the session catalog is the source of truth for Home.
     #[serde(default)]
     pub artifact: Option<ArtifactPeek>,
+    /// Full host-delivered report when normal presentation fails (never spoken).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_report: Option<crate::artifacts::ArtifactCard>,
     /// Live-mic teach progress. Present while the user is recording takes
     /// (or just finished). Not a turn — the teach page is the surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +156,7 @@ impl StatusPicture {
             context_limit: None,
             context_estimated: false,
             artifact: None,
+            fallback_report: None,
             wake_enroll: None,
             input: None,
         }

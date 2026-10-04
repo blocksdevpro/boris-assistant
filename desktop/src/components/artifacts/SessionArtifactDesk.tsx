@@ -26,9 +26,11 @@ const soft = [0.22, 1, 0.36, 1] as const;
 export function SessionArtifactDesk({
   peek,
   engineOn,
+  fallback,
 }: {
   peek: ArtifactPeek | null | undefined;
   engineOn: boolean;
+  fallback?: ArtifactCard | null;
 }) {
   const [items, setItems] = useState<ArtifactListItem[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -39,14 +41,19 @@ export function SessionArtifactDesk({
   const reduceMotion = Boolean(useReducedMotion());
 
   const refresh = useCallback(async () => {
-    const next = await listSessionArtifacts();
+    // A damaged catalog must not hide the full report already delivered by the host.
+    let next = await listSessionArtifacts().catch(() => [] as ArtifactListItem[]);
+    if (fallback && !next.some((item) => item.id === fallback.id)) {
+      next = [{ ...fallback, current: true }, ...next];
+    }
     setItems(next);
     setSelected((previous) => {
+      if (fallback) return fallback.id;
       if (previous && next.some((item) => item.id === previous)) return previous;
       const current = next.find((item) => item.current);
       return current?.id ?? next[0]?.id ?? null;
     });
-  }, []);
+  }, [fallback]);
 
   useEffect(() => {
     void refresh();
@@ -55,6 +62,11 @@ export function SessionArtifactDesk({
   useEffect(() => {
     if (!selected) {
       setCard(null);
+      setLoading(false);
+      return;
+    }
+    if (fallback?.id === selected) {
+      setCard(fallback);
       setLoading(false);
       return;
     }
@@ -76,7 +88,7 @@ export function SessionArtifactDesk({
     return () => {
       active = false;
     };
-  }, [selected]);
+  }, [selected, fallback]);
 
   useEffect(
     () => () => {

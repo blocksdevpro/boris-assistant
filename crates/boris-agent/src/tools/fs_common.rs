@@ -12,6 +12,19 @@ use std::path::{Path, PathBuf};
 use crate::runtime::policy::{normalize_path, path_is_within, resolve_path_for_policy};
 use crate::tool::ToolError;
 
+/// Optional directory/search roots share one default; required file targets
+/// still go through the strict resolver below.
+pub fn resolve_search_root(
+    raw: Option<&str>,
+    sandbox: &Path,
+    roots: &[PathBuf],
+) -> Result<PathBuf, ToolError> {
+    match raw.map(str::trim).filter(|path| !path.is_empty()) {
+        Some(raw) => resolve_under_roots(raw, roots),
+        None => resolve_under_roots(&sandbox.to_string_lossy(), roots),
+    }
+}
+
 /// Resolve `raw` to a normalized absolute path that sits under one of `roots`.
 ///
 /// # Rules
@@ -205,6 +218,70 @@ pub fn did_you_mean_suffix(missing: &Path, max_n: usize) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn optional_search_roots_use_sandbox_and_keep_required_targets_strict() {
+        use crate::tools::files::{FsRoots, ListDirTool, ReadFileTool};
+        use crate::{Tool, ToolCallContext};
+        let dir = std::env::temp_dir().join(format!(
+            "boris-default-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("evidence.txt"), "needle").unwrap();
+        let roots = FsRoots {
+            sandbox: dir.clone(),
+            data: vec![],
+            allow_read: vec![],
+            allow_write: vec![],
+        };
+        let ctx = ToolCallContext::new("c");
+        let tools: Vec<(Box<dyn Tool>, serde_json::Value)> = vec![
+            (
+                Box::new(ListDirTool::new(roots.clone())),
+                serde_json::json!({}),
+            ),
+            (
+                Box::new(crate::tools::glob::GlobTool::new(roots.clone())),
+                serde_json::json!({"pattern":"*.txt"}),
+            ),
+            (
+                Box::new(crate::tools::grep::GrepTool::new(roots.clone())),
+                serde_json::json!({"pattern":"needle"}),
+            ),
+        ];
+        for (tool, args) in tools {
+            let expected = tool.execute(&ctx, args.clone()).await.unwrap();
+            assert!(expected.contains("evidence.txt"));
+            for path in [
+                serde_json::json!(""),
+                serde_json::json!(" \t "),
+                serde_json::Value::Null,
+            ] {
+                let mut args = args.clone();
+                args["path"] = path;
+                crate::tool::validate_args(&tool.parameters(), &args, &args.to_string()).unwrap();
+                assert_eq!(
+                    tool.execute(&ctx, args).await.unwrap(),
+                    expected,
+                    "{}",
+                    tool.name()
+                );
+            }
+            let mut escaped = args.clone();
+            escaped["path"] = serde_json::json!("..");
+            assert!(tool.execute(&ctx, escaped).await.is_err());
+        }
+        assert!(ReadFileTool::new(roots)
+            .execute(&ctx, serde_json::json!({"path":""}))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn rejects_escape() {

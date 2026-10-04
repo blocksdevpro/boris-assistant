@@ -202,6 +202,14 @@ pub enum AgentEvent {
     ToolNote {
         text: String,
     },
+    /// Full report delivered on screen even when normal card presentation failed.
+    ReportFallback {
+        meta: Option<crate::ArtifactMeta>,
+        title: String,
+        kind: String,
+        language: Option<String>,
+        body: String,
+    },
     ToolExecutionStart {
         call_id: String,
         tool_name: String,

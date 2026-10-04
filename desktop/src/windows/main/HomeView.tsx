@@ -231,7 +231,7 @@ export function HomeView({
       ) : null}
 
       <ConversationView status={status} />
-      <SessionArtifactDesk peek={status.artifact} engineOn={engineOn} />
+      <SessionArtifactDesk peek={status.artifact} fallback={status.fallback_report} engineOn={engineOn} />
     </div>
   );
 }

@@ -46,7 +46,7 @@ pub fn list_session_artifacts() -> Result<Vec<ArtifactListItem>, String> {
         Ok(pair) => pair,
         Err(_) => return Ok(Vec::new()),
     };
-    let index = store.load_artifact_index(&id)?;
+    let index = ArtifactStore::new(store.artifacts_dir(&id)).load_display_index()?;
     let current = index.current.clone();
     Ok(index
         .items
@@ -68,7 +68,7 @@ pub fn list_session_artifacts() -> Result<Vec<ArtifactListItem>, String> {
 pub fn get_session_artifact(id: Option<&str>) -> Result<ArtifactCard, String> {
     let (store, sid) = open_current()?;
     let arts = ArtifactStore::new(store.artifacts_dir(&sid));
-    let (meta, body) = arts.get(id)?;
+    let (meta, body) = arts.get_display(id)?;
     Ok(ArtifactCard {
         id: meta.id,
         title: meta.title,

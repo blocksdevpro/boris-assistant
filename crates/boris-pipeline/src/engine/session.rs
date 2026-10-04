@@ -233,7 +233,7 @@ pub(super) fn go_off(
     // from the previous turn may linger — the next Start begins blank.
     picture.engine = EngineState::Off;
     picture.turn = None;
-    picture.artifact = None;
+    picture.clear_artifacts();
     picture.detail = None;
     picture.heard = None;
     picture.said = None;

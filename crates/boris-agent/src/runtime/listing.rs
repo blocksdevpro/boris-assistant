@@ -39,6 +39,7 @@ pub struct ActivationEntry {
 #[derive(Debug, Clone)]
 pub struct ActivationTable {
     entries: Vec<ActivationEntry>,
+    listed: HashSet<String>,
     ttl: Duration,
     max: usize,
 }
@@ -47,6 +48,7 @@ impl Default for ActivationTable {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            listed: HashSet::new(),
             ttl: ACTIVATION_TTL,
             max: MAX_ACTIVATED,
         }
@@ -56,6 +58,19 @@ impl Default for ActivationTable {
 impl ActivationTable {
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.listed.clear();
+    }
+
+    /// Actual request-local availability, including core tools and schema pruning.
+    pub fn record_listed(&mut self, names: impl IntoIterator<Item = String>) -> bool {
+        let names: HashSet<String> = names.into_iter().collect();
+        let changed = self.listed != names;
+        self.listed = names;
+        changed
+    }
+
+    pub fn listed(&self) -> &HashSet<String> {
+        &self.listed
     }
 
     pub fn snapshot(&mut self) -> HashSet<String> {
@@ -115,7 +130,13 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "bash",
+    "web_search",
+    "web_fetch",
+    "memory_search",
+    "memory_get",
     "present_artifact",
+    "list_artifacts",
+    "get_artifact",
     "get_tool_output",
     "collect_input",
 ];
@@ -430,6 +451,7 @@ mod tests {
         };
         let mut activated = HashSet::new();
         activated.insert("file_read".into());
+        activated.insert("extra_0".into());
         let ctx = ListToolsContext {
             activated: Arc::new(activated),
             features,
@@ -443,7 +465,9 @@ mod tests {
         assert!(listed.contains(&"list_skills"));
         assert!(listed.contains(&"file_read"));
         assert!(listed.contains(&"bash"));
-        assert!(!listed.contains(&"web_fetch"));
+        assert!(listed.contains(&"web_fetch"));
+        assert!(listed.contains(&"extra_0"));
+        assert!(!listed.contains(&"extra_1"));
     }
 
     #[test]
@@ -472,11 +496,41 @@ mod tests {
     }
 
     #[test]
+    fn everyday_tools_are_listed_without_discovery_even_on_a_greeting() {
+        let names = [
+            "file_read",
+            "file_write",
+            "file_edit",
+            "list_dir",
+            "glob",
+            "grep",
+            "bash",
+            "web_search",
+            "web_fetch",
+            "memory_search",
+            "memory_get",
+            "present_artifact",
+            "list_artifacts",
+            "get_artifact",
+        ];
+        let tools: Vec<Arc<dyn Tool>> = names
+            .iter()
+            .map(|name| Arc::new(Named { name, list: false }) as Arc<dyn Tool>)
+            .collect();
+        let ctx = ListToolsContext {
+            task: Some(crate::task::classify_task("hi")),
+            ..Default::default()
+        };
+        assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
+    }
+
+    #[test]
     fn activation_table_lru_and_ttl() {
         let mut t = ActivationTable {
             entries: Vec::new(),
             ttl: Duration::from_millis(50),
             max: 2,
+            listed: HashSet::new(),
         };
         t.activate(["a".into(), "b".into(), "c".into()]);
         assert_eq!(t.snapshot().len(), 2);

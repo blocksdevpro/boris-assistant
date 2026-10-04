@@ -450,6 +450,7 @@ impl Context {
     /// so we keep `Role::User` and merge into one message with explicit
     /// section headers, order, and precedence. Each section keeps its
     /// existing envelope tags so downstream parsers are unaffected.
+    /// Appended after history so changing task evidence cannot rewrite its prefix.
     /// Order: personal_context, skills_catalog, retrieved_memory, task_state.
     pub(crate) fn derived_context_message(&self) -> Option<Message> {
         let sections = self.derived_context_sections();
@@ -510,13 +511,10 @@ impl Context {
 
     pub(super) fn wire_messages(&self) -> Vec<Message> {
         let mut messages = self.messages.clone();
-        let insert_at = usize::from(
-            messages
-                .first()
-                .is_some_and(|message| matches!(message.role, Role::System)),
-        );
         if let Some(derived) = self.derived_context_message() {
-            messages.splice(insert_at..insert_at, [derived]);
+            // Only expose derived data after a complete tool batch; never put
+            // a user-role message between tool_calls and their observations.
+            messages.push(derived);
         }
         messages
     }
@@ -739,12 +737,12 @@ mod tests {
         let wire = ctx.wire_messages();
         assert!(matches!(wire[0].role, Role::System));
         assert_eq!(wire[0].content, json!("trusted policy"));
-        // Merged derived block: exactly one User message after system.
-        assert!(matches!(wire[1].role, Role::User));
-        assert_eq!(wire[1].origin, MessageOrigin::DerivedContext);
-        assert_eq!(wire[2].origin, MessageOrigin::Human);
+        // Human history stays ahead of the changing derived reference block.
+        assert!(matches!(wire[2].role, Role::User));
+        assert_eq!(wire[2].origin, MessageOrigin::DerivedContext);
+        assert_eq!(wire[1].origin, MessageOrigin::Human);
         assert_eq!(wire.len(), 3);
-        let derived = wire[1].content.as_str().unwrap();
+        let derived = wire[2].content.as_str().unwrap();
         assert!(derived.contains("<derived_context>"));
         assert!(derived.contains("Precedence"));
         assert!(derived.contains("<personal_context_data>"));
@@ -812,7 +810,40 @@ mod tests {
         assert!(matches!(wire[0].role, Role::System));
         assert!(matches!(wire[1].role, Role::User));
         assert!(matches!(wire[2].role, Role::User));
-        assert!(wire[2].origin.is_human());
+        assert!(wire[1].origin.is_human());
+    }
+
+    #[test]
+    fn task_updates_preserve_the_serialized_conversation_prefix() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "stable policy");
+        ctx.push(Role::User, "run a diagnostic");
+        ctx.begin_task("run a diagnostic");
+        ctx.set_skills_catalog(Some("<skills_catalog_data>[]</skills_catalog_data>".into()));
+        let before = ctx.as_json();
+        ctx.push(
+            Role::Assistant,
+            json!({"content":"Checking", "tool_calls":[
+                {"id":"c1", "function":{"name":"get_time", "arguments":"{}"}}
+            ]}),
+        );
+        ctx.push_tool_result("get_time", "c1", "12:00".into(), true);
+        let after = ctx.as_json();
+        assert_eq!(
+            &before.as_array().unwrap()[..2],
+            &after.as_array().unwrap()[..2]
+        );
+        assert_eq!(after[2]["role"], "assistant");
+        assert_eq!(after[3]["role"], "tool");
+        assert_ne!(
+            before.as_array().unwrap().last(),
+            after.as_array().unwrap().last()
+        );
+        assert!(after.as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("get_time succeeded"));
+        assert_eq!(ctx.history().len(), 4);
     }
 
     #[test]

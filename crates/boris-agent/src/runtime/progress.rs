@@ -27,6 +27,13 @@ pub enum ProgressEvent {
         subkind: String,
         payload: serde_json::Value,
     },
+    ReportFallback {
+        meta: Option<crate::ArtifactMeta>,
+        title: String,
+        kind: String,
+        language: Option<String>,
+        body: String,
+    },
 }
 
 /// Host/runtime sink for progress events.
@@ -122,12 +129,30 @@ impl EventProgressSink {
                 (msg, Some(*total_bytes))
             }
             ProgressEvent::Custom { subkind, .. } => (Self::truncate_msg(subkind, max), None),
+            ProgressEvent::ReportFallback { .. } => (String::new(), None),
         }
     }
 }
 
 impl ProgressSink for EventProgressSink {
     fn emit(&self, event: ProgressEvent) {
+        if let ProgressEvent::ReportFallback {
+            meta,
+            title,
+            kind,
+            language,
+            body,
+        } = event
+        {
+            (self.emit)(AgentEvent::ReportFallback {
+                meta,
+                title,
+                kind,
+                language,
+                body,
+            });
+            return;
+        }
         if !self.should_emit() {
             return;
         }

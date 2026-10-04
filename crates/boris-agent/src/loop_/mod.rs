@@ -233,7 +233,11 @@ pub async fn agent_loop_with_budget(
                     activated,
                     tools_used[activation_start..]
                         .iter()
-                        .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
+                        .filter(|name| {
+                            name.as_str() != "tool_search"
+                                && !crate::runtime::is_core_name(name, &config.features)
+                                && state.tools.iter().any(|tool| tool.name() == name.as_str())
+                        })
                         .cloned(),
                 );
             }
@@ -800,7 +804,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use boris_ai::{LlmClient, LlmError};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Mutex;
 
     struct ScriptedClient {
@@ -808,6 +812,125 @@ mod tests {
     }
 
     struct UsageClient;
+
+    #[tokio::test]
+    async fn presentation_failures_deliver_reports_without_progress_and_withhold_further_retries() {
+        struct CapturingClient {
+            responses: Mutex<Vec<Value>>,
+            schemas: Mutex<Vec<Value>>,
+        }
+        #[async_trait]
+        impl LlmClient for CapturingClient {
+            async fn complete(&self, _: Value, tools: Value) -> Result<Value, LlmError> {
+                self.schemas.lock().unwrap().push(tools);
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let call = |id: &str, artifact_id: &str| {
+            json!({"role":"assistant", "content":"Preparing the report", "tool_calls":[
+                {"id":id, "type":"function", "function":{"name":"present_artifact", "arguments":json!({
+                    "kind":"markdown", "title":"Diagnostic", "body":"Verified tool evidence", "id":artifact_id
+                }).to_string()}}
+            ]})
+        };
+        let client = CapturingClient {
+            responses: Mutex::new(vec![
+                call("c1", "missing"),
+                call("c2", "still-missing"),
+                json!({"role":"assistant", "content":"The execution report is on screen."}),
+            ]),
+            schemas: Mutex::new(vec![]),
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "boris-loop-delivery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let tools: Vec<std::sync::Arc<dyn Tool>> = crate::artifact_tools_at(&dir)
+            .into_iter()
+            .map(std::sync::Arc::from)
+            .collect();
+        let runtime = ToolRuntime::new(
+            crate::SandboxConfig::for_desktop_mvp(&dir).with_trusted_auto_moderate(true),
+            Box::new(crate::NullAuditSink),
+        );
+        let mut context = Context::new(20);
+        context.push(Role::System, "policy");
+        context.push(Role::User, "show report");
+        context.begin_task("show report");
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let emit: crate::types::EmitFn =
+            std::sync::Arc::new(move |event| captured.lock().unwrap().push(event));
+        let debug = std::sync::Arc::new(crate::DebugCapture::default());
+        debug.set_enabled(true);
+        let config = AgentLoopConfig {
+            features: crate::ToolRuntimeFeatures {
+                progress_events: false,
+                ..Default::default()
+            },
+            debug: Some(debug.clone()),
+            ..Default::default()
+        };
+        let activated = crate::runtime::new_activation_set();
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: Some(&activated),
+        };
+        let result = agent_loop(
+            state,
+            "show report",
+            &config,
+            vec![],
+            0,
+            0,
+            None,
+            Some(emit),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.tool_rounds, 2);
+        assert!(
+            activated.lock().unwrap().snapshot().is_empty(),
+            "core calls must not consume long-tail activation slots"
+        );
+        let schemas = client.schemas.lock().unwrap();
+        assert!(schemas[0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "present_artifact"));
+        assert!(!schemas[2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "present_artifact"));
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, crate::AgentEvent::ReportFallback { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            crate::ArtifactStore::new(&dir).get_display(None).unwrap().1,
+            "Verified tool evidence"
+        );
+        assert!(debug.snapshot(0).events.iter().any(
+            |event| event.kind == "tool_listing" && event.data["presentation_disabled"] == true
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[async_trait]
     impl LlmClient for UsageClient {

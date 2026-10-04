@@ -81,6 +81,8 @@ export function DebugView({ status }: { status: StatusPicture }) {
   const [droppedEvents, setDroppedEvents] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedEvent, setCopiedEvent] = useState<{ seq: number } | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const cursor = useRef(0);
   const inFlight = useRef(false);
 
@@ -115,6 +117,16 @@ export function DebugView({ status }: { status: StatusPicture }) {
   }, [refresh]);
 
   const selected = events.find((event) => event.seq === selectedSeq) ?? events[events.length - 1] ?? null;
+  useEffect(() => {
+    if (!copiedEvent) return;
+    if (copiedEvent.seq !== selected?.seq) {
+      setCopiedEvent(null);
+      return;
+    }
+    const timeout = window.setTimeout(() => setCopiedEvent(null), 1800);
+    return () => window.clearTimeout(timeout);
+  }, [copiedEvent, selected?.seq]);
+
   const requests = events.filter((event) => event.kind === "request");
   const toolStarts = events.filter((event) => event.kind === "tool_start");
   const latestRequest = requests[requests.length - 1] ?? null;
@@ -160,10 +172,22 @@ export function DebugView({ status }: { status: StatusPicture }) {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(events, null, 2));
+      setCopyError(null);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setCopyError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const copyEvent = async () => {
+    if (!selected) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(selected, null, 2));
+      setCopyError(null);
+      setCopiedEvent({ seq: selected.seq });
+    } catch (cause) {
+      setCopyError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -194,6 +218,7 @@ export function DebugView({ status }: { status: StatusPicture }) {
       <p className="mb-4 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3.5 py-2.5 text-[11px] leading-relaxed text-white/42">Capture begins when you turn it on and stays in memory only. Requests may contain personal chat, tool output, and secrets you typed into Boris. Copy JSON only when you intend to share it.</p>
       {droppedEvents > 0 && <p className="mb-3 text-[11px] text-[#ffc47d]">{droppedEvents} older events were dropped from the memory buffer.</p>}
       {error && <p className="mb-3 rounded-lg bg-[#ff3b30]/10 px-3 py-2 text-[12px] text-[#ff9a93]">{error}</p>}
+      {copyError && <p role="alert" className="mb-3 rounded-lg bg-[#ff3b30]/10 px-3 py-2 text-[12px] text-[#ff9a93]">Could not copy to clipboard: {copyError}</p>}
 
       <div className="grid min-h-[28rem] gap-3 md:grid-cols-[minmax(15rem,0.9fr)_minmax(0,1.6fr)]">
         <section className="overflow-hidden rounded-[17px] border border-white/[0.07] bg-white/[0.035]" aria-label="Captured timeline">
@@ -207,7 +232,16 @@ export function DebugView({ status }: { status: StatusPicture }) {
         </section>
 
         <section className="min-w-0 overflow-hidden rounded-[17px] border border-white/[0.07] bg-white/[0.035]" aria-label="Event details">
-          <div className="flex items-center justify-between border-b border-white/[0.065] px-4 py-3.5"><h2 className="text-[12px] font-semibold text-white/85">{selected ? eventLabel(selected) : "Details"}</h2><span className="font-mono text-[10px] text-white/35">{selected ? `#${selected.seq}` : ""}</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.065] px-4 py-3.5">
+            <h2 className="text-[12px] font-semibold text-white/85">{selected ? eventLabel(selected) : "Details"}</h2>
+            {selected && <div className="flex items-center gap-3">
+              <span className="font-mono text-[10px] text-white/35">#{selected.seq}</span>
+              <button type="button" title="Copy the complete selected event as JSON" aria-label="Copy selected event as JSON" onClick={() => void copyEvent()} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.055] px-2 text-[11px] font-medium text-white/60 transition-colors hover:bg-white/[0.09]">
+                {copiedEvent?.seq === selected.seq ? <Check className="size-3.5" /> : <Clipboard className="size-3.5" />}
+                <span aria-live="polite">{copiedEvent?.seq === selected.seq ? "Copied" : "Copy event"}</span>
+              </button>
+            </div>}
+          </div>
           {!selected ? <div className="flex min-h-56 items-center justify-center text-[12px] text-white/35">Select an event to inspect it.</div> : <div className="space-y-5 p-4 sm:p-5">
             <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[10px] text-white/35"><span>{new Date(selected.at_ms).toLocaleString()}</span>{selected.turn_id && <span>Turn {selected.turn_id}</span>}</div>
             {selectedRequest && <>

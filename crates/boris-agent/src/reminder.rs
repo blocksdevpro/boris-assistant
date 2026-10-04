@@ -12,8 +12,8 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
             "Load a skill only when its full description matches the user's intent.".into(),
         ),
         "bash" if err => Some(
-            "Shell failed. Read the error, fix the command or cwd, and retry with a different command. \
-             Do not repeat the exact same failing call. For files/search use file_read/grep/glob, not bash."
+            "Shell failed. Retry only if a changed command or cwd can resolve the error. \
+             Do not repeat the failure or bypass a denial. For files/search use file_read/grep/glob."
                 .into(),
         ),
         "bash" if observation.contains("Command was not run.") => Some(
@@ -22,12 +22,13 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
                 .into(),
         ),
         "grep" if !err && observation.contains("No matches found") => Some(
-            "Empty grep is not done. Drop glob/type, set -i true, simplify or escape the regex, \
-             or search a parent path. Batch alternate greps in one message."
+            "If this leaves an unresolved lookup, drop glob/type, set -i true, simplify the regex, \
+             or search a parent path. An absence check may already be answered. Batch useful alternatives."
                 .into(),
         ),
         "glob" if !err && observation.contains("No files matched") => Some(
-            "Empty glob is not done. Try '**/*.ext', list_dir on a parent, or a simpler pattern."
+            "If the file lookup remains unresolved, try a simpler glob or list_dir on a parent. \
+             Do not retry just to reconfirm an expected absence."
                 .into(),
         ),
         "todo_write" if !err => Some(
@@ -35,7 +36,7 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
                 .into(),
         ),
         "present_artifact" if !err => Some(
-            "Speak 1–2 short sentences pointing at the card. Do not read the artifact aloud."
+            "When the requested work is complete, speak a short result and card pointer. Do not read the artifact aloud."
                 .into(),
         ),
         "web_fetch" if !err => Some(
@@ -44,23 +45,23 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
                 .into(),
         ),
         "web_search" if !err && is_empty_or_weak_search(observation) => Some(
-            "Empty or weak search is not done. Fire another multi-tool batch with different \
-             phrasings (quotes, city, job, company, site: filters). Do not conclude 'not found' yet."
+            "An empty or weak query is not proof of nonexistence. Try a different angle if it can resolve \
+             a real gap; otherwise state the limitation or ask for a missing clue."
                 .into(),
         ),
         "web_search" if !err => Some(
-            "If the goal is finding a person/profile, fetch 2-4 strong URLs next and/or run \
-             alternate-angle searches in parallel. Aggregate clues before answering."
+            "Fetch strong person/profile candidates to verify identity clues. For other facts, fetch when \
+             snippets do not establish the claim. Stop when sufficient evidence supports the requested answer."
                 .into(),
         ),
         "spawn_subagent" if !err && is_weak_subagent(observation) => Some(
-            "Child dig was thin or under-tooled. You own research: fire a multi web_search batch \
-             yourself (3-5 angles), then web_fetch strong candidates. Do not trust the child alone."
+            "Child dig was thin or under-tooled. Do not trust it as evidence. Resolve missing claims yourself \
+             with relevant tools; batch independent web_search queries if web research is needed."
                 .into(),
         ),
         "spawn_subagent" if !err => Some(
-            "Parent owns verification: web_fetch any critical candidate URLs yourself before \
-             accepting the child summary. Keep multi-query fan-out going if gaps remain."
+            "Parent owns verification: check critical claims against source evidence, using web_fetch \
+             for web candidates. Do not repeat sufficient searches without a real gap."
                 .into(),
         ),
         // Subtle batching nudge: only after successful multi-file-capable writes.
@@ -75,7 +76,7 @@ pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
 fn load_skill_reminder(observation: &str) -> String {
     let base = "Apply only the skill guidance relevant to the request. Use todo_write only when it helps track real work. \
                 Keep spoken replies short and stop when the requested result is complete.";
-    // Research skill body (heading / name) -> multi-query nudge.
+    // Research skill body (heading / name) -> evidence-quality nudge.
     if observation_looks_like_research_skill(observation) {
         format!(
             "{base} Research depth follows uncertainty and stakes. Verify critical claims with primary sources."
@@ -240,7 +241,8 @@ mod tests {
                 .into(),
         );
         assert!(out.contains("<system-reminder>"));
-        assert!(out.contains("not done") || out.contains("different"));
+        assert!(out.contains("not proof of nonexistence"));
+        assert!(out.contains("real gap"));
     }
 
     #[test]
@@ -260,7 +262,8 @@ mod tests {
             "<workspace_result path=\"/tmp\">\nNo matches found\n</workspace_result>\nNo matches for pattern 'TODO' under /tmp.".into(),
         );
         assert!(out.contains("<system-reminder>"));
-        assert!(out.contains("Empty grep") || out.contains("-i") || out.contains("glob"));
+        assert!(out.contains("-i") || out.contains("glob"));
+        assert!(out.contains("absence check may already be answered"));
     }
 
     #[test]

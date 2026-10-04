@@ -1079,7 +1079,7 @@ impl MemoryStore {
     }
 
     pub fn prompt_hint(&self) -> String {
-        "<memory>\nUse memory_search when prior decisions, people, projects, or preferences are relevant. Search returns current evidence-backed memory records. Never claim a memory that was not returned.\n</memory>".into()
+        "<memory>\nUse supplied memory evidence first. Call memory_search for relevant past facts missing from context; memory_get takes a returned record id. Never invent memories.\n</memory>".into()
     }
 
     fn forget_from_profile_snapshot(&self, query: &str) -> Result<(), String> {

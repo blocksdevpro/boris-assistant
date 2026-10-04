@@ -11,11 +11,12 @@
 //! - [`round`] — per-round LLM complete, tool-call gating, finish-gate checks
 //! - [`finish`] — terminal emit helpers (speech / HITL pause)
 //!
-//! Tool batches that may need HITL run sequentially so remaining sibling calls
-//! can be paused. Auto-allow batches (no confirmation needed) run in parallel
-//! via chunked `join_all` (or read/write waves), preserving original order in
-//! context and never exceeding `max_parallel_tools` concurrent invokes.
+//! Independent read-only runs execute in bounded rolling pools; writes and
+//! HITL/input are ordering barriers. The explicit `parallel` interface expands
+//! to the same native calls before context insertion and runtime mediation.
 
+#[cfg(test)]
+mod batch_tests;
 mod finish;
 mod helpers;
 mod message_parse;
@@ -44,7 +45,9 @@ use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
     push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
 };
-use message_parse::{extract_reply_text, extract_tool_note, parse_raw_tool_calls};
+use message_parse::{
+    expand_parallel_calls, extract_reply_text, extract_tool_note, parse_raw_tool_calls,
+};
 use round::{
     cancelled, complete_round, ensure_spoken_reply_at_cap, should_reenter_finish_gate,
     tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
@@ -187,6 +190,18 @@ pub async fn agent_loop_with_budget(
         )
         .await?;
 
+        // Normalize only actual runnable API calls, never content or calls at cap.
+        let response = if tool_calls_if_runnable(&response, at_cap).is_some() {
+            let (normalized, mappings) = expand_parallel_calls(response, state.tools);
+            if let Some(debug) = &config.debug {
+                for mapping in mappings {
+                    debug.record(config.turn_id.as_deref(), "parallel_expansion", mapping);
+                }
+            }
+            normalized
+        } else {
+            response
+        };
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
             // One round before cap: run tools, then inject a finish nudge and
             // continue so the next iteration (at_cap) produces a spoken reply.

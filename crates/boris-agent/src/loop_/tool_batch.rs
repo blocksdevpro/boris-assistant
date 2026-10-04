@@ -2,12 +2,9 @@
 //!
 //! Dispatch rules:
 //! - Length 1 → sequential path.
-//! - Length > 1 → preflight with [`ToolRuntime::decide_only`]; if any call can
-//!   pause for confirmation or input, fall back to sequential. Otherwise:
-//!   - **wave scheduling** (default): read-only wave (parallel, chunked) then
-//!     write wave (sequential)
-//!   - else: legacy parallel path — all auto-allow calls, still chunked by
-//!     `max_parallel_tools` (no unbounded `join_all`)
+//! - Wave scheduling (default): contiguous independent read-only runs execute
+//!   in a bounded rolling pool. Writes, input, and approval are ordering barriers.
+//! - Legacy mode: preflight pause-free batches, then bounded parallel dispatch.
 //!
 //! Sequential batches can pause mid-batch for HITL and keep remaining siblings.
 //! Contiguous confirm-needed calls that share risk **and shell-ness** are
@@ -18,21 +15,22 @@
 
 use std::time::Instant;
 
-use futures::future::join_all;
+use futures::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
 use crate::outcome::AgentOutcome;
 use crate::runtime::{
-    args_summary, clamp_parallel, partition_read_write, InvokeOptions, InvokeResult,
-    PendingToolCall, PendingTurn, PolicyDecision, RawToolCall,
+    args_summary, clamp_parallel, InvokeOptions, InvokeResult, PendingToolCall, PendingTurn,
+    PolicyDecision, RawToolCall,
 };
-use crate::tool::{Permission, Tool, ToolRisk};
-use crate::types::{AgentLoopConfig, EmitFn};
+use crate::tool::{Permission, ToolRisk};
+use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
 
 use super::helpers::{
-    build_tool_invocation, commit_tool_observation, emit_tool_start, find_tool_opt,
-    observation_looks_ok, parallel_batch_observation, unknown_tool_observation,
+    build_tool_invocation, commit_tool_observation, emit_tool_end, emit_tool_start, find_tool_opt,
+    observation_looks_ok, parallel_batch_observation, push_tool_result_messages,
+    unknown_tool_observation,
 };
 use super::LoopState;
 
@@ -64,26 +62,22 @@ pub(super) async fn process_tool_calls(
     emit: &EmitFn,
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
+    if calls.len() > 1 && config.features.wave_scheduling {
+        return run_tool_batch_waves(
+            state,
+            calls,
+            tools_used,
+            tool_rounds,
+            confirms_used,
+            user_text,
+            config,
+            emit,
+            cancel,
+        )
+        .await;
+    }
     if calls.len() > 1 {
         if !batch_may_pause(state, &calls, *confirms_used)? {
-            if config.features.wave_scheduling {
-                tracing::debug!(
-                    batch = calls.len(),
-                    "tool batch: wave scheduling (parallel reads + sequential writes)"
-                );
-                return run_tool_batch_waves(
-                    state,
-                    calls,
-                    tools_used,
-                    tool_rounds,
-                    confirms_used,
-                    user_text,
-                    config,
-                    emit,
-                    cancel,
-                )
-                .await;
-            }
             tracing::debug!(
                 batch = calls.len(),
                 max_parallel = config.features.max_parallel_tools,
@@ -130,7 +124,17 @@ pub(super) async fn process_tool_calls(
             .await?
             {
                 ToolBatchResult::Continue => {}
-                paused @ ToolBatchResult::Paused { .. } => return Ok(paused),
+                ToolBatchResult::Paused {
+                    outcome,
+                    mut pending_turn,
+                } => {
+                    // A late pause in the prefix must retain the untouched tail.
+                    pending_turn.remaining_calls.extend(rest);
+                    return Ok(ToolBatchResult::Paused {
+                        outcome,
+                        pending_turn,
+                    });
+                }
             }
         }
         if rest.is_empty() {
@@ -215,7 +219,7 @@ fn split_auto_readonly_prefix(
             state.runtime.decide_only(tool, &call.args, opts),
             PolicyDecision::NeedsConfirmation { .. }
         );
-        if tool.meta().is_read_only() && !confirm {
+        if tool.meta().is_read_only() && !tool.meta().collects_input && !confirm {
             prefix.push(call);
         } else {
             let mut rest = vec![call];
@@ -239,14 +243,54 @@ async fn run_tool_batch_sequential(
     emit: &EmitFn,
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
+    let (result, _) = run_tool_batch_sequential_inner(
+        state,
+        calls,
+        tools_used,
+        tool_rounds,
+        confirms_used,
+        user_text,
+        config,
+        emit,
+        cancel,
+        false,
+    )
+    .await?;
+    Ok(result)
+}
+
+/// A single non-pausing action returns its untouched tail to the wave planner.
+/// A pause already captures the full tail (including compatible confirmations).
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_batch_sequential_inner(
+    state: &mut LoopState<'_>,
+    calls: Vec<RawToolCall>,
+    tools_used: &mut Vec<String>,
+    tool_rounds: u32,
+    confirms_used: &mut u32,
+    user_text: &str,
+    config: &AgentLoopConfig,
+    emit: &EmitFn,
+    cancel: Option<CancellationToken>,
+    single_step: bool,
+) -> Result<(ToolBatchResult, Vec<RawToolCall>), AgentError> {
     let mut iter = calls.into_iter();
     while let Some(call) = iter.next() {
+        if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(AgentError::cancelled("tool batch cancelled"));
+        }
         emit_tool_start(emit, &call);
         let started = Instant::now();
 
         // Soft-fail unknown tools so prompt/history drift cannot kill the turn.
         let Some(tool) = find_tool_opt(state.tools, &call.name) else {
             tracing::warn!(tool = %call.name, "model requested unknown tool; soft-failing");
+            state.runtime.audit_unknown_tool(
+                &call.name,
+                &call.args,
+                config.session_id.as_deref(),
+                config.turn_id.as_deref(),
+            );
             let duration_ms = started.elapsed().as_millis() as u64;
             commit_tool_observation(
                 state.context,
@@ -257,6 +301,9 @@ async fn run_tool_batch_sequential(
                 tools_used,
                 emit,
             );
+            if single_step {
+                return Ok((ToolBatchResult::Continue, iter.collect()));
+            }
             continue;
         };
 
@@ -312,13 +359,16 @@ async fn run_tool_batch_sequential(
                     gate_left: 0,
                     token_accounting: crate::types::TokenAccounting::default(),
                 };
-                return Ok(ToolBatchResult::Paused {
-                    outcome: AgentOutcome::NeedsInput {
-                        text: speak_prompt,
-                        pending,
+                return Ok((
+                    ToolBatchResult::Paused {
+                        outcome: AgentOutcome::NeedsInput {
+                            text: speak_prompt,
+                            pending,
+                        },
+                        pending_turn,
                     },
-                    pending_turn,
-                });
+                    Vec::new(),
+                ));
             }
             InvokeResult::NeedsConfirmation {
                 pending,
@@ -369,17 +419,23 @@ async fn run_tool_batch_sequential(
                     gate_left: 0,
                     token_accounting: crate::types::TokenAccounting::default(),
                 };
-                return Ok(ToolBatchResult::Paused {
-                    outcome: AgentOutcome::NeedsConfirmation {
-                        text: speak_prompt,
-                        pending,
+                return Ok((
+                    ToolBatchResult::Paused {
+                        outcome: AgentOutcome::NeedsConfirmation {
+                            text: speak_prompt,
+                            pending,
+                        },
+                        pending_turn,
                     },
-                    pending_turn,
-                });
+                    Vec::new(),
+                ));
             }
         }
+        if single_step {
+            return Ok((ToolBatchResult::Continue, iter.collect()));
+        }
     }
-    Ok(ToolBatchResult::Continue)
+    Ok((ToolBatchResult::Continue, Vec::new()))
 }
 
 /// Collect a contiguous prefix of remaining calls that need confirmation,
@@ -535,15 +591,12 @@ fn truncate_voice(s: &str, max_chars: usize) -> String {
 
 /// Parallel path for batches where every call is auto-allowed or denyable.
 ///
-/// Invokes in chunks of `max_parallel_tools` (same clamp as the wave path);
+/// Invokes in a rolling pool bounded by `max_parallel_tools`;
 /// only mutates context after all results are collected, preserving original
 /// call order.
 ///
-/// If any call unexpectedly needs confirmation/input (policy race between
-/// preflight and invoke), the whole batch falls back to sequential execution
-/// so the HITL pause is preserved instead of surfacing
-/// `Error: unexpected confirmation...`. The error text is only kept when the
-/// sequential fallback itself reports a mismatch (which cannot pause).
+/// Completed calls are committed exactly once. Only unresolved pauses fall
+/// back to sequential execution; successful siblings are never replayed.
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_batch_parallel(
     state: &mut LoopState<'_>,
@@ -561,55 +614,96 @@ async fn run_tool_batch_parallel(
         confirms_used: *confirms_used,
     };
     let max_par = clamp_parallel(calls.len(), config.features.max_parallel_tools);
-    let mut results: Vec<(u64, InvokeResult)> = Vec::with_capacity(calls.len());
-
-    // Chunk so we never spawn an unbounded join_all over the full batch.
-    for chunk in calls.chunks(max_par.max(1)) {
-        let chunk_results = {
-            let tools = state.tools;
-            let runtime = state.runtime;
-
-            // Resolve tools first; unknown names become instant error observations.
-            let mut resolved: Vec<Option<&dyn Tool>> = Vec::with_capacity(chunk.len());
-            for call in chunk {
-                emit_tool_start(emit, call);
-                resolved.push(find_tool_opt(tools, &call.name));
-            }
-
-            let futs = chunk.iter().zip(resolved).map(|(call, tool)| {
-                let inv = build_tool_invocation(call, config, cancel.clone(), emit);
-                let started = Instant::now();
-                let name = call.name.clone();
-                async move {
-                    let result = match tool {
-                        Some(tool) => runtime.invoke(tool, inv, opts).await,
-                        None => {
-                            tracing::warn!(tool = %name, "model requested unknown tool; soft-failing");
-                            InvokeResult::Observation(unknown_tool_observation(&name))
-                        }
-                    };
-                    (started.elapsed().as_millis() as u64, result)
-                }
-            });
-
-            join_all(futs).await
-        };
-        results.extend(chunk_results);
+    if calls.is_empty() {
+        return Ok(ToolBatchResult::Continue);
     }
-
-    if results.iter().any(|(_, r)| {
-        matches!(
-            r,
+    let batch_started = Instant::now();
+    let batch_len = calls.len();
+    emit(AgentEvent::ToolBatchStart {
+        call_ids: calls.iter().map(|call| call.call_id.clone()).collect(),
+        max_parallel: max_par as u32,
+    });
+    let tools = state.tools;
+    let runtime = state.runtime;
+    let futs: Vec<_> = calls
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let cancel = cancel.clone();
+            async move {
+                emit_tool_start(emit, &call);
+                let started = Instant::now();
+                let inv = build_tool_invocation(&call, config, cancel, emit);
+                let result = match find_tool_opt(tools, &call.name) {
+                    Some(tool) => runtime.invoke(tool, inv, opts).await,
+                    None => {
+                        runtime.audit_unknown_tool(
+                            &call.name,
+                            &call.args,
+                            config.session_id.as_deref(),
+                            config.turn_id.as_deref(),
+                        );
+                        InvokeResult::Observation(unknown_tool_observation(&call.name))
+                    }
+                };
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let ok = match &result {
+                    InvokeResult::Observation(content) => Some(observation_looks_ok(content)),
+                    InvokeResult::Denied { .. } => Some(false),
+                    _ => None,
+                };
+                if let Some(ok) = ok {
+                    emit_tool_end(emit, &call, ok, duration_ms);
+                }
+                (index, call, result)
+            }
+        })
+        .collect();
+    let run = stream::iter(futs)
+        .buffer_unordered(max_par.max(1))
+        .collect::<Vec<_>>();
+    let mut results = if let Some(token) = &cancel {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                emit(AgentEvent::ToolBatchEnd {
+                    tool_count: batch_len, duration_ms: batch_started.elapsed().as_millis() as u64,
+                    failed: 0, paused: 0, cancelled: true,
+                });
+                return Err(AgentError::cancelled("parallel batch cancelled"));
+            },
+            results = run => results,
+        }
+    } else {
+        run.await
+    };
+    results.sort_by_key(|(index, _, _)| *index);
+    let mut unresolved = Vec::new();
+    let mut failed = 0;
+    for (_, call, result) in results {
+        if matches!(
+            result,
             InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
-        )
-    }) {
-        tracing::warn!(
-            batch = calls.len(),
-            "parallel batch hit unexpected HITL; falling back to sequential"
-        );
+        ) {
+            unresolved.push(call);
+        } else {
+            let (content, ok) = parallel_batch_observation(result);
+            failed += usize::from(!ok);
+            tools_used.push(call.name.clone());
+            push_tool_result_messages(state.context, &call.name, &call.call_id, content, ok);
+        }
+    }
+    emit(AgentEvent::ToolBatchEnd {
+        tool_count: batch_len,
+        failed,
+        paused: unresolved.len(),
+        cancelled: false,
+        duration_ms: batch_started.elapsed().as_millis() as u64,
+    });
+    if !unresolved.is_empty() {
         return run_tool_batch_sequential(
             state,
-            calls,
+            unresolved,
             tools_used,
             tool_rounds,
             confirms_used,
@@ -621,18 +715,16 @@ async fn run_tool_batch_parallel(
         .await;
     }
 
-    commit_batch_results(state, &calls, results, tools_used, emit);
     Ok(ToolBatchResult::Continue)
 }
 
-/// Wave scheduling: parallel read-only wave, then sequential non-read-only.
-///
-/// Same HITL fallback as [`run_tool_batch_parallel`]: an unexpected
-/// confirm/input in either wave re-runs the whole batch sequentially.
+/// Wave scheduling preserves barriers: read/read → write → read/read.
+/// Reads after a write never move ahead of it, and safe reads can still run
+/// together before or after a confirmation boundary.
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_batch_waves(
     state: &mut LoopState<'_>,
-    calls: Vec<RawToolCall>,
+    mut calls: Vec<RawToolCall>,
     tools_used: &mut Vec<String>,
     tool_rounds: u32,
     confirms_used: &mut u32,
@@ -641,132 +733,56 @@ async fn run_tool_batch_waves(
     emit: &EmitFn,
     cancel: Option<CancellationToken>,
 ) -> Result<ToolBatchResult, AgentError> {
-    let opts = InvokeOptions {
-        skip_confirmation: false,
-        confirms_used: *confirms_used,
-    };
-    let (read_idx, write_idx) = partition_read_write(&calls, state.tools);
-    // Contract with `partition_read_write`: every index in 0..calls.len() lands
-    // in exactly one of read_idx/write_idx (checked below, right before the
-    // `ordered[i]` invariant it backs is relied on via `.expect()`).
-    let partitioned_len = read_idx.len() + write_idx.len();
-    let max_par = clamp_parallel(read_idx.len(), config.features.max_parallel_tools);
-
-    // Pre-size results in original order.
-    let mut ordered: Vec<Option<(u64, InvokeResult)>> = (0..calls.len()).map(|_| None).collect();
-
-    // Read-only wave in chunks of max_par.
-    for chunk in read_idx.chunks(max_par.max(1)) {
-        let results = {
-            let tools = state.tools;
-            let runtime = state.runtime;
-            let mut pairs: Vec<(&RawToolCall, Option<&dyn Tool>)> = Vec::new();
-            for &i in chunk {
-                let call = &calls[i];
-                emit_tool_start(emit, call);
-                pairs.push((call, find_tool_opt(tools, &call.name)));
-            }
-            let futs = pairs.into_iter().map(|(call, tool)| {
-                let inv = build_tool_invocation(call, config, cancel.clone(), emit);
-                let started = Instant::now();
-                let name = call.name.clone();
-                async move {
-                    let result = match tool {
-                        Some(tool) => runtime.invoke(tool, inv, opts).await,
-                        None => {
-                            tracing::warn!(tool = %name, "model requested unknown tool; soft-failing");
-                            InvokeResult::Observation(unknown_tool_observation(&name))
-                        }
-                    };
-                    (started.elapsed().as_millis() as u64, result)
-                }
-            });
-            join_all(futs).await
+    while !calls.is_empty() {
+        let (reads, rest) = split_auto_readonly_prefix(state, calls, *confirms_used);
+        let (result, tail) = if reads.len() > 1 {
+            let result = run_tool_batch_parallel(
+                state,
+                reads,
+                tools_used,
+                tool_rounds,
+                confirms_used,
+                user_text,
+                config,
+                emit,
+                cancel.clone(),
+            )
+            .await?;
+            (result, rest)
+        } else {
+            // One read or an ordering barrier. Give the sequential handler the
+            // full tail so compatible confirmations can still share a prompt.
+            let mut next = reads;
+            next.extend(rest);
+            run_tool_batch_sequential_inner(
+                state,
+                next,
+                tools_used,
+                tool_rounds,
+                confirms_used,
+                user_text,
+                config,
+                emit,
+                cancel.clone(),
+                true,
+            )
+            .await?
         };
-        for (&i, res) in chunk.iter().zip(results) {
-            ordered[i] = Some(res);
+        match result {
+            ToolBatchResult::Continue => calls = tail,
+            ToolBatchResult::Paused {
+                outcome,
+                mut pending_turn,
+            } => {
+                pending_turn.remaining_calls.extend(tail);
+                return Ok(ToolBatchResult::Paused {
+                    outcome,
+                    pending_turn,
+                });
+            }
         }
     }
-
-    // Write wave: sequential in original relative order.
-    for i in write_idx {
-        let call = &calls[i];
-        emit_tool_start(emit, call);
-        let started = Instant::now();
-        let result = match find_tool_opt(state.tools, &call.name) {
-            Some(tool) => {
-                let inv = build_tool_invocation(call, config, cancel.clone(), emit);
-                state.runtime.invoke(tool, inv, opts).await
-            }
-            None => {
-                tracing::warn!(tool = %call.name, "model requested unknown tool; soft-failing");
-                InvokeResult::Observation(unknown_tool_observation(&call.name))
-            }
-        };
-        ordered[i] = Some((started.elapsed().as_millis() as u64, result));
-    }
-
-    // Every `ordered[i]` must have been filled by exactly one of the read/write
-    // waves above — guaranteed by `partition_read_write` partitioning every
-    // index into exactly one of read_idx/write_idx (see `runtime::concurrency`
-    // unit tests for the checked contract). Debug-only: cheap, and a violation
-    // here would mean the `.expect()` below is masking a real bug.
-    debug_assert_eq!(
-        partitioned_len,
-        calls.len(),
-        "partition_read_write must assign every call index to exactly one wave"
-    );
-    let results: Vec<(u64, InvokeResult)> = ordered
-        .into_iter()
-        .map(|o| o.expect("every call should have a result"))
-        .collect();
-    if results.iter().any(|(_, r)| {
-        matches!(
-            r,
-            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. }
-        )
-    }) {
-        tracing::warn!(
-            batch = calls.len(),
-            "wave batch hit unexpected HITL; falling back to sequential"
-        );
-        return run_tool_batch_sequential(
-            state,
-            calls,
-            tools_used,
-            tool_rounds,
-            confirms_used,
-            user_text,
-            config,
-            emit,
-            cancel,
-        )
-        .await;
-    }
-    commit_batch_results(state, &calls, results, tools_used, emit);
     Ok(ToolBatchResult::Continue)
-}
-
-/// Append batch outcomes to context in original call order.
-fn commit_batch_results(
-    state: &mut LoopState<'_>,
-    calls: &[RawToolCall],
-    results: Vec<(u64, InvokeResult)>,
-    tools_used: &mut Vec<String>,
-    emit: &EmitFn,
-) {
-    for (call, (duration_ms, result)) in calls.iter().zip(results) {
-        let (content, ok) = parallel_batch_observation(result);
-        commit_tool_observation(
-            state.context,
-            call,
-            content,
-            ok,
-            duration_ms,
-            tools_used,
-            emit,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -779,7 +795,7 @@ mod tests {
 
     use crate::context::Context;
     use crate::runtime::ToolRuntime;
-    use crate::tool::{ToolError, ToolMeta, ToolRisk};
+    use crate::tool::{Tool, ToolError, ToolMeta, ToolRisk};
     use crate::types::AgentLoopConfig;
 
     struct NoopClient;
@@ -1314,7 +1330,7 @@ mod tests {
         // B12: force the parallel path with a confirm-needed batch (bypassing
         // preflight). It must fall back to sequential and pause — never emit
         // "Error: unexpected confirmation..." text.
-        struct Safe;
+        struct Safe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
         #[async_trait]
         impl Tool for Safe {
             fn name(&self) -> &str {
@@ -1334,11 +1350,15 @@ mod tests {
                 _ctx: &crate::tool_context::ToolCallContext,
                 _args: serde_json::Value,
             ) -> Result<String, ToolError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok("ok".into())
             }
         }
-        let tools: Vec<Arc<dyn Tool>> =
-            vec![Arc::new(Safe), Arc::new(DangerWrite { name: "danger" })];
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(Safe(executions.clone())),
+            Arc::new(DangerWrite { name: "danger" }),
+        ];
         let runtime = ToolRuntime::null();
         let mut context = Context::new(20);
         let client = NoopClient;
@@ -1379,6 +1399,12 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "completed siblings must never be replayed"
+        );
+        assert_eq!(tools_used, ["safe"]);
         match result {
             ToolBatchResult::Paused { pending_turn, .. } => {
                 assert_eq!(pending_turn.pending.name, "danger");

@@ -113,6 +113,9 @@ design, change review,
 technical writing, mentoring, and skill creation. User intent controls whether
 a matching playbook is loaded, and optional steps such as todos, research, or
 artifacts are used only when they help produce the requested result.
+Simple direct actions do not require a skill-loading round, and playbooks already
+supplied in context should not be loaded again. Research reminders ask for missing
+evidence rather than fixed search quotas; expected empty absence checks need no retry.
 
 ## Tool inputs and results
 
@@ -154,6 +157,8 @@ registered by the capability preset and within the schema budget. Discovery is
 for long-tail tools. `tool_search` distinguishes actual current availability from
 new activations; debug capture includes a `tool_listing` event with names,
 estimated schema tokens, and availability changes for each model request.
+Discovery hits are keyword matches, not proof of a capability. Check their actual
+descriptions before using them, and repeat discovery only for a specific new lead.
 
 ## Optional MCP host integration
 
@@ -204,13 +209,43 @@ Desktop MVP: `SandboxConfig::for_desktop_mvp` opens network + shell-with-confirm
 ## Multi-tool fan-out (wave scheduling)
 
 One model response can include **many** `tool_calls` in a single assistant message.
-There is **no hard cap** on count per message. The loop processes the full batch:
+Native batches have **no hard cap** on count per message. Built-in registration
+also exposes an explicit **`parallel`** tool for independent work:
+
+```json
+{
+  "tool_uses": [
+    { "recipient_name": "grep", "parameters": { "pattern": "handle_wake" } },
+    { "recipient_name": "glob", "parameters": { "pattern": "**/*test*" } }
+  ]
+}
+```
+
+Use exact listed tool names and ordinary argument objects. The loop expands
+this envelope into native child calls **before** it enters context; each child
+gets its own call ID and result. No additional model request is needed. The raw
+provider response and parent-to-child mapping remain in developer capture.
+An envelope accepts 1–32 children; malformed or nested envelopes produce a
+repairable error without executing any child. Native and explicit forms share
+the same per-child schema validation, path/network/shell policy, audit,
+concurrency limits, cancellation, and approval/input pause-and-resume paths.
+Never duplicate the same work in both forms or batch result-dependent calls.
+
+The scheduler processes the batch:
 
 | Mode | When | Behavior |
 |------|------|----------|
-| **wave scheduling** (default) | batch auto-allowed | read-only tools run in parallel waves (`max_parallel_tools`, default **16**); writes run sequential |
-| **legacy join_all** | `wave_scheduling=false` | all auto-allowed tools `join_all` in `max_parallel_tools`-bounded chunks (never unbounded) |
-| **sequential** | any call needs confirm, collects typed input, or batch size 1 | HITL-safe; **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash in that turn skips the confirm UI (hard gates still apply). |
+| **wave scheduling** (default) | contiguous auto-approved read-only runs | rolling parallel pool (`max_parallel_tools`, default **16**); writes, approval, and typed input are ordering barriers. Later reads never overtake a write. Parallelism resumes after a barrier. |
+| **legacy parallel** | `wave_scheduling=false`, no pausing call | all auto-allowed calls in a bounded rolling pool |
+| **sequential / HITL** | ordering barrier, input, or singleton | **batch HITL** groups contiguous same-risk calls of the same shell-ness (writes together, bash together — never mixed) into one yes/no. After the user approves shell once in a turn, later bash skips the confirm UI (hard gates still apply). |
+
+Completion events reflect actual finish order; normal batch observations enter
+context in request order. Unexpected approval/input pauses retain completed
+sibling results and only reschedule unresolved calls, never replay completed
+side effects. Unknown child tools are audited and soft-failed individually.
+Developer capture records `parallel_expansion`, `parallel_batch_start`, and
+`parallel_batch_end` (IDs, scheduler limit, wall time, failures, pauses, cancellation).
+Home/overlay keep an explicit parallel batch activity label while child tools run.
 
 Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
 HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).

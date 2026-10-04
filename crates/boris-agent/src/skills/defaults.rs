@@ -114,7 +114,7 @@ mod tests {
         );
         let body =
             fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
-        assert!(body.contains("version: 5"));
+        assert!(body.contains("version: 6"));
         assert!(
             body.contains("Minimum effort")
                 || body.contains("multi-tool")
@@ -151,7 +151,7 @@ mod tests {
         );
         let body =
             fs::read_to_string(dir.join("skills").join("research").join("SKILL.md")).unwrap();
-        assert!(body.contains("version: 5"));
+        assert!(body.contains("version: 6"));
         assert!(body.contains("wave 1") || body.contains("spawn_subagent"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -243,7 +243,7 @@ Complete the requested outcome with the least work that proves it is done.
         "research",
         r#"---
 name: research
-version: 5
+version: 6
 description: >
   Research a question that requires current or externally verifiable sources.
   Use when the user explicitly asks to search or when the answer depends on
@@ -261,8 +261,8 @@ Find enough reliable evidence to answer the question. Stop when further searchin
 Identity matching needs stronger evidence than a general fact lookup.
 
 1. Collect every clue the user gave: full name, city/region, job/title, company,
-   school, industry, nicknames, email domain, languages. Also call
-   `get_user_context` / `recall_notes` if they might already be known.
+   school, industry, nicknames, email domain, languages. Use supplied personal context first;
+   call `get_user_context` / `recall_notes` only for relevant missing clues.
 2. Search distinct clues in parallel when several angles are useful. Example angles:
    - `"Full Name" LinkedIn`
    - `"Full Name" "City" LinkedIn` or `"Full Name" City job-title`
@@ -276,9 +276,9 @@ Identity matching needs stronger evidence than a general fact lookup.
 5. Report confidence:
    - High confidence -> speak the best match in 1–2 sentences. You may include **exactly one**
      profile URL, or call `open_url` with that URL so the host can open it.
-   - Medium -> offer top 1-2 candidates and ask **one** short verify question.
-   - No hit -> say you tried several angles, ask for **one** extra clue (employer spelling,
-     school, handle). Never invent a profile URL.
+   - Medium -> put useful candidate details on screen and ask **one** short verify question.
+   - No hit -> state the actual search limitation and ask for **one** extra clue if it could help
+     (employer spelling, school, handle). Claim several search angles only if you tried them.
 
 ### B) Fact / news / general lookup
 1. Start with the smallest `web_search` query that can answer the question.
@@ -290,8 +290,8 @@ Identity matching needs stronger evidence than a general fact lookup.
 
 Use `spawn_subagent` only when independent research branches will save time. Parent still owns the answer:
 
-- After a child returns, **you** must still `web_fetch` critical candidate URLs
-  yourself before trusting the summary.
+- Verify critical candidate claims against fetched source evidence. Fetch missing or insufficient
+  sources yourself rather than trusting a thin summary.
 - Do not repeat the child's searches unless verification or a missing clue requires it.
 
 ## Hard rules
@@ -309,7 +309,7 @@ Use `spawn_subagent` only when independent research branches will save time. Par
         "daily-brief",
         r#"---
 name: daily-brief
-version: 2
+version: 3
 description: >
   Give a quick personal/day brief: time/date, any notes or todos that matter,
   and optional weather/news if asked. Use for "good morning", "what's on today",
@@ -320,12 +320,11 @@ description: >
 
 ## Steps
 
-1. `get_time` and `get_date`.
-2. `todo_read` if todos exist — mention only open high-priority items.
-3. `recall_notes` with a short query like "today" or "remind" if useful.
-4. `get_user_context` if personal context might tailor the brief.
-5. Optional: if they want news/weather, use `web_search` once.
-6. Speak a tight 1–2 sentence brief. Warm Boris energy, not a corporate summary.
+1. For an actual day brief, batch `get_time` / `get_date` and any needed todo or note lookups.
+   A bare greeting needs no tool round.
+2. Mention only relevant open priorities. Use supplied personal context; retrieve more only for missing details.
+3. Search news/weather only if requested, verifying details when snippets are insufficient.
+4. Speak a tight 1–2 sentence brief. Warm Boris energy, not a corporate summary.
 "#,
     ),
     (
@@ -354,7 +353,7 @@ description: >
         "build-code",
         r#"---
 name: build-code
-version: 1
+version: 2
 description: >
   Implement a requested code change in an existing project and verify the real
   behavior. Use when the user asks to add, change, fix, refactor, or implement
@@ -369,7 +368,8 @@ description: >
 2. Locate the smallest set of files and callers that define the behavior.
 3. Establish an observable acceptance condition. Reproduce a bug first when practical.
 4. Preserve unrelated user changes. Edit only what the requested result needs.
-5. Run the narrowest meaningful test, then broader checks proportional to the change.
+5. Run the narrowest meaningful validation. Broaden only for affected integration paths or unresolved risk;
+   do not repeat passed checks without new changes or evidence.
 6. Inspect the final diff and exercise the real feature path when the available tools allow it.
 7. Report what changed, what passed, and what remains unverified.
 
@@ -386,7 +386,7 @@ description: >
         "debug-root-cause",
         r#"---
 name: debug-root-cause
-version: 1
+version: 2
 description: >
   Diagnose a reproducible bug or failure by tracing it to the owning code or
   system boundary. Use when the user asks why something is broken or asks to
@@ -402,8 +402,9 @@ description: >
 3. Trace backward from the symptom through callers, state changes, logs, and external boundaries.
 4. Test competing explanations. Do not patch the first suspicious line.
 5. State the root cause and explain how it produces the symptom.
-6. If the user requested a fix, change the owning layer and add a regression check.
-7. Re-run the reproduction and relevant surrounding tests.
+6. If the user requested a fix, change the owning layer and add a meaningful regression check when needed.
+7. After a fix, re-run the reproduction and relevant checks. For diagnosis alone, stop when the cause is
+   supported; do not edit or run unrelated project test suites.
 
 ## Rules
 

@@ -39,7 +39,9 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search available tools by keyword (e.g. files, web, shell, clipboard) and \
          activate matches for this session. Call this before using tools that are not \
-         already in your tool list. Do not search for tools already listed. Returns names and required parameters, distinguishing currently available tools from new activations."
+         already in your tool list. Keyword matches do not prove capability; check descriptions. \
+         Do not rediscover listed tools or repeat searches without a specific new lead. \
+         Returns names and required parameters, distinguishing current availability from new activation."
     }
 
     fn parameters(&self) -> Value {
@@ -117,7 +119,7 @@ impl Tool for ToolSearchTool {
 
         if scored.is_empty() {
             return Ok(format!(
-                "No tools matched query {query:?}. Try: files, web, shell, clipboard, memory."
+                "No tools matched query {query:?}. Search again only with a specific new lead; otherwise report the capability unavailable."
             ));
         }
 
@@ -152,7 +154,7 @@ impl Tool for ToolSearchTool {
             ));
         }
         lines.push(
-            "Use already-available tools directly; do not search again. New schemas appear next round within the request schema budget."
+            "Use already-available tools directly. New schemas appear next round within the schema budget. Check descriptions, not just keyword hits; if none performs the needed action, report it unavailable unless a specific new lead warrants another query."
                 .into(),
         );
         Ok(lines.join("\n"))

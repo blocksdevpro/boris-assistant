@@ -20,6 +20,32 @@ pub(super) fn is_tool_chip(activity: &str) -> bool {
 /// `wave` counts consecutive same-kind starts so parallel reads collapse.
 pub(super) fn activity_label(ev: &AgentEvent, wave: &ActivityWave) -> Option<String> {
     match ev {
+        AgentEvent::ToolBatchStart {
+            call_ids,
+            max_parallel,
+        } if *max_parallel <= 1 => Some(format!(
+            "tool · Batch of {} tools (sequential limit)",
+            call_ids.len()
+        )),
+        AgentEvent::ToolBatchStart {
+            call_ids,
+            max_parallel,
+        } => Some(format!(
+            "tool · Parallel batch of {} tools (up to {max_parallel} at once)",
+            call_ids.len()
+        )),
+        AgentEvent::ToolBatchEnd {
+            cancelled: true, ..
+        } => Some("fail · Parallel batch cancelled".into()),
+        AgentEvent::ToolBatchEnd { failed, .. } if *failed > 0 => Some(format!(
+            "fail · Parallel batch returned with {failed} failures"
+        )),
+        AgentEvent::ToolBatchEnd { paused, .. } if *paused > 0 => {
+            Some(format!("tool · Parallel batch paused for {paused} actions"))
+        }
+        AgentEvent::ToolBatchEnd { tool_count, .. } => Some(format!(
+            "done · Parallel dispatch of {tool_count} tools finished"
+        )),
         AgentEvent::ToolExecutionStart {
             tool_name,
             args_summary,
@@ -248,5 +274,33 @@ mod tests {
             activity_label(&flood, &wave_for(&["bash"])).is_none(),
             "stdout chunks must not clobber the command line"
         );
+    }
+
+    #[test]
+    fn parallel_activity_distinguishes_running_failed_paused_and_cancelled() {
+        let wave = ActivityWave::default();
+        let start = AgentEvent::ToolBatchStart {
+            call_ids: vec!["a".into(), "b".into(), "c".into()],
+            max_parallel: 2,
+        };
+        let label = activity_label(&start, &wave).unwrap();
+        assert!(is_tool_chip(&label));
+        assert!(label.contains("Parallel batch of 3 tools"));
+        assert!(label.contains("up to 2"));
+        for (failed, paused, cancelled, expected) in [
+            (0, 0, false, "done ·"),
+            (1, 0, false, "fail ·"),
+            (0, 1, false, "tool ·"),
+            (0, 0, true, "fail ·"),
+        ] {
+            let end = AgentEvent::ToolBatchEnd {
+                tool_count: 3,
+                duration_ms: 10,
+                failed,
+                paused,
+                cancelled,
+            };
+            assert!(activity_label(&end, &wave).unwrap().starts_with(expected));
+        }
     }
 }

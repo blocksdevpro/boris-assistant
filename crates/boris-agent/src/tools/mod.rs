@@ -11,6 +11,7 @@
 //! | [`files`] / [`glob`] / [`grep`] | filesystem |
 //! | [`web`] | web_search, web_fetch |
 //! | [`bash`] | shell |
+//! | [`parallel`] | explicit independent-tool scheduling envelope |
 //! | [`skills_tools`] / [`memory`] / [`subagent`] / [`tool_search`] | advanced |
 //!
 //! Hosts (pipeline / desktop) should call [`register_builtin_tools`] once after
@@ -29,6 +30,7 @@ pub mod memory;
 pub mod memory_tools;
 pub mod notes;
 pub mod open_tool;
+pub mod parallel;
 pub mod path_pattern;
 pub mod profile;
 pub mod skills_tools;
@@ -91,9 +93,10 @@ impl BuiltinToolPaths {
 
 // ── Tool set factories ───────────────────────────────────────────────────────
 
-/// Core v1 tools: time + notes (no profile).
+/// Core tools: time, notes, and the parallel scheduling interface (no profile).
 pub fn builtin_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
+        Box::new(parallel::ParallelTool),
         Box::new(time::GetTimeTool),
         Box::new(time::GetDateTool),
         Box::new(notes::RememberNoteTool::new(paths.notes_path.clone())),
@@ -204,12 +207,11 @@ pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
 /// boris_agent::tools::register_mcp_tools(&mut agent, tools, preset);
 /// ```
 /// Capability filtering still applies (Web kind → VoiceSafe/LocalPower drop).
-pub fn register_mcp_tools(
-    agent: &mut Agent,
-    tools: Vec<mcp::McpTool>,
-    preset: CapabilityPreset,
-) {
-    let boxed: Vec<Box<dyn Tool>> = tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>).collect();
+pub fn register_mcp_tools(agent: &mut Agent, tools: Vec<mcp::McpTool>, preset: CapabilityPreset) {
+    let boxed: Vec<Box<dyn Tool>> = tools
+        .into_iter()
+        .map(|t| Box::new(t) as Box<dyn Tool>)
+        .collect();
     let filtered = filter_tools_for_preset(boxed, preset);
     agent.register_tools(filtered);
 }

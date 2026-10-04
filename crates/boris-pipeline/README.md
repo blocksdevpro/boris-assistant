@@ -63,6 +63,14 @@ an independent `artifacts/recovery/` catalog keeps the report across restarts.
 An initial presentation failure permits one corrected retry before the tool is
 withheld for that turn.
 
+The system prompt separates short speech from thorough tool work and detailed
+screen reports. Shared rules are stated once; research and retry depth follows
+unresolved evidence gaps rather than fixed query or tool-round quotas.
+Independent tools can use the explicit `parallel` API or native multi-tool calls.
+The activity chip shows the live parallel batch and concurrency ceiling; child
+completion events remain visible in developer capture. Writes and approval/input
+boundaries preserve ordering, and completed calls are never replayed on a late pause.
+
 When Parakeet is warm, freeform capture can re-decode the recorded audio prefix
 and show interim text in the overlay. Those partials are advisory; the final
 decode remains authoritative. Stable partials can shorten the silence wait.

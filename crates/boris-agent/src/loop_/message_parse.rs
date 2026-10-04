@@ -2,9 +2,79 @@
 //!
 //! Keeps OpenAI-style JSON shape handling out of the ReAct control flow.
 
-use serde_json::Value;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
 
 use crate::runtime::RawToolCall;
+use crate::tool::Tool;
+
+static PARALLEL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Expand a model's explicit parallel envelope into ordinary, individually
+/// paired calls before it enters context. Invalid envelopes stay intact so the
+/// runtime returns a repairable error. Raw provider responses remain in debug.
+pub(super) fn expand_parallel_calls(
+    mut response: Value,
+    tools: &[std::sync::Arc<dyn Tool>],
+) -> (Value, Vec<Value>) {
+    if !tools
+        .iter()
+        .any(|tool| tool.name() == crate::tools::parallel::NAME)
+    {
+        return (response, Vec::new());
+    }
+    let Some(calls) = response.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+        return (response, Vec::new());
+    };
+    if !calls
+        .iter()
+        .any(|call| call["function"]["name"].as_str() == Some(crate::tools::parallel::NAME))
+    {
+        return (response, Vec::new());
+    }
+    let mut ids: HashSet<String> = calls
+        .iter()
+        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+        .collect();
+    let mut expanded = Vec::new();
+    let mut mappings = Vec::new();
+    for call in std::mem::take(calls) {
+        if call["function"]["name"].as_str() != Some(crate::tools::parallel::NAME) {
+            expanded.push(call);
+            continue;
+        }
+        let raw = parse_one_tool_call(&call);
+        let Ok(children) = crate::tools::parallel::parse_tool_uses(raw.args) else {
+            expanded.push(call);
+            continue;
+        };
+        let mut mapping = Vec::new();
+        for child in children {
+            let id = loop {
+                let seq = PARALLEL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let id = format!("call_parallel_{stamp:x}_{seq:x}");
+                if ids.insert(id.clone()) {
+                    break id;
+                }
+            };
+            mapping.push(json!({"call_id": id, "tool_name": child.recipient_name}));
+            expanded.push(json!({
+                "id": id, "type": "function",
+                "function": {"name": child.recipient_name, "arguments": Value::Object(child.parameters).to_string()}
+            }));
+        }
+        mappings.push(json!({"parent_call_id": raw.call_id, "children": mapping}));
+    }
+    *calls = expanded;
+    (response, mappings)
+}
 
 /// Parse OpenAI-style `tool_calls` array entries into [`RawToolCall`]s.
 ///
@@ -81,6 +151,46 @@ pub(super) fn log_preview(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parallel_expansion_pairs_leaf_calls_and_preserves_native_siblings() {
+        let tools: Vec<std::sync::Arc<dyn Tool>> =
+            vec![std::sync::Arc::new(crate::tools::parallel::ParallelTool)];
+        let response = json!({"role":"assistant", "content":"Checking both facts.", "tool_calls":[
+            {"id":"outer", "function":{"name":"parallel", "arguments":json!({"tool_uses":[
+                {"recipient_name":"get_time", "parameters":{}},
+                {"recipient_name":"get_date", "parameters":{}}
+            ]}).to_string()}},
+            {"id":"native", "function":{"name":"get_system_info", "arguments":"{}"}}
+        ]});
+        let (expanded, mappings) = expand_parallel_calls(response.clone(), &tools);
+        let calls = parse_raw_tool_calls(expanded["tool_calls"].as_array().unwrap());
+        assert_eq!(
+            calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["get_time", "get_date", "get_system_info"]
+        );
+        assert_eq!(expanded["content"], response["content"]);
+        assert_eq!(calls[2].call_id, "native");
+        assert_ne!(calls[0].call_id, calls[1].call_id);
+        assert_eq!(mappings[0]["parent_call_id"], "outer");
+        assert_eq!(mappings[0]["children"][0]["call_id"], calls[0].call_id);
+        assert_eq!(expanded["tool_calls"][2], response["tool_calls"][1]);
+    }
+
+    #[test]
+    fn invalid_or_unregistered_parallel_is_not_partially_expanded() {
+        let response = json!({"tool_calls":[{"id":"outer", "function":{"name":"parallel", "arguments":json!({"tool_uses":[
+            {"recipient_name":"get_time", "parameters":{}},
+            {"recipient_name":"parallel", "parameters":{}}
+        ]}).to_string()}}]});
+        let tools: Vec<std::sync::Arc<dyn Tool>> =
+            vec![std::sync::Arc::new(crate::tools::parallel::ParallelTool)];
+        for registry in [&tools[..], &[][..]] {
+            let (expanded, mapping) = expand_parallel_calls(response.clone(), registry);
+            assert_eq!(expanded, response);
+            assert!(mapping.is_empty());
+        }
+    }
 
     #[test]
     fn tool_note_uses_same_response_content_without_speech() {

@@ -32,6 +32,9 @@ function eventLabel(event: DebugEvent): string {
     case "response": return "API response";
     case "request_error": return "API request failed";
     case "tool_start": return `${string(event.data.tool_name) ?? "Tool"} started`;
+    case "parallel_expansion": return "Parallel call expanded";
+    case "parallel_batch_start": return `Parallel batch · ${number(event.data.tool_count) ?? "?"} tools`;
+    case "parallel_batch_end": return "Parallel dispatch finished";
     case "history": return "Complete chat history";
     case "tool_end": return `${string(event.data.tool_name) ?? "Tool"} finished`;
     case "round_start": return `Agent round ${number(event.data.round) ?? ""}`;
@@ -58,6 +61,9 @@ function eventDetail(event: DebugEvent): string {
     return `${number(event.data.duration_ms)?.toLocaleString() ?? "?"} ms${usage ? ` · ${number(usage.prompt_tokens)?.toLocaleString() ?? "?"} input tokens` : " · usage unavailable"}`;
   }
   if (event.kind === "tool_start") return string(event.data.args_summary) ?? "";
+  if (event.kind === "parallel_expansion") return `${Array.isArray(event.data.children) ? event.data.children.length : 0} native child calls · ${string(event.data.parent_call_id) ?? ""}`;
+  if (event.kind === "parallel_batch_start") return `Concurrency limit ${number(event.data.max_parallel) ?? "?"}`;
+  if (event.kind === "parallel_batch_end") return `${number(event.data.duration_ms)?.toLocaleString() ?? "?"} ms · ${number(event.data.tool_count) ?? "?"} calls${event.data.cancelled === true ? " · cancelled" : ` · ${number(event.data.failed) ?? 0} failed · ${number(event.data.paused) ?? 0} paused`}`;
   if (event.kind === "tool_end") return `${number(event.data.duration_ms)?.toLocaleString() ?? "?"} ms · ${event.data.ok === true ? "success" : "failed"}`;
   if (event.kind === "model_send" || event.kind === "transport_attempt") return `Request #${number(event.data.request_seq) ?? "?"}`;
   if (event.kind === "request_error" || event.kind === "error") return string(event.data.message) ?? "";

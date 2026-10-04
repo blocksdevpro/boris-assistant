@@ -13,7 +13,8 @@ const CATALOG_SUFFIX: &str = "\n</skills_catalog_data>";
 /// user-role reference data.
 pub(crate) const SKILLS_SYSTEM_POLICY: &str = "<skills_policy>\n\
 You can load host-discovered skill playbooks with load_skill. Use a skill only when the user's \
-intent matches a catalog entry. Do not invent skills, and apply only relevant guidance after loading.\n\
+intent matches a catalog entry and its guidance helps. Simple direct actions need no skill round. \
+Do not invent skills or reload a playbook already in context; apply only relevant guidance.\n\
 </skills_policy>";
 
 /// Progressive-disclosure catalog for the system prompt.

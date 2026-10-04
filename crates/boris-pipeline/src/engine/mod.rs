@@ -916,6 +916,7 @@ fn run(
         let activity_events_enabled_w = activity_events_enabled.clone();
         let wave = std::sync::Arc::new(std::sync::Mutex::new(boris_agent::ActivityWave::default()));
         let wave_w = wave.clone();
+        let parallel_active = std::sync::atomic::AtomicBool::new(false);
         let thought_t = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let thought_w = thought_t.clone();
         let art_store = rt.store.clone();
@@ -925,6 +926,18 @@ fn run(
         let unsub = rt.agent.subscribe(move |ev| {
             if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
                 return;
+            }
+            match ev {
+                AgentEvent::ToolBatchStart { .. } => {
+                    parallel_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                AgentEvent::ToolBatchEnd { .. }
+                | AgentEvent::TurnStart { .. }
+                | AgentEvent::NeedsConfirmation { .. }
+                | AgentEvent::NeedsInput { .. } => {
+                    parallel_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {}
             }
             // Track consecutive tool starts for same-kind collapse.
             if let AgentEvent::ToolExecutionStart {
@@ -1025,6 +1038,17 @@ fn run(
                 }
             }
             let wave_snapshot = wave_w.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            // Keep the explicit parallel label while individual child tools run.
+            if parallel_active.load(std::sync::atomic::Ordering::Relaxed)
+                && matches!(
+                    ev,
+                    AgentEvent::ToolExecutionStart { .. }
+                        | AgentEvent::ToolExecutionEnd { .. }
+                        | AgentEvent::ToolProgress { .. }
+                )
+            {
+                return;
+            }
             let Some(label) = activity_label(ev, &wave_snapshot) else {
                 return;
             };

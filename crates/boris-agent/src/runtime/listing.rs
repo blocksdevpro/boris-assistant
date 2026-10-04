@@ -114,6 +114,7 @@ impl ActivationTable {
 /// Work tools (read/search/shell) stay listed even on non-coding turns so the
 /// model can actually execute instead of discovering them via `tool_search`.
 pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
+    "parallel",
     "get_time",
     "get_date",
     "remember_note",
@@ -148,9 +149,9 @@ pub struct ToolRuntimeFeatures {
     pub progressive_listing: bool,
     /// Ignore progressive filter; list everything.
     pub force_list_all: bool,
-    /// Partition multi-tool batches into a parallel **read** wave then a sequential
-    /// **write** wave (Grok-style fan-out). When false, falls back to legacy
-    /// parallel dispatch (chunked by `max_parallel_tools`) for every auto-allowed call.
+    /// Execute contiguous read-only runs in parallel, preserving write/approval
+    /// barriers. When false, use legacy bounded parallel dispatch for a
+    /// pause-free batch (including auto-approved writes).
     ///
     /// (Historically named `concurrency_v2` during the rollout; the name was
     /// just "second concurrency strategy", not a protocol version.)

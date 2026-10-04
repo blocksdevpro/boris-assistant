@@ -210,6 +210,18 @@ pub enum AgentEvent {
         language: Option<String>,
         body: String,
     },
+    /// A bounded parallel dispatch, with child call IDs for debug correlation.
+    ToolBatchStart {
+        call_ids: Vec<String>,
+        max_parallel: u32,
+    },
+    ToolBatchEnd {
+        tool_count: usize,
+        duration_ms: u64,
+        failed: usize,
+        paused: usize,
+        cancelled: bool,
+    },
     ToolExecutionStart {
         call_id: String,
         tool_name: String,

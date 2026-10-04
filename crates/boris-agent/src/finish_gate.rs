@@ -114,10 +114,9 @@ pub fn pending_todo_count(todos_file: &Path) -> usize {
 pub fn todo_gate_reminder(pending: usize) -> String {
     format!(
         "<system-reminder>\n\
-         You still have {pending} open todo(s). Do not stop yet. \
-         Continue with tools (todo_write to update, then the next work steps) \
-         until the list is done or you need one short question from the human. \
-         Stay silent on tool dumps — only speak when truly finished or blocked.\n\
+         You still have {pending} open todo(s). Continue requested work that remains. \
+         Use todo_write to record completed, superseded, or blocked items; optional or stale todos \
+         do not expand the user's request. Finish when done or state the real blocker.\n\
          </system-reminder>"
     )
 }
@@ -269,11 +268,9 @@ pub fn local_work_gate_reminder() -> String {
 /// System-reminder when research was under-tooled after a content-only reply.
 pub fn research_gate_reminder() -> String {
     "<system-reminder>\n\
-     You under-tooled this research. Use real API tool_calls only (never tool XML in speech). \
-     Fan out 3+ web_search queries with different angles in one multi-tool message \
-     (name+city, job, site:linkedin.com, company), then web_fetch 2+ candidates. \
-     For a high-confidence profile match you may speak ONE URL or call open_url. \
-     Do not conclude not found yet. Stay silent until you have real evidence or true exhaustion.\n\
+     This research is under-tooled: support the requested claims with evidence. Use listed web_search \
+     or web_fetch as needed, batching independent lookups. Verify person/profile candidates against \
+     identity clues. Resolve actual gaps, not a fixed query quota; state genuine tool or source blockers.\n\
      </system-reminder>"
         .to_string()
 }
@@ -282,11 +279,8 @@ pub fn research_gate_reminder() -> String {
 pub fn person_find_skill_nudge(skill_body: &str) -> String {
     format!(
         "<system-reminder>\n\
-         Person/profile research request. Follow this research playbook using real API tool_calls only \
-         (never write tool XML, invoke tags, or tool JSON in speech). \
-         Word limit applies only to the final spoken line after tools. \
-         When you have a verified profile, speak one short line and may include exactly one URL, \
-         or call open_url for the user.\n\n\
+         Person/profile research request. This playbook is already supplied; do not load it again. \
+         Apply relevant steps and verify identity before reporting a match.\n\n\
          {skill_body}\n\
          </system-reminder>"
     )
@@ -573,7 +567,8 @@ mod tests {
         assert!(s.contains("under-tooled"));
         assert!(s.contains("web_search"));
         assert!(s.contains("web_fetch"));
-        assert!(s.contains("tool_calls") || s.contains("API"));
+        assert!(s.contains("evidence"));
+        assert!(s.contains("not a fixed query quota"));
     }
 
     fn s(name: &str) -> String {

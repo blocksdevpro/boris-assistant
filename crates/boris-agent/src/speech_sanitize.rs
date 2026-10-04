@@ -32,6 +32,7 @@ pub fn contains_tool_markup(s: &str) -> bool {
             && (lower.contains("web_search")
                 || lower.contains("web_fetch")
                 || lower.contains("load_skill")
+                || lower.contains("parallel")
                 || lower.contains("spawn_subagent")))
 }
 
@@ -92,12 +93,16 @@ pub fn is_markup_only_speech(s: &str) -> bool {
 /// True when a JSON-ish span looks like a pseudo-tool call for a known tool.
 fn looks_like_pseudo_tool_json(block: &str) -> bool {
     let lower = block.to_ascii_lowercase();
-    lower.contains("\"name\"")
-        && lower.contains("\"arguments\"")
-        && (lower.contains("web_search")
-            || lower.contains("web_fetch")
-            || lower.contains("load_skill")
-            || lower.contains("spawn_subagent"))
+    (lower.contains("\"tool_uses\"")
+        && lower.contains("\"recipient_name\"")
+        && lower.contains("\"parameters\""))
+        || (lower.contains("\"name\"")
+            && lower.contains("\"arguments\"")
+            && (lower.contains("web_search")
+                || lower.contains("web_fetch")
+                || lower.contains("load_skill")
+                || lower.contains("spawn_subagent")
+                || lower.contains("parallel")))
 }
 
 /// Remove ``` fenced blocks that contain pseudo-tool JSON.
@@ -284,6 +289,21 @@ fn line_is_tool_noise(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_envelopes_in_speech_are_stripped_never_executed() {
+        for fake in [
+            r#"{"name":"parallel","arguments":{"tool_uses":[{"recipient_name":"get_time","parameters":{}}]}}"#,
+            r#"{"tool_uses":[{"recipient_name":"get_time","parameters":{}}]}"#,
+        ] {
+            assert!(contains_tool_markup(fake));
+            assert!(strip_tool_markup(fake).is_empty());
+            assert_eq!(
+                strip_tool_markup(&format!("Checking now.\n{fake}")),
+                "Checking now."
+            );
+        }
+    }
 
     #[test]
     fn detects_invoke_xml() {

@@ -321,6 +321,13 @@ pub(super) fn commit_tool_observation(
     tools_used: &mut Vec<String>,
     emit: &EmitFn,
 ) {
+    emit_tool_end(emit, call, ok, duration_ms);
+    tools_used.push(call.name.clone());
+    push_tool_result_messages(context, &call.name, &call.call_id, content, ok);
+}
+
+/// Emit completion when a future finishes, independently of context ordering.
+pub(super) fn emit_tool_end(emit: &EmitFn, call: &RawToolCall, ok: bool, duration_ms: u64) {
     log_tool_done(&call.name, ok, duration_ms);
     emit(AgentEvent::ToolExecutionEnd {
         call_id: call.call_id.clone(),
@@ -328,8 +335,6 @@ pub(super) fn commit_tool_observation(
         ok,
         duration_ms,
     });
-    tools_used.push(call.name.clone());
-    push_tool_result_messages(context, &call.name, &call.call_id, content, ok);
 }
 
 /// Store an unmodified tool observation, followed by any host-authored nudge

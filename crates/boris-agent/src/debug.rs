@@ -224,6 +224,23 @@ impl DebugCapture {
                 json!({ "role": role.to_string(), "preview": preview }),
             ),
             AgentEvent::ToolNote { text } => ("tool_note", json!({ "text": text })),
+            AgentEvent::ToolBatchStart {
+                call_ids,
+                max_parallel,
+            } => (
+                "parallel_batch_start",
+                json!({ "call_ids": call_ids, "tool_count": call_ids.len(), "max_parallel": max_parallel }),
+            ),
+            AgentEvent::ToolBatchEnd {
+                tool_count,
+                duration_ms,
+                failed,
+                paused,
+                cancelled,
+            } => (
+                "parallel_batch_end",
+                json!({ "tool_count": tool_count, "duration_ms": duration_ms, "failed": failed, "paused": paused, "cancelled": cancelled }),
+            ),
             AgentEvent::ReportFallback { meta, title, .. } => (
                 "report_fallback",
                 json!({

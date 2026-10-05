@@ -26,12 +26,17 @@ not a Session FSM.
 | `AwaitingInput` | Typed/pasted overlay/Home input |
 | `Hearing` | Mic capture + VAD |
 | `Reading` | STT |
-| `Thinking` | Agent + tools (+ TTS synth) |
+| `Thinking` | Agent + tools, TTS preload, then accepted-answer synthesis |
 | `Talking` | Playback started |
 
 Wake scoring, VAD capture, and STT run inline on the engine thread. The agent
 turn runs on a scoped thread during Thinking so the engine can still service
-Stop and barge-in. Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
+Stop and barge-in. TTS loading overlaps agent work, but reply synthesis starts
+only after the complete final answer is accepted and tool markup is removed.
+Streamed model content does not start synthesis or playback. Speculative
+first-unit synthesis during answer generation is not implemented.
+
+Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
 helper thread fed by one turn-scoped producer;
 the engine remains the sole owner of phases and playback state. Bounded helpers
 (a 2-worker Tokio runtime, a maintenance worker, two reusable model loaders)

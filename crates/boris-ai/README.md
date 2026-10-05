@@ -54,6 +54,10 @@ default-model constants, which stay `boris_ai`-only.
   tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
   them. Reasoning is never assembled into `content`.
 - Assistant `content` is normalized to a **string** for the agent loop.
+- `CompleteOptions::tool_error` carries host-known current-turn tool failure
+  evidence for internal routing. `Some(false)` prevents successful output
+  containing error-related words from triggering failure escalation; `None`
+  uses legacy error prefixes. Providers never receive this option in JSON.
 - `session_id` is sent as JSON and as `x-session-id` on **both** streaming and
   blocking requests (OpenRouter sticky routing / prompt-cache hits).
 - Non-success HTTP statuses map to [`LlmErrorKind::Provider`] (or Timeout for
@@ -69,8 +73,10 @@ default-model constants, which stay `boris_ai`-only.
 - SSE assembly flushes a final unterminated line when the byte stream ends.
 - SSE assembly treats incremental `delta` payloads as appends and canonical
   `message` payloads as replacements, so streams that send both do not glue
-  duplicated text; tool calls rebuild by position and snapshots only cover
-  content with no prior delta.
+  duplicated text. Tool calls rebuild by position. Canonical content always
+  replaces the draft, but a snapshot emits content deltas only when no earlier
+  content delta was emitted. Consumers must check the returned final message
+  before acting on streamed drafts.
 - Multi-line SSE events are **not** reassembled (single-line `data:` only).
 - Default model (`DEFAULT_MODEL`) is owned by this crate as a last-resort
   fallback when the host passes `None`; product defaults should set a model

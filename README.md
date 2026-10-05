@@ -68,7 +68,7 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 
 - **Hands-free loop** — wake word, VAD capture, local STT, agent turn, local TTS playback, with wake barge-in while talking, thinking, or confirming
 - **Taught wake filter** — four “Boris” takes so TV / Translate / TTS from a speaker do not start a turn
-- **Responsive speech** — Silero VAD, sentence-streamed TTS, and configurable model residency
+- **Responsive speech** — Silero VAD, sentence-streamed TTS after final-answer acceptance, and configurable model residency
 - **Voice island** — always-on-top overlay with live captions, interim transcripts during capture, and current tool progress
 - **Presence orb** — a phase-aware orb on Home, the overlay, startup, and Teach Voice (listening / transcribing / thinking / searching / working / speaking / confirm / fault); honors reduced-motion with a static fallback
 - **Tool-using agent** — files, glob/grep, shell (HITL), web search and fetch, clipboard, memory, skills, sessions, todos, and recovery hints for misheard file names
@@ -83,6 +83,12 @@ Packaged builds have no console. Logs land at `%USERPROFILE%\.boris\logs\boris.Y
 - **Local diagnostics** — durable per-turn latency traces under `~/.boris/traces/turns.jsonl`
 - **User home** — `%USERPROFILE%\.boris` for config, keys, models, logs, sessions, memory, skills, workspace, speaker teach
 
+Tool results preserve execution status independently of their output text.
+Successful logs containing words such as "error" or "failed" stay successful;
+shell failures, missing search paths, and MCP tool errors retain their
+diagnostics and report failure. See the
+[agent tool-result contract](crates/boris-agent/README.md#tool-execution-status).
+
 ---
 
 ## How a turn works
@@ -96,8 +102,10 @@ Armed  →  wake  →  Hearing  →  Reading  →  Thinking  →  Talking  →  
 ```
 
 The engine thread owns voice state and turn ordering. Reusable loader threads
-preload STT/TTS, final speech is produced sentence-by-sentence while playback
-continues, and durable memory/trace work runs on maintenance lanes (the
+preload STT/TTS. TTS loading overlaps agent work, but synthesis begins only
+after the final answer is accepted and tool markup is removed. Later sentences
+synthesize while earlier audio plays. Synthesis during answer generation is
+not implemented. Durable memory/trace work runs on maintenance lanes (the
 transcript append stays in the turn path). Voice confirmations follow the same
 HITL budget as the agent (`max_confirms_per_turn`, default 12), support wake
 barge-in mid-prompt, and feed post-confirm tool rounds back into the context
@@ -209,7 +217,7 @@ More packaging, updater signing, and log detail: [`desktop/README.md`](desktop/R
 # Library crates (no Tauri UI)
 cargo test -p boris-core -p boris-ai -p boris-agent --lib
 cargo test -p boris-audio -p boris-sense -p boris-inference --lib
-cargo test -p boris-pipeline --lib
+cargo test -p boris-pipeline -p boris-tts-supertone --lib
 cargo check -p boris-pipeline --features stt-parakeet,tts-supertone
 
 # Full product (needs the tracked wake ONNX + frontend toolchain)

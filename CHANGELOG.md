@@ -5,7 +5,36 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+
+- Tool execution status now stays typed through sequential and parallel
+  batches, approval and typed-input resumes, task state, session history,
+  post-tool reminders, and model routing. Successful output containing
+  error-related words no longer counts as a failed operation.
+- Nonzero shell exits, missing `grep` search paths, and MCP responses with
+  `isError: true` now report failure while retaining useful diagnostics.
+- Tool-result transcripts preserve host-only `_tool_ok` metadata. Provider
+  messages omit that metadata; older history uses conventional error prefixes.
+- Timeout recovery guidance asks for a safe retry or a narrower request
+  instead of incorrectly claiming that the arguments need repair.
+
+### Removed
+
+- The temporary `scripts/tool-status-fix/SKILL.md` migration playbook and the
+  otherwise unused root `scripts/` directory.
+
+### Validation
+
+On 2026-10-05, the library baseline at `ea4f559` passed with 1,011 tests,
+0 failures, and 3 ignored tests:
+
+```bash
+cargo test --offline -p boris-agent -p boris-ai -p boris-pipeline -p boris-tts-supertone --lib
+```
+
+This run validates the current agent and speech behavior. Speculative
+first-unit synthesis remains unimplemented; no first-speech speedup was
+measured.
 
 ## [1.2.0] - 2026-09-28
 

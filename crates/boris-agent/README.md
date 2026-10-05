@@ -160,6 +160,34 @@ estimated schema tokens, and availability changes for each model request.
 Discovery hits are keyword matches, not proof of a capability. Check their actual
 descriptions before using them, and repeat discovery only for a specific new lead.
 
+## Tool execution status
+
+`Tool::execute` returns `Result<String, ToolError>`. Failed operations return
+a typed error with useful diagnostics. The runtime carries a `ToolObservation`
+in `InvokeResult::Observation` and reads its status before rendering provider
+text. For example, a successful file read containing "Error: quoted log line"
+remains successful.
+
+Status survives sequential and parallel batches, approval and typed-input
+resumes, task-state updates, and `ToolExecutionEnd.ok` events. Post-tool
+reminders and research evidence use that status rather than failure-related
+words in the output. Timeout guidance distinguishes a safe retry from argument
+repair.
+
+Internal tool history stores `_tool_ok` and preserves it through transcript
+serialization. Provider messages omit this field. Older history without the
+field uses case-insensitive `Error:` and `Error [` prefixes. Current-turn
+failure evidence resets at the next human message and remains available even
+when the provider context is compacted.
+
+The loop passes that evidence through `CompleteOptions::tool_error` for model
+routing. `Some(false)` overrides error-looking successful output; the option
+stays inside the host and is never serialized into the provider request.
+
+Nonzero shell exits and missing `grep` search paths return failures with their
+diagnostics. MCP calls with `result.isError: true` fail with the full result
+object, including text and structured diagnostics.
+
 ## Optional MCP host integration
 
 Hosts can load stdio MCP server definitions from `~/.boris/mcp.json`, discover

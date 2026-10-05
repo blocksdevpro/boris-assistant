@@ -24,6 +24,8 @@ the voice engine.
 | Floating overlay wording or content | `src/lib/status/` | `src/windows/overlay/OverlayWindow.tsx` |
 | Overlay window size, placement, visibility, or click-through | `src-tauri/src/overlay_win.rs` | Matching layout rules in `src/lib/status/overlay.ts` |
 | Status appears stale or out of order | `src/bridge/useStatus.ts` | `src-tauri/src/orchestrator.rs`, then the pipeline status producer |
+| Successful tool output is reported as failure | `crates/boris-agent/src/tool/observation.rs` | Runtime invocation, loop batching, context history, and `routing.rs`; see the [tool-result contract](../../crates/boris-agent/README.md#tool-execution-status) |
+| Boris waits before speaking | `crates/boris-pipeline/src/engine/mod.rs` | `engine/speech.rs` and `crates/boris-agent/src/loop_/round.rs`; see the [current speech flow](../../crates/boris-pipeline/README.md#turn-loop) |
 | A button invokes the wrong behavior or reports an IPC error | `src/bridge/` | The matching module in `src-tauri/src/commands/` |
 | Settings save or autostart behavior | `src/windows/main/settings/` | `src/bridge/commands/settings.ts`, `src-tauri/src/commands/settings.rs`, then pipeline settings |
 | Model installation or progress | `src/windows/main/MainWindow.tsx` | `src/bridge/commands/models.ts`, `src-tauri/src/commands/models.rs`, then pipeline install code |

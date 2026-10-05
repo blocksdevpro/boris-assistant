@@ -16,7 +16,7 @@ Boris is a Windows-first desktop voice assistant: wake word → listen → trans
 # Library crates — no Tauri UI, no wake ONNX required
 cargo test -p boris-core -p boris-ai -p boris-agent --lib
 cargo test -p boris-audio -p boris-sense -p boris-inference --lib
-cargo test -p boris-pipeline --lib
+cargo test -p boris-pipeline -p boris-tts-supertone --lib
 
 # Single test / module (works with any -p crate)
 cargo test -p boris-pipeline confirm
@@ -113,6 +113,11 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 
 `Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
 
+TTS loading overlaps agent work. Reply synthesis begins only after final-answer
+acceptance and speech sanitization; later sentence synthesis overlaps playback.
+The agent loop does not forward `ContentDelta` events to TTS. Speculative
+first-unit synthesis remains unimplemented.
+
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 
 ```
@@ -162,6 +167,11 @@ Dev secrets go in `.env` (copy from `.env.example`), gitignored.
 - **Keep low-level crates thin.** `boris-core` has only `thiserror` by design; `boris-inference` has no `ort`/vendor SDKs/Tokio; adapters map failures to `boris_core::Error` at the trait edge. Don't add HTTP/ORT/Tokio deps to a crate whose README says it's deliberately kept small.
 - **Import from crate roots**, not internal modules, unless the crate's own README says otherwise (e.g. `boris-agent` marks nested modules public for the pipeline but not a stability guarantee).
 - **Never block inside a cpal RT callback** (`boris-audio`) — convert/`try_send` only; do real work on the worker thread.
+- **Preserve tool execution status.** Carry `ToolObservation` through runtime,
+  batching, and resumes. Read its status before rendering text; successful logs
+  can contain error-related words. Internal `_tool_ok` survives history and
+  transcripts but stays out of provider messages. Routing uses
+  `CompleteOptions::tool_error`, and reminders use host-known status.
 - Each crate has its own `README.md` with a more detailed module map, public API, and design notes — read the relevant one before making non-trivial changes in that crate.
-- Architecture rationale / refactor history: `docs/design/oss-collaboration-refactor.md`.
+- Architecture maps: `desktop/docs/ARCHITECTURE.md` and the per-crate READMEs.
 - PRs should stay single-concern (one crate, one feature slice, or docs) — see `CONTRIBUTING.md`.

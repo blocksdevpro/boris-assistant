@@ -12,7 +12,7 @@ project’s architecture and keep PRs reviewable are welcome.
   package is a retired CLI stub — do not extend it as the voice host.
 - **License:** Apache-2.0. By contributing you agree your changes are licensed
   under the same terms (see [LICENSE](LICENSE)).
-- **Architecture notes:** [docs/design/oss-collaboration-refactor.md](docs/design/oss-collaboration-refactor.md)
+- **Architecture notes:** [Desktop architecture](desktop/docs/ARCHITECTURE.md)
   and per-crate `README.md` files under `crates/`.
 
 ## Prerequisites
@@ -30,7 +30,7 @@ Library crates (no Tauri UI, no wake ONNX required for the core/agent plane):
 ```bash
 cargo test -p boris-core -p boris-ai -p boris-agent --lib
 cargo test -p boris-audio -p boris-sense -p boris-inference --lib
-cargo test -p boris-pipeline --lib
+cargo test -p boris-pipeline -p boris-tts-supertone --lib
 cargo check -p boris-pipeline --features stt-parakeet,tts-supertone
 ```
 
@@ -43,12 +43,22 @@ cd desktop && bun install && bun run tauri dev
 
 Prefer the lightweight library suite above for day-to-day PR validation unless you are changing desktop packaging.
 
+For changes spanning agent behavior and speech, run the affected libraries
+together. `--offline` requires dependencies to be cached locally:
+
+```bash
+cargo test --offline -p boris-agent -p boris-ai -p boris-pipeline -p boris-tts-supertone --lib
+```
+
+Leave live tests ignored unless you explicitly intend to exercise a live
+environment. Library tests do not measure real first-speech latency.
+
 ## Branches
 
 | Branch | Use it for |
 |---|---|
-| **`main`** | Current stable line (`1.1.x`). Hotfixes and docs that should ship in the next patch. |
-| **`next`** | Next minor beta line (`1.2.0-beta.N`). New features and 1.2 work. |
+| **`main`** | Current stable line (`1.2.x`). Hotfixes and docs that should ship in the next patch. |
+| **`next`** | Next minor beta line (`1.3.0-beta.N`). New features and 1.3 work. |
 
 Open feature PRs against **`next`**. Open stable-hotfix PRs against **`main`**,
 then cherry-pick onto `next`. Do not name a branch `beta` — that is the

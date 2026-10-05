@@ -158,22 +158,30 @@ fn emit_default_stream_events(
 
 /// Validate `messages` / `tools` payload shapes before sending to a provider.
 ///
-/// - `messages` must be a JSON array (OpenAI chat shape).
+/// - `messages` must be a JSON array (OpenAI chat shape); participant and
+///   historical function names must match `^[a-zA-Z0-9_-]+$`.
 /// - `tools` must be `null` or a JSON array; each entry must be an object
-///   with `"type": "function"` and a `function` object carrying a non-empty
-///   `name` string.
+///   with `"type": "function"` and a `function` object carrying a valid name.
 ///
 /// This is intentionally **not** called from the [`LlmClient`] trait defaults:
-/// product clients call it at the top of their `complete` paths (fail fast on
-/// caller bugs), and calling it in the default as well would double-validate
-/// whenever a client delegates to another. Kept `pub` (crate-visible via
-/// `crate::client::validate_messages_tools`) for the OpenRouter paths.
-#[allow(dead_code)] // Intended callers are the Group2/3 `complete` paths (same crate).
-pub fn validate_messages_tools(messages: &Value, tools: &Value) -> Result<(), LlmError> {
-    if !messages.is_array() {
-        return Err(LlmError::invalid_request(
-            "`messages` must be a JSON array of chat messages",
-        ));
+/// concrete clients validate the canonical wire payload immediately before
+/// sending it. Trait defaults may delegate to another client.
+pub(crate) fn validate_messages_tools(messages: &Value, tools: &Value) -> Result<(), LlmError> {
+    let messages = messages.as_array().ok_or_else(|| {
+        LlmError::invalid_request("`messages` must be a JSON array of chat messages")
+    })?;
+    for (i, message) in messages.iter().enumerate() {
+        if let Some(name) = message.get("name") {
+            validate_name(name, &format!("messages[{i}].name"))?;
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for (j, call) in calls.iter().enumerate() {
+                validate_name(
+                    &call["function"]["name"],
+                    &format!("messages[{i}].tool_calls[{j}].function.name"),
+                )?;
+            }
+        }
     }
     match tools {
         Value::Null => Ok(()),
@@ -188,16 +196,10 @@ pub fn validate_messages_tools(messages: &Value, tools: &Value) -> Result<(), Ll
                         "`tools[{i}].type` must be \"function\""
                     )));
                 }
-                let name = obj
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if name.trim().is_empty() {
-                    return Err(LlmError::invalid_request(format!(
-                        "`tools[{i}].function.name` must be a non-empty string"
-                    )));
-                }
+                validate_name(
+                    &item["function"]["name"],
+                    &format!("tools[{i}].function.name"),
+                )?;
             }
             Ok(())
         }
@@ -205,6 +207,15 @@ pub fn validate_messages_tools(messages: &Value, tools: &Value) -> Result<(), Ll
             "`tools` must be null or a JSON array of tool definitions",
         )),
     }
+}
+
+fn validate_name(value: &Value, path: &str) -> Result<(), LlmError> {
+    if !value.as_str().is_some_and(crate::is_valid_tool_name) {
+        return Err(LlmError::invalid_request(format!(
+            "`{path}` must be a string matching ^[a-zA-Z0-9_-]+$ (got {value})"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -356,5 +367,45 @@ mod tests {
         )
         .is_err());
         assert!(validate_messages_tools(&json!([]), &json!(["nope"])).is_err());
+    }
+
+    #[test]
+    fn validate_checks_historical_names_even_without_advertised_tools() {
+        for name in [
+            json!(""),
+            json!("functions.web_search"),
+            json!("web search"),
+            json!("web/search"),
+            json!("réad"),
+            Value::Null,
+            json!(123),
+        ] {
+            let messages = json!([
+                {"role":"user", "content":"check"},
+                {"role":"assistant", "tool_calls":[{"id":"c1", "function":{"name":name, "arguments":"{}"}}]}
+            ]);
+            let error = validate_messages_tools(&messages, &Value::Null).unwrap_err();
+            assert!(error
+                .message()
+                .contains("messages[1].tool_calls[0].function.name"));
+            assert!(error.message().contains("^[a-zA-Z0-9_-]+$"));
+            let tools = json!([{"type":"function", "function":{"name":name}}]);
+            let error = validate_messages_tools(&json!([]), &tools).unwrap_err();
+            assert!(error.message().contains("tools[0].function.name"));
+        }
+        assert!(validate_messages_tools(&json!([
+            {"role":"assistant", "tool_calls":[{"id":"old", "function":{"name":"retired_tool-2", "arguments":"{}"}}]},
+            {"role":"tool", "tool_call_id":"old", "content":"old result"}
+        ]), &Value::Null).is_ok());
+    }
+
+    #[test]
+    fn validate_reports_invalid_optional_participant_name() {
+        let error = validate_messages_tools(
+            &json!([{"role":"user", "name":"User Name", "content":"hi"}]),
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert!(error.message().contains("messages[0].name"));
     }
 }

@@ -124,7 +124,9 @@ impl OpenRouterClient {
         on_event: &mut (dyn FnMut(LlmStreamEvent) + Send),
     ) -> Result<Value, LlmError> {
         let started = Instant::now();
-        on_event(LlmStreamEvent::TransportAttempt { mode: "blocking_fallback" });
+        on_event(LlmStreamEvent::TransportAttempt {
+            mode: "blocking_fallback",
+        });
         match self.complete_blocking_inner(messages, tools, opts).await {
             Ok((message, usage)) => {
                 log_complete(
@@ -252,6 +254,7 @@ impl OpenRouterClient {
         opts: &CompleteOptions,
     ) -> Result<(Value, Option<TokenUsage>), LlmError> {
         let body = self.request_body_with(messages, tools, false, opts);
+        crate::client::validate_messages_tools(&body["messages"], tools)?;
 
         let req = self.http.post(self.chat_completions_url()).json(&body);
         let req = self.apply_common_headers(req);
@@ -331,6 +334,7 @@ impl OpenRouterClient {
         F: FnMut(StreamDelta) + Send,
     {
         let body = self.request_body_with(messages, tools, true, opts);
+        crate::client::validate_messages_tools(&body["messages"], tools)?;
 
         let req = self
             .http
@@ -544,6 +548,160 @@ fn ingest_sse_data(assembler: &mut StreamAssembler, data: &str) -> StreamDelta {
 mod tests {
     use super::*;
     use crate::providers::openrouter::sse::ToolDelta;
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    fn test_server(
+        responses: Vec<(&'static str, String)>,
+    ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (content_type, response) in responses {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "client did not send a request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept failed: {error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("POST /v1/chat/completions "));
+                let mut length = None;
+                loop {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let mut body = vec![0; length.unwrap()];
+                reader.read_exact(&mut body).unwrap();
+                requests.push(serde_json::from_slice(&body).unwrap());
+                drop(reader);
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+            requests
+        });
+        (base, worker)
+    }
+
+    #[tokio::test]
+    async fn historical_namespace_is_repaired_on_stream_and_blocking_http_paths() {
+        let messages = json!([
+            {"role":"user", "content":[{"type":"text", "text":"check functions.web_search"}]},
+            {"role":"assistant", "content":"", "tool_calls":[
+                {"id":"c1", "type":"function", "function":{"name":"functions.web_search", "arguments":"{\"query\":\"example\"}"}}
+            ]},
+            {"role":"tool", "tool_call_id":"c1", "content":"Unknown tool functions.web_search"}
+        ]);
+        let mut expected = messages.clone();
+        expected[1]["tool_calls"][0]["function"]["name"] = json!("web_search");
+        for typed in [false, true] {
+            for fallback in [false, true] {
+                let responses = if fallback {
+                    vec![
+                        ("text/event-stream", "data: [DONE]\n\n".into()),
+                        ("application/json", json!({"choices":[{"message":{"role":"assistant", "content":"Finished."}}]}).to_string()),
+                    ]
+                } else {
+                    vec![(
+                        "text/event-stream",
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"role":"assistant", "content":"Finished."}}]})
+                        ),
+                    )]
+                };
+                let (base, worker) = test_server(responses);
+                let client = OpenRouterClient::new("test-key".into(), Some("test-model".into()))
+                    .with_base_url(base)
+                    .with_timeouts(Duration::from_secs(2), Duration::from_secs(5));
+                let reply = if typed {
+                    client
+                        .complete_stream(
+                            messages.clone(),
+                            Value::Null,
+                            CompleteOptions::default(),
+                            &mut |_| {},
+                        )
+                        .await
+                } else {
+                    client.complete(messages.clone(), Value::Null).await
+                }
+                .unwrap();
+                assert_eq!(reply["content"], "Finished.");
+                let requests = worker.join().unwrap();
+                assert_eq!(requests.len(), if fallback { 2 } else { 1 });
+                assert_eq!(requests[0]["stream"], true);
+                for request in &requests {
+                    assert_eq!(request["messages"], expected);
+                }
+                if fallback {
+                    assert!(requests[1].get("stream").is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_names_fail_with_field_path_before_any_http_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = OpenRouterClient::new("test-key".into(), Some("test-model".into()))
+            .with_base_url(format!("http://{}/v1", listener.local_addr().unwrap()));
+        for (messages, tools, path) in [
+            (
+                json!([{"role":"assistant", "tool_calls":[{"id":"c1", "function":{"name":"other.web_search", "arguments":"{}"}}]}]),
+                Value::Null,
+                "messages[0].tool_calls[0].function.name",
+            ),
+            (
+                json!([]),
+                json!([{"type":"function", "function":{"name":"web.search"}}]),
+                "tools[0].function.name",
+            ),
+        ] {
+            let stream_error = client
+                .complete_stream(
+                    messages.clone(),
+                    tools.clone(),
+                    CompleteOptions::default(),
+                    &mut |_| {},
+                )
+                .await
+                .unwrap_err();
+            let blocking_error = client
+                .complete_blocking(&messages, &tools, &CompleteOptions::default())
+                .await
+                .unwrap_err();
+            for error in [stream_error, blocking_error] {
+                assert!(error.message().contains(path));
+                assert!(error.message().contains("^[a-zA-Z0-9_-]+$"));
+                assert_eq!(error.status(), None);
+            }
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn typed_delta_events_are_incremental_and_first_delta_is_once() {

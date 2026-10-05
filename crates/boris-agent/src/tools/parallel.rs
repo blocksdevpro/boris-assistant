@@ -27,7 +27,7 @@ pub(crate) struct ToolUse {
 }
 
 pub(crate) fn parse_tool_uses(args: Value) -> Result<Vec<ToolUse>, ToolError> {
-    let args: ParallelArgs = serde_json::from_value(args).map_err(|error| {
+    let mut args: ParallelArgs = serde_json::from_value(args).map_err(|error| {
         ToolError::invalid_args(format!(
             "parallel expects tool_uses: [{{recipient_name: tool name, parameters: object}}]: {error}"
         ))
@@ -37,9 +37,12 @@ pub(crate) fn parse_tool_uses(args: Value) -> Result<Vec<ToolUse>, ToolError> {
             "parallel requires 1–{MAX_TOOL_USES} tool_uses; split larger batches"
         )));
     }
-    for call in &args.tool_uses {
-        if call.recipient_name.trim().is_empty() {
-            return Err(ToolError::invalid_args("recipient_name must name a tool"));
+    for call in &mut args.tool_uses {
+        call.recipient_name = boris_ai::canonical_tool_name(&call.recipient_name).to_owned();
+        if !boris_ai::is_valid_tool_name(&call.recipient_name) {
+            return Err(ToolError::invalid_args(
+                "recipient_name must match ^[a-zA-Z0-9_-]+$; use the exact listed tool name",
+            ));
         }
         if call.recipient_name == NAME {
             return Err(ToolError::invalid_args(
@@ -75,7 +78,7 @@ impl Tool for ParallelTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "recipient_name": {"type": "string", "description": "Exact listed tool name, e.g. grep or file_read"},
+                            "recipient_name": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "description": "Exact listed tool name, e.g. grep or file_read"},
                             "parameters": {"type": "object", "description": "That tool's ordinary arguments"}
                         },
                         "required": ["recipient_name", "parameters"],
@@ -114,11 +117,32 @@ mod tests {
             json!({"tool_uses":[]}),
             json!({"tool_uses":vec![leaf.clone(); MAX_TOOL_USES + 1]}),
             json!({"tool_uses":[{"recipient_name":"parallel", "parameters":{}}]}),
+            json!({"tool_uses":[{"recipient_name":"functions.parallel", "parameters":{}}]}),
             json!({"tool_uses":[{"recipient_name":"", "parameters":{}}]}),
             json!({"tool_uses":[{"recipient_name":"file_read", "parameters":"{}"}]}),
             json!({"tool_uses":[leaf], "skip_confirmation":true}),
         ] {
             assert!(parse_tool_uses(args).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_names_reject_the_whole_envelope() {
+        for name in [
+            "functions.",
+            "functions.web.search",
+            "other.web_search",
+            "web/search",
+            "web search",
+            "réad",
+        ] {
+            let error = parse_tool_uses(json!({"tool_uses":[
+                {"recipient_name":"web_search", "parameters":{"query":"example"}},
+                {"recipient_name":name, "parameters":{}}
+            ]}))
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("recipient_name"));
         }
     }
 }

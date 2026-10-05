@@ -13,13 +13,15 @@ use crate::tool::Tool;
 
 static PARALLEL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Expand a model's explicit parallel envelope into ordinary, individually
-/// paired calls before it enters context. Invalid envelopes stay intact so the
-/// runtime returns a repairable error. Raw provider responses remain in debug.
-pub(super) fn expand_parallel_calls(
+/// Normalize names and expand a model's explicit parallel envelope into
+/// individually paired calls before dispatch or context insertion. Invalid
+/// envelopes stay intact so the runtime returns a repairable error.
+/// Raw provider responses remain in debug.
+pub(super) fn normalize_tool_calls(
     mut response: Value,
     tools: &[std::sync::Arc<dyn Tool>],
 ) -> (Value, Vec<Value>) {
+    boris_ai::normalize_tool_call_names(&mut response);
     if !tools
         .iter()
         .any(|tool| tool.name() == crate::tools::parallel::NAME)
@@ -153,6 +155,41 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn functions_namespace_is_removed_before_dispatch_and_history() {
+        let response = json!({"role":"assistant", "content":"Checking.", "tool_calls":[
+            {"id":"search", "type":"function", "function":{"name":"functions.web_search", "arguments":"{\"query\":\"example\"}"}},
+            {"id":"fetch", "type":"function", "function":{"name":"functions.web_fetch", "arguments":"{\"url\":\"https://example.com\"}"}}
+        ]});
+        let (normalized, mappings) = normalize_tool_calls(response.clone(), &[]);
+        let calls = parse_raw_tool_calls(normalized["tool_calls"].as_array().unwrap());
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[1].name, "web_fetch");
+        assert_eq!(calls[0].call_id, "search");
+        assert_eq!(calls[0].args, json!({"query":"example"}));
+        assert_eq!(normalized["content"], response["content"]);
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parallel_normalizes_namespaced_envelope_and_children() {
+        let tools: Vec<std::sync::Arc<dyn Tool>> =
+            vec![std::sync::Arc::new(crate::tools::parallel::ParallelTool)];
+        let response = json!({"role":"assistant", "tool_calls":[
+            {"id":"outer", "function":{"name":"functions.parallel", "arguments":json!({"tool_uses":[
+                {"recipient_name":"functions.web_search", "parameters":{"query":"example"}},
+                {"recipient_name":"functions.web_fetch", "parameters":{"url":"https://example.com"}}
+            ]}).to_string()}}
+        ]});
+        let (expanded, mappings) = normalize_tool_calls(response, &tools);
+        let calls = parse_raw_tool_calls(expanded["tool_calls"].as_array().unwrap());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[1].name, "web_fetch");
+        assert_eq!(calls[0].args, json!({"query":"example"}));
+        assert_eq!(mappings[0]["parent_call_id"], "outer");
+    }
+
+    #[test]
     fn parallel_expansion_pairs_leaf_calls_and_preserves_native_siblings() {
         let tools: Vec<std::sync::Arc<dyn Tool>> =
             vec![std::sync::Arc::new(crate::tools::parallel::ParallelTool)];
@@ -163,7 +200,7 @@ mod tests {
             ]}).to_string()}},
             {"id":"native", "function":{"name":"get_system_info", "arguments":"{}"}}
         ]});
-        let (expanded, mappings) = expand_parallel_calls(response.clone(), &tools);
+        let (expanded, mappings) = normalize_tool_calls(response.clone(), &tools);
         let calls = parse_raw_tool_calls(expanded["tool_calls"].as_array().unwrap());
         assert_eq!(
             calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
@@ -186,7 +223,7 @@ mod tests {
         let tools: Vec<std::sync::Arc<dyn Tool>> =
             vec![std::sync::Arc::new(crate::tools::parallel::ParallelTool)];
         for registry in [&tools[..], &[][..]] {
-            let (expanded, mapping) = expand_parallel_calls(response.clone(), registry);
+            let (expanded, mapping) = normalize_tool_calls(response.clone(), registry);
             assert_eq!(expanded, response);
             assert!(mapping.is_empty());
         }

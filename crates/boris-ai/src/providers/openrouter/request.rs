@@ -38,6 +38,15 @@ impl OpenRouterClient {
     ) -> Value {
         let strip = self.should_strip_openrouter_extensions();
         let mut body = base_body(&self.model, messages, tools, strip);
+        // Replay older calls with the same canonical names used by dispatch.
+        // Preserve multimodal content and tool-result pairing while doing so.
+        if let Some(items) = body["messages"].as_array_mut() {
+            for message in items {
+                if message["role"] == "assistant" {
+                    crate::normalize_tool_call_names(message);
+                }
+            }
+        }
         let obj = body
             .as_object_mut()
             .expect("chat completion body is always a JSON object");
@@ -145,6 +154,37 @@ fn tools_absent_or_empty(tools: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::providers::openrouter::OpenRouterClient;
+
+    #[test]
+    fn replayed_namespaced_tool_calls_have_provider_valid_names() {
+        let client = OpenRouterClient::new("k".into(), Some("m".into()));
+        let messages = json!([
+            {"role":"assistant", "content":"Checking", "tool_calls":[
+                {"id":"search", "type":"function", "function":{"name":"functions.web_search", "arguments":"{}"}},
+                {"id":"fetch", "type":"function", "function":{"name":"functions.web_fetch", "arguments":"{}"}}
+            ]},
+            {"role":"tool", "tool_call_id":"search", "content":"Unknown tool functions.web_search"},
+            {"role":"tool", "tool_call_id":"fetch", "content":"Unknown tool functions.web_fetch"}
+        ]);
+        for stream in [false, true] {
+            let body = client.request_body(&messages, &Value::Null, stream);
+            assert_eq!(
+                body["messages"][0]["tool_calls"][0]["function"]["name"],
+                "web_search"
+            );
+            assert_eq!(
+                body["messages"][0]["tool_calls"][1]["function"]["name"],
+                "web_fetch"
+            );
+            assert_eq!(body["messages"][1], messages[1]);
+            assert_eq!(body["messages"][2], messages[2]);
+            assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "search");
+        }
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            "functions.web_search"
+        );
+    }
 
     #[test]
     fn request_body_includes_provider_session_and_stream_opts() {

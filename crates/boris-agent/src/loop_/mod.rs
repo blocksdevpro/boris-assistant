@@ -44,7 +44,7 @@ use helpers::{
     push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
 };
 use message_parse::{
-    expand_parallel_calls, extract_reply_text, extract_tool_note, parse_raw_tool_calls,
+    extract_reply_text, extract_tool_note, normalize_tool_calls, parse_raw_tool_calls,
 };
 use round::{
     cancelled, complete_round, ensure_spoken_reply_at_cap, should_reenter_finish_gate,
@@ -190,7 +190,7 @@ pub async fn agent_loop_with_budget(
 
         // Normalize only actual runnable API calls, never content or calls at cap.
         let response = if tool_calls_if_runnable(&response, at_cap).is_some() {
-            let (normalized, mappings) = expand_parallel_calls(response, state.tools);
+            let (normalized, mappings) = normalize_tool_calls(response, state.tools);
             if let Some(debug) = &config.debug {
                 for mapping in mappings {
                     debug.record(config.turn_id.as_deref(), "parallel_expansion", mapping);

@@ -223,6 +223,95 @@ async fn run_batch(
 }
 
 #[tokio::test]
+async fn namespaced_calls_execute_and_leave_valid_paired_history() {
+    for explicit in [false, true] {
+        for waves in [false, true] {
+            let executions = Arc::new(AtomicUsize::new(0));
+            let tools: Vec<Arc<dyn Tool>> = vec![
+                Arc::new(crate::tools::parallel::ParallelTool),
+                Arc::new(StateTool {
+                    name: "web_search",
+                    read_only: true,
+                    confirm: false,
+                    permissions: &[Permission::None],
+                    value: Arc::new(AtomicUsize::new(0)),
+                    executions: executions.clone(),
+                }),
+                Arc::new(StateTool {
+                    name: "web_fetch",
+                    read_only: true,
+                    confirm: false,
+                    permissions: &[Permission::None],
+                    value: Arc::new(AtomicUsize::new(0)),
+                    executions: executions.clone(),
+                }),
+            ];
+            let calls = vec![
+                call("search", "functions.web_search", json!({})),
+                call("fetch", "functions.web_fetch", json!({})),
+                call("unknown", "functions.absent", json!({})),
+            ];
+            let client = ScriptedClient::new(
+                "test",
+                vec![
+                    response(&calls, explicit),
+                    json!({"role":"assistant", "content":"The requested checks finished."}),
+                ],
+            );
+            let mut context = Context::new(20);
+            context.push(Role::System, "sys");
+            context.push(Role::User, "check values");
+            let runtime = ToolRuntime::null();
+            let config = AgentLoopConfig {
+                features: crate::ToolRuntimeFeatures {
+                    wave_scheduling: waves,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let result = agent_loop(
+                LoopState {
+                    context: &mut context,
+                    tools: &tools,
+                    runtime: &runtime,
+                    client: &client,
+                    activated: None,
+                },
+                "check values",
+                &config,
+                vec![],
+                0,
+                0,
+                None,
+                None,
+                None,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(executions.load(Ordering::SeqCst), 2);
+            assert_eq!(result.tools_used, ["web_search", "web_fetch", "absent"]);
+            assert_eq!(client.calls.lock().unwrap().len(), 2);
+            assert_paired(&context);
+            let wire = context.as_json();
+            for message in wire.as_array().unwrap() {
+                if let Some(calls) = message["tool_calls"].as_array() {
+                    for call in calls {
+                        assert!(boris_ai::is_valid_tool_name(
+                            call["function"]["name"].as_str().unwrap()
+                        ));
+                    }
+                }
+            }
+            assert!(tool_results(&context)[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("absent"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn rolling_pool_refills_before_slowest_call_and_keeps_result_order() {
     let read = Arc::new(PoolRead::new(8, true, false));
     let tools: Vec<Arc<dyn Tool>> = vec![read.clone()];
@@ -498,7 +587,7 @@ async fn native_and_explicit_batches_use_one_round_and_pair_individual_errors() 
 }
 
 #[tokio::test]
-async fn explicit_batch_preserves_approval_verdicts_and_remaining_siblings() {
+async fn namespaced_explicit_batch_preserves_approval_verdicts_and_remaining_siblings() {
     for approved in [false, true] {
         let reads = Arc::new(AtomicUsize::new(0));
         let writes = Arc::new(AtomicUsize::new(0));
@@ -525,7 +614,7 @@ async fn explicit_batch_preserves_approval_verdicts_and_remaining_siblings() {
         let calls = ["read", "read", "write", "read", "read"]
             .into_iter()
             .enumerate()
-            .map(|(n, name)| call(&format!("c{n}"), name, json!({})))
+            .map(|(n, name)| call(&format!("c{n}"), &format!("functions.{name}"), json!({})))
             .collect::<Vec<_>>();
         let client = ScriptedClient::new(
             "test",

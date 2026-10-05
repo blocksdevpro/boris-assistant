@@ -29,6 +29,7 @@ mod model_pref;
 mod providers;
 mod request;
 pub mod stream;
+mod tool_name;
 mod usage;
 
 pub use client::LlmClient;
@@ -37,6 +38,7 @@ pub use model_pref::{parse_provider_list, split_model_and_provider};
 pub use providers::OpenRouterClient;
 pub use request::{CompleteOptions, RequestStage};
 pub use stream::LlmStreamEvent;
+pub use tool_name::{canonical_tool_name, is_valid_tool_name, normalize_tool_call_names};
 pub use usage::TokenUsage;
 
 // OpenRouter timeout / base-url / reasoning (hosts may tune with builders).

@@ -47,7 +47,7 @@ pub struct TranscriptRecord {
     /// Message body. Shape depends on role:
     /// - user/system/plain assistant: string or content-block array
     /// - assistant + tools: object with optional `content` + `tool_calls`
-    /// - tool: object `{ tool_call_id, content }`
+    /// - tool: object `{ tool_call_id, content, _tool_ok? }` (status is host-only)
     pub content: Value,
 }
 
@@ -85,12 +85,16 @@ impl TranscriptRecord {
                     .get("content")
                     .map(content_to_plain)
                     .unwrap_or_else(|| content_to_plain(&self.content));
-                json!({
+                let mut result = json!({
                     "type": "tool_result",
                     "tool_call_id": tool_call_id,
                     "content": body,
                     "ts": ts,
-                })
+                });
+                if let Some(ok) = self.content.get("_tool_ok").and_then(Value::as_bool) {
+                    result["_tool_ok"] = json!(ok);
+                }
+                result
             }
             "assistant" => {
                 // Assistant with tool_calls: content is the raw LLM message object.
@@ -156,13 +160,17 @@ impl TranscriptRecord {
                     .cloned()
                     .unwrap_or(Value::String(String::new()));
                 let content_body = v.get("content").cloned().unwrap_or(Value::Null);
+                let mut content = json!({
+                    "tool_call_id": tool_call_id,
+                    "content": content_body,
+                });
+                if let Some(ok) = v.get("_tool_ok").and_then(Value::as_bool) {
+                    content["_tool_ok"] = json!(ok);
+                }
                 Ok(Self {
                     ts_ms,
                     role: "tool".into(),
-                    content: json!({
-                        "tool_call_id": tool_call_id,
-                        "content": content_body,
-                    }),
+                    content,
                 })
             }
             "assistant" => {
@@ -264,5 +272,29 @@ mod tests {
         assert_eq!(rec.role, "tool");
         assert_eq!(rec.content["tool_call_id"], "c1");
         assert_eq!(rec.content["content"], "ok");
+        assert!(rec.content.get("_tool_ok").is_none());
+    }
+
+    #[test]
+    fn tool_status_survives_transcript_roundtrip() {
+        for ok in [true, false] {
+            let record = TranscriptRecord {
+                ts_ms: 1_700_000_000_000,
+                role: "tool".into(),
+                content: json!({
+                    "tool_call_id": "c1",
+                    "content": "Error: quoted diagnostic",
+                    "_tool_ok": ok,
+                }),
+            };
+            let line = record.to_json_line().unwrap();
+            let restored =
+                TranscriptRecord::from_json_value(serde_json::from_str(&line).unwrap()).unwrap();
+            assert_eq!(restored, record);
+            let mut context = crate::context::Context::new(20);
+            context.push(crate::context::Role::User, "read the diagnostic");
+            context.push(crate::context::Role::Tool, restored.content);
+            assert_eq!(context.current_turn_has_tool_error(), !ok);
+        }
     }
 }

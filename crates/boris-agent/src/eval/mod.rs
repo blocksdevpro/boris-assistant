@@ -276,7 +276,10 @@ mod tests {
         );
         assert_eq!(
             calls[0].options,
-            CompleteOptions::for_stage(boris_ai::RequestStage::SimpleVoice)
+            CompleteOptions {
+                tool_error: Some(false),
+                ..CompleteOptions::for_stage(boris_ai::RequestStage::SimpleVoice)
+            }
         );
     }
 
@@ -303,6 +306,45 @@ mod tests {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Done."),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn successful_error_looking_output_keeps_the_simple_budget() {
+        let output = "Error: quoted source text; 0 failed";
+        let client = ScriptedClient::new(
+            "fast",
+            vec![
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": json!({"x": output}).to_string()
+                        }
+                    }]
+                }),
+                json!({"role": "assistant", "content": "Done."}),
+            ],
+        );
+        let (_, context, executions) = run_loop_full(&client, "hello").await;
+        assert_eq!(executions.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let result = context
+            .history()
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .unwrap();
+        assert_eq!(result.content["content"], output);
+        assert_eq!(result.content["_tool_ok"], true);
+        assert!(!context.current_turn_has_tool_error());
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(
+            calls[1].options.stage,
+            Some(boris_ai::RequestStage::SimpleVoice)
+        );
+        assert_eq!(calls[1].options.tool_error, Some(false));
     }
 
     #[tokio::test]
@@ -352,7 +394,10 @@ mod tests {
         );
         assert_eq!(
             calls[1].options,
-            CompleteOptions::for_stage(boris_ai::RequestStage::Complex),
+            CompleteOptions {
+                tool_error: Some(true),
+                ..CompleteOptions::for_stage(boris_ai::RequestStage::Complex)
+            },
             "a current-turn invalid-args observation must escalate the next round"
         );
     }
@@ -475,7 +520,10 @@ mod tests {
         let calls = client.calls.lock().unwrap();
         assert_eq!(
             calls[0].options,
-            CompleteOptions::for_stage(boris_ai::RequestStage::Complex)
+            CompleteOptions {
+                tool_error: Some(false),
+                ..CompleteOptions::for_stage(boris_ai::RequestStage::Complex)
+            }
         );
     }
 

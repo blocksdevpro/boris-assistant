@@ -6,7 +6,8 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::tool::{
-    truncate_tool_result_detailed, validate_args, Permission, Tool, ToolMeta, ToolObservation,
+    truncate_tool_result_detailed, validate_args, Permission, Tool, ToolErrorKind, ToolMeta,
+    ToolObservation,
 };
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
@@ -345,7 +346,7 @@ impl ToolRuntime {
         opts: InvokeOptions,
     ) -> InvokeResult {
         let meta = tool.meta();
-        if let Some(obs) = reject_invalid_args(tool, &inv.args) {
+        if let Some(mut obs) = reject_invalid_args(tool, &inv.args) {
             // Invalid args never reach policy/execute, but must still audit
             // (decision=rejected) so the audit trail has no silent drops.
             let kind = obs
@@ -363,15 +364,16 @@ impl ToolRuntime {
                 false,
                 obs.bytes,
             );
-            let mut text = obs.to_provider_text();
             if tool.name() == "present_artifact" {
                 self.artifact_failures_this_turn
                     .fetch_add(1, Ordering::Relaxed);
                 if self.artifact_delivery_exhausted() {
-                    text.push_str("\nPresentation is disabled for this turn after two failures. Finish with a short spoken status; do not retry presentation");
+                    if let Some(error) = &mut obs.error {
+                        error.message.push_str("\nPresentation is disabled for this turn after two failures. Finish with a short spoken status; do not retry presentation");
+                    }
                 }
             }
-            return InvokeResult::Observation(text);
+            return InvokeResult::Observation(obs);
         }
         let args = inv.args.clone();
 
@@ -492,7 +494,6 @@ impl ToolRuntime {
                 let truncated = cut.truncated;
                 let structured =
                     ToolObservation::from_text(text, duration_ms, truncated, cut.cursor);
-                let obs = structured.to_provider_text();
                 self.audit_event_full(
                     &inv,
                     &meta,
@@ -503,7 +504,7 @@ impl ToolRuntime {
                     truncated,
                     bytes,
                 );
-                InvokeResult::Observation(obs)
+                InvokeResult::Observation(structured)
             }
             Err(mut e) => {
                 if tool.name() == "present_artifact" {
@@ -514,7 +515,7 @@ impl ToolRuntime {
                     }
                 }
                 let timed_out = is_timeout(&e);
-                let kind = if timed_out { "timeout" } else { "error" };
+                let kind = e.kind().as_str();
                 let decision = if timed_out { "timeout" } else { decision_label };
                 self.audit_event_full(
                     &inv,
@@ -528,11 +529,17 @@ impl ToolRuntime {
                 );
                 let bounded = bound_error_message(&e.message, MAX_ERROR_MESSAGE_CHARS);
                 let structured = ToolObservation::err(
-                    crate::tool::ObservationError::new(kind, timed_out, bounded),
+                    crate::tool::ObservationError::new(
+                        kind,
+                        matches!(
+                            e.kind(),
+                            ToolErrorKind::InvalidArgs | ToolErrorKind::Timeout
+                        ),
+                        bounded,
+                    ),
                     duration_ms,
                 );
-                let obs = structured.to_provider_text();
-                InvokeResult::Observation(obs)
+                InvokeResult::Observation(structured)
             }
         }
     }
@@ -909,7 +916,9 @@ mod tests {
                     InvokeOptions::default(),
                 )
                 .await;
-            assert!(matches!(result, InvokeResult::Observation(text) if text.starts_with("Error")));
+            assert!(
+                matches!(result, InvokeResult::Observation(observation) if !observation.looks_ok())
+            );
             runtime.begin_turn(1);
         }
         assert!(runtime.artifact_delivery_exhausted());
@@ -982,6 +991,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.contains("[truncated"));
             }
             other => panic!("unexpected {other:?}"),
@@ -1018,6 +1028,7 @@ mod tests {
         };
         match rt.invoke(&tool, inv("c1", "danger"), opts).await {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.starts_with("ran"));
                 assert!(*tool.ran.lock().unwrap());
             }
@@ -1090,6 +1101,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.starts_with("ok"));
                 assert_eq!(*tool.ran.lock().unwrap(), 1);
             }
@@ -1277,6 +1289,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.contains("Error ["), "{s}");
                 assert!(s.contains("not_object") || s.contains("object"), "{s}");
                 assert!(!s.contains("should-not-run"));
@@ -1292,6 +1305,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.contains("missing_required") || s.contains("name"), "{s}");
             }
             other => panic!("unexpected {other:?}"),
@@ -1325,7 +1339,11 @@ mod tests {
             .invoke(&Slow, inv("1", "slow"), InvokeOptions::default())
             .await
         {
-            InvokeResult::Observation(s) => assert!(s.contains("timed out") || s.contains("Error")),
+            InvokeResult::Observation(s) => {
+                assert!(!s.looks_ok());
+                let text = s.to_provider_text();
+                assert!(text.contains("timed out") || text.contains("Error"));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1382,6 +1400,7 @@ mod tests {
             .await
         {
             InvokeResult::Observation(s) => {
+                let s = s.to_provider_text();
                 assert!(s.contains("Error"), "{s}");
                 assert!(s.contains("[truncated"), "{s}");
                 assert!(s.contains("tail-marker-zz"), "{s}");
@@ -1431,7 +1450,10 @@ mod tests {
             )
             .await
         {
-            InvokeResult::Observation(s) => assert!(s.contains("Error"), "{s}"),
+            InvokeResult::Observation(s) => {
+                assert!(!s.looks_ok());
+                assert!(s.to_provider_text().contains("Error"));
+            }
             other => panic!("unexpected {other:?}"),
         }
         let events = sink.events.lock().unwrap();

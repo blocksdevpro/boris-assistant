@@ -113,7 +113,13 @@ impl ToolObservation {
                 s.push_str(&format!("; expected {expected}"));
             }
             if err.retryable {
-                s.push_str(". Fix the arguments and retry.");
+                if err.path.is_some() || err.code == "invalid_args" {
+                    s.push_str(". Fix the arguments and retry.");
+                } else if err.code == "timeout" {
+                    s.push_str(". Retry only if safe, or narrow the request.");
+                } else {
+                    s.push_str(". Retry only after addressing the cause.");
+                }
             }
             if let Some(preview) = &err.raw_preview {
                 if !preview.is_empty() {
@@ -189,6 +195,18 @@ mod tests {
         assert!(text.contains("command"));
         assert!(text.contains("Fix the arguments"));
         assert!(text.contains("Raw:"));
+    }
+
+    #[test]
+    fn timeout_guidance_does_not_claim_arguments_are_invalid() {
+        let observation = ToolObservation::err(
+            ObservationError::new("timeout", true, "operation timed out"),
+            100,
+        );
+        let text = observation.to_provider_text();
+        assert!(!observation.looks_ok());
+        assert!(text.contains("Retry only if safe"));
+        assert!(!text.contains("Fix the arguments"));
     }
 
     #[test]

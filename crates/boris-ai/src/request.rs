@@ -68,6 +68,10 @@ pub struct CompleteOptions {
     /// Optional sampling temperature, passed through as `"temperature"` when
     /// `Some`. `None` (default) omits the key so the provider default applies.
     pub temperature: Option<f32>,
+    /// Host-known current-turn tool failure status for internal routing.
+    /// `Some(false)` also overrides error-looking text in successful results.
+    /// Never serialized into a provider request; `None` uses legacy prefixes.
+    pub tool_error: Option<bool>,
 }
 
 impl CompleteOptions {
@@ -85,6 +89,7 @@ impl CompleteOptions {
             max_tokens: Some(max_tokens),
             stage: Some(stage),
             temperature: None,
+            tool_error: None,
         }
     }
 
@@ -175,6 +180,7 @@ mod tests {
             max_tokens: Some(512),
             stage: Some(RequestStage::Complex),
             temperature: None,
+            tool_error: None,
         };
         assert_eq!(
             opts.resolved_reasoning(ReasoningConfig::high()).effort,

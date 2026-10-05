@@ -108,9 +108,9 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
                 has_tool_results = true;
                 if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
                     max_tool_result_chars = max_tool_result_chars.max(c.chars().count());
-                    if tool_content_is_error(c) {
-                        has_error_evidence = true;
-                    }
+                }
+                if tool_result_has_error(m) {
+                    has_error_evidence = true;
                 }
             }
             if role == "assistant" && m.get("tool_calls").is_some() {
@@ -129,36 +129,38 @@ pub(crate) fn round_traits_for_task(messages: &Value, task: TaskTraits) -> Round
 
 /// True when one tool observation looks like a failure.
 ///
-/// Matches the loop helper convention (`Error:` / `Error [` prefixes) plus
-/// case-insensitive `invalid arguments` / `failed` observations.
+/// Legacy fallback for observations without host status. Only conventional
+/// error prefixes count; failure-related words can occur in successful data.
 fn tool_content_is_error(content: &str) -> bool {
-    let t = content.trim_start();
-    if t.starts_with("Error:") || t.starts_with("Error [") {
-        return true;
+    let lower = content.trim_start().to_ascii_lowercase();
+    lower.starts_with("error:") || lower.starts_with("error [")
+}
+
+/// Read internal tool-result status before falling back to legacy text.
+pub(crate) fn tool_result_has_error(result: &Value) -> bool {
+    if let Some(ok) = result.get("_tool_ok").and_then(Value::as_bool) {
+        return !ok;
     }
-    let lower = t.to_ascii_lowercase();
-    lower.starts_with("error:")
-        || lower.starts_with("error [")
-        || lower.contains("invalid arguments")
-        || lower.contains("failed")
+    result
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| result.as_str())
+        .is_some_and(tool_content_is_error)
 }
 
 /// True when any current-turn tool observation looks like a failure.
 ///
-/// Unified error check over the wire messages: `Error:` / `Error [` prefixes
-/// (case-insensitive) plus `invalid arguments` / `failed` observations.
+/// Uses internal tool status when present, else `Error:` / `Error [` prefixes
+/// (case-insensitive) for legacy messages.
 /// Evidence from older user turns is ignored.
 pub fn round_has_error(messages: &Value) -> bool {
     let Some(arr) = messages.as_array() else {
         return false;
     };
     let turn_start = current_turn_start(arr).map_or(0, |i| i.saturating_add(1));
-    arr[turn_start..].iter().any(|m| {
-        m.get("role").and_then(|r| r.as_str()) == Some("tool")
-            && m.get("content")
-                .and_then(|c| c.as_str())
-                .is_some_and(tool_content_is_error)
-    })
+    arr[turn_start..]
+        .iter()
+        .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool") && tool_result_has_error(m))
 }
 
 fn current_turn_start(messages: &[Value]) -> Option<usize> {
@@ -231,7 +233,11 @@ impl RoutingClient {
 }
 
 impl RoutingClient {
-    fn prepare_request(&self, messages: &Value) -> (RouteMode, CompleteOptions) {
+    fn prepare_request(
+        &self,
+        messages: &Value,
+        tool_error: Option<bool>,
+    ) -> (RouteMode, CompleteOptions) {
         if is_summary_maintenance(messages) {
             tracing::debug!(
                 route = RouteMode::Fast.as_str(),
@@ -244,7 +250,10 @@ impl RoutingClient {
             );
         }
         let text = last_user_text(messages).unwrap_or_default();
-        let round = round_traits_from_messages(messages, &text);
+        let mut round = round_traits_from_messages(messages, &text);
+        if let Some(has_error) = tool_error {
+            round.has_error_evidence = has_error;
+        }
         let mode = route_from_traits(round.task, round);
         let stage = request_stage_for(round.task, round);
         tracing::debug!(
@@ -274,6 +283,7 @@ impl RoutingClient {
         if !caller_downgrades && opts.max_tokens.is_some() {
             routed.max_tokens = opts.max_tokens;
         }
+        routed.tool_error = opts.tool_error;
         routed
     }
 
@@ -318,7 +328,7 @@ impl LlmClient for RoutingClient {
         opts: CompleteOptions,
     ) -> Result<Value, LlmError> {
         // Route from task/round traits — never from mere tool-list presence.
-        let (mode, inferred) = self.prepare_request(&messages);
+        let (mode, inferred) = self.prepare_request(&messages, opts.tool_error);
         let routed = Self::merge_options(inferred, opts);
         // Compatibility telemetry is updated, but the client reference and
         // fallback choice below are both derived from this request's local mode.
@@ -387,7 +397,7 @@ impl LlmClient for RoutingClient {
         opts: CompleteOptions,
         on_event: &mut (dyn FnMut(LlmStreamEvent) + Send),
     ) -> Result<Value, LlmError> {
-        let (mode, inferred) = self.prepare_request(&messages);
+        let (mode, inferred) = self.prepare_request(&messages, opts.tool_error);
         let routed = Self::merge_options(inferred, opts);
         self.set_route(mode);
         let primary = self.client_for(mode);
@@ -816,12 +826,15 @@ mod tests {
         ));
         assert!(tool_content_is_error("error: something broke"));
         assert!(tool_content_is_error("error [invalid_args]: fix it"));
-        // Invalid-args / failed observations, case-insensitive.
+        // Conventional prefixes still identify legacy invalid-args errors.
         assert!(tool_content_is_error(
             "Error [invalid_args]: Invalid arguments provided. Fix the arguments and retry."
         ));
-        assert!(tool_content_is_error("Failed to fetch the page"));
-        assert!(tool_content_is_error("failed: timeout"));
+        // Failure-related data without an error prefix is not status.
+        assert!(!tool_content_is_error("Failed to fetch the page"));
+        assert!(!tool_content_is_error("failed: timeout"));
+        assert!(!tool_content_is_error("0 failed"));
+        assert!(!tool_content_is_error("fn invalid_arguments() {}"));
         // Clean observations are not errors.
         assert!(!tool_content_is_error("pong"));
         assert!(!tool_content_is_error("10:41"));
@@ -838,7 +851,7 @@ mod tests {
             { "role": "assistant", "content": null, "tool_calls": [{
                 "id": "new", "function": {"name": "get_time"}
             }]},
-            { "role": "tool", "content": "Failed to reach the clock" },
+            { "role": "tool", "content": "Error: failed to reach the clock" },
         ]);
         assert!(round_has_error(&messages));
 
@@ -857,6 +870,67 @@ mod tests {
     struct RecordingClient {
         model: &'static str,
         calls: std::sync::Mutex<u32>,
+    }
+
+    #[test]
+    fn host_tool_status_controls_route_and_budget() {
+        let client = RoutingClient::new(
+            Box::new(RecordingClient {
+                model: "fast-model",
+                calls: std::sync::Mutex::new(0),
+            }),
+            Box::new(RecordingClient {
+                model: "strong-model",
+                calls: std::sync::Mutex::new(0),
+            }),
+        );
+        let quoted_error = json!([
+            {"role": "user", "content": "hello"},
+            {"role": "tool", "content": "Error: quoted file contents"}
+        ]);
+        let (mode, options) = client.prepare_request(&quoted_error, Some(false));
+        assert_eq!(mode, RouteMode::Fast);
+        assert_eq!(options.stage, Some(RequestStage::SimpleVoice));
+
+        let plain_failure = json!([
+            {"role": "user", "content": "hello"},
+            {"role": "tool", "content": "connection closed"}
+        ]);
+        let (mode, options) = client.prepare_request(&plain_failure, Some(true));
+        assert_eq!(mode, RouteMode::Strong);
+        assert_eq!(options.stage, Some(RequestStage::Complex));
+
+        let (mode, _) = client.prepare_request(&quoted_error, None);
+        assert_eq!(mode, RouteMode::Strong);
+    }
+
+    #[test]
+    fn internal_tool_metadata_overrides_legacy_text() {
+        let clean = json!([
+            {"role": "user", "content": "hello"},
+            {"role": "tool", "content": "Error: quoted file contents", "_tool_ok": true}
+        ]);
+        assert!(!round_has_error(&clean));
+        assert!(!round_traits_from_messages(&clean, "hello").has_error_evidence);
+
+        let failed = json!([
+            {"role": "user", "content": "hello"},
+            {"role": "tool", "content": "connection closed", "_tool_ok": false}
+        ]);
+        assert!(round_has_error(&failed));
+        assert!(round_traits_from_messages(&failed, "hello").has_error_evidence);
+    }
+
+    #[test]
+    fn option_merge_preserves_host_tool_status_during_stage_escalation() {
+        let mut options = CompleteOptions::for_stage(RequestStage::SimpleVoice);
+        options.tool_error = Some(true);
+        let merged = RoutingClient::merge_options(
+            CompleteOptions::for_stage(RequestStage::Complex),
+            options,
+        );
+        assert_eq!(merged.stage, Some(RequestStage::Complex));
+        assert_eq!(merged.tool_error, Some(true));
     }
 
     struct StreamRecordingClient {

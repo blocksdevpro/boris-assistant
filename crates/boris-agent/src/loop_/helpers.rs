@@ -12,7 +12,7 @@ use crate::runtime::{
     args_summary, filter_listed_tools, ActivationSet, EventProgressSink, InvokeResult,
     ListToolsContext, RawToolCall, ToolInvocation, MAX_TOOL_SCHEMA_CHARS,
 };
-use crate::tool::Tool;
+use crate::tool::{ObservationError, Tool, ToolObservation};
 use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
 
 /// Resolve a tool by name from the session tool table.
@@ -225,9 +225,10 @@ pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -
     json!({ "tool_call_id": call_id, "content": content.into() })
 }
 
-/// Observation text is treated as failure when it starts with the conventional prefix.
+/// Legacy observations without trusted status use only conventional error prefixes.
 pub(super) fn observation_looks_ok(content: &str) -> bool {
-    !(content.starts_with("Error:") || content.starts_with("Error ["))
+    let lower = content.trim_start().to_ascii_lowercase();
+    !(lower.starts_with("error:") || lower.starts_with("error ["))
 }
 
 /// Count useful web-search/fetch observations in the current user turn.
@@ -278,6 +279,10 @@ pub(super) fn useful_research_observation_count(context: &Context) -> u32 {
             let content = m.content.get("content")?.as_str()?;
             (research_calls.contains(id)
                 && counted.insert(id.to_string())
+                && m.content
+                    .get("_tool_ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| observation_looks_ok(content))
                 && observation_has_useful_evidence(content))
             .then_some(())
         })
@@ -291,7 +296,7 @@ fn is_control_user_message(text: &str) -> bool {
 
 fn observation_has_useful_evidence(content: &str) -> bool {
     let trimmed = content.trim();
-    if trimmed.is_empty() || !observation_looks_ok(trimmed) {
+    if trimmed.is_empty() {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -354,26 +359,27 @@ pub(super) fn log_tool_done(tool: &str, ok: bool, ms: u64) {
     tracing::info!(tool = %tool, ok, ms, "tool done");
 }
 
-/// Map a non-HITL invoke result to observation text.
+/// Map a non-HITL invoke result to its trusted observation.
 ///
-/// Returns `None` only for [`InvokeResult::NeedsConfirmation`] (caller decides
+/// Returns `None` for confirmation or input pauses (caller decides
 /// whether that is a pause or an unexpected parallel-batch error).
-pub(super) fn observation_text_from_invoke(result: InvokeResult) -> Option<String> {
+pub(super) fn observation_from_invoke(result: InvokeResult) -> Option<ToolObservation> {
     match result {
         InvokeResult::Observation(s) => Some(s),
-        InvokeResult::Denied { reason } => Some(format!("Error: {reason}")),
+        InvokeResult::Denied { reason } => Some(ToolObservation::err(
+            ObservationError::new("denied", false, reason),
+            0,
+        )),
         InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => None,
     }
 }
 
 /// Convert parallel-batch invoke outcomes (confirmation is unexpected → error string).
 pub(super) fn parallel_batch_observation(result: InvokeResult) -> (String, bool) {
-    match observation_text_from_invoke(result) {
-        Some(text) => {
-            let ok = observation_looks_ok(&text);
-            // Denied always reports ok=false even if formatting changes later.
-            // observation_looks_ok already treats "Error:" prefix as fail.
-            (text, ok)
+    match observation_from_invoke(result) {
+        Some(observation) => {
+            let ok = observation.looks_ok();
+            (observation.to_provider_text(), ok)
         }
         None => (
             "Error: unexpected confirmation required in parallel batch".to_string(),
@@ -564,31 +570,49 @@ mod tests {
     }
 
     #[test]
-    fn observation_text_from_invoke_variants() {
+    fn observation_from_invoke_variants() {
         assert_eq!(
-            observation_text_from_invoke(InvokeResult::Observation("x".into())),
+            observation_from_invoke(InvokeResult::Observation(ToolObservation::ok_text("x", 0)))
+                .map(|observation| observation.to_provider_text()),
             Some("x".into())
         );
         assert_eq!(
-            observation_text_from_invoke(InvokeResult::Denied {
+            observation_from_invoke(InvokeResult::Denied {
                 reason: "nope".into()
-            }),
-            Some("Error: nope".into())
-        );
-        assert!(
-            observation_text_from_invoke(InvokeResult::NeedsConfirmation {
-                pending: crate::runtime::PendingToolCall::new(
-                    "id",
-                    "t",
-                    json!({}),
-                    "sum",
-                    crate::tool::ToolRisk::Safe,
-                    "c1",
-                ),
-                speak_prompt: "confirm?".into(),
             })
-            .is_none()
+            .map(|observation| observation.to_provider_text()),
+            Some("Error [denied]: nope".into())
         );
+        assert!(observation_from_invoke(InvokeResult::NeedsConfirmation {
+            pending: crate::runtime::PendingToolCall::new(
+                "id",
+                "t",
+                json!({}),
+                "sum",
+                crate::tool::ToolRisk::Safe,
+                "c1",
+            ),
+            speak_prompt: "confirm?".into(),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn parallel_batch_uses_status_even_when_success_text_looks_like_error() {
+        let text = "Error: quoted file contents; 0 failed";
+        let (rendered, ok) = parallel_batch_observation(InvokeResult::Observation(
+            ToolObservation::ok_text(text, 0),
+        ));
+        assert!(ok);
+        assert_eq!(rendered, text);
+
+        let (rendered, ok) =
+            parallel_batch_observation(InvokeResult::Observation(ToolObservation::err(
+                ObservationError::new("failed", false, "connection closed"),
+                0,
+            )));
+        assert!(!ok);
+        assert!(rendered.contains("connection closed"));
     }
 
     #[test]

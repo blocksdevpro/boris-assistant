@@ -3,9 +3,9 @@
 //! This module selects reminder text only. Context insertion keeps the raw
 //! tool observation unchanged and emits host guidance as a separate control.
 
-/// Optional reminder text to append after a tool observation.
-pub fn reminder_for(tool_name: &str, observation: &str) -> Option<String> {
-    let err = observation.starts_with("Error:") || observation.starts_with("Error [");
+/// Optional reminder text selected using the host-known execution status.
+pub fn reminder_for(tool_name: &str, observation: &str, ok: bool) -> Option<String> {
+    let err = !ok;
     match tool_name {
         "load_skill" if !err => Some(load_skill_reminder(observation)),
         "list_skills" if !err && observation.contains("skill(s)") => Some(
@@ -123,7 +123,8 @@ mod tests {
     /// Render selected text for concise content assertions. Production code
     /// inserts this text as a separate context message.
     fn with_reminder(tool_name: &str, observation: String) -> String {
-        match reminder_for(tool_name, &observation) {
+        let ok = !(observation.starts_with("Error:") || observation.starts_with("Error ["));
+        match reminder_for(tool_name, &observation, ok) {
             Some(reminder) => format!("<system-reminder>\n{reminder}\n</system-reminder>"),
             None => observation,
         }
@@ -215,6 +216,15 @@ mod tests {
         // detected as an error (not the success/batch path).
         let out = with_reminder("bash", "Error [timeout]: timed out".into());
         assert!(out.contains("Shell failed"));
+    }
+
+    #[test]
+    fn reminder_selection_uses_status_instead_of_error_looking_data() {
+        assert!(reminder_for("bash", "Error: quoted log line", true).is_none());
+        assert!(reminder_for("file_write", "Error: quoted log line", true).is_some());
+        let failure = reminder_for("bash", "connection closed", false).unwrap();
+        assert!(failure.contains("Shell failed"));
+        assert!(reminder_for("file_write", "connection closed", false).is_none());
     }
 
     #[test]

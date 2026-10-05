@@ -34,15 +34,13 @@ use crate::context::{Context, Role};
 use crate::error::AgentError;
 use crate::finish_gate::FinishGateBudget;
 use crate::outcome::AgentOutcome;
-use crate::runtime::{
-    ActivationSet, InvokeOptions, InvokeResult, PendingTurn, RawToolCall, ToolRuntime,
-};
+use crate::runtime::{ActivationSet, InvokeOptions, PendingTurn, RawToolCall, ToolRuntime};
 use crate::tool::Tool;
 use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult, TokenAccounting};
 
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
-    build_tool_invocation, find_tool, find_tool_opt, log_tool_done, observation_looks_ok,
+    build_tool_invocation, find_tool, find_tool_opt, log_tool_done, parallel_batch_observation,
     push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
 };
 use message_parse::{
@@ -481,6 +479,7 @@ pub async fn resume_pending_input(
         .ok_or_else(|| AgentError::new("pending pause is not typed input"))?;
 
     let started = Instant::now();
+    let ok = value.is_some();
     let observation = match value {
         Some(raw) => {
             let clipped: String = raw.chars().take(input.max_chars as usize).collect();
@@ -493,7 +492,6 @@ pub async fn resume_pending_input(
         None => "Error: user cancelled typed input".into(),
     };
     let duration_ms = started.elapsed().as_millis() as u64;
-    let ok = observation_looks_ok(&observation);
     log_tool_done(&pending.name, ok, duration_ms);
     emit(AgentEvent::ToolExecutionEnd {
         call_id: pending.call_id.clone(),
@@ -626,7 +624,7 @@ pub async fn resume_pending_tool(
         state.runtime.grant_shell_this_turn();
     }
 
-    let observation = if approved {
+    let (observation, ok) = if approved {
         // Disjoint borrows: `tool` from `state.tools`, invoke via `state.runtime`.
         let raw = RawToolCall {
             call_id: pending.call_id.clone(),
@@ -639,24 +637,17 @@ pub async fn resume_pending_tool(
             skip_confirmation: true,
             confirms_used,
         };
-        match state.runtime.invoke(tool, inv, opts).await {
-            InvokeResult::Observation(s) => s,
-            InvokeResult::Denied { reason } => format!("Error: {reason}"),
-            InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => {
-                "Error: unexpected pause after grant".to_string()
-            }
-        }
+        parallel_batch_observation(state.runtime.invoke(tool, inv, opts).await)
     } else {
         state.runtime.audit_rejection(
             &pending,
             config.session_id.as_deref(),
             config.turn_id.as_deref(),
         );
-        "Error: user declined this action".to_string()
+        ("Error: user declined this action".to_string(), false)
     };
 
     let duration_ms = started.elapsed().as_millis() as u64;
-    let ok = approved && observation_looks_ok(&observation);
     log_tool_done(&pending.name, ok, duration_ms);
     emit(AgentEvent::ToolExecutionEnd {
         call_id: pending.call_id.clone(),
@@ -697,20 +688,14 @@ pub async fn resume_pending_tool(
             push_tool_result_messages(state.context, &call.name, &call.call_id, observation, false);
             continue;
         };
-        let observation = if approved {
+        let (observation, ok) = if approved {
             let mut inv = build_tool_invocation(&call, config, cancel.clone(), &emit);
             inv.cwd = None;
             let opts = InvokeOptions {
                 skip_confirmation: true,
                 confirms_used,
             };
-            match state.runtime.invoke(tool, inv, opts).await {
-                InvokeResult::Observation(s) => s,
-                InvokeResult::Denied { reason } => format!("Error: {reason}"),
-                InvokeResult::NeedsConfirmation { .. } | InvokeResult::NeedsInput { .. } => {
-                    "Error: unexpected pause after grant".to_string()
-                }
-            }
+            parallel_batch_observation(state.runtime.invoke(tool, inv, opts).await)
         } else {
             let risk = tool.meta().risk;
             let rejected = crate::runtime::PendingToolCall::new(
@@ -726,10 +711,9 @@ pub async fn resume_pending_tool(
                 config.session_id.as_deref(),
                 config.turn_id.as_deref(),
             );
-            "Error: user declined this action".to_string()
+            ("Error: user declined this action".to_string(), false)
         };
         let duration_ms = started.elapsed().as_millis() as u64;
-        let ok = approved && observation_looks_ok(&observation);
         log_tool_done(&call.name, ok, duration_ms);
         emit(AgentEvent::ToolExecutionEnd {
             call_id: call.call_id.clone(),

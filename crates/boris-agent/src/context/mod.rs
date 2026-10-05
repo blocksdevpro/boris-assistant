@@ -209,11 +209,11 @@ impl Context {
         content: String,
         ok: bool,
     ) {
-        let reminder = crate::reminder::reminder_for(tool_name, &content);
+        let reminder = crate::reminder::reminder_for(tool_name, &content, ok);
         self.record_tool_result(tool_name, call_id, ok, &content);
         self.push(
             Role::Tool,
-            json!({"tool_call_id": call_id, "content": content}),
+            json!({"tool_call_id": call_id, "content": content, "_tool_ok": ok}),
         );
         if let Some(reminder) = reminder {
             if !self.pending_tool_controls.contains(&reminder) {
@@ -221,6 +221,17 @@ impl Context {
             }
         }
         self.flush_tool_controls_if_batch_resolved();
+    }
+
+    /// Trusted tool status for the current human turn, independent of the
+    /// compacted provider view. Legacy history falls back to error prefixes.
+    pub(crate) fn current_turn_has_tool_error(&self) -> bool {
+        self.history
+            .iter()
+            .rev()
+            .take_while(|message| !message.origin.is_human())
+            .filter(|message| matches!(message.role, Role::Tool))
+            .any(|message| crate::routing::tool_result_has_error(&message.content))
     }
 
     fn flush_tool_controls_if_batch_resolved(&mut self) {
@@ -306,7 +317,8 @@ impl Context {
                 Role::Tool,
                 json!({
                     "tool_call_id": call_id,
-                    "content": "Error: tool call cancelled because the turn was aborted"
+                    "content": "Error: tool call cancelled because the turn was aborted",
+                    "_tool_ok": false
                 }),
             );
         }
@@ -921,6 +933,54 @@ mod tests {
         assert_eq!(messages[3].origin, MessageOrigin::HostControl);
         assert!(!messages[1].content.to_string().contains("system-reminder"));
         assert!(messages[3].content.to_string().contains("system-reminder"));
+    }
+
+    #[test]
+    fn tool_result_status_stays_internal_and_resets_with_the_human_turn() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::User, "read this passage");
+        ctx.push_tool_result(
+            "read_file",
+            "c1",
+            "Error: quoted passage, 0 failed".into(),
+            true,
+        );
+        assert!(!ctx.current_turn_has_tool_error());
+        let raw = &ctx.history().last().unwrap().content;
+        assert_eq!(raw["_tool_ok"], true);
+        let wire = ctx.as_json();
+        let tool = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["role"] == "tool")
+            .unwrap();
+        assert!(tool.get("_tool_ok").is_none());
+        assert_eq!(tool["content"], "Error: quoted passage, 0 failed");
+
+        ctx.push_tool_result("read_file", "c2", "connection closed".into(), false);
+        ctx.push_control("<system-reminder>recover</system-reminder>");
+        assert!(ctx.current_turn_has_tool_error());
+        ctx.push_tool_result("read_file", "c3", "read succeeded".into(), true);
+        assert!(ctx.current_turn_has_tool_error());
+        ctx.push(Role::User, "hello");
+        assert!(!ctx.current_turn_has_tool_error());
+    }
+
+    #[test]
+    fn legacy_tool_status_uses_conventional_error_prefixes() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::User, "read this passage");
+        ctx.push(
+            Role::Tool,
+            json!({"tool_call_id": "c1", "content": "0 failed, invalid arguments example"}),
+        );
+        assert!(!ctx.current_turn_has_tool_error());
+        ctx.push(
+            Role::Tool,
+            json!({"tool_call_id": "c2", "content": "error [execution]: connection closed"}),
+        );
+        assert!(ctx.current_turn_has_tool_error());
     }
 
     #[test]

@@ -24,13 +24,12 @@ use crate::runtime::{
     args_summary, clamp_parallel, InvokeOptions, InvokeResult, PendingToolCall, PendingTurn,
     PolicyDecision, RawToolCall,
 };
-use crate::tool::{Permission, ToolRisk};
+use crate::tool::{ObservationError, Permission, ToolObservation, ToolRisk};
 use crate::types::{AgentEvent, AgentLoopConfig, EmitFn};
 
 use super::helpers::{
     build_tool_invocation, commit_tool_observation, emit_tool_end, emit_tool_start, find_tool_opt,
-    observation_looks_ok, parallel_batch_observation, push_tool_result_messages,
-    unknown_tool_observation,
+    parallel_batch_observation, push_tool_result_messages, unknown_tool_observation,
 };
 use super::LoopState;
 
@@ -319,8 +318,8 @@ async fn run_tool_batch_sequential_inner(
                 commit_tool_observation(
                     state.context,
                     &call,
-                    result.clone(),
-                    observation_looks_ok(&result),
+                    result.to_provider_text(),
+                    result.looks_ok(),
                     duration_ms,
                     tools_used,
                     emit,
@@ -643,12 +642,21 @@ async fn run_tool_batch_parallel(
                             config.session_id.as_deref(),
                             config.turn_id.as_deref(),
                         );
-                        InvokeResult::Observation(unknown_tool_observation(&call.name))
+                        InvokeResult::Observation(ToolObservation::err(
+                            ObservationError::new(
+                                "unknown_tool",
+                                false,
+                                unknown_tool_observation(&call.name)
+                                    .trim_start_matches("Error: ")
+                                    .to_string(),
+                            ),
+                            0,
+                        ))
                     }
                 };
                 let duration_ms = started.elapsed().as_millis() as u64;
                 let ok = match &result {
-                    InvokeResult::Observation(content) => Some(observation_looks_ok(content)),
+                    InvokeResult::Observation(observation) => Some(observation.looks_ok()),
                     InvokeResult::Denied { .. } => Some(false),
                     _ => None,
                 };

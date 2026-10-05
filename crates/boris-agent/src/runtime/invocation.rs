@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 
+use crate::tool::ToolObservation;
 use crate::tool_context::ToolCallContext;
 
 use super::pending::PendingToolCall;
@@ -80,8 +81,8 @@ pub struct InvokeOptions {
 /// Result of runtime mediation (before the engine continues the ReAct loop).
 #[derive(Debug, Clone)]
 pub enum InvokeResult {
-    /// Observation string for the model (already truncated + reminder).
-    Observation(String),
+    /// Trusted execution outcome. Render text only at the provider boundary.
+    Observation(ToolObservation),
     /// Pause for host HITL; tool was not executed.
     NeedsConfirmation {
         /// Pending call record for approve/reject.

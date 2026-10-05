@@ -100,9 +100,11 @@ pub(super) async fn complete_round(
     let task = config
         .task
         .unwrap_or_else(|| crate::task::classify_task(user_text));
-    let round = crate::routing::round_traits_for_task(&state.context.as_json(), task);
+    let mut round = crate::routing::round_traits_for_task(&state.context.as_json(), task);
+    round.has_error_evidence = state.context.current_turn_has_tool_error();
     let stage = crate::routing::request_stage_for(task, round);
-    let opts = boris_ai::CompleteOptions::for_stage(stage);
+    let mut opts = boris_ai::CompleteOptions::for_stage(stage);
+    opts.tool_error = Some(round.has_error_evidence);
     let context_limit = state
         .client
         .context_window_tokens()

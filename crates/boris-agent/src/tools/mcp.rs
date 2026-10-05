@@ -23,8 +23,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::tool::{
-    require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta,
-    ToolRisk,
+    require_object, truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
 };
 
 /// One stdio MCP server (mirrors `mcp.json` shape).
@@ -120,9 +119,11 @@ impl McpToolDef {
     /// Read-suggestive names auto-register; everything else needs allow_writes.
     pub fn is_read_suggestive(&self) -> bool {
         let n = self.name.to_ascii_lowercase();
-        ["get", "list", "search", "read", "query", "find", "describe", "show"]
-            .iter()
-            .any(|p| n.starts_with(p) || n.contains(&format!("_{p}")))
+        [
+            "get", "list", "search", "read", "query", "find", "describe", "show",
+        ]
+        .iter()
+        .any(|p| n.starts_with(p) || n.contains(&format!("_{p}")))
     }
 
     pub fn qualified_name(server: &str, tool: &str) -> String {
@@ -296,9 +297,7 @@ async fn call_remote_tool(
     parse_call_result(&line).map_err(ToolError::failed)
 }
 
-fn spawn_server(
-    server: &McpServerConfig,
-) -> Result<tokio::process::Child, String> {
+fn spawn_server(server: &McpServerConfig) -> Result<tokio::process::Child, String> {
     if server.command.trim().is_empty() || server.command.contains('\0') {
         return Err("mcp: empty command".into());
     }
@@ -319,13 +318,11 @@ fn spawn_server(
             cmd.env_remove(k);
         }
     }
-    cmd.spawn().map_err(|e| format!("mcp spawn {}: {e}", server.command))
+    cmd.spawn()
+        .map_err(|e| format!("mcp spawn {}: {e}", server.command))
 }
 
-async fn write_line(
-    stdin: &mut tokio::process::ChildStdin,
-    v: &Value,
-) -> Result<(), String> {
+async fn write_line(stdin: &mut tokio::process::ChildStdin, v: &Value) -> Result<(), String> {
     let mut s = serde_json::to_string(v).map_err(|e| format!("mcp encode: {e}"))?;
     s.push('\n');
     stdin
@@ -348,8 +345,7 @@ async fn read_line_timeout(
 }
 
 fn parse_tools_list(line: &str) -> Result<Vec<McpToolDef>, String> {
-    let v: Value =
-        serde_json::from_str(line).map_err(|e| format!("mcp tools/list parse: {e}"))?;
+    let v: Value = serde_json::from_str(line).map_err(|e| format!("mcp tools/list parse: {e}"))?;
     if let Some(err) = v.get("error") {
         return Err(format!("mcp tools/list error: {err}"));
     }
@@ -372,17 +368,22 @@ fn parse_tools_list(line: &str) -> Result<Vec<McpToolDef>, String> {
                 .chars()
                 .take(500)
                 .collect(),
-            input_schema: t.get("inputSchema").cloned().unwrap_or(json!({"type":"object"})),
+            input_schema: t
+                .get("inputSchema")
+                .cloned()
+                .unwrap_or(json!({"type":"object"})),
         });
     }
     Ok(out)
 }
 
 fn parse_call_result(line: &str) -> Result<String, String> {
-    let v: Value =
-        serde_json::from_str(line).map_err(|e| format!("mcp tools/call parse: {e}"))?;
+    let v: Value = serde_json::from_str(line).map_err(|e| format!("mcp tools/call parse: {e}"))?;
     if let Some(err) = v.get("error") {
         return Err(format!("mcp tools/call error: {err}"));
+    }
+    if v.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
+        return Err(format!("mcp tools/call failed: {}", v["result"]));
     }
     // Standard shape: result.content[].text joined.
     if let Some(content) = v.pointer("/result/content").and_then(|c| c.as_array()) {
@@ -399,8 +400,7 @@ fn parse_call_result(line: &str) -> Result<String, String> {
         }
     }
     // Fallback: whole result object.
-    Ok(v
-        .get("result")
+    Ok(v.get("result")
         .map(|r| r.to_string())
         .unwrap_or_else(|| line.chars().take(4000).collect()))
 }
@@ -495,6 +495,38 @@ mod tests {
         assert_eq!(defs[0].name, "get_events");
 
         let line = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_call_result(line).unwrap(), "hi");
+    }
+
+    #[test]
+    fn tool_error_flag_preserves_content_and_structured_diagnostics() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "isError": true,
+                "content": [{ "type": "text", "text": "Calendar access denied" }],
+                "structuredContent": { "code": "permission_denied", "calendar": "work" }
+            }
+        })
+        .to_string();
+        let err = parse_call_result(&line).expect_err("MCP tool errors must fail the operation");
+
+        assert!(err.contains("Calendar access denied"), "got: {err}");
+        assert!(err.contains("structuredContent"), "got: {err}");
+        assert!(err.contains("permission_denied"), "got: {err}");
+        assert!(err.contains("work"), "got: {err}");
+    }
+
+    #[test]
+    fn tool_error_flag_without_content_still_fails() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}"#;
+        assert!(parse_call_result(line).is_err());
+    }
+
+    #[test]
+    fn successful_tool_result_keeps_compact_text() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"result":{"isError":false,"content":[{"type":"text","text":"hi"}],"structuredContent":{"summary":"hi"}}}"#;
         assert_eq!(parse_call_result(line).unwrap(), "hi");
     }
 

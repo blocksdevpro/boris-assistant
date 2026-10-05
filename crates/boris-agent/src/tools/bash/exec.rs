@@ -547,13 +547,18 @@ impl Tool for BashTool {
             ""
         };
 
-        Ok(truncate_tool_result(format!(
+        let output = truncate_tool_result(format!(
             "Exit code: {exit_code}{hint}\n\
              cwd: {}\n\
              duration_ms: {duration_ms}\n\n\
              {text}",
             cwd.display()
-        )))
+        ));
+        if exit_code == 0 {
+            Ok(output)
+        } else {
+            Err(ToolError::failed(output))
+        }
     }
 }
 
@@ -616,6 +621,35 @@ mod tests {
         assert!(
             out.contains("Exit code: 0") && !out.contains("Command was not run."),
             "got: {out}"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_preserves_failure_diagnostics() {
+        let dir = std::env::temp_dir().join(format!("boris-bash-failed-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+        let err = tool
+            .execute(
+                &crate::tool_context::ToolCallContext::new("failed-command"),
+                json!({ "command": "pwd; exit 7" }),
+            )
+            .await
+            .expect_err("a nonzero exit must be a failed tool operation");
+
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::Failed);
+        assert!(err.message.contains("Exit code: 7"), "got: {}", err.message);
+        assert!(err.message.contains("cwd:"), "got: {}", err.message);
+        assert!(
+            err.message.contains("boris-bash-failed-"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("duration_ms:") && !err.message.contains("(no output)"),
+            "got: {}",
+            err.message
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

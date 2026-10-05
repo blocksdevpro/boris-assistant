@@ -149,10 +149,10 @@ impl Tool for GrepTool {
             &self.roots.readers(),
         )?;
         if !search_path.exists() {
-            return Ok(format!(
+            return Err(ToolError::failed(format!(
                 "Path not found: {}. Check the path, or glob / list_dir from a parent directory first.",
                 search_path.display()
-            ));
+            )));
         }
 
         let display = search_path.display().to_string();
@@ -329,14 +329,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let tool = GrepTool::new(roots_at(dir.clone()));
         let missing = dir.join("nope-not-here");
-        let out = tool
+        let err = tool
             .execute(
                 &crate::tool_context::ToolCallContext::new("t"),
                 json!({ "pattern": "x", "path": missing.to_string_lossy() }),
             )
             .await
-            .unwrap();
-        assert!(out.to_ascii_lowercase().contains("not found"), "got: {out}");
+            .expect_err("a missing search root must not count as successful work");
+        assert_eq!(err.kind(), crate::tool::ToolErrorKind::Failed);
+        assert!(err.message.contains("Path not found:"), "got: {err}");
+        assert!(err.message.contains("nope-not-here"), "got: {err}");
+        assert!(err.message.contains("glob / list_dir"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

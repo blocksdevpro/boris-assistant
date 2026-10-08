@@ -5,14 +5,26 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0-beta.1] - 2026-10-08
+
+First beta of the 1.3 line for Windows x64, with an NSIS installer.
+Stable installations remain on 1.2.0 unless you select the Beta update channel.
+
 ### Added
 
+- Desktop developer monitor for model requests, tool calls, routing, context,
+  and provider usage, with export and per-event copy actions.
+- Explicit `parallel` tool for independent calls, with live batch activity.
+  Writes and approval or input boundaries preserve ordering, and completed
+  calls are not replayed after a pause.
 - Offline `tool_selection_audit` example for comparing full listing with task
   selection through `Agent::prompt`. It reports estimated schema tokens and
   request counts using builtin schemas or a request-event JSON export.
 
 ### Changed
 
+- Shared prompt rules and skill guidance describe research depth and retries
+  in terms of unresolved evidence rather than fixed tool-call quotas.
 - Progressive listing selects builtin tool bundles from the human objective
   before the first model request. Research gets web and recall tools; workspace
   work gets file and shell tools. Other requests select time, planning, profile,
@@ -31,6 +43,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Namespaced `functions.` tool calls are normalized before dispatch and replay.
+  Historical tool names and definitions are validated before provider requests.
+- Failed card presentation preserves the complete report for on-screen display
+  and, when storage is writable, in a recovery catalog across restarts.
+- Optional directory, glob, and grep roots accept omission, null, or blank as
+  the sandbox root. Required file targets remain strict. Web extraction removes
+  navigation, scripts, styles, and SVG while preserving article content.
+- Tool arguments are checked against their schemas before execution. Context
+  updates preserve the conversation prefix and avoid treating incidental words
+  or garbled negation as hard task restrictions.
 - Progressive turns ensure `tool_search` is registered even when the host uses
   default construction or replaces the tool registry.
 - Failed or cancelled turns and checkpoint restores recover the preceding
@@ -60,6 +82,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   otherwise unused root `scripts/` directory.
 
 ### Validation
+
+On 2026-10-08, release preparation passed 1,031 library tests with 0 failures
+and 3 ignored tests, plus all 50 frontend tests. Release metadata, the
+production frontend build, and the bundle-size check also passed:
+
+```bash
+cargo test --offline -p boris-agent -p boris-ai -p boris-pipeline -p boris-tts-supertone --lib --quiet
+cd desktop
+bun run test
+bun run verify:release
+bun run build
+bun run check:bundle-size
+```
 
 On 2026-10-08, task selection passed the affected library suite with 913 tests,
 0 failures, and 3 ignored tests:
@@ -628,6 +663,7 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.3.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.1
 [1.2.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0
 [beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3
 [beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.2

@@ -60,6 +60,7 @@ pub(super) fn build_list_ctx(
         activated: Arc::new(activated_snap),
         features,
         task: config.task,
+        selection: config.tool_selection.clone(),
     }
 }
 
@@ -100,33 +101,28 @@ pub(super) fn tools_json_for_llm(
     let listed_before = list.len();
     let mut pruned_core = 0usize;
     while serialized_definitions_len(&list) > MAX_TOOL_SCHEMA_CHARS {
-        // Prefer removing the lowest-value non-core definition. Within an
+        // Remove the lowest-value definition. Within an
         // equal priority tier, removing the largest schema recovers the most
         // budget while disturbing the fewest capabilities.
-        let non_core = list
-            .iter()
-            .enumerate()
-            .filter(|(_, (tool, _, _, _))| {
-                !crate::runtime::is_core_name(tool.name(), &list_ctx.features)
-                    && tool.name() != "tool_search"
-            })
-            .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
-            .map(|(index, _)| (index, false));
-        // The cap is unconditional. If retained/core schemas alone exceed it,
-        // remove the lowest-value core definition next, keeping tool_search as
-        // the last discovery escape hatch whenever it fits.
-        let core = list
+        let candidate = list
             .iter()
             .enumerate()
             .filter(|(_, (tool, _, _, _))| tool.name() != "tool_search")
             .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
-            .map(|(index, _)| (index, true));
+            .map(|(index, (tool, _, _, _))| {
+                (
+                    index,
+                    crate::runtime::is_core_name(tool.name(), &list_ctx.features),
+                )
+            });
+        // Keep discovery until last, but enforce the cap even if it alone
+        // exceeds the budget.
         let last_resort = list
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| schema_removal_order(a, b))
             .map(|(index, _)| (index, true));
-        let Some((index, protected)) = non_core.or(core).or(last_resort) else {
+        let Some((index, protected)) = candidate.or(last_resort) else {
             break;
         };
         pruned_core += usize::from(protected);
@@ -431,7 +427,7 @@ mod tests {
     fn tool_payload_prunes_low_priority_definitions_to_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(LargeDefinitionTool {
-                name: "get_time".into(),
+                name: "remember_note".into(),
                 description: "core".into(),
             }),
             Arc::new(LargeDefinitionTool {
@@ -459,7 +455,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
-        assert!(names.contains(&"get_time"), "core tool must be retained");
+        assert!(
+            names.contains(&"remember_note"),
+            "core tool must be retained"
+        );
         assert!(
             names.contains(&"activated_tool"),
             "actual-use activation must outrank an unselected tool"
@@ -472,14 +471,46 @@ mod tests {
     }
 
     #[test]
+    fn schema_budget_keeps_discoveries_above_unused_shared_tools() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(LargeDefinitionTool {
+                name: "remember_note".into(),
+                description: "n".repeat(40_000),
+            }),
+            Arc::new(LargeDefinitionTool {
+                name: "activated_tool".into(),
+                description: "a".repeat(40_000),
+            }),
+            Arc::new(LargeDefinitionTool {
+                name: "tool_search".into(),
+                description: "discovery".into(),
+            }),
+        ];
+        let ctx = ListToolsContext {
+            activated: Arc::new(HashSet::from(["activated_tool".into()])),
+            ..Default::default()
+        };
+        let (payload, pruned) = tools_json_for_llm(&tools, &ctx);
+        let names = payload
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["activated_tool", "tool_search"]);
+        assert_eq!(pruned, 1);
+        assert!(payload.to_string().len() <= MAX_TOOL_SCHEMA_CHARS);
+    }
+
+    #[test]
     fn tool_payload_prunes_core_when_core_alone_exceeds_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(LargeDefinitionTool {
-                name: "get_time".into(),
+                name: "remember_note".into(),
                 description: "t".repeat(40_000),
             }),
             Arc::new(LargeDefinitionTool {
-                name: "get_date".into(),
+                name: "present_artifact".into(),
                 description: "d".repeat(40_000),
             }),
         ];

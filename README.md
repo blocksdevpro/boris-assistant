@@ -89,6 +89,13 @@ shell failures, missing search paths, and MCP tool errors retain their
 diagnostics and report failure. See the
 [agent tool-result contract](crates/boris-agent/README.md#tool-execution-status).
 
+Boris selects common tools for each task before the first model request.
+Research gets web and recall tools, while workspace work gets file and shell
+tools. Discovery adds missing capabilities for the current objective and keeps
+them across short follow-ups such as "continue". See
+[agent tool listing](crates/boris-agent/README.md#tool-listing) for selection,
+limits, and the offline audit.
+
 ---
 
 ## How a turn works

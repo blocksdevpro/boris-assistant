@@ -1,11 +1,10 @@
 //! File-backed markdown memory tools (`memory_search_files`, `memory_get_file`).
 //!
 //! The canonical SQLite store owns `memory_search` / `memory_get`. These
-//! markdown variants use distinct primary names so both backends can coexist
-//! without silent last-wins replacement in [`crate::Agent::register_tools`].
-//! Deprecated `memory_search` / `memory_get` aliases are still registered with
-//! `should_list=false` for old prompts; they will be replaced by the canonical
-//! tools when both backends are enabled.
+//! Markdown variants use distinct names to avoid silent replacement in
+//! [`crate::Agent::register_tools`]. Only the two file tools are registered.
+//! The canonical backend
+//! removes them when enabled, leaving one authoritative retrieval interface.
 //!
 //! File/grep/bash observation bodies live in other groups' files and are not
 //! wrapped here; see the tool-observation banner notes in those modules.
@@ -113,10 +112,6 @@ impl Tool for MemorySearchTool {
             .max_concurrency(8)
     }
 
-    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
-        true // soft-core when progressive listing is on
-    }
-
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let query = require_string(obj, "query")?;
@@ -177,10 +172,6 @@ impl Tool for MemoryGetTool {
             .max_concurrency(8)
     }
 
-    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
-        true // soft-core when progressive listing is on
-    }
-
     async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let path = require_string(obj, "path")?;
@@ -194,102 +185,10 @@ impl Tool for MemoryGetTool {
     }
 }
 
-/// Deprecated alias for `memory_search_files` (old `memory_search` name).
-/// Hidden from listing; the canonical SQLite tool wins on name dedupe when
-/// both backends are enabled.
-pub struct DeprecatedMemorySearchTool {
-    memory: SharedLongTermMemory,
-}
-
-impl DeprecatedMemorySearchTool {
-    pub fn new(memory: SharedLongTermMemory) -> Self {
-        Self { memory }
-    }
-}
-
-#[async_trait]
-impl Tool for DeprecatedMemorySearchTool {
-    fn name(&self) -> &str {
-        "memory_search"
-    }
-
-    fn description(&self) -> &str {
-        "Deprecated alias for memory_search_files. Prefer memory_search_files."
-    }
-
-    fn parameters(&self) -> Value {
-        MemorySearchTool::new(self.memory.clone()).parameters()
-    }
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe)
-            .kind(ToolKind::Memory)
-            .permissions(&[Permission::FsRead])
-            .read_only(true)
-            .max_concurrency(8)
-    }
-
-    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
-        false
-    }
-
-    async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
-        MemorySearchTool::new(self.memory.clone())
-            .execute(_ctx, args)
-            .await
-    }
-}
-
-/// Deprecated alias for `memory_get_file` (old `memory_get` name).
-pub struct DeprecatedMemoryGetTool {
-    memory: SharedLongTermMemory,
-}
-
-impl DeprecatedMemoryGetTool {
-    pub fn new(memory: SharedLongTermMemory) -> Self {
-        Self { memory }
-    }
-}
-
-#[async_trait]
-impl Tool for DeprecatedMemoryGetTool {
-    fn name(&self) -> &str {
-        "memory_get"
-    }
-
-    fn description(&self) -> &str {
-        "Deprecated alias for memory_get_file. Prefer memory_get_file."
-    }
-
-    fn parameters(&self) -> Value {
-        MemoryGetTool::new(self.memory.clone()).parameters()
-    }
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::with_risk(ToolRisk::Safe)
-            .kind(ToolKind::Memory)
-            .permissions(&[Permission::FsRead])
-            .read_only(true)
-            .max_concurrency(8)
-    }
-
-    fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
-        false
-    }
-
-    async fn execute(&self, _ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
-        MemoryGetTool::new(self.memory.clone())
-            .execute(_ctx, args)
-            .await
-    }
-}
-
 pub fn memory_tools(memory: SharedLongTermMemory) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(MemorySearchTool::new(memory.clone())),
-        Box::new(MemoryGetTool::new(memory.clone())),
-        Box::new(DeprecatedMemorySearchTool::new(memory.clone())),
-        Box::new(DeprecatedMemoryGetTool::new(memory)),
+        Box::new(MemoryGetTool::new(memory)),
     ]
 }
 
@@ -318,21 +217,11 @@ mod tests {
             "memory_search_files"
         );
         assert_eq!(MemoryGetTool::new(mem.clone()).name(), "memory_get_file");
-        assert_eq!(
-            DeprecatedMemorySearchTool::new(mem.clone()).name(),
-            "memory_search"
-        );
-        assert_eq!(DeprecatedMemoryGetTool::new(mem).name(), "memory_get");
-    }
-
-    #[test]
-    fn deprecated_aliases_are_hidden() {
-        use crate::runtime::ListToolsContext;
-        let mem = Arc::new(LongTermMemory::new(std::env::temp_dir()));
-        let ctx = ListToolsContext::default();
-        assert!(!DeprecatedMemorySearchTool::new(mem.clone()).should_list(&ctx));
-        assert!(!DeprecatedMemoryGetTool::new(mem.clone()).should_list(&ctx));
-        assert!(MemorySearchTool::new(mem.clone()).should_list(&ctx));
+        let names = memory_tools(mem)
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["memory_search_files", "memory_get_file"]);
     }
 
     #[test]

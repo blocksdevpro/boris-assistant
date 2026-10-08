@@ -212,10 +212,6 @@ pub fn describe_tool(tool_name: &str, args_summary: &str, tense: Tense) -> Strin
                 (_, Tense::Past) => "Loaded a skill".into(),
             }
         }
-        "list_skills" => match tense {
-            Tense::Present => "Listing skills".into(),
-            Tense::Past => "Listed skills".into(),
-        },
         "todo_write" => match tense {
             Tense::Present => "Updating todos".into(),
             Tense::Past => "Updated todos".into(),

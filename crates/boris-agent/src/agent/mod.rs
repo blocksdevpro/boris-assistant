@@ -60,6 +60,7 @@ pub struct TurnCancel {
 #[derive(Clone)]
 pub struct AgentCheckpoint {
     context: Context,
+    activations: crate::runtime::listing::ActivationTable,
 }
 
 impl TurnCancel {
@@ -424,7 +425,7 @@ impl Agent {
     /// Enable markdown memory: global under `memory_root`, session logs under
     /// `sessions_root/{id}/memory.md` when bound.
     ///
-    /// Registers `memory_search` / `memory_get`, injects a `<memory>` prompt hint,
+    /// Registers `memory_search_files` / `memory_get_file`, injects a `<memory>` prompt hint,
     /// and appends each completed turn to the **session** `memory.md` after
     /// [`Self::bind_session`].
     pub fn enable_long_term_memory(
@@ -460,7 +461,10 @@ impl Agent {
         }
         ltm.set_session_id(self.session_id.clone());
         let shared: SharedLongTermMemory = Arc::new(ltm);
-        let already = self.tools.iter().any(|t| t.name() == "memory_search");
+        let already = self
+            .tools
+            .iter()
+            .any(|t| matches!(t.name(), "memory_search" | "memory_search_files"));
         if !already {
             self.register_tools(legacy_memory_tools(shared.clone()));
         }
@@ -479,16 +483,14 @@ impl Agent {
         self.long_term.clone()
     }
 
-    /// Enable Boris's canonical durable memory store.  It replaces the legacy
-    /// Markdown search tools by name, so callers cannot accidentally run both
-    /// retrieval systems in the same turn.
+    /// Enable the canonical store and retire the fallback Markdown tools.
     pub fn enable_memory_store(
         &mut self,
         path: impl Into<PathBuf>,
     ) -> Result<SharedMemoryStore, String> {
         let store = Arc::new(MemoryStore::open(path)?);
-        // `register_tools` deduplicates by name, replacing legacy
-        // `memory_search` / `memory_get` if the host enabled them earlier.
+        self.tools
+            .retain(|tool| !matches!(tool.name(), "memory_search_files" | "memory_get_file"));
         self.register_tools(canonical_memory_tools(store.clone()));
         self.memory_store = Some(store.clone());
         self.long_term = None;
@@ -528,7 +530,7 @@ impl Agent {
     }
 
     /// Install discovered skills: inject catalog into system prompt, register
-    /// `list_skills` / `load_skill`, and raise the tool-round budget for playbooks.
+    /// `load_skill`, and raise the tool-round budget for playbooks.
     pub fn enable_skills(&mut self, loaded: LoadedSkills) -> SharedSkills {
         let shared: SharedSkills = Arc::new(Mutex::new(loaded));
         // Avoid double-registering skill tools if called twice.
@@ -724,6 +726,11 @@ impl Agent {
     pub fn checkpoint(&self) -> AgentCheckpoint {
         AgentCheckpoint {
             context: self.context.clone(),
+            activations: self
+                .activated
+                .lock()
+                .map(|table| table.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -731,6 +738,9 @@ impl Agent {
     pub fn restore_checkpoint(&mut self, checkpoint: AgentCheckpoint) {
         self.abort();
         self.context = checkpoint.context;
+        if let Ok(mut table) = self.activated.lock() {
+            *table = checkpoint.activations;
+        }
     }
 
     /// Drop pending HITL state and cancel in-flight loop token.

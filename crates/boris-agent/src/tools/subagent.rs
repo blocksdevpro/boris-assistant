@@ -281,6 +281,7 @@ impl Tool for SpawnSubagentTool {
             force_list_all: true,
             // Give routing the actual child task instead of mutable global state.
             task: Some(crate::task::classify_task(&goal)),
+            tool_selection: Some(crate::runtime::ToolSelection::for_request(&goal)),
             debug: None,
         };
         let emit = child_progress_emit(ctx);

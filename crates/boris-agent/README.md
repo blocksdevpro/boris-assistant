@@ -80,6 +80,43 @@ Nested modules are public for the pipeline but are not a stability guarantee.
 
 LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 
+## Tool listing
+
+The host selects builtin tool bundles from the user request before the first
+completion. Research gets web and recall tools; coding gets workspace and
+planning tools. Other requests add bundles for time, profile, clipboard,
+system, artifacts, opening URLs or paths, and skills. This local selection
+adds no model request and only lists tools registered by the host.
+
+The shared set contains `tool_search`, `remember_note`, `present_artifact`, and
+`collect_input`. Matching plugin categories add at most four tools. Discovery
+adds specialized tools for the current objective, including short follow-ups
+such as "continue" and "try again". A new objective clears those activations;
+failed turns and checkpoint restores recover the preceding set. The existing
+32-tool activation cap and 15-minute expiry still apply. Schema order follows
+registration order, and the serialized table stays within 64 KiB.
+
+`force_list_all` and disabling `progressive_listing` retain full listing,
+subject to the schema budget. Explicit `should_list` opt-ins remain supported.
+When the schema budget is exceeded, activated tools take priority over unused
+shared tools; `tool_search` is removed last. Progressive turns ensure discovery
+is registered even after `Agent::set_tools` replaces the registry.
+
+`Agent::prompt` supplies selection automatically. Direct loop callers can set
+`AgentLoopConfig::tool_selection` with
+`boris_agent::runtime::ToolSelection::for_request`. Direct listing callers use
+`ListToolsContext::selection`. Both fields default to `None`; task traits still
+provide a fallback selection. Struct literals must include the new field or use
+`..Default::default()`.
+
+Run `cargo run -p boris-agent --example tool_selection_audit` for an offline
+comparison of full listing and task selection through `Agent::prompt`. It uses
+actual builtin schemas and scripted model replies, reporting estimated schema
+tokens and request counts. It executes no external model, web, or shell calls.
+Pass a request-event JSON export after `--` to use its `data.tools` schemas.
+The default audit excludes optional memory, profile, skill, and plugin tools.
+These estimates do not measure live model latency.
+
 ## Canonical memory
 
 Hosts should call `enable_memory_store` before registering built-in tools. It
@@ -91,6 +128,11 @@ database. The Desktop host also queues the verified migration of legacy
 Migration first stages each source and refines it with the configured LLM. It
 only deletes a legacy source after all of its excerpts are refined and verified
 in SQLite. Failure leaves the old files in place for retry.
+
+The Markdown fallback exposes only `memory_search_files` and `memory_get_file`.
+Its deprecated `memory_search` and `memory_get` aliases have been removed;
+those names belong to the canonical store. Enabling the canonical store removes
+fallback tools from the registry without deleting their source files.
 
 ## Skills
 
@@ -106,8 +148,10 @@ paths; the first skill with a given name wins.
 Only skill names and descriptions enter the prompt, as a bounded JSON
 `<skills_catalog_data>` user-role envelope paired with a small static trusted
 `SKILLS_SYSTEM_POLICY`. `load_skill` reads a
-full body on demand, so specialized guidance does not expand every turn. The
-bundled set includes task execution, research, daily briefs, remembering,
+full body on demand, so specialized guidance does not expand every turn.
+The redundant `list_skills` tool has been removed; the supplied catalog already
+contains names and descriptions. The bundled set includes task execution,
+research, daily briefs, remembering,
 coding, root-cause debugging, code explanation, design rationale (`investigate-why`),
 design, change review,
 technical writing, mentoring, and skill creation. User intent controls whether
@@ -152,10 +196,11 @@ If saving also fails, the host still receives the full body for on-screen displa
 The runtime permits one corrected retry, then withholds presentation for the
 rest of the turn. Recovery cards remain available through list/get after restart.
 
-Everyday file, shell, web, memory, and artifact tools are always listed when
-registered by the capability preset and within the schema budget. Discovery is
-for long-tail tools. `tool_search` distinguishes actual current availability from
-new activations; debug capture includes a `tool_listing` event with names,
+Tools selected for the current objective are listed within the schema budget.
+Use `tool_search` for a needed capability absent from that list. See
+[tool listing](#tool-listing) for bundles and activation lifetime.
+`tool_search` distinguishes actual current availability from new activations;
+debug capture includes a `tool_listing` event with names,
 estimated schema tokens, and availability changes for each model request.
 Discovery hits are keyword matches, not proof of a capability. Check their actual
 descriptions before using them, and repeat discovery only for a specific new lead.

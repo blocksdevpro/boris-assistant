@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::ToolSelection;
 use crate::task::TaskTraits;
-use crate::tool::{Tool, ToolKind};
+use crate::tool::Tool;
 
 /// Session activation set mutated by `tool_search` (bounded LRU + TTL).
 pub type ActivationSet = Arc<Mutex<ActivationTable>>;
@@ -19,7 +20,7 @@ pub const MAX_ACTIVATED: usize = 32;
 /// Activations expire so a session-long set cannot keep growing forever.
 pub const ACTIVATION_TTL: Duration = Duration::from_secs(15 * 60);
 /// Host-side top-k listed on top of the always-on core (when progressive).
-pub const DEFAULT_TOP_K: usize = 10;
+pub const DEFAULT_TOP_K: usize = 4;
 /// Maximum serialized OpenAI-style tool definitions sent in one request.
 ///
 /// Message compaction cannot make an oversized schema table smaller, so the
@@ -109,43 +110,18 @@ impl ActivationTable {
     }
 }
 
-/// Hard-core tool names always listed when progressive is on (if registered).
-///
-/// Work tools (read/search/shell) stay listed even on non-coding turns so the
-/// model can actually execute instead of discovering them via `tool_search`.
+/// Small shared set. Task bundles provide work tools before the first request.
 pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
-    "parallel",
-    "get_time",
-    "get_date",
     "remember_note",
-    "recall_notes",
-    "todo_read",
-    "todo_write",
-    "get_system_info",
-    "get_user_context",
     "tool_search",
-    "file_read",
-    "file_write",
-    "file_edit",
-    "list_dir",
-    "glob",
-    "grep",
-    "bash",
-    "web_search",
-    "web_fetch",
-    "memory_search",
-    "memory_get",
     "present_artifact",
-    "list_artifacts",
-    "get_artifact",
-    "get_tool_output",
     "collect_input",
 ];
 
 /// Feature flags for listing / concurrency / progress (owned by [`crate::Agent`]).
 #[derive(Debug, Clone)]
 pub struct ToolRuntimeFeatures {
-    /// Shrink tools_json to core ∪ activated ∪ should_list opt-in.
+    /// List shared tools, task bundles, matching plugins, activations, and opt-ins.
     pub progressive_listing: bool,
     /// Ignore progressive filter; list everything.
     pub force_list_all: bool,
@@ -167,7 +143,7 @@ pub struct ToolRuntimeFeatures {
 impl Default for ToolRuntimeFeatures {
     fn default() -> Self {
         Self {
-            // Progressive listing is on: core + top-k + tool_search fallback.
+            // Shared tools + task bundles + plugin top-k + discovery fallback.
             progressive_listing: true,
             force_list_all: false,
             // Parallel reads + sequential writes for multi-tool assistant messages.
@@ -190,6 +166,7 @@ pub struct ListToolsContext {
     pub features: ToolRuntimeFeatures,
     /// Latest user-task traits (drives host-side top-k / domain tools).
     pub task: Option<TaskTraits>,
+    pub selection: Option<ToolSelection>,
 }
 
 impl Default for ListToolsContext {
@@ -200,6 +177,7 @@ impl Default for ListToolsContext {
             activated: Arc::new(HashSet::new()),
             features: ToolRuntimeFeatures::default(),
             task: None,
+            selection: None,
         }
     }
 }
@@ -261,27 +239,38 @@ fn filter_listed_inner<'a>(
     if !ctx.features.progressive_listing || ctx.features.force_list_all {
         return tools.iter().collect();
     }
-    // Small registries: skip discovery tax.
-    if tools.len() <= 12 {
+    // Unclassified embedding callers with a small registry need no discovery.
+    if tools.len() <= 12 && ctx.task.is_none() && ctx.selection.is_none() {
         return tools.iter().collect();
     }
     select_tools_for_turn(tools, ctx, DEFAULT_TOP_K)
 }
 
-/// Host-side top-k: always-on core + obvious domain tools + LRU activations.
+/// Eager builtin bundles plus a bounded number of matching plugin tools.
 pub fn select_tools_for_turn<'a>(
     tools: &'a [Arc<dyn Tool>],
     ctx: &ListToolsContext,
     top_k: usize,
 ) -> Vec<&'a Arc<dyn Tool>> {
+    let selection = ctx
+        .selection
+        .clone()
+        .or_else(|| ctx.task.map(ToolSelection::for_task));
     let mut scored: Vec<(i32, usize)> = tools
         .iter()
         .enumerate()
-        .map(|(i, t)| (score_tool(t.as_ref(), ctx), i))
+        .map(|(i, t)| {
+            (
+                selection
+                    .as_ref()
+                    .map_or(0, |selection| selection.score(t.name(), t.meta().kind)),
+                i,
+            )
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    let mut out = Vec::new();
+    let mut selected = HashSet::new();
     let mut extras = 0usize;
     for (score, i) in scored {
         let t = &tools[i];
@@ -290,81 +279,46 @@ pub fn select_tools_for_turn<'a>(
         let activated = ctx.activated.contains(name);
         let domain = score >= 400;
         if core || activated || domain || t.should_list(ctx) {
-            out.push(t);
+            selected.insert(i);
             continue;
         }
         if extras < top_k && score > 0 {
-            out.push(t);
+            selected.insert(i);
             extras += 1;
         }
     }
-    // Preserve original registration order for the selected set.
-    out.sort_by_key(|t| tools.iter().position(|x| x.name() == t.name()).unwrap_or(0));
-    out
-}
-
-fn score_tool(tool: &dyn Tool, ctx: &ListToolsContext) -> i32 {
-    let name = tool.name();
-    if is_core_name(name, &ctx.features) || name == "tool_search" {
-        return 1_000;
-    }
-    if ctx.activated.contains(name) {
-        return 500;
-    }
-    let Some(task) = ctx.task else {
-        return 0;
-    };
-    let kind = tool.meta().kind;
-    let mut score = 0;
-    if task.time_date && matches!(name, "get_time" | "get_date") {
-        score += 400;
-    }
-    if task.research_depth != crate::task::ResearchDepth::None
-        && (name.starts_with("web_") || kind == ToolKind::Web)
-    {
-        score += 400;
-    }
-    if task.coding
-        && matches!(
-            name,
-            "file_read" | "file_write" | "file_edit" | "glob" | "grep" | "bash"
-        )
-    {
-        score += 400;
-    }
-    if task.side_effects && (name == "bash" || kind == ToolKind::Execute || kind == ToolKind::Write)
-    {
-        score += 300;
-    }
-    if (name.contains("memory") || kind == ToolKind::Memory)
-        && (name.contains("remember") || name.contains("memory") || name.contains("note"))
-    {
-        score += 250;
-    }
-    if task.greeting || task.time_date {
-        // Do not pull in extra domains on a greeting.
-        return score.min(400);
-    }
-    score
+    // Preserve registration order even when relevance changes between requests.
+    tools
+        .iter()
+        .enumerate()
+        .filter_map(|(i, tool)| selected.contains(&i).then_some(tool))
+        .collect()
 }
 
 /// Retention priority when the serialized schema table exceeds its budget.
 ///
-/// Core tools remain above activated tools, explicit `should_list` tools, and
-/// task-domain matches. The caller removes the lowest priority definitions
+/// Activated tools remain above shared tools, explicit opt-ins, and task-domain
+/// matches. The caller removes the lowest priority definitions
 /// first (and may use definition size as a tie-breaker).
 pub(crate) fn schema_retention_priority(tool: &dyn Tool, ctx: &ListToolsContext) -> i32 {
     let name = tool.name();
+    if ctx.activated.contains(name) {
+        return 11_000;
+    }
     if is_core_name(name, &ctx.features) || name == "tool_search" {
         return 10_000;
-    }
-    if ctx.activated.contains(name) {
-        return 5_000;
     }
     if tool.should_list(ctx) {
         return 4_500;
     }
-    score_tool(tool, ctx)
+    ctx.selection.as_ref().map_or_else(
+        || {
+            ctx.task.map_or(0, |task| {
+                ToolSelection::for_task(task).score(name, tool.meta().kind)
+            })
+        },
+        |selection| selection.score(name, tool.meta().kind),
+    )
 }
 
 /// Insert names into the activation set (cap at [`MAX_ACTIVATED`], LRU + TTL).
@@ -399,7 +353,11 @@ mod tests {
             json!({"type":"object","properties":{}})
         }
         fn meta(&self) -> ToolMeta {
-            ToolMeta::safe_default()
+            if self.name.starts_with("web_plugin_") {
+                ToolMeta::safe_default().kind(crate::tool::ToolKind::Web)
+            } else {
+                ToolMeta::safe_default()
+            }
         }
         fn should_list(&self, _: &ListToolsContext) -> bool {
             self.list
@@ -417,7 +375,7 @@ mod tests {
     fn progressive_lists_core_and_opt_in_only() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(Named {
-                name: "get_time",
+                name: "remember_note",
                 list: false,
             }),
             Arc::new(Named {
@@ -429,7 +387,7 @@ mod tests {
                 list: false,
             }),
             Arc::new(Named {
-                name: "list_skills",
+                name: "pinned_plugin",
                 list: true,
             }),
             Arc::new(Named {
@@ -456,14 +414,17 @@ mod tests {
         let ctx = ListToolsContext {
             activated: Arc::new(activated),
             features,
+            selection: Some(ToolSelection::for_request(
+                "debug this repo then look up my GitHub profile",
+            )),
             ..Default::default()
         };
         let listed: Vec<&str> = filter_listed_tools(&many, &ctx)
             .iter()
             .map(|t| t.name())
             .collect();
-        assert!(listed.contains(&"get_time"));
-        assert!(listed.contains(&"list_skills"));
+        assert!(listed.contains(&"remember_note"));
+        assert!(listed.contains(&"pinned_plugin"));
         assert!(listed.contains(&"file_read"));
         assert!(listed.contains(&"bash"));
         assert!(listed.contains(&"web_fetch"));
@@ -472,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn progressive_off_lists_all() {
+    fn small_unclassified_registry_lists_all() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(Named {
                 name: "a",
@@ -488,6 +449,50 @@ mod tests {
     }
 
     #[test]
+    fn task_bundle_and_plugin_top_k_preserve_registration_order() {
+        let tools: Vec<Arc<dyn Tool>> = [
+            "web_plugin_0",
+            "web_fetch",
+            "web_plugin_1",
+            "web_plugin_2",
+            "web_plugin_3",
+            "web_plugin_4",
+            "web_plugin_5",
+            "web_search",
+            "bash",
+        ]
+        .into_iter()
+        .map(|name| Arc::new(Named { name, list: false }) as Arc<dyn Tool>)
+        .collect();
+        let mut ctx = ListToolsContext {
+            selection: Some(ToolSelection::for_request("look up the latest Rust news")),
+            activated: Arc::new(HashSet::from(["web_plugin_5".into()])),
+            ..Default::default()
+        };
+        let names = filter_listed_tools(&tools, &ctx)
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "web_plugin_0",
+                "web_fetch",
+                "web_plugin_1",
+                "web_plugin_2",
+                "web_plugin_3",
+                "web_plugin_5",
+                "web_search"
+            ]
+        );
+        ctx.features.force_list_all = true;
+        assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
+        ctx.features.force_list_all = false;
+        ctx.features.progressive_listing = false;
+        assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
+    }
+
+    #[test]
     fn default_features_enable_parallel_read_wave() {
         let f = ToolRuntimeFeatures::default();
         assert!(f.wave_scheduling, "wave scheduling on by default");
@@ -497,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn everyday_tools_are_listed_without_discovery_even_on_a_greeting() {
+    fn greeting_omits_unrelated_work_tools() {
         let names = [
             "file_read",
             "file_write",
@@ -522,7 +527,11 @@ mod tests {
             task: Some(crate::task::classify_task("hi")),
             ..Default::default()
         };
-        assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
+        let listed = filter_listed_tools(&tools, &ctx)
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(listed, ["present_artifact"]);
     }
 
     #[test]

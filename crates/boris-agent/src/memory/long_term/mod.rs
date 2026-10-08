@@ -546,7 +546,7 @@ impl LongTermMemory {
             "<memory>\n\
              Global curated memory: {}/MEMORY.md (plus workspace MEMORY.md).\n\
              Each chat keeps its own turn log at sessions/…/{{id}}/memory.md.\n\
-             Use supplied memory first; search missing relevant past facts with memory_search. Use memory_get with hit paths \
+             Use supplied memory first; search missing relevant past facts with memory_search_files. Use memory_get_file with hit paths \
              (MEMORY.md or session/{{id}}/memory.md).\n\
              </memory>",
             self.root.display()

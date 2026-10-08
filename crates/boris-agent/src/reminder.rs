@@ -8,9 +8,6 @@ pub fn reminder_for(tool_name: &str, observation: &str, ok: bool) -> Option<Stri
     let err = !ok;
     match tool_name {
         "load_skill" if !err => Some(load_skill_reminder(observation)),
-        "list_skills" if !err && observation.contains("skill(s)") => Some(
-            "Load a skill only when its full description matches the user's intent.".into(),
-        ),
         "bash" if err => Some(
             "Shell failed. Retry only if a changed command or cwd can resolve the error. \
              Do not repeat the failure or bypass a denial. For files/search use file_read/grep/glob."

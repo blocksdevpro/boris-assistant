@@ -10,6 +10,7 @@ pub mod listing;
 pub mod pending;
 pub mod policy;
 pub mod progress;
+pub mod selection;
 pub mod timeout;
 
 pub use audit::{
@@ -31,4 +32,5 @@ pub use policy::{
     NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,
 };
 pub use progress::{EventProgressSink, NullProgressSink, ProgressEvent, ProgressSink};
+pub use selection::ToolSelection;
 pub use timeout::{is_timeout, run_with_timeout};

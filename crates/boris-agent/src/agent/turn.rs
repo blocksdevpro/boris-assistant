@@ -129,6 +129,23 @@ impl Agent {
     }
 
     fn loop_config(&self, user_text: &str) -> AgentLoopConfig {
+        let objective = if crate::runtime::selection::is_task_followup(user_text) {
+            self.context
+                .history()
+                .iter()
+                .rev()
+                .find_map(|message| {
+                    let text = message.content.as_str()?;
+                    (message.origin == crate::MessageOrigin::Human
+                        && !crate::runtime::selection::is_task_followup(text)
+                        && !crate::task::classify_task(text).greeting)
+                        .then_some(text)
+                })
+                .unwrap_or(user_text)
+        } else {
+            user_text
+        };
+        let selection = crate::runtime::ToolSelection::for_request(objective);
         AgentLoopConfig {
             max_tool_rounds: self.max_tool_rounds,
             session_id: self.session_id.clone(),
@@ -137,7 +154,8 @@ impl Agent {
             force_list_all: false,
             // Use the host's original utterance, never an injected user-role
             // research/finish reminder appended later in the same turn.
-            task: Some(crate::task::classify_task(user_text)),
+            task: Some(selection.task),
+            tool_selection: Some(selection),
             debug: self.debug.clone(),
         }
     }
@@ -257,24 +275,30 @@ impl Agent {
         let debug = self.debug.clone();
         let turn_id = self.turn_id.clone();
         let mut reported_usage = None;
-        let mut on_event = |event: boris_ai::LlmStreamEvent| {
-            match event {
-                boris_ai::LlmStreamEvent::Usage(usage) => {
-                    accounting.record_provider_usage(&usage);
-                    reported_usage = Some(usage);
-                }
-                boris_ai::LlmStreamEvent::ModelSend { model } => {
-                    if let Some(debug) = &debug {
-                        debug.record(turn_id.as_deref(), "model_send", serde_json::json!({ "request_seq": request_seq, "model": model }));
-                    }
-                }
-                boris_ai::LlmStreamEvent::TransportAttempt { mode } => {
-                    if let Some(debug) = &debug {
-                        debug.record(turn_id.as_deref(), "transport_attempt", serde_json::json!({ "request_seq": request_seq, "mode": mode }));
-                    }
-                }
-                _ => {}
+        let mut on_event = |event: boris_ai::LlmStreamEvent| match event {
+            boris_ai::LlmStreamEvent::Usage(usage) => {
+                accounting.record_provider_usage(&usage);
+                reported_usage = Some(usage);
             }
+            boris_ai::LlmStreamEvent::ModelSend { model } => {
+                if let Some(debug) = &debug {
+                    debug.record(
+                        turn_id.as_deref(),
+                        "model_send",
+                        serde_json::json!({ "request_seq": request_seq, "model": model }),
+                    );
+                }
+            }
+            boris_ai::LlmStreamEvent::TransportAttempt { mode } => {
+                if let Some(debug) = &debug {
+                    debug.record(
+                        turn_id.as_deref(),
+                        "transport_attempt",
+                        serde_json::json!({ "request_seq": request_seq, "mode": mode }),
+                    );
+                }
+            }
+            _ => {}
         };
         let stream =
             self.client
@@ -289,7 +313,8 @@ impl Agent {
         drop(on_event);
         if let Some(debug) = &self.debug {
             match &result {
-                Ok(message) => { debug.record(self.turn_id.as_deref(), "response", serde_json::json!({
+                Ok(message) => {
+                    debug.record(self.turn_id.as_deref(), "response", serde_json::json!({
                     "request_seq": request_seq,
                     "duration_ms": started.elapsed().as_millis() as u64,
                     "message": message,
@@ -301,12 +326,19 @@ impl Agent {
                         "cache_write_tokens": usage.cache_write_tokens,
                         "reasoning_tokens": usage.reasoning,
                     })),
-                })); }
-                Err(error) => { debug.record(self.turn_id.as_deref(), "request_error", serde_json::json!({
-                    "request_seq": request_seq,
-                    "duration_ms": started.elapsed().as_millis() as u64,
-                    "message": error.to_string(),
-                })); }
+                }));
+                }
+                Err(error) => {
+                    debug.record(
+                        self.turn_id.as_deref(),
+                        "request_error",
+                        serde_json::json!({
+                            "request_seq": request_seq,
+                            "duration_ms": started.elapsed().as_millis() as u64,
+                            "message": error.to_string(),
+                        }),
+                    );
+                }
             }
         }
         let msg = result?;
@@ -400,10 +432,25 @@ impl Agent {
             ));
         }
 
+        // Default construction and set_tools can omit the discovery tool.
+        // Every progressively filtered request must retain a path to hidden tools.
+        if self.features.progressive_listing {
+            self.ensure_tool_search();
+        }
+
         // Fresh turn: re-require shell HITL even if a prior turn granted it.
         self.runtime.clear_turn_grants();
 
         let turn_snapshot = self.context.clone();
+        let activation_snapshot = self
+            .activated
+            .lock()
+            .map(|table| table.clone())
+            .unwrap_or_default();
+        if replacement_control.is_some() || !crate::runtime::selection::is_task_followup(user_text)
+        {
+            self.clear_activations();
+        }
         self.context.clear_host_controls();
         // Refresh dynamic memory/catalog data as well as environment facts.
         // Canonical memory can change in the background without `personal`.
@@ -438,6 +485,9 @@ impl Agent {
                 Ok(accounting) => compaction_accounting = accounting,
                 Err(e) if e.kind() == AgentErrorKind::Cancelled => {
                     self.context = turn_snapshot;
+                    if let Ok(mut table) = self.activated.lock() {
+                        *table = activation_snapshot;
+                    }
                     self.cancel = None;
                     return Err(e);
                 }
@@ -542,6 +592,9 @@ impl Agent {
             }
             Err(e) => {
                 self.context = turn_snapshot;
+                if let Ok(mut table) = self.activated.lock() {
+                    *table = activation_snapshot;
+                }
                 self.pending_turn = None;
                 if e.kind() == AgentErrorKind::Cancelled {
                     info!(
@@ -998,13 +1051,15 @@ mod retrieval_tests {
     #[derive(Clone, Default)]
     struct RecordingClient {
         requests: Arc<Mutex<Vec<Value>>>,
+        schemas: Arc<Mutex<Vec<Value>>>,
         fail: bool,
     }
 
     #[async_trait]
     impl LlmClient for RecordingClient {
-        async fn complete(&self, messages: Value, _tools: Value) -> Result<Value, LlmError> {
+        async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
             self.requests.lock().unwrap().push(messages);
+            self.schemas.lock().unwrap().push(tools);
             if self.fail {
                 Err(LlmError::new("replacement test failure"))
             } else {
@@ -1021,6 +1076,142 @@ mod retrieval_tests {
             .filter_map(|message| message.get("content").and_then(Value::as_str))
             .filter(|content| content.starts_with("<turn_replacement>"))
             .collect()
+    }
+
+    struct ListingTool(&'static str);
+
+    #[async_trait]
+    impl crate::tool::Tool for ListingTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            self.0
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        fn meta(&self) -> crate::tool::ToolMeta {
+            crate::tool::ToolMeta::safe_default().read_only(true)
+        }
+        async fn execute(
+            &self,
+            _: &crate::tool_context::ToolCallContext,
+            _: Value,
+        ) -> Result<String, crate::tool::ToolError> {
+            Ok("completed".into())
+        }
+    }
+
+    fn listing_tools(agent: &mut super::Agent) {
+        for name in [
+            "web_search",
+            "web_fetch",
+            "bash",
+            "file_read",
+            "file_edit",
+            "get_time",
+            "rare_tool",
+        ] {
+            agent.register_tool(Box::new(ListingTool(name)));
+        }
+    }
+
+    fn schema_names(schema: &Value) -> Vec<&str> {
+        schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn task_tools_are_available_on_the_first_request_without_discovery() {
+        let client = RecordingClient::default();
+        let schemas = client.schemas.clone();
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+        listing_tools(&mut agent);
+        agent.prompt("what is the weather today").await.unwrap();
+        let requests = schemas.lock().unwrap();
+        assert_eq!(requests.len(), 1, "selection must not add a model request");
+        let names = schema_names(&requests[0]);
+        assert!(names.contains(&"tool_search"));
+        assert!(names.contains(&"web_search") && names.contains(&"web_fetch"));
+        assert!(!names.contains(&"bash") && !names.contains(&"file_edit"));
+        assert!(!names.contains(&"rare_tool"));
+    }
+
+    #[tokio::test]
+    async fn discovery_survives_followups_but_not_a_new_objective() {
+        struct DiscoveryClient(Arc<Mutex<Vec<Value>>>);
+        #[async_trait]
+        impl LlmClient for DiscoveryClient {
+            async fn complete(&self, _: Value, tools: Value) -> Result<Value, LlmError> {
+                let mut schemas = self.0.lock().unwrap();
+                let round = schemas.len();
+                schemas.push(tools);
+                let call = match round {
+                    0 => Some((
+                        "tool_search",
+                        serde_json::json!({"query":"rare_tool","limit":1}),
+                    )),
+                    1 => Some(("rare_tool", serde_json::json!({}))),
+                    _ => None,
+                };
+                Ok(match call {
+                    Some((name, args)) => {
+                        serde_json::json!({"role":"assistant","content":"","tool_calls":[{
+                            "id":format!("discover_{round}"),"type":"function","function":{"name":name,"arguments":args.to_string()}
+                        }]})
+                    }
+                    None => serde_json::json!({"role":"assistant","content":"Complete."}),
+                })
+            }
+        }
+        let schemas = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = super::Agent::new(Box::new(DiscoveryClient(schemas.clone())), "sys");
+        listing_tools(&mut agent);
+        agent.prompt("what is the weather today").await.unwrap();
+        assert!(!schema_names(&schemas.lock().unwrap()[0]).contains(&"rare_tool"));
+        assert!(schema_names(&schemas.lock().unwrap()[1]).contains(&"rare_tool"));
+        agent.prompt("continue").await.unwrap();
+        agent.prompt("please keep going").await.unwrap();
+        {
+            let requests = schemas.lock().unwrap();
+            assert_eq!(requests.len(), 5);
+            for request in &requests[3..] {
+                let names = schema_names(request);
+                assert!(names.contains(&"rare_tool") && names.contains(&"web_search"));
+                assert!(!names.contains(&"bash"));
+            }
+        }
+        agent.prompt("hi").await.unwrap();
+        let requests = schemas.lock().unwrap();
+        let names = schema_names(requests.last().unwrap());
+        assert!(!names.contains(&"rare_tool") && !names.contains(&"web_search"));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_and_checkpoint_restore_task_discoveries() {
+        let mut agent = super::Agent::new(
+            Box::new(RecordingClient {
+                fail: true,
+                ..Default::default()
+            }),
+            "sys",
+        );
+        agent
+            .activated
+            .lock()
+            .unwrap()
+            .activate(["rare_tool".into()]);
+        let checkpoint = agent.checkpoint();
+        assert!(agent.prompt("new objective").await.is_err());
+        assert!(agent.activated.lock().unwrap().contains("rare_tool"));
+        agent.clear_activations();
+        agent.restore_checkpoint(checkpoint);
+        assert!(agent.activated.lock().unwrap().contains("rare_tool"));
     }
 
     #[tokio::test]
@@ -1190,6 +1381,51 @@ mod retrieval_tests {
         }));
 
         drop(memory);
+        drop(agent);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn canonical_memory_retires_markdown_tools_without_deleting_data() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("boris-memory-tool-switch-{unique}"));
+        let mut agent = super::Agent::new(Box::new(NoopClient), "sys");
+        let legacy = agent.enable_long_term_memory(&root).unwrap();
+        let path = legacy.memory_md_path();
+        std::fs::write(&path, "# Memory\nKeep this source.\n").unwrap();
+        assert!(agent
+            .tools
+            .iter()
+            .any(|tool| tool.name() == "memory_search_files"));
+        assert!(!agent
+            .tools
+            .iter()
+            .any(|tool| tool.name() == "memory_search"));
+        let canonical = agent
+            .enable_memory_store(root.join("memory.sqlite"))
+            .unwrap();
+        let names = agent
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"memory_search") && names.contains(&"memory_get"));
+        assert!(!names.contains(&"memory_search_files") && !names.contains(&"memory_get_file"));
+        assert!(!agent
+            .shared_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|tool| matches!(tool.name(), "memory_search_files" | "memory_get_file")));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "# Memory\nKeep this source.\n"
+        );
+        drop(canonical);
+        drop(legacy);
         drop(agent);
         let _ = std::fs::remove_dir_all(root);
     }

@@ -18,7 +18,7 @@ const MAX_LIMIT: usize = 16;
 /// Live tool registry mirror owned by [`crate::Agent`].
 pub type SharedToolRegistry = Arc<Mutex<Vec<Arc<dyn Tool>>>>;
 
-/// Search tools by name/description/kind and activate hits for this session.
+/// Search tools by name/description/kind and activate hits for the current task.
 pub struct ToolSearchTool {
     tools: SharedToolRegistry,
     activated: ActivationSet,
@@ -38,7 +38,7 @@ impl Tool for ToolSearchTool {
 
     fn description(&self) -> &str {
         "Search available tools by keyword (e.g. files, web, shell, clipboard) and \
-         activate matches for this session. Call this before using tools that are not \
+         activate matches for this task. Call this before using tools that are not \
          already in your tool list. Keyword matches do not prove capability; check descriptions. \
          Do not rediscover listed tools or repeat searches without a specific new lead. \
          Returns names and required parameters, distinguishing current availability from new activation."
@@ -203,7 +203,7 @@ fn score_tool(tool: &dyn Tool, query: &str) -> u32 {
             "memory",
             &["memory_search", "memory_get", "remember", "recall"],
         ),
-        ("skill", &["list_skills", "load_skill"]),
+        ("skill", &["load_skill"]),
         (
             "artifact",
             &["present_artifact", "list_artifacts", "get_artifact"],

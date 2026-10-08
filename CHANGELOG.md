@@ -5,8 +5,38 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Offline `tool_selection_audit` example for comparing full listing with task
+  selection through `Agent::prompt`. It reports estimated schema tokens and
+  request counts using builtin schemas or a request-event JSON export.
+
+### Changed
+
+- Progressive listing selects builtin tool bundles from the human objective
+  before the first model request. Research gets web and recall tools; workspace
+  work gets file and shell tools. Other requests select time, planning, profile,
+  system, clipboard, artifact, opening, and skill tools as needed.
+- The shared tool set is now `tool_search`, `remember_note`, `present_artifact`,
+  and `collect_input`. Matching plugin categories add at most four tools by
+  default. Explicit listing opt-ins and full-list overrides remain supported.
+- Discovered tools follow the current objective across short replies such as
+  "continue" and "try again". A new objective clears discoveries. Activations
+  remain limited to 32 tools with a 15-minute expiry.
+- Within the 64 KiB schema budget, activated tools take priority over unused
+  shared tools. `tool_search` is retained until last, and schema order follows
+  registration order.
+- `AgentLoopConfig::tool_selection` and `ListToolsContext::selection` carry
+  `runtime::ToolSelection` for callers that drive the loop or listing directly.
+
 ### Fixed
 
+- Progressive turns ensure `tool_search` is registered even when the host uses
+  default construction or replaces the tool registry.
+- Failed or cancelled turns and checkpoint restores recover the preceding
+  tool activations alongside conversation history.
+- Enabling canonical memory retires Markdown retrieval tools from both agent
+  and discovery registries without deleting their source files.
 - Tool execution status now stays typed through sequential and parallel
   batches, approval and typed-input resumes, task state, session history,
   post-tool reminders, and model routing. Successful output containing
@@ -20,10 +50,30 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- `list_skills` and its `ListSkillsTool` Rust type. Skill names and descriptions
+  already arrive in the prompt catalog; use `load_skill` to read a full body.
+- Deprecated Markdown `memory_search` and `memory_get` aliases and their Rust
+  types, `DeprecatedMemorySearchTool` and `DeprecatedMemoryGetTool`.
+  Markdown-only hosts use `memory_search_files` and `memory_get_file`; the
+  canonical SQLite store retains `memory_search` and `memory_get`.
 - The temporary `scripts/tool-status-fix/SKILL.md` migration playbook and the
   otherwise unused root `scripts/` directory.
 
 ### Validation
+
+On 2026-10-08, task selection passed the affected library suite with 913 tests,
+0 failures, and 3 ignored tests:
+
+```bash
+cargo test --offline -p boris-agent -p boris-pipeline --lib
+cargo run --offline -p boris-agent --example tool_selection_audit
+```
+
+The default offline audit reduced estimated first-request schema tokens from
+4,299 with full listing to 1,533 for "look up my website". Both runs used three
+model requests. A greeting listed only the four shared tools at an estimated
+789 schema tokens. These estimates use scripted replies and exclude optional
+memory, profile, skill, and plugin tools; they do not measure live model latency.
 
 On 2026-10-05, the library baseline at `ea4f559` passed with 1,011 tests,
 0 failures, and 3 ignored tests:
@@ -32,7 +82,7 @@ On 2026-10-05, the library baseline at `ea4f559` passed with 1,011 tests,
 cargo test --offline -p boris-agent -p boris-ai -p boris-pipeline -p boris-tts-supertone --lib
 ```
 
-This run validates the current agent and speech behavior. Speculative
+That baseline validates agent and speech behavior at `ea4f559`. Speculative
 first-unit synthesis remains unimplemented; no first-speech speedup was
 measured.
 

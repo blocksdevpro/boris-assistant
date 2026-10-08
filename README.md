@@ -38,8 +38,8 @@ The product is **Boris Desktop** (`desktop/` → `boris-desktop`). Voice and age
 | Channel | Version | Get it |
 |---|---|---|
 | **Stable** | [1.2.0](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0) | [Latest release](https://github.com/blocksdevpro/boris-assistant/releases/latest) — NSIS or MSI |
-| **Beta** | [1.2.0-beta.3](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3) — NSIS |
-| **This tree** | **1.3.0-beta.1** | Beta release candidate, NSIS only; [release notes](.tauri/releases/v1.3.0-beta.1.md) |
+| **Beta** | [1.3.0-beta.1](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.1) | [Beta release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.1) — NSIS |
+| **This tree** | **1.3.0-beta.1** | Published beta, NSIS only; [release notes](.tauri/releases/v1.3.0-beta.1.md) |
 
 Workspace crates are `publish = false`. They ship inside the desktop app, not on crates.io.
 

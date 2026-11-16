@@ -28,3 +28,8 @@ export function setDebugCapture(enabled: boolean): Promise<void> {
 export function clearDebugCapture(): Promise<void> {
   return invoke<void>(COMMANDS.clearDebugCapture);
 }
+
+/** Open Windows Settings → Privacy & security → Microphone. */
+export function openMicPrivacySettings(): Promise<void> {
+  return invoke<void>(COMMANDS.openMicPrivacySettings);
+}

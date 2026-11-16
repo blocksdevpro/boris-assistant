@@ -174,6 +174,7 @@ pub(super) fn init_runtime(
         fallback_report: None,
         wake_enroll: None,
         input: None,
+        listen_hint: None,
         status_tx,
         latest: std::sync::Arc::new(std::sync::Mutex::new(StatusPicture::off())),
         phase_started: std::time::Instant::now(),
@@ -238,6 +239,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         fallback_report: None,
         wake_enroll: None,
         input: None,
+        listen_hint: None,
     });
 }
 
@@ -443,6 +445,7 @@ fn fault(
         fallback_report: None,
         wake_enroll: None,
         input: None,
+        listen_hint: None,
     });
 }
 

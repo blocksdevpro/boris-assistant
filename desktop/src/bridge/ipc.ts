@@ -32,6 +32,7 @@ export const COMMANDS = {
   getDebugCapture: "get_debug_capture",
   setDebugCapture: "set_debug_capture",
   clearDebugCapture: "clear_debug_capture",
+  openMicPrivacySettings: "open_mic_privacy_settings",
   listSessionArtifacts: "list_session_artifacts",
   getSessionArtifact: "get_session_artifact",
   checkAppUpdate: "check_app_update",

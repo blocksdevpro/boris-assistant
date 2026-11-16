@@ -92,7 +92,12 @@ export type StatusPicture = {
   wake_enroll?: WakeEnrollPeek | null;
   /** On-screen typed input request. Never includes the typed value. */
   input?: InputPeek | null;
+  /** Why "Hey Boris" may not be working right now (Armed only). */
+  listen_hint?: ListenHint | null;
 };
+
+/** Mirrors `boris_pipeline::ListenHint` (snake_case). */
+export type ListenHint = "mic_silent" | "ignored_playback" | "ignored_voice";
 
 /** Mirrors `boris_pipeline::InputPeek`. */
 export type InputPeek = {
@@ -273,12 +278,12 @@ export const EMPTY_SETTINGS: AppSettings = {
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
-  show_overlay_on_wake: false,
+  show_overlay_on_wake: true,
   overlay_caption_mode: "full",
   overlay_position: "top_center",
   overlay_scale_percent: 100,
   typed_input_submit: "enter",
-  start_engine_on_launch: false,
+  start_engine_on_launch: true,
   start_with_windows: false,
   update_channel: "stable",
   logging_filter: "",
@@ -341,6 +346,7 @@ export const OFF_STATUS: StatusPicture = {
   artifact: null,
   wake_enroll: null,
   input: null,
+  listen_hint: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -366,6 +372,7 @@ export function normalizeStatus(
     artifact: raw.artifact ?? null,
     wake_enroll: raw.wake_enroll ?? null,
     input: raw.input ?? null,
+    listen_hint: raw.listen_hint ?? null,
   };
 }
 
@@ -393,7 +400,7 @@ export function normalizeSettings(
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
-    show_overlay_on_wake: raw?.show_overlay_on_wake ?? false,
+    show_overlay_on_wake: raw?.show_overlay_on_wake ?? true,
     overlay_caption_mode:
       raw?.overlay_caption_mode === "assistant" ||
       raw?.overlay_caption_mode === "hidden"
@@ -405,7 +412,7 @@ export function normalizeSettings(
         : "top_center",
     overlay_scale_percent: normalizeOverlayScale(raw?.overlay_scale_percent),
     typed_input_submit: normalizeTypedInputSubmit(raw?.typed_input_submit),
-    start_engine_on_launch: raw?.start_engine_on_launch ?? false,
+    start_engine_on_launch: raw?.start_engine_on_launch ?? true,
     start_with_windows: raw?.start_with_windows ?? false,
     update_channel: normalizeUpdateChannel(raw?.update_channel),
     logging_filter: raw?.logging_filter ?? "",

@@ -124,3 +124,8 @@ commands.allow = ["clear_wake_profile"]
 identifier = "allow-check-app-update"
 description = "Check GitHub Releases for a signed app update on the selected channel"
 commands.allow = ["check_app_update"]
+
+[[permission]]
+identifier = "allow-open-mic-privacy-settings"
+description = "Open the fixed Windows microphone privacy settings page"
+commands.allow = ["open_mic_privacy_settings"]

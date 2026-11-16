@@ -8,6 +8,7 @@ import {
   isConfirmContext,
 } from "./activity";
 import { isEchoOfThinking } from "./labels";
+import { WAKE_PROMPT } from "@/lib/phaseVisual";
 /**
  * Speech caption for the island / conversation primary quote.
  * Strict rules kill stale STT during confirm and idle Ready.
@@ -115,7 +116,7 @@ export function pickSecondary(
       return phaseHint;
     case "Quiet":
     case "Armed":
-      return "Say the wake word";
+      return WAKE_PROMPT;
     case "AwaitingReply":
       return "No wake word needed";
     case "AwaitingConfirm":
@@ -250,7 +251,7 @@ export function conversationLines(status: StatusPicture): ConversationLine[] {
   if (!heard && !said) {
     lines.push({
       kind: "placeholder",
-      text: "Nothing yet. Say the wake word to talk.",
+      text: `Nothing yet. ${WAKE_PROMPT} to talk.`,
     });
   }
   return lines;

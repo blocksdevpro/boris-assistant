@@ -65,6 +65,7 @@ pub fn run() {
             commands::diagnostics::get_debug_capture,
             commands::diagnostics::set_debug_capture,
             commands::diagnostics::clear_debug_capture,
+            commands::diagnostics::open_mic_privacy_settings,
             commands::artifacts::list_session_artifacts,
             commands::artifacts::get_session_artifact,
             updater::check_app_update,

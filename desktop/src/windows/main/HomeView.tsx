@@ -34,6 +34,7 @@ import type {
   SettingsCategory,
   UpdateUiState,
 } from "./mainWindowShared";
+import { ListenHintBanner } from "./ListenHintBanner";
 
 export function HomeView({
   status,
@@ -58,6 +59,7 @@ export function HomeView({
   onInstallUpdate,
   onDismissUpdate,
   onOpenSettings,
+  onTeachVoice,
 }: {
   status: StatusPicture;
   tone: ReturnType<typeof toneFor>;
@@ -81,6 +83,7 @@ export function HomeView({
   onInstallUpdate: () => void;
   onDismissUpdate: () => void;
   onOpenSettings: (category?: SettingsCategory) => void;
+  onTeachVoice: () => void;
 }) {
   const reduceMotion = useReducedMotion();
   const act = humanizeActivity(status.activity);
@@ -202,6 +205,13 @@ export function HomeView({
           <span className="min-w-0 break-words">{error}</span>
         </p>
       ) : null}
+      <ListenHintBanner
+        status={status}
+        onOpenMicSettings={() => onOpenSettings("speech")}
+        onOpenSpeechSettings={() => onOpenSettings("speech")}
+        onTeachVoice={onTeachVoice}
+      />
+
       {engineFault && !error && !status.detail ? (
         <p role="alert" className="text-[13px] text-amber-200/80">
           Something went wrong — try Stop, then Start again.

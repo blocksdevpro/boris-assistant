@@ -570,8 +570,22 @@ fn run(
                     }));
             }
 
+            let mic_known_silent =
+                rt.picture.listen_hint == Some(crate::status::ListenHint::MicSilent);
+            let picture = &mut rt.picture;
             let wake_window =
-                match hear::wait_for_wake(&rt.mic, &mut rt.wake, &cmd_rx, &mut running) {
+                match hear::wait_for_wake(
+                    &rt.mic,
+                    &mut rt.wake,
+                    &cmd_rx,
+                    &mut running,
+                    mic_known_silent,
+                    |signal| match signal {
+                        hear::MicSignal::Silent => picture
+                            .set_listen_hint(Some(crate::status::ListenHint::MicSilent)),
+                        hear::MicSignal::Live => picture.set_listen_hint(None),
+                    },
+                ) {
                     Ok(w) => w,
                     Err(HearBreak::StartWakeEnroll { takes }) => {
                         enroll_left = takes.clamp(2, 8);
@@ -644,6 +658,8 @@ fn run(
                         hops = crop.speech_hops,
                         "wake rejected — speaker playback"
                     );
+                    rt.picture
+                        .set_listen_hint(Some(crate::status::ListenHint::IgnoredPlayback));
                     if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
                         match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                             LoopReact::Continue => continue,
@@ -658,6 +674,8 @@ fn run(
                         hops = crop.speech_hops,
                         "wake rejected — not the taught voice"
                     );
+                    rt.picture
+                        .set_listen_hint(Some(crate::status::ListenHint::IgnoredVoice));
                     if let Err(e) = hear::drain_ms(&rt.mic, &cmd_rx, &mut running, 400) {
                         match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                             LoopReact::Continue => continue,
@@ -689,6 +707,7 @@ fn run(
             rt.picture.said = None;
             rt.picture.heard = None;
             rt.picture.wake_enroll = None;
+            rt.picture.listen_hint = None;
             CaptureKind::AfterWake
         };
 

@@ -52,6 +52,16 @@ fn default_barge_in() -> bool {
     true
 }
 
+/// A fresh install starts listening as soon as models + key are ready.
+fn default_start_engine_on_launch() -> bool {
+    true
+}
+
+/// The first wake must visibly react, even with the main window hidden.
+fn default_show_overlay_on_wake() -> bool {
+    true
+}
+
 fn normalize_model_residency(raw: String) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "low_memory" | "low-memory" => "low_memory".into(),
@@ -157,7 +167,7 @@ pub struct AppSettings {
     #[serde(default = "default_max_confirms_per_turn")]
     pub max_confirms_per_turn: u32,
     /// Show floating island when wake fires (host may honor later).
-    #[serde(default)]
+    #[serde(default = "default_show_overlay_on_wake")]
     pub show_overlay_on_wake: bool,
     /// Caption privacy: `full` | `assistant` | `hidden`.
     #[serde(default = "default_overlay_caption_mode")]
@@ -172,7 +182,7 @@ pub struct AppSettings {
     #[serde(default = "default_typed_input_submit")]
     pub typed_input_submit: String,
     /// Auto-start the engine when the desktop app opens.
-    #[serde(default)]
+    #[serde(default = "default_start_engine_on_launch")]
     pub start_engine_on_launch: bool,
     /// Launch Boris at Windows sign-in (host writes the HKCU Run key).
     #[serde(default)]
@@ -205,12 +215,12 @@ impl Default for AppSettings {
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
-            show_overlay_on_wake: false,
+            show_overlay_on_wake: default_show_overlay_on_wake(),
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             typed_input_submit: default_typed_input_submit(),
-            start_engine_on_launch: false,
+            start_engine_on_launch: default_start_engine_on_launch(),
             start_with_windows: false,
             update_channel: default_update_channel(),
             logging_filter: String::new(),
@@ -356,7 +366,7 @@ impl Default for AgentSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct UiSection {
-    #[serde(default)]
+    #[serde(default = "default_show_overlay_on_wake")]
     show_overlay_on_wake: bool,
     #[serde(default = "default_overlay_caption_mode")]
     overlay_caption_mode: String,
@@ -366,7 +376,7 @@ struct UiSection {
     overlay_scale_percent: u16,
     #[serde(default = "default_typed_input_submit")]
     typed_input_submit: String,
-    #[serde(default)]
+    #[serde(default = "default_start_engine_on_launch")]
     start_engine_on_launch: bool,
     #[serde(default)]
     start_with_windows: bool,
@@ -377,12 +387,12 @@ struct UiSection {
 impl Default for UiSection {
     fn default() -> Self {
         Self {
-            show_overlay_on_wake: false,
+            show_overlay_on_wake: default_show_overlay_on_wake(),
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
             overlay_scale_percent: default_overlay_scale_percent(),
             typed_input_submit: default_typed_input_submit(),
-            start_engine_on_launch: false,
+            start_engine_on_launch: default_start_engine_on_launch(),
             start_with_windows: false,
             update_channel: default_update_channel(),
         }
@@ -1002,6 +1012,9 @@ mod tests {
         let s: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, AppSettings::default());
         assert_eq!(s.update_channel, "stable");
+        // First run: listen once setup is done, and show the overlay on wake.
+        assert!(s.start_engine_on_launch);
+        assert!(s.show_overlay_on_wake);
     }
 
     #[test]

@@ -74,5 +74,6 @@ pub use settings::{
     DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_PROVIDER,
 };
 pub use status::{
-    ArtifactPeek, DeviceHealth, EngineState, InputPeek, Phase, StatusPicture, WakeEnrollPeek,
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, StatusPicture,
+    WakeEnrollPeek,
 };

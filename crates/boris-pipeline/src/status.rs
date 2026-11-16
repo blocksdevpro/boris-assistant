@@ -104,6 +104,23 @@ pub struct StatusPicture {
     /// On-screen typed input request. Never includes the typed value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<InputPeek>,
+    /// Why "Hey Boris" may not be working right now (silent mic, ignored
+    /// wake). Set while Armed; cleared when a turn starts or the cause ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_hint: Option<ListenHint>,
+}
+
+/// Something the user should know while Boris is listening for the wake word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenHint {
+    /// The input device delivers digital silence (Windows mic privacy off,
+    /// hardware mute, or a dead/virtual input selected).
+    MicSilent,
+    /// A wake hit was ignored because it sounded like a speaker or TV.
+    IgnoredPlayback,
+    /// A wake hit was ignored because it did not match the taught voice.
+    IgnoredVoice,
 }
 
 /// Field the UI should show while [`Phase::AwaitingInput`].
@@ -159,6 +176,7 @@ impl StatusPicture {
             fallback_report: None,
             wake_enroll: None,
             input: None,
+            listen_hint: None,
         }
     }
 }

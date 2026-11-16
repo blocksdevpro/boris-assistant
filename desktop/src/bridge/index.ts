@@ -33,7 +33,7 @@ export {
   onModelsProgress,
 } from "./commands/models";
 export { getSettings, saveSettings } from "./commands/settings";
-export { getDebugCapture, setDebugCapture, clearDebugCapture, type DebugEvent, type DebugSnapshot } from "./commands/diagnostics";
+export { getDebugCapture, setDebugCapture, clearDebugCapture, openMicPrivacySettings, type DebugEvent, type DebugSnapshot } from "./commands/diagnostics";
 export {
   getSessionArtifact,
   listSessionArtifacts,
@@ -66,6 +66,7 @@ export {
   type Phase,
   type PreflightReport,
   type StatusPicture,
+  type ListenHint,
   type WakeEnrollPeek,
   type InputPeek,
 } from "./types";

@@ -20,6 +20,7 @@ import {
   switchInput,
   switchOutput,
   useStatus,
+  type AppSettings,
   type DeviceDto,
   type DownloadProgress,
   type ModelsStatus,
@@ -38,6 +39,23 @@ import { SettingsView } from "./settings";
 import { TeachVoiceView } from "./TeachVoiceView";
 import { useSettingsController } from "./settings/useSettingsController";
 import { useUpdateController } from "./useUpdateController";
+
+/** Settle time before auto-start, so a key being typed never starts the engine. */
+const AUTO_START_SETTLE_MS = 800;
+/** Settle time before restarting a running engine for new key / model settings. */
+const LLM_RESTART_SETTLE_MS = 1500;
+
+/** LLM inputs baked into the engine at spawn; a change needs a restart. */
+function llmFingerprint(s: AppSettings): string {
+  return JSON.stringify([
+    s.openrouter_api_key.trim(),
+    s.openrouter_model,
+    s.openrouter_fast_model,
+    s.openrouter_model_provider,
+    s.openrouter_fast_provider,
+    s.openrouter_pin_provider,
+  ]);
+}
 
 /**
  * Main window — Home (run) + Settings (prefs).
@@ -86,6 +104,8 @@ export function MainWindow() {
   const [logPath, setLogPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const autoStarted = useRef(false);
+  /** LLM settings the live engine was started with (null = not started here). */
+  const startedLlm = useRef<string | null>(null);
 
   const engineOn = status.engine === "On" || status.engine === "Starting";
   const engineFault = status.engine === "Fault";
@@ -224,6 +244,7 @@ export function MainWindow() {
         fastProvider: s.openrouter_fast_provider || undefined,
         pinProvider: s.openrouter_pin_provider,
       });
+      startedLlm.current = llmFingerprint(s);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error("UI onStart failed", msg);
@@ -233,15 +254,36 @@ export function MainWindow() {
     }
   };
 
-  // Start engine on launch when enabled (once).
+  // Start listening by itself once setup is complete: on launch, or the moment
+  // the models finish downloading / the key is pasted on a fresh install.
+  // Waits for settings to settle so a half-typed key never starts the engine.
   useEffect(() => {
     if (autoStarted.current || !settings?.start_engine_on_launch) return;
     if (!modelsReady || engineOn || busy) return;
     if (!settings.openrouter_api_key.trim()) return;
-    autoStarted.current = true;
-    void onStart();
+    const timer = setTimeout(() => {
+      autoStarted.current = true;
+      logger.info("auto-start: setup complete");
+      void onStart();
+    }, AUTO_START_SETTLE_MS);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot
   }, [settings, modelsReady, engineOn, busy]);
+
+  // The engine bakes key + models in at start. Restart it when they change
+  // (e.g. a corrected key), but only between turns.
+  useEffect(() => {
+    if (!settings || !engineOn || busy || startedLlm.current == null) return;
+    if (status.phase !== "Armed" && status.phase !== "Quiet") return;
+    if (!settings.openrouter_api_key.trim()) return;
+    if (llmFingerprint(settings) === startedLlm.current) return;
+    const timer = setTimeout(() => {
+      logger.info("LLM settings changed — restarting engine");
+      void onStart();
+    }, LLM_RESTART_SETTLE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onStart reads refs
+  }, [settings, engineOn, busy, status.phase]);
 
   const onStop = async () => {
     setBusy(true);
@@ -436,6 +478,7 @@ export function MainWindow() {
                   setSettingsCategory(category);
                   setView("settings");
                 }}
+                onTeachVoice={() => setView("teach")}
               />
             ) : view === "debug" ? (
               <DebugView status={status} />

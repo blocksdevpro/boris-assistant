@@ -154,15 +154,90 @@ fn next_frame(
     }
 }
 
+/// Peak at or below this is digital silence. Windows delivers exact zeros when
+/// microphone privacy blocks desktop apps, and hardware mute keys do the same;
+/// even a very quiet live mic sits well above it.
+const MIC_SILENT_PEAK: f32 = 1e-5;
+/// How long the input must stay digitally silent (or deliver nothing) before
+/// the UI is told. Long enough to skip stream warm-up.
+const MIC_SILENT_AFTER: Duration = Duration::from_secs(3);
+
+/// Mic state changes seen while waiting for the wake word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicSignal {
+    /// Only digital silence (or no audio at all) for [`MIC_SILENT_AFTER`].
+    Silent,
+    /// Real signal again after [`MicSignal::Silent`].
+    Live,
+}
+
+/// Detects a mic that "works" but delivers nothing — the failure that looks
+/// exactly like Boris ignoring the wake word.
+#[derive(Debug)]
+struct MicSilenceWatch {
+    silent_samples: u64,
+    since_frame: Duration,
+    silent: bool,
+}
+
+impl MicSilenceWatch {
+    /// `known_silent`: the caller already reported [`MicSignal::Silent`]
+    /// (the wait restarted), so the first real signal must report `Live`.
+    fn new(known_silent: bool) -> Self {
+        Self {
+            silent_samples: 0,
+            since_frame: Duration::ZERO,
+            silent: known_silent,
+        }
+    }
+
+    fn limit_samples() -> u64 {
+        duration_to_samples(MIC_SILENT_AFTER, AUDIO_TARGET_RATE) as u64
+    }
+
+    fn on_frame(&mut self, frame: &[f32]) -> Option<MicSignal> {
+        self.since_frame = Duration::ZERO;
+        let peak = frame.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if peak > MIC_SILENT_PEAK {
+            self.silent_samples = 0;
+            if self.silent {
+                self.silent = false;
+                return Some(MicSignal::Live);
+            }
+            return None;
+        }
+        self.silent_samples = self.silent_samples.saturating_add(frame.len() as u64);
+        self.mark_silent_if(self.silent_samples >= Self::limit_samples())
+    }
+
+    /// No frame arrived for `waited` (stalled or stopped device).
+    fn on_idle(&mut self, waited: Duration) -> Option<MicSignal> {
+        self.since_frame = self.since_frame.saturating_add(waited);
+        self.mark_silent_if(self.since_frame >= MIC_SILENT_AFTER)
+    }
+
+    fn mark_silent_if(&mut self, cond: bool) -> Option<MicSignal> {
+        if cond && !self.silent {
+            self.silent = true;
+            return Some(MicSignal::Silent);
+        }
+        None
+    }
+}
+
 /// Block until the wake model crosses threshold, or the host stops / switches devices.
 ///
 /// Returns the 2 s window that fired so the engine can run liveness / enroll
-/// on the same samples.
+/// on the same samples. `on_mic` hears when the input goes digitally silent
+/// and when it comes back, so the UI can say why "Hey Boris" does nothing.
+/// Pass `mic_known_silent` when the last wait ended with the mic silent.
 pub fn wait_for_wake(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     wake: &mut impl WakeWord,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
+    mic_known_silent: bool,
+    mut on_mic: impl FnMut(MicSignal),
 ) -> Result<AudioBuffer, HearBreak> {
     tracing::info!(
         threshold = WAKEWORD_THRESHOLD,
@@ -178,9 +253,28 @@ pub fn wait_for_wake(
     let mut max_score: f32 = 0.0;
     let mut last_heartbeat = std::time::Instant::now();
     let mut mic_samples: u64 = 0;
+    let mut watch = MicSilenceWatch::new(mic_known_silent);
+    const POLL: Duration = Duration::from_millis(40);
 
     loop {
-        let frame = next_frame(mic, cmd_rx, running)?;
+        still_running(cmd_rx, running)?;
+        let frame = match mic.recv_timeout(POLL) {
+            Ok(frame) => frame,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if let Some(signal) = watch.on_idle(POLL) {
+                    tracing::warn!(?signal, "wake wait: mic delivered no audio");
+                    on_mic(signal);
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return Err(HearBreak::Disconnected);
+            }
+        };
+        if let Some(signal) = watch.on_frame(&frame) {
+            tracing::warn!(?signal, mic_samples, "wake wait: mic silence state changed");
+            on_mic(signal);
+        }
         frames = frames.saturating_add(1);
         mic_samples = mic_samples.saturating_add(frame.len() as u64);
         window.push(&frame);
@@ -1023,5 +1117,54 @@ mod tests {
         .expect("confirm capture should endpoint");
         assert!(partials.is_empty());
         assert_eq!(stt.calls, 0);
+    }
+
+    #[test]
+    fn mic_silence_watch_flags_digital_silence_once_then_recovers() {
+        let mut w = MicSilenceWatch::new(false);
+        let zeros = vec![0.0f32; 1_600]; // 100 ms
+        let mut signals = Vec::new();
+        for _ in 0..29 {
+            signals.extend(w.on_frame(&zeros));
+        }
+        assert!(signals.is_empty(), "2.9 s of silence is still warm-up");
+        for _ in 0..20 {
+            signals.extend(w.on_frame(&zeros));
+        }
+        assert_eq!(signals, vec![MicSignal::Silent], "flag once, not every hop");
+        let speech = vec![0.01f32; 1_600];
+        assert_eq!(w.on_frame(&speech), Some(MicSignal::Live));
+        assert_eq!(w.on_frame(&speech), None);
+    }
+
+    #[test]
+    fn mic_silence_watch_ignores_a_quiet_live_room() {
+        let mut w = MicSilenceWatch::new(false);
+        // ~-80 dBFS noise floor: quiet, but a working mic.
+        let floor: Vec<f32> = (0..1_600)
+            .map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 })
+            .collect();
+        for _ in 0..100 {
+            assert_eq!(w.on_frame(&floor), None);
+        }
+    }
+
+    #[test]
+    fn mic_silence_watch_flags_a_stalled_stream() {
+        let mut w = MicSilenceWatch::new(false);
+        let poll = Duration::from_millis(40);
+        let mut signals = Vec::new();
+        for _ in 0..80 {
+            signals.extend(w.on_idle(poll));
+        }
+        assert_eq!(signals, vec![MicSignal::Silent]);
+        assert_eq!(w.on_frame(&[0.2; 320]), Some(MicSignal::Live));
+    }
+
+    #[test]
+    fn mic_silence_watch_restarted_while_silent_reports_recovery() {
+        // Device switch restarts the wait; a working new mic must clear the hint.
+        let mut w = MicSilenceWatch::new(true);
+        assert_eq!(w.on_frame(&[0.05; 320]), Some(MicSignal::Live));
     }
 }

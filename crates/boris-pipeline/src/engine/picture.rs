@@ -14,7 +14,8 @@ use std::time::Instant;
 use boris_core::TurnId;
 
 use crate::status::{
-    ArtifactPeek, DeviceHealth, EngineState, InputPeek, Phase, StatusPicture, WakeEnrollPeek,
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, StatusPicture,
+    WakeEnrollPeek,
 };
 
 /// Max wire chars for the activity chip (overlay renders one line).
@@ -63,6 +64,7 @@ pub(super) struct Picture {
     pub fallback_report: Option<crate::artifacts::ArtifactCard>,
     pub wake_enroll: Option<WakeEnrollPeek>,
     pub input: Option<InputPeek>,
+    pub listen_hint: Option<ListenHint>,
     pub status_tx: Sender<StatusPicture>,
     /// The agent-event closure updates this same snapshot while thinking.
     pub latest: Arc<Mutex<StatusPicture>>,
@@ -96,6 +98,7 @@ impl Picture {
             fallback_report: self.fallback_report.clone(),
             wake_enroll: self.wake_enroll.clone(),
             input: self.input.clone(),
+            listen_hint: self.listen_hint,
         };
         let mut latest = self
             .latest
@@ -142,6 +145,15 @@ impl Picture {
     pub fn set_wake_enroll(&mut self, peek: Option<WakeEnrollPeek>) {
         if self.wake_enroll != peek {
             self.wake_enroll = peek;
+            self.publish();
+        }
+    }
+
+    /// Publish only on change: the wake loop calls this on every hop.
+    pub fn set_listen_hint(&mut self, hint: Option<ListenHint>) {
+        if self.listen_hint != hint {
+            tracing::info!(?hint, "listen hint");
+            self.listen_hint = hint;
             self.publish();
         }
     }
@@ -256,6 +268,7 @@ mod tests {
             fallback_report: None,
             wake_enroll: None,
             input: None,
+            listen_hint: None,
             status_tx,
             latest: Arc::new(Mutex::new(StatusPicture::off())),
             phase_started: Instant::now(),

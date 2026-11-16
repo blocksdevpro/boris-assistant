@@ -1,5 +1,8 @@
 import type { EngineState, Phase } from "@/bridge";
 
+/** What a first-time user should actually say. Shown wherever Boris is listening. */
+export const WAKE_PROMPT = "Say “Hey Boris”";
+
 /**
  * Presence tokens for the voice island + main hero.
  *
@@ -65,7 +68,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Quiet: {
     label: "Ready",
-    hint: "Say the wake word",
+    hint: WAKE_PROMPT,
     accent: READY.accent,
     glow: READY.glow,
     alive: true,
@@ -73,7 +76,7 @@ const PHASE: Record<Phase, PhaseTone> = {
   },
   Armed: {
     label: "Ready",
-    hint: "Say the wake word",
+    hint: WAKE_PROMPT,
     accent: READY.accent,
     glow: READY.glow,
     alive: true,

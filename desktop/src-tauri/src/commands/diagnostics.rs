@@ -32,3 +32,17 @@ pub fn set_debug_capture(state: State<'_, AppState>, enabled: bool) {
 pub fn clear_debug_capture(state: State<'_, AppState>) {
     state.clear_debug_capture();
 }
+
+/// Open Windows Settings → Privacy & security → Microphone, the usual fix when
+/// the mic delivers only silence. The target is fixed here; the webview cannot
+/// choose what gets opened.
+#[tauri::command]
+pub fn open_mic_privacy_settings(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("ms-settings:privacy-microphone", None::<&str>)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "open mic privacy settings failed");
+            e.to_string()
+        })
+}

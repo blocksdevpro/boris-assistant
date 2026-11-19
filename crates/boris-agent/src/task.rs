@@ -67,12 +67,11 @@ impl TaskTraits {
             || self.complexity >= TaskComplexity::Complex
     }
 
-    /// Greeting / time / short local fact — fast tier even with tools advertised.
+    /// High-confidence chit-chat (greeting / thanks / time or date) that the
+    /// cheap request stage can answer. Other "simple-looking" local requests
+    /// may still need tools and synthesis, so they do not qualify.
     pub fn is_simple_voice(self) -> bool {
-        !self.needs_strong()
-            && (self.greeting
-                || self.time_date
-                || (self.local_only && self.complexity == TaskComplexity::Simple))
+        !self.needs_strong() && (self.greeting || self.time_date)
     }
 }
 
@@ -538,7 +537,8 @@ mod tests {
         assert!(!t.coding, "{t:?}");
         assert!(!t.multi_step);
         assert!(!t.needs_strong());
-        assert!(t.is_simple_voice());
+        // Needs a file read and a synthesis budget: not chit-chat.
+        assert!(!t.is_simple_voice());
     }
 
     #[test]

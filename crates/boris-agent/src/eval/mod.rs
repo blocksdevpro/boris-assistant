@@ -388,9 +388,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         let calls = client.calls.lock().unwrap();
+        // Not chit-chat, so the first round gets the Medium default stage.
         assert_eq!(
             calls[0].options.stage,
-            Some(boris_ai::RequestStage::SimpleVoice)
+            Some(boris_ai::RequestStage::ToolPlanning)
         );
         assert_eq!(
             calls[1].options,

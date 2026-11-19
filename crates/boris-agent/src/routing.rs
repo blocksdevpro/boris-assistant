@@ -56,11 +56,13 @@ pub fn route_from_traits(task: TaskTraits, round: RoundTraits) -> RouteMode {
 
 /// Stage-aware reasoning / token budget for this request.
 ///
-/// Once tool results are in context the reply must synthesize them, so any
-/// prior tool output escalates to at least `ToolPlanning` (whose 4_096-token
-/// budget fits synthesis). The only exception is an explicitly simple-voice
-/// turn with short (< [`SIMPLE_VOICE_TOOL_CHARS`]) clean results and no error
-/// evidence, which stays on the 768-token `SimpleVoice` budget.
+/// Keyword classification can be wrong (mishearings, Hinglish, paraphrase),
+/// so a misjudged turn must never be starved: `ToolPlanning` (Medium
+/// reasoning, 8_192 tokens) is the default. The cheap `SimpleVoice` stage
+/// (Low reasoning, 2_048 tokens) is used only for high-confidence chit-chat
+/// ([`TaskTraits::is_simple_voice`]: greeting or time/date) with no tool
+/// output yet, or with only short (< [`SIMPLE_VOICE_TOOL_CHARS`]) clean
+/// results. Complex, deep-research, or error-recovering turns get `Complex`.
 pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
     if task.complexity == crate::task::TaskComplexity::Complex
         || task.research_depth >= crate::task::ResearchDepth::Deep
@@ -68,17 +70,17 @@ pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
         || (round.tool_rounds > 0 && task.needs_strong())
     {
         RequestStage::Complex
-    } else if task.needs_strong()
-        || (round.has_tool_results && !short_clean_simple_voice(task, round))
+    } else if task.is_simple_voice()
+        && (!round.has_tool_results || short_clean_simple_voice(task, round))
     {
-        RequestStage::ToolPlanning
-    } else {
         RequestStage::SimpleVoice
+    } else {
+        RequestStage::ToolPlanning
     }
 }
 
-/// Tool results longer than this force synthesis budget even on simple-voice
-/// turns (the 768-token `SimpleVoice` budget may truncate the reply).
+/// Tool results longer than this force the synthesis budget even on
+/// chit-chat turns.
 pub const SIMPLE_VOICE_TOOL_CHARS: usize = 200;
 
 /// True when a simple-voice turn may keep the cheap stage despite prior tool
@@ -791,7 +793,7 @@ mod tests {
         assert!(round.has_tool_results);
         assert!(!round.has_error_evidence);
         assert!(round.max_tool_result_chars >= SIMPLE_VOICE_TOOL_CHARS);
-        // Long results must be synthesized: never the 768-token stage.
+        // Long results must be synthesized: never the cheap stage.
         assert_eq!(
             request_stage_for(round.task, round),
             RequestStage::ToolPlanning
@@ -803,7 +805,7 @@ mod tests {
     #[test]
     fn non_simple_tool_results_escalate_to_planning() {
         // Research turn with tool results but no completed tool round yet:
-        // ToolPlanning synthesis budget (not the 768-token stage).
+        // ToolPlanning synthesis budget (not the cheap stage).
         let messages = json!([
             { "role": "user", "content": "research the latest Rust async runtimes" },
             { "role": "tool", "content": "short hit" },
@@ -815,6 +817,33 @@ mod tests {
             request_stage_for(round.task, round),
             RequestStage::ToolPlanning
         );
+    }
+
+    #[test]
+    fn unclear_or_misheard_requests_default_to_medium_planning() {
+        // Local-only "simple" requests, mishearings, and Hinglish are not
+        // high-confidence chit-chat: they may need tools and synthesis.
+        for text in [
+            "check my screen",
+            "mujhe screen dikhao",
+            "summarize this file",
+            "stop",
+        ] {
+            let task = classify_task(text);
+            assert_eq!(
+                request_stage_for(task, RoundTraits::first(task)),
+                RequestStage::ToolPlanning,
+                "{text}"
+            );
+        }
+        for text in ["hi", "thanks", "what time is it"] {
+            let task = classify_task(text);
+            assert_eq!(
+                request_stage_for(task, RoundTraits::first(task)),
+                RequestStage::SimpleVoice,
+                "{text}"
+            );
+        }
     }
 
     #[test]

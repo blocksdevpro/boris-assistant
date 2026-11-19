@@ -50,6 +50,11 @@ default-model constants, which stay `boris_ai`-only.
 
 - `complete` tries **SSE first**, then falls back to a single JSON response if
   the stream fails or yields an empty (no text, no tools) payload.
+- Stage budgets: `SimpleVoice` (high-confidence chit-chat only) is Low effort
+  with 2,048 tokens; `ToolPlanning` (the default) is Medium with 8,192;
+  `Complex` is High with the full headroom. Any request that lists tools gets
+  at least `MIN_MAX_TOKENS_WITH_TOOLS` (2,048) so a misrouted turn cannot
+  truncate its tool calls.
 - Tool-planning and complex stages send `reasoning.exclude = false` so thinking
   tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
   them. Reasoning is never assembled into `content`.

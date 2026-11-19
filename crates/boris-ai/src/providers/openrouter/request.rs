@@ -51,7 +51,12 @@ impl OpenRouterClient {
             .as_object_mut()
             .expect("chat completion body is always a JSON object");
 
-        let raw_max = opts.resolved_max_tokens(self.max_tokens);
+        let mut raw_max = opts.resolved_max_tokens(self.max_tokens);
+        // Never starve tool calls: a listed tool table gets a usable pool even
+        // when a cheap stage or an explicit small cap was requested.
+        if tools.as_array().is_some_and(|tools| !tools.is_empty()) {
+            raw_max = raw_max.max(crate::request::MIN_MAX_TOKENS_WITH_TOOLS);
+        }
         let max_tokens =
             clamp_to_context_window(raw_max, Some(OpenRouterClient::context_window_tokens(self)));
         if max_tokens != raw_max {
@@ -204,6 +209,20 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["reasoning"]["enabled"], true);
         assert!(body["max_tokens"].as_u64().unwrap() >= 8_000);
+    }
+
+    #[test]
+    fn listed_tools_floor_max_tokens_but_toolless_requests_keep_small_caps() {
+        let client = OpenRouterClient::new("k".into(), Some("m".into()));
+        let tools = json!([{ "type": "function", "function": { "name": "x" } }]);
+        let tiny = crate::CompleteOptions {
+            max_tokens: Some(512),
+            ..crate::CompleteOptions::default()
+        };
+        let body = client.request_body_with(&json!([]), &tools, false, &tiny);
+        assert_eq!(body["max_tokens"], crate::MIN_MAX_TOKENS_WITH_TOOLS);
+        let body = client.request_body_with(&json!([]), &Value::Null, false, &tiny);
+        assert_eq!(body["max_tokens"], 512, "summary maintenance stays capped");
     }
 
     #[test]

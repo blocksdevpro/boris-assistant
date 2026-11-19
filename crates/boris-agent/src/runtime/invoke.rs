@@ -1287,6 +1287,7 @@ mod tests {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         };
         let rt = ToolRuntime::new(policy, Box::new(MemoryAuditSink::new()));
         let inv = ToolInvocation::new(

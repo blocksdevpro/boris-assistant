@@ -641,7 +641,10 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     let max_confirms = config.max_confirms_per_turn.max(1);
     let sandbox = sandbox
         .with_trusted_auto_moderate(trusted)
-        .with_max_confirms_per_turn(max_confirms);
+        .with_max_confirms_per_turn(max_confirms)
+        // User-managed `[agent] shell_auto_allow` prefixes (single plain
+        // commands only); everything else still asks.
+        .with_shell_auto_allow(config.shell_auto_allow.clone());
     // Enforce the load-bearing order at the type level: preset lockdown threads
     // into `configure_runtime` below (VoiceSafe/LocalPower ⇒ Off/Denied).
     let mut sandbox = preset.apply_to_sandbox_owned(sandbox);

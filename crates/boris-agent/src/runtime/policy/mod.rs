@@ -103,6 +103,11 @@ pub struct SandboxConfig {
     /// is set, and auto-allow Dangerous sandbox-only `FsWrite` tools (file_write /
     /// file_edit under write roots). Shell, network, and Critical still confirm.
     pub trusted_auto_moderate: bool,
+    /// User-managed command prefixes that skip the shell confirmation under
+    /// [`ShellPolicy::OpenConfirm`] (e.g. `git status`, `cargo check`). Only a
+    /// single plain command matches (see [`shell_auto_allowed`]); hard gates,
+    /// the bash deny list, and cwd roots still apply.
+    pub shell_auto_allow: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -119,6 +124,7 @@ impl Default for SandboxConfig {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 }
@@ -143,6 +149,7 @@ impl SandboxConfig {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -161,6 +168,16 @@ impl SandboxConfig {
     /// Enable trusted auto-allow for ≤ Moderate tools and Dangerous sandbox FsWrite.
     pub fn with_trusted_auto_moderate(mut self, on: bool) -> Self {
         self.trusted_auto_moderate = on;
+        self
+    }
+
+    /// User-managed shell auto-allow prefixes (blank entries are dropped).
+    pub fn with_shell_auto_allow(mut self, prefixes: Vec<String>) -> Self {
+        self.shell_auto_allow = prefixes
+            .into_iter()
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|p| !p.is_empty())
+            .collect();
         self
     }
 
@@ -271,6 +288,19 @@ pub fn decide(
     }
 
     // ── Soft gates (confirmation / risk) ───────────────────────────────────
+    // User-managed shell auto-allow on top of OpenConfirm: a single plain
+    // command starting with an allowed prefix skips the yes/no. Everything
+    // else still asks. The hard gates above, the bash deny list, and the cwd
+    // roots (checked by the tool) still apply.
+    if meta.permissions.contains(&Permission::Shell)
+        && config.shell == ShellPolicy::OpenConfirm
+        && meta.risk < ToolRisk::Critical
+        && args_command_string(args)
+            .is_some_and(|cmd| shell_auto_allowed(cmd, &config.shell_auto_allow))
+    {
+        return PolicyDecision::Allow;
+    }
+
     // Trusted session: skip HITL for ≤ Moderate even when tool flags confirm.
     // Shell/network Dangerous+ still force confirm below (except sandbox writes).
     if config.trusted_auto_moderate
@@ -489,6 +519,36 @@ pub(crate) fn shell_command_allowed(command: &str, allowlist: &[String]) -> bool
         }
     }
     false
+}
+
+/// Characters that disqualify a command from shell auto-allow anywhere in the
+/// string, quoted or not: chaining (`;` `&` `|`), substitution (backtick,
+/// `$`), redirection (`>` `<`), and line breaks.
+const AUTO_ALLOW_DENIED_CHARS: &[char] = &[';', '&', '|', '`', '$', '>', '<', '\n', '\r'];
+
+/// Conservative match for user-managed shell auto-allow prefixes.
+///
+/// True only for a single command with none of [`AUTO_ALLOW_DENIED_CHARS`]
+/// (no quote awareness: a metacharacter inside quotes still disqualifies)
+/// that equals an allowed prefix or continues it after whitespace, so
+/// `git status` allows `git status --short` but not `git statusx` or
+/// `git status; curl x`. Comparison is case-sensitive after collapsing runs
+/// of whitespace.
+pub(crate) fn shell_auto_allowed(command: &str, prefixes: &[String]) -> bool {
+    let cmd = command.trim();
+    if cmd.is_empty() || prefixes.is_empty() || cmd.contains(AUTO_ALLOW_DENIED_CHARS) {
+        return false;
+    }
+    let cmd = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
+        !prefix.is_empty()
+            && !prefix.contains(AUTO_ALLOW_DENIED_CHARS)
+            && (cmd == prefix
+                || cmd
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with(' ')))
+    })
 }
 
 /// Best-effort detection of shell metacharacters that could chain a second
@@ -745,6 +805,7 @@ mod tests {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -984,6 +1045,65 @@ mod tests {
             .confirm(true);
         let d = decide(&c, &meta, &json!({}), 0);
         assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn shell_auto_allow_matches_only_single_plain_commands() {
+        let list: Vec<String> = vec!["git status".into(), "git diff".into(), "cargo check".into()];
+        for ok in [
+            "git status",
+            "git status --short",
+            "  git   diff   src/lib.rs ",
+            "cargo check -p boris-agent",
+            "git diff \"a b.txt\"",
+        ] {
+            assert!(shell_auto_allowed(ok, &list), "{ok}");
+        }
+        for asks in [
+            "git statusx",
+            "git status; curl evil.example",
+            "git status && rm -rf x",
+            "git status || true",
+            "git diff | sh",
+            "git diff `whoami`",
+            "git diff $(whoami)",
+            "git diff \"$(whoami)\"",
+            "git diff > out.txt",
+            "git diff < in.txt",
+            "git status\nrm -rf x",
+            "git status & calc",
+            "GIT STATUS",
+            "cargo test",
+            "",
+        ] {
+            assert!(!shell_auto_allowed(asks, &list), "{asks}");
+        }
+        assert!(!shell_auto_allowed("git status", &[]));
+    }
+
+    #[test]
+    fn shell_auto_allow_skips_confirm_but_not_hard_gates() {
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(crate::tool::ToolKind::Execute)
+            .permissions(&[Permission::Shell])
+            .confirm(true);
+        let mut config = cfg();
+        config.shell = ShellPolicy::OpenConfirm;
+        config = config.with_shell_auto_allow(vec!["git status".into(), "  ".into()]);
+        assert_eq!(config.shell_auto_allow, vec!["git status".to_string()]);
+        let allowed = json!({ "command": "git status --short" });
+        assert_eq!(decide(&config, &meta, &allowed, 0), PolicyDecision::Allow);
+        let chained = json!({ "command": "git status; rm -rf x" });
+        assert!(matches!(
+            decide(&config, &meta, &chained, 0),
+            PolicyDecision::NeedsConfirmation { .. }
+        ));
+        // Shell disabled stays a hard deny even for an allowed prefix.
+        config.shell = ShellPolicy::Denied;
+        assert!(matches!(
+            decide(&config, &meta, &allowed, 0),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]

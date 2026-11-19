@@ -71,6 +71,18 @@ fn normalize_model_residency(raw: String) -> String {
 }
 
 /// Default HITL confirm budget per user turn (multi-tool friendly).
+/// Trim, collapse whitespace, and drop blank or duplicate prefixes.
+fn normalize_shell_auto_allow(prefixes: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for prefix in prefixes {
+        let prefix = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !prefix.is_empty() && !out.contains(&prefix) {
+            out.push(prefix);
+        }
+    }
+    out
+}
+
 fn default_max_confirms_per_turn() -> u32 {
     12
 }
@@ -169,6 +181,11 @@ pub struct AppSettings {
     /// Max HITL confirmations per user turn before remaining calls are denied.
     #[serde(default = "default_max_confirms_per_turn")]
     pub max_confirms_per_turn: u32,
+    /// Shell command prefixes that run without a yes/no (e.g. `git status`).
+    /// Only single plain commands match; chaining, pipes, substitution, and
+    /// redirection always ask. `[agent] shell_auto_allow` in config.toml.
+    #[serde(default)]
+    pub shell_auto_allow: Vec<String>,
     /// Show floating island when wake fires (host may honor later).
     #[serde(default = "default_show_overlay_on_wake")]
     pub show_overlay_on_wake: bool,
@@ -225,6 +242,7 @@ impl Default for AppSettings {
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
+            shell_auto_allow: Vec::new(),
             show_overlay_on_wake: default_show_overlay_on_wake(),
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
@@ -370,6 +388,8 @@ struct AgentSection {
     trusted_auto_moderate: bool,
     #[serde(default = "default_max_confirms_per_turn")]
     max_confirms_per_turn: u32,
+    #[serde(default)]
+    shell_auto_allow: Vec<String>,
 }
 
 impl Default for AgentSection {
@@ -378,6 +398,7 @@ impl Default for AgentSection {
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
+            shell_auto_allow: Vec::new(),
         }
     }
 }
@@ -451,6 +472,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
+    out.shell_auto_allow = normalize_shell_auto_allow(cfg.agent.shell_auto_allow);
     out.show_overlay_on_wake = cfg.ui.show_overlay_on_wake;
     out.overlay_caption_mode = normalize_overlay_caption_mode(cfg.ui.overlay_caption_mode);
     out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
@@ -662,6 +684,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         long_term_memory: settings.long_term_memory,
         trusted_auto_moderate: settings.trusted_auto_moderate,
         max_confirms_per_turn: settings.max_confirms_per_turn.max(1),
+        shell_auto_allow: normalize_shell_auto_allow(settings.shell_auto_allow.clone()),
     };
     let ui = UiSection {
         show_overlay_on_wake: settings.show_overlay_on_wake,
@@ -1177,6 +1200,7 @@ mod tests {
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
+            shell_auto_allow: vec!["git status".into(), " cargo  check ".into(), "".into()],
             show_overlay_on_wake: true,
             overlay_caption_mode: "assistant".into(),
             overlay_position: "top_right".into(),
@@ -1227,6 +1251,8 @@ mod tests {
         assert!(!loaded.long_term_memory);
         assert!(!loaded.trusted_auto_moderate);
         assert_eq!(loaded.max_confirms_per_turn, 8);
+        assert_eq!(loaded.shell_auto_allow, vec!["git status", "cargo check"]);
+        assert!(raw_cfg.contains("shell_auto_allow"));
         assert!(loaded.show_overlay_on_wake);
         assert_eq!(loaded.overlay_caption_mode, "assistant");
         assert_eq!(loaded.overlay_position, "top_right");

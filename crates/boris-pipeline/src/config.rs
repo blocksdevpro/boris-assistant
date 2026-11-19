@@ -120,6 +120,8 @@ pub struct PipelineConfig {
     pub trusted_auto_moderate: bool,
     /// Max HITL confirmations per user turn before remaining calls are denied.
     pub max_confirms_per_turn: u32,
+    /// `[agent] shell_auto_allow`: shell prefixes that skip the confirmation.
+    pub shell_auto_allow: Vec<String>,
     /// STT/TTS residency: `low_memory` | `balanced` | `low_latency`.
     pub model_residency: String,
     /// Wake-word barge-in while Talking or Thinking.
@@ -202,6 +204,7 @@ impl PipelineConfig {
             long_term_memory,
             trusted_auto_moderate,
             max_confirms_per_turn,
+            shell_auto_allow: saved.shell_auto_allow.clone(),
             model_residency: resolve_model_residency(&saved),
             voice_barge_in: resolve_voice_barge_in(&saved),
             ignore_speaker_playback: resolve_ignore_speaker_playback(&saved),

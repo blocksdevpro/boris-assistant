@@ -424,6 +424,7 @@ mod tests {
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -573,6 +574,7 @@ mod tests {
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         };
         // If link is a dir symlink to outside, path under link is outside root after canon.
         let probe = if link.is_dir() {

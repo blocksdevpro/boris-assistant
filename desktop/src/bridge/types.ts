@@ -252,6 +252,12 @@ export type AppSettings = {
    * Default 12 (multi-tool friendly). No dedicated UI control yet.
    */
   max_confirms_per_turn: number;
+  /**
+   * Shell command prefixes that run without a yes/no (`[agent] shell_auto_allow`).
+   * Only single plain commands match. No dedicated UI control yet; kept so a
+   * settings save round-trips the hand-edited list.
+   */
+  shell_auto_allow: string[];
   /** Prefer showing the floating island on wake. */
   show_overlay_on_wake: boolean;
   /** Which spoken text may appear in the floating overlay. */
@@ -309,6 +315,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
+  shell_auto_allow: [],
   show_overlay_on_wake: true,
   overlay_caption_mode: "full",
   overlay_position: "top_center",
@@ -436,6 +443,11 @@ export function normalizeSettings(
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
+    shell_auto_allow: Array.isArray(raw?.shell_auto_allow)
+      ? raw.shell_auto_allow.filter(
+          (p) => typeof p === "string" && p.trim() !== "",
+        )
+      : [],
     show_overlay_on_wake: raw?.show_overlay_on_wake ?? true,
     overlay_caption_mode:
       raw?.overlay_caption_mode === "assistant" ||

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{Context, Role};
+use crate::context::Context;
 use crate::error::AgentError;
 use crate::runtime::{
     args_summary, filter_listed_tools, ActivationSet, EventProgressSink, InvokeResult,
@@ -218,88 +218,6 @@ pub(super) fn build_tool_invocation(
 #[cfg(test)]
 pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -> Value {
     json!({ "tool_call_id": call_id, "content": content.into() })
-}
-
-/// Legacy observations without trusted status use only conventional error prefixes.
-pub(super) fn observation_looks_ok(content: &str) -> bool {
-    let lower = content.trim_start().to_ascii_lowercase();
-    !(lower.starts_with("error:") || lower.starts_with("error ["))
-}
-
-/// Count useful web-search/fetch observations in the current user turn.
-///
-/// Tool names live on assistant `tool_calls` while results carry only call ids,
-/// so join the two here instead of treating raw call counts as evidence. Old
-/// turns and harness-injected reminder messages cannot satisfy the gate.
-pub(super) fn useful_research_observation_count(context: &Context) -> u32 {
-    let messages = context.messages();
-    let turn_start = messages
-        .iter()
-        .rposition(|m| {
-            matches!(m.role, Role::User)
-                && m.content
-                    .as_str()
-                    .is_some_and(|s| !is_control_user_message(s))
-        })
-        .map_or(0, |i| i.saturating_add(1));
-
-    let mut research_calls = HashSet::new();
-    for message in &messages[turn_start..] {
-        if !matches!(message.role, Role::Assistant) {
-            continue;
-        }
-        let Some(calls) = message.content.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for call in calls {
-            let name = call
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str);
-            if !matches!(name, Some("web_search" | "web_fetch")) {
-                continue;
-            }
-            if let Some(id) = call.get("id").and_then(Value::as_str) {
-                research_calls.insert(id.to_string());
-            }
-        }
-    }
-
-    let mut counted = HashSet::new();
-    messages[turn_start..]
-        .iter()
-        .filter(|m| matches!(m.role, Role::Tool))
-        .filter_map(|m| {
-            let id = m.content.get("tool_call_id")?.as_str()?;
-            let content = m.content.get("content")?.as_str()?;
-            (research_calls.contains(id)
-                && counted.insert(id.to_string())
-                && m.content
-                    .get("_tool_ok")
-                    .and_then(Value::as_bool)
-                    .unwrap_or_else(|| observation_looks_ok(content))
-                && observation_has_useful_evidence(content))
-            .then_some(())
-        })
-        .count() as u32
-}
-
-fn is_control_user_message(text: &str) -> bool {
-    let text = text.trim_start();
-    text.starts_with("<system-reminder>") || text.starts_with("<conversation_summary>")
-}
-
-fn observation_has_useful_evidence(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    !lower.starts_with("no search results")
-        && !lower.starts_with("no results")
-        && !lower.starts_with("search returned empty")
-        && !lower.starts_with("not found")
-        && !lower.contains("search backends returned empty")
 }
 
 /// Emit `ToolExecutionStart` for a raw call (uses standard args summary).
@@ -540,61 +458,6 @@ mod tests {
         let v = tool_observation_json("c1", "hello");
         assert_eq!(v["tool_call_id"], "c1");
         assert_eq!(v["content"], "hello");
-    }
-
-    #[test]
-    fn observation_looks_ok_checks_error_prefix() {
-        assert!(observation_looks_ok("ok result"));
-        assert!(!observation_looks_ok("Error: denied"));
-    }
-
-    #[test]
-    fn research_evidence_counts_only_useful_current_turn_results() {
-        let mut context = Context::new(20);
-        context.push(Role::User, "old research");
-        context.push(
-            Role::Assistant,
-            json!({"tool_calls":[{
-                "id":"old", "function":{"name":"web_search","arguments":"{}"}
-            }]}),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("old", "Search results for: old\n1. stale"),
-        );
-
-        context.push(Role::User, "research current topic");
-        context.push(
-            Role::Assistant,
-            json!({"tool_calls":[
-                {"id":"empty", "function":{"name":"web_search","arguments":"{}"}},
-                {"id":"failed", "function":{"name":"web_fetch","arguments":"{}"}},
-                {"id":"hit", "function":{"name":"web_search","arguments":"{}"}},
-                {"id":"local", "function":{"name":"file_read","arguments":"{}"}}
-            ]}),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("empty", "No search results for: current"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("failed", "Error: fetch HTTP 500"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("hit", "Search results for: current\n1. useful"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("local", "local file content"),
-        );
-        context.push(
-            Role::User,
-            "<system-reminder>\nkeep researching\n</system-reminder>",
-        );
-
-        assert_eq!(useful_research_observation_count(&context), 1);
     }
 
     #[test]

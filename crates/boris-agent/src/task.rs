@@ -1,4 +1,4 @@
-//! Explicit task / round traits used by routing, listing, and finish gates.
+//! Explicit task / round traits used by request-stage routing.
 //!
 //! Classification is heuristic but structured: callers should gate on these
 //! fields (freshness, research depth, side effects, …) rather than raw
@@ -74,31 +74,6 @@ impl TaskTraits {
                 || self.time_date
                 || (self.local_only && self.complexity == TaskComplexity::Simple))
     }
-
-    /// Strong enough local-workspace signal to finish-gate on under-tooling.
-    ///
-    /// Broader than [`Self::coding`] (which also matches the word "function").
-    pub fn is_workspace_job(self, user_text: &str) -> bool {
-        if self.greeting || self.time_date {
-            return false;
-        }
-        if self.research_depth != ResearchDepth::None {
-            return false;
-        }
-        let t = user_text.to_ascii_lowercase();
-        self.coding
-            && (LOCAL_WORK_NEEDLES.iter().any(|n| t.contains(n))
-                || t.contains("file")
-                || t.contains("project")
-                || t.contains("debug")
-                || t.contains("implement")
-                || t.contains("refactor")
-                || t.contains("compile")
-                || t.contains("stack trace")
-                || t.contains("codebase")
-                || t.contains(".rs")
-                || t.contains("src/"))
-    }
 }
 
 const RESEARCH_NEEDLES: &[&str] = &[
@@ -140,39 +115,6 @@ const CODING_NEEDLES: &[&str] = &[
     "stack trace",
     "function",
     "codebase",
-];
-
-/// Local workspace work — must not be routed as web research.
-///
-/// Strong needles always imply local tool work (grep, test runners, file
-/// search). Weak needles (`this file`, `my project`, …) only count as coding
-/// when paired with a [`CODING_ACTION_VERBS`] verb, so read-only requests
-/// like "summarize this file" stay on the fast tier.
-const LOCAL_WORK_NEEDLES: &[&str] = &[
-    "grep",
-    "glob",
-    "ripgrep",
-    "in src",
-    "in the repo",
-    "this file",
-    "the file",
-    "these files",
-    "this folder",
-    "this directory",
-    "this project",
-    "my project",
-    "list files",
-    "find files",
-    "search files",
-    "search the code",
-    "in the code",
-    "compile error",
-    "run tests",
-    "run the test",
-    "cargo test",
-    "cargo build",
-    "npm test",
-    "pytest",
 ];
 
 /// Local-work needles that imply coding on their own (tool verbs, runners).
@@ -528,49 +470,6 @@ impl RoundTraits {
     }
 }
 
-/// Evidence quality for research finish-gating (not raw search-call counts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EvidenceCoverage {
-    pub search_calls: u32,
-    pub fetch_calls: u32,
-    /// Observations that look like real hits (non-empty, not an error).
-    pub useful_results: u32,
-}
-
-impl EvidenceCoverage {
-    pub fn from_tools(tools_used: &[String], observations_ok: u32) -> Self {
-        let search_calls = tools_used
-            .iter()
-            .filter(|t| t.as_str() == "web_search")
-            .count() as u32;
-        let fetch_calls = tools_used
-            .iter()
-            .filter(|t| t.as_str() == "web_fetch")
-            .count() as u32;
-        Self {
-            search_calls,
-            fetch_calls,
-            useful_results: observations_ok,
-        }
-    }
-
-    /// Enough coverage for the given research depth.
-    pub fn meets(self, depth: ResearchDepth) -> bool {
-        let useful = self.useful_results;
-        match depth {
-            ResearchDepth::None => true,
-            ResearchDepth::Light => {
-                useful >= 1 && self.search_calls >= 1 && (self.search_calls + self.fetch_calls) >= 2
-            }
-            ResearchDepth::Deep => {
-                useful >= 2
-                    && self.search_calls >= 2
-                    && (self.fetch_calls >= 1 || self.search_calls >= 3)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,35 +626,5 @@ mod tests {
         let t = classify_task(text);
         assert!(t.multi_step, "{t:?}");
         assert!(t.needs_strong());
-    }
-
-    #[test]
-    fn evidence_light_and_deep() {
-        let light = EvidenceCoverage {
-            search_calls: 2,
-            fetch_calls: 0,
-            useful_results: 2,
-        };
-        assert!(light.meets(ResearchDepth::Light));
-        assert!(!light.meets(ResearchDepth::Deep));
-        let one = EvidenceCoverage {
-            search_calls: 1,
-            fetch_calls: 0,
-            useful_results: 1,
-        };
-        assert!(!one.meets(ResearchDepth::Light));
-        let deep = EvidenceCoverage {
-            search_calls: 3,
-            fetch_calls: 1,
-            useful_results: 2,
-        };
-        assert!(deep.meets(ResearchDepth::Deep));
-        let failed = EvidenceCoverage {
-            search_calls: 5,
-            fetch_calls: 2,
-            useful_results: 0,
-        };
-        assert!(!failed.meets(ResearchDepth::Light));
-        assert!(!failed.meets(ResearchDepth::Deep));
     }
 }

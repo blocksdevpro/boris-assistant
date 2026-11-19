@@ -175,44 +175,6 @@ impl Agent {
         })
     }
 
-    /// For LinkedIn / person-find asks, inject the research skill body once so
-    /// freestyle "need more hints" does not skip the multi-query playbook.
-    fn maybe_inject_research_skill(&mut self, user_text: &str) {
-        if !crate::finish_gate::looks_like_person_find(user_text) {
-            return;
-        }
-        let Some(shared) = self.skills.as_ref() else {
-            return;
-        };
-        let body = {
-            let Ok(guard) = shared.lock() else {
-                return;
-            };
-            let Some(skill) = guard.get("research") else {
-                return;
-            };
-            match crate::skills::load_skill_body(skill) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %e, "research skill inject skipped");
-                    return;
-                }
-            }
-        };
-        // Avoid re-injecting while a recent research playbook is still in context.
-        let already = self.context.messages().iter().rev().take(10).any(|m| {
-            m.content
-                .as_str()
-                .is_some_and(|s| s.contains("Person/profile research request"))
-        });
-        if already {
-            return;
-        }
-        info!("injecting research skill body for person/profile find");
-        self.context
-            .push_control(crate::finish_gate::person_find_skill_nudge(&body));
-    }
-
     /// Summarize older turns into a compact block (Grok-lite compaction).
     async fn maybe_llm_compact(
         &mut self,
@@ -494,7 +456,7 @@ impl Agent {
         self.context
             .compact_mechanical_for_request_with_budget(&tools_for_request, compact_budget);
         // Split finish budgets: markup (tool-XML re-prompt) vs gate
-        // (research/todo). `finish_gate_remaining` tracks the gate; markup
+        // (open todos). `finish_gate_remaining` tracks the gate; markup
         // always starts at `MARKUP_INIT` (see `FinishGateBudget::fresh`).
         self.finish_gate_remaining = crate::finish_gate::FinishGateBudget::GATE_INIT;
 
@@ -518,10 +480,6 @@ impl Agent {
         }
         self.context.begin_task(user_text);
         self.retrieve_memory_for_turn(user_text).await;
-
-        // Person/profile finds: auto-inject research skill body so the model
-        // does not freestyle without the multi-query playbook.
-        self.maybe_inject_research_skill(user_text);
 
         let emit = self.make_emit();
         // Finish gate reads the session-bound todos *file* (not sandbox root).
@@ -1264,8 +1222,7 @@ mod retrieval_tests {
             .unwrap();
 
         let requests = requests.lock().unwrap();
-        // The finish gate may issue a follow-up completion for person/profile
-        // wording; inspect the initial replacement request itself.
+        // Inspect the initial replacement request itself.
         let request = requests.first().unwrap();
         let controls = replacement_controls(request);
         assert_eq!(controls.len(), 1);

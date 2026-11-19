@@ -120,7 +120,7 @@ pub use speech_sanitize::{
     contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
 pub use stats::AgentStats;
-pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
+pub use task::{classify_task, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
     InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolOutputStore,
     ToolRisk, MAX_SKILL_RESULT_CHARS, MAX_STORED_CHARS, MAX_TOOL_RESULT_CHARS,

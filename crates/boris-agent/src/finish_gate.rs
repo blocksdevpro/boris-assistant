@@ -1,9 +1,12 @@
-//! Finish gate: nudge the model to keep working when todos remain open
-//! or when research was under-tooled.
+//! Finish gate: nudge the model to keep working when todos it created this
+//! turn remain open.
 //!
-//! Used by the agent loop after a content-only reply:
-//! - if the session (or sandbox) todos file still has pending items → [`todo_gate_reminder`]
-//! - if the user asked for research/lookup and effort was weak → [`research_gate_reminder`]
+//! Used by the agent loop after a content-only reply, and only when the turn
+//! already used tools: if the session (or sandbox) todos file still has
+//! pending items → [`todo_gate_reminder`]. Keyword gates that guessed
+//! "research" or "local work" from the request text were removed; they
+//! fought the model with extra rounds. The tool-markup re-prompt and the
+//! unknown-tool breaker live in the loop.
 //!
 //! All helpers are pure / best-effort FS reads — never panic on missing files.
 
@@ -16,12 +19,10 @@ use serde::Deserialize;
 /// The two counters are independent:
 /// - `markup` guards tool-markup-only speech re-prompts (model dumped
 ///   `<invoke>` XML into `content` instead of using API `tool_calls`).
-/// - `gate` guards research / local-work / todo reminders after a
-///   content-only reply.
+/// - `gate` guards open-todo reminders after a content-only reply.
 ///
 /// They were previously a single shared counter (init 3), so a markup
-/// rejection consumed research budget and vice versa. Splitting keeps a
-/// chatty markup slip from starving real research follow-ups.
+/// rejection consumed the todo budget and vice versa.
 ///
 /// Batch-HITL note: one yes/no prompt may cover several sibling tools, but
 /// the confirm budget is still per-tool aware (see `loop_::tool_batch`).
@@ -30,14 +31,14 @@ use serde::Deserialize;
 pub struct FinishGateBudget {
     /// Remaining markup-only re-prompts.
     pub markup: u32,
-    /// Remaining research / local-work / todo re-entries.
+    /// Remaining open-todo re-entries.
     pub gate: u32,
 }
 
 impl FinishGateBudget {
     /// Fresh-turn markup budget: at most two markup re-prompts.
     pub const MARKUP_INIT: u32 = 2;
-    /// Fresh-turn finish-gate budget: at most three research/todo re-entries.
+    /// Fresh-turn finish-gate budget: at most three open-todo re-entries.
     pub const GATE_INIT: u32 = 3;
 
     /// Fresh turn: full markup + gate budgets.
@@ -53,7 +54,7 @@ impl FinishGateBudget {
         Self { markup: 0, gate: 0 }
     }
 
-    /// Post-HITL resume: keep markup budget, disable research/todo gate so an
+    /// Post-HITL resume: keep markup budget, disable the todo gate so an
     /// approval cannot loop back into finish-gate nudges.
     pub fn post_hitl(markup_left: u32) -> Self {
         Self {
@@ -117,171 +118,6 @@ pub fn todo_gate_reminder(pending: usize) -> String {
          You still have {pending} open todo(s). Continue requested work that remains. \
          Use todo_write to record completed, superseded, or blocked items; optional or stale todos \
          do not expand the user's request. Finish when done or state the real blocker.\n\
-         </system-reminder>"
-    )
-}
-
-// ── Research effort gate ────────────────────────────────────────────────────
-
-/// Case-insensitive needles that mark a user message as a research / lookup ask.
-const RESEARCH_NEEDLES: &[&str] = &[
-    "look up",
-    "look for",
-    "find out",
-    "who is",
-    "where is",
-    "linkedin",
-    "github",
-    "profile",
-    "research",
-    "search",
-    "investigate",
-    "find",
-];
-
-/// Phrases that signal the model gave up on research too early.
-const GAVE_UP_NEEDLES: &[&str] = &[
-    "not found",
-    "couldn't find",
-    "could not find",
-    "failed to find",
-    "no results",
-    "nothing",
-    "empty",
-    "unable to find",
-    "no information",
-    "i couldn't",
-    "i could not",
-];
-
-/// Needles that mark person / social-profile lookup (stronger research path).
-const PERSON_FIND_NEEDLES: &[&str] = &[
-    "linkedin",
-    "linked in",
-    "github",
-    "profile",
-    "who is",
-    "find my",
-    "find me",
-    "find their",
-    "look up",
-    "look for",
-    "my linkedin",
-    "my github",
-    "social",
-];
-
-/// True when the latest user text looks like a research / find-person / lookup ask.
-pub fn looks_like_research_request(user_text: &str) -> bool {
-    let lower = user_text.to_ascii_lowercase();
-    RESEARCH_NEEDLES.iter().any(|n| lower.contains(n))
-}
-
-/// True when the user is asking to find a person or social profile.
-pub fn looks_like_person_find(user_text: &str) -> bool {
-    let lower = user_text.to_ascii_lowercase();
-    PERSON_FIND_NEEDLES.iter().any(|n| lower.contains(n))
-}
-
-/// Count tool names equal to `name` in `tools_used`.
-fn count_tool(tools_used: &[String], name: &str) -> usize {
-    tools_used.iter().filter(|t| t.as_str() == name).count()
-}
-
-/// Weak web research for general lookup: fewer than 2 among {web_search, web_fetch}
-/// or zero web_search.
-///
-/// Person/profile finds need more: fewer than 3 web_search, or zero fetch when
-/// any search ran (must verify candidates).
-pub fn research_effort_weak(tools_used: &[String]) -> bool {
-    research_effort_weak_for(tools_used, false)
-}
-
-/// Same as [`research_effort_weak`] with optional person-find bar.
-pub fn research_effort_weak_for(tools_used: &[String], person_find: bool) -> bool {
-    let web_search = count_tool(tools_used, "web_search");
-    let web_fetch = count_tool(tools_used, "web_fetch");
-    if person_find {
-        // Minimum: 3 searches, or 2 searches + 1 fetch.
-        return web_search < 3 && !(web_search >= 2 && web_fetch >= 1);
-    }
-    let total = web_search + web_fetch;
-    total < 2 || web_search == 0
-}
-
-/// True when the spoken reply claims research came up empty / failed.
-pub fn looks_like_gave_up_research(reply: &str) -> bool {
-    let lower = reply.to_ascii_lowercase();
-    GAVE_UP_NEEDLES.iter().any(|n| lower.contains(n))
-}
-
-/// Conservative research finish-gate when observation quality is unavailable.
-///
-/// Production loop callers should use [`should_research_gate_with`] and pass
-/// the number of useful observations. Raw calls alone never count as evidence.
-pub fn should_research_gate(user_text: &str, reply: &str, tools_used: &[String]) -> bool {
-    should_research_gate_with(user_text, reply, tools_used, 0)
-}
-
-/// Same as [`should_research_gate`] with a count of useful (non-error) observations.
-pub fn should_research_gate_with(
-    user_text: &str,
-    reply: &str,
-    tools_used: &[String],
-    useful_results: u32,
-) -> bool {
-    let _ = reply;
-    let traits = crate::task::classify_task(user_text);
-    if traits.research_depth == crate::task::ResearchDepth::None {
-        return false;
-    }
-    let coverage = crate::task::EvidenceCoverage::from_tools(tools_used, useful_results);
-    !coverage.meets(traits.research_depth)
-}
-
-/// True when the user asked for local workspace work and no file/search/shell
-/// tools ran this turn.
-pub fn should_local_work_gate(user_text: &str, tools_used: &[String]) -> bool {
-    let traits = crate::task::classify_task(user_text);
-    if !traits.is_workspace_job(user_text) {
-        return false;
-    }
-    !tools_used.iter().any(|n| {
-        matches!(
-            n.as_str(),
-            "grep" | "glob" | "file_read" | "list_dir" | "bash" | "file_edit" | "file_write"
-        )
-    })
-}
-
-/// System-reminder when local workspace work was under-tooled.
-pub fn local_work_gate_reminder() -> String {
-    "<system-reminder>\n\
-     This is local workspace work. Use grep, glob, list_dir, and file_read \
-     (not bash cat/grep/find, not web_search) before answering. \
-     Batch independent searches and reads in one multi-tool message. \
-     Do not claim you looked unless tool output says so.\n\
-     </system-reminder>"
-        .to_string()
-}
-
-/// System-reminder when research was under-tooled after a content-only reply.
-pub fn research_gate_reminder() -> String {
-    "<system-reminder>\n\
-     This research is under-tooled: support the requested claims with evidence. Use listed web_search \
-     or web_fetch as needed, batching independent lookups. Verify person/profile candidates against \
-     identity clues. Resolve actual gaps, not a fixed query quota; state genuine tool or source blockers.\n\
-     </system-reminder>"
-        .to_string()
-}
-
-/// Compact playbook injected for person/profile finds when the research skill loads.
-pub fn person_find_skill_nudge(skill_body: &str) -> String {
-    format!(
-        "<system-reminder>\n\
-         Person/profile research request. This playbook is already supplied; do not load it again. \
-         Apply relevant steps and verify identity before reporting a match.\n\n\
-         {skill_body}\n\
          </system-reminder>"
     )
 }
@@ -407,208 +243,6 @@ mod tests {
                     || p == Path::new(".boris-workspace")
             );
         }
-    }
-
-    // ── Research helpers ────────────────────────────────────────────────────
-
-    #[test]
-    fn research_request_needles() {
-        assert!(looks_like_research_request("Find Jane Doe on LinkedIn"));
-        assert!(looks_like_research_request("look up the CEO of Acme"));
-        assert!(looks_like_research_request("Who is Satya Nadella?"));
-        assert!(looks_like_research_request(
-            "search for rust async runtimes"
-        ));
-        assert!(looks_like_research_request("research this company"));
-        assert!(looks_like_research_request("investigate the outage"));
-        assert!(looks_like_research_request("where is their github profile"));
-        assert!(!looks_like_research_request("what time is it"));
-        assert!(!looks_like_research_request("summarize this file"));
-    }
-
-    #[test]
-    fn research_effort_weak_counts() {
-        assert!(research_effort_weak(&[]));
-        assert!(research_effort_weak(&[s("bash")]));
-        assert!(research_effort_weak(&[s("web_search")]));
-        assert!(research_effort_weak(&[s("web_fetch"), s("web_fetch")])); // zero search
-        assert!(!research_effort_weak(&[s("web_search"), s("web_search")]));
-        assert!(!research_effort_weak(&[s("web_search"), s("web_fetch")]));
-        assert!(!research_effort_weak(&[
-            s("web_search"),
-            s("web_search"),
-            s("web_fetch")
-        ]));
-    }
-
-    #[test]
-    fn gave_up_research_needles() {
-        assert!(looks_like_gave_up_research("I couldn't find anything."));
-        assert!(looks_like_gave_up_research("Not found on LinkedIn."));
-        assert!(looks_like_gave_up_research("No results for that name."));
-        assert!(looks_like_gave_up_research("Search returned empty."));
-        assert!(!looks_like_gave_up_research(
-            "Jane Doe is a software engineer at Acme."
-        ));
-    }
-
-    #[test]
-    fn should_research_gate_lazy_search_not_found() {
-        let tools = vec![s("web_search")];
-        assert!(should_research_gate(
-            "find John Smith linkedin",
-            "I couldn't find John Smith.",
-            &tools
-        ));
-    }
-
-    #[test]
-    fn should_research_gate_weak_search_even_without_gave_up() {
-        // Prefer: one web_search + research intent + weak effort re-enters.
-        let tools = vec![s("web_search")];
-        assert!(should_research_gate(
-            "look up Jane Doe",
-            "Jane works at Acme Corp.",
-            &tools
-        ));
-    }
-
-    #[test]
-    fn should_research_gate_zero_tools_freestyle() {
-        // LinkedIn freestyle with no tools must re-enter.
-        assert!(should_research_gate(
-            "find my LinkedIn based on my hints",
-            "Hit me with the first hint, bro.",
-            &[]
-        ));
-    }
-
-    #[test]
-    fn should_research_gate_adequate_effort_skips() {
-        let tools = vec![s("web_search"), s("web_search")];
-        assert!(!should_research_gate_with(
-            "search for rust async runtimes",
-            "I couldn't find her.",
-            &tools,
-            2,
-        ));
-        let tools2 = vec![s("web_search"), s("web_fetch")];
-        assert!(!should_research_gate_with(
-            "research the latest tokio release",
-            "Not found.",
-            &tools2,
-            2,
-        ));
-    }
-
-    #[test]
-    fn person_find_needs_more_effort() {
-        // 2 searches alone is not enough for LinkedIn person-find.
-        let tools = vec![s("web_search"), s("web_search")];
-        assert!(should_research_gate(
-            "find Jane Doe on LinkedIn",
-            "I think I found her.",
-            &tools
-        ));
-        // 2 search + 1 fetch is adequate for person-find.
-        let tools_ok = vec![s("web_search"), s("web_search"), s("web_fetch")];
-        assert!(!should_research_gate_with(
-            "find Jane Doe on LinkedIn",
-            "Here is the profile.",
-            &tools_ok,
-            2,
-        ));
-    }
-
-    #[test]
-    fn failed_search_calls_do_not_count_as_evidence() {
-        let tools = vec![s("web_search"), s("web_search"), s("web_fetch")];
-        assert!(should_research_gate_with(
-            "find Jane Doe on LinkedIn",
-            "I couldn't find her.",
-            &tools,
-            0,
-        ));
-    }
-
-    #[test]
-    fn looks_like_person_find_needles() {
-        assert!(looks_like_person_find("find my LinkedIn"));
-        assert!(looks_like_person_find("look up Jane on GitHub"));
-        assert!(!looks_like_person_find("what time is it"));
-    }
-
-    #[test]
-    fn should_research_gate_no_research_intent() {
-        let tools = vec![s("web_search")];
-        assert!(!should_research_gate(
-            "what time is it in Tokyo",
-            "I couldn't find that.",
-            &tools
-        ));
-    }
-
-    #[test]
-    fn should_research_gate_gave_up_without_web_tools() {
-        // Research ask, only local tools → still nudge (weak effort).
-        let tools = vec![s("bash")];
-        assert!(should_research_gate(
-            "search for the maintainer of serde",
-            "I couldn't find anything.",
-            &tools
-        ));
-    }
-
-    #[test]
-    fn research_gate_reminder_shape() {
-        let s = research_gate_reminder();
-        assert!(s.contains("<system-reminder>"));
-        assert!(s.contains("</system-reminder>"));
-        assert!(s.contains("under-tooled"));
-        assert!(s.contains("web_search"));
-        assert!(s.contains("web_fetch"));
-        assert!(s.contains("evidence"));
-        assert!(s.contains("not a fixed query quota"));
-    }
-
-    fn s(name: &str) -> String {
-        name.to_string()
-    }
-
-    #[test]
-    fn finish_gate_false_positive_local_find() {
-        // "find" in a local-file ask must not trip the research gate.
-        assert!(!should_research_gate(
-            "find the function in src/main.rs",
-            "It's in main.",
-            &[]
-        ));
-    }
-
-    #[test]
-    fn finish_gate_false_negative_zero_tools_person() {
-        assert!(should_research_gate(
-            "find Jane Doe on LinkedIn",
-            "Need more hints.",
-            &[]
-        ));
-    }
-
-    #[test]
-    fn local_work_gate_on_undertooled_file_ask() {
-        assert!(should_local_work_gate(
-            "find the function in src/main.rs",
-            &[]
-        ));
-        assert!(!should_local_work_gate(
-            "find the function in src/main.rs",
-            &[s("grep")]
-        ));
-        assert!(!should_local_work_gate("what time is it", &[]));
-        assert!(!should_local_work_gate("find Jane Doe on LinkedIn", &[]));
-        let reminder = local_work_gate_reminder();
-        assert!(reminder.contains("grep"));
-        assert!(reminder.contains("<system-reminder>"));
     }
 
     #[test]

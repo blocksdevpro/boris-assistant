@@ -1,4 +1,4 @@
-//! Per-round LLM completion, tool-call gating, and finish-gate checks.
+//! Per-round LLM completion, tool-call gating, and the open-todo finish check.
 
 use std::time::{Duration, Instant};
 
@@ -321,33 +321,19 @@ pub(super) async fn ensure_spoken_reply_at_cap(
     Ok(reply)
 }
 
+/// Open-todo reminder after a content-only reply. Only when this turn already
+/// used tools, so stale todos never force more work on a casual reply.
 pub(super) fn should_reenter_finish_gate(
     at_cap: bool,
     finish_gate_left: u32,
     reply: &str,
     tools_used: &[String],
-    useful_research_results: u32,
     todos_file: &std::path::Path,
-    user_text: &str,
 ) -> bool {
-    if at_cap || finish_gate_left == 0 || reply.is_empty() {
+    if at_cap || finish_gate_left == 0 || reply.is_empty() || tools_used.is_empty() {
         return false;
     }
-    // Research gate may fire with zero tools (freestyle LinkedIn/find-person).
-    if crate::finish_gate::should_research_gate_with(
-        user_text,
-        reply,
-        tools_used,
-        useful_research_results,
-    ) {
-        return true;
-    }
-    if crate::finish_gate::should_local_work_gate(user_text, tools_used) {
-        return true;
-    }
-    // Open todos only re-enter when this turn already used tools (avoid stale
-    // todos forcing silence on casual replies).
-    !tools_used.is_empty() && crate::finish_gate::pending_todo_count(todos_file) > 0
+    crate::finish_gate::pending_todo_count(todos_file) > 0
 }
 
 #[cfg(test)]

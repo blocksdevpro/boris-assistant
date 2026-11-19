@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn bracket_error_prefix_also_suppresses_success_reminder() {
         // Matches `ToolObservation::to_provider_text` ("Error [code]: …") and
-        // `loop_::observation_looks_ok` conventions.
+        // legacy `Error:` / `Error [` prefix conventions.
         let s = "Error [invalid_args]: missing command. Fix the arguments and retry.".to_string();
         assert_eq!(with_reminder("file_write", s.clone()), s);
         // `bash` errors still get the shell-retry reminder, but must be

@@ -41,7 +41,7 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult, TokenAccount
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, parallel_batch_observation,
-    push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
+    push_tool_result_messages, unknown_tool_observation,
 };
 use message_parse::{
     extract_reply_text, extract_tool_note, normalize_tool_calls, parse_raw_tool_calls,
@@ -93,7 +93,7 @@ pub(crate) fn listed_tools_json(
 ///
 /// Finish gates use split budgets (see [`FinishGateBudget`]): `markup`
 /// (default 2) for tool-markup re-prompts and `gate` (legacy
-/// `finish_gate_left`, default 3) for research/todo re-entries.
+/// `finish_gate_left`, default 3) for open-todo re-entries.
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_loop(
     state: LoopState<'_>,
@@ -127,7 +127,7 @@ pub async fn agent_loop(
 /// Budget-explicit ReAct loop (split markup vs research/todo gates).
 ///
 /// `budget.markup` guards markup-only re-prompts; `budget.gate` guards
-/// research/todo re-entries. `initial_accounting` seeds token accounting
+/// open-todo re-entries. `initial_accounting` seeds token accounting
 /// (fresh turns pass `default()`; resume paths restore the pre-pause
 /// accounting so HITL never discards cost).
 #[allow(clippy::too_many_arguments)]
@@ -155,7 +155,7 @@ pub async fn agent_loop_with_budget(
     // Full path to todos.json (session-bound or sandbox fallback).
     let todos_file = todos_file
         .unwrap_or_else(|| crate::finish_gate::default_sandbox_guess().join("todos.json"));
-    // Split finish budgets: markup re-prompts vs research/todo gates.
+    // Split finish budgets: markup re-prompts vs open-todo gate.
     let mut markup_left = budget.markup;
     let mut gate_left = budget.gate;
     // Last non-empty spoken line this turn (finish-gate re-entry must not discard it).
@@ -367,47 +367,20 @@ pub async fn agent_loop_with_budget(
             consecutive_unknown_rounds = 0;
         }
 
-        // Finish gate: research may re-enter with zero tools; open todos only
-        // when this turn already used tools (stale todos must not silence casual
-        // replies). Uses the split `gate_left` budget (markup has its own).
-        let useful_research_results = useful_research_observation_count(state.context);
-        if should_reenter_finish_gate(
-            at_cap,
-            gate_left,
-            &reply,
-            &tools_used,
-            useful_research_results,
-            &todos_file,
-            user_text,
-        ) {
+        // Open-todo reminder, only when this turn already used tools (stale
+        // todos must not silence casual replies). Uses the split `gate_left`
+        // budget (markup has its own). No keyword gates second-guess the reply.
+        if should_reenter_finish_gate(at_cap, gate_left, &reply, &tools_used, &todos_file) {
             gate_left = gate_left.saturating_sub(1);
-            let reminder = if crate::finish_gate::should_research_gate_with(
-                user_text,
-                &reply,
-                &tools_used,
-                useful_research_results,
-            ) {
-                tracing::info!(
-                    left = gate_left,
-                    "finish gate: weak research — continue tooling"
-                );
-                crate::finish_gate::research_gate_reminder()
-            } else if crate::finish_gate::should_local_work_gate(user_text, &tools_used) {
-                tracing::info!(
-                    left = gate_left,
-                    "finish gate: weak local work — continue tooling"
-                );
-                crate::finish_gate::local_work_gate_reminder()
-            } else {
-                let pending = crate::finish_gate::pending_todo_count(&todos_file);
-                tracing::info!(
-                    pending,
-                    left = gate_left,
-                    "finish gate: open todos — continue tooling"
-                );
-                crate::finish_gate::todo_gate_reminder(pending)
-            };
-            state.context.push_control(reminder);
+            let pending = crate::finish_gate::pending_todo_count(&todos_file);
+            tracing::info!(
+                pending,
+                left = gate_left,
+                "finish gate: open todos — continue tooling"
+            );
+            state
+                .context
+                .push_control(crate::finish_gate::todo_gate_reminder(pending));
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
             });

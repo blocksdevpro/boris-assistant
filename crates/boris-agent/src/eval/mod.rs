@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_searches_do_not_satisfy_research_gate() {
+    async fn failed_searches_end_the_turn_without_a_keyword_gate() {
         let failed_calls = (1..=3)
             .map(|i| {
                 json!({
@@ -567,8 +567,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(client.calls.lock().unwrap().len(), 3);
-        assert!(context.messages().iter().any(|m| {
+        // The model's own conclusion stands: no host keyword gate re-enters.
+        assert_eq!(client.calls.lock().unwrap().len(), 2);
+        assert!(!context.messages().iter().any(|m| {
             matches!(m.role, Role::User)
                 && m.content
                     .as_str()
@@ -583,7 +584,7 @@ mod tests {
                 .is_some_and(|s| s.starts_with("Error ["))));
         match result.outcome {
             AgentOutcome::Speak { text, .. } => {
-                assert_eq!(text, "Still no verified result after retrying.")
+                assert_eq!(text, "I couldn't find a verified profile.")
             }
             other => panic!("{other:?}"),
         }

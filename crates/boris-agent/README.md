@@ -211,6 +211,16 @@ is restored to its pre-turn snapshot exactly. Hosts handling a barge-in call
 `Agent::abandon_turn(checkpoint)`, which applies the same rule against a
 checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
 
+## Finish checks
+
+A content-only reply ends the turn unless one of three non-keyword checks
+applies: speech that contains tool markup is rejected with a protocol
+reminder (budget 2); two consecutive rounds of only unknown tools inject the
+available tool names; and open todos re-prompt (budget 3) only when the turn
+already used tools. No gate guesses from the request text that more research
+or local work is needed, and no research playbook is injected; skills load
+when the model calls `load_skill`.
+
 ## Tool execution status
 
 `Tool::execute` returns `Result<String, ToolError>`. Failed operations return

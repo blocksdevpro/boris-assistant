@@ -21,19 +21,19 @@ export const stableRelease = {
 };
 
 export const betaRelease = {
-  version: "1.3.0-beta.1",
-  date: "2026-10-08",
-  dateLabel: "October 8, 2026",
+  version: "1.3.0-beta.2",
+  date: "2026-11-19",
+  dateLabel: "November 19, 2026",
   channel: "Beta",
-  url: `${repo}/releases/tag/v1.3.0-beta.1`,
-  download: `${repo}/releases/download/v1.3.0-beta.1/Boris_1.3.0-beta.1_x64-setup.exe`,
-  summary: "Faster first replies through task-aware tool selection, explicit parallel tool calls, and a developer monitor.",
+  url: `${repo}/releases/tag/v1.3.0-beta.2`,
+  download: `${repo}/releases/download/v1.3.0-beta.2/Boris_1.3.0-beta.2_x64-setup.exe`,
+  summary: "A guided first run, an on-device setup check, and clear answers when \"Hey Boris\" does nothing.",
   highlights: [
-    "Boris picks the tools a task needs before the first model request. Research gets web and recall tools; workspace work gets file and shell tools. Follow-ups such as \"continue\" keep the same set.",
-    "Independent tool calls can run in parallel, with the batch shown in the activity chip. Writes, confirmations, and typed input keep their order.",
-    "A developer monitor in the desktop app shows model requests, tool calls, routing, context, and provider usage, with export for debugging.",
-    "Tool results keep their success or failure status separately from their text, so reading a log that mentions \"error\" no longer fails a successful call.",
-    "Shell exits, missing paths, and MCP errors report failure with useful diagnostics. Failed report cards keep their full content on screen.",
-    "Upgrades from 1.2.0 keep the existing local memory store. EXE installer only; stable installations stay on 1.2.0 unless you choose the Beta channel.",
+    "A welcome flow connects your OpenRouter key, picks fast replies or a lighter PC, chooses a microphone, and downloads the voice models. New installs start listening as soon as it finishes.",
+    "A setup check runs \"Hey Boris, what time is it?\" through the real wake, speech-detection, and transcription models, then checks your mic and speakers. Repair re-downloads damaged models.",
+    "Boris says when the mic hears only silence (Windows mic privacy, mute key, dead input) or when a wake was ignored by the speaker filter, even with every window hidden.",
+    "Unplugging or switching a microphone or speaker no longer needs a restart. A soft chime confirms the moment \"Hey Boris\" is heard.",
+    "The key check says whether your OpenRouter key works, is out of credit, or was rejected. Tray Quit no longer freezes, and a broken speech runtime is explained instead of hanging at \"Starting\".",
+    "Includes everything in 1.3.0-beta.1: task-aware tool selection, parallel tool calls, and the developer monitor. EXE installer only; stable installations stay on 1.2.0 unless you choose the Beta channel.",
   ],
 };

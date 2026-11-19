@@ -365,8 +365,12 @@ Summary compaction is lossless — only complete oldest turns fold into a
 single `Summary` message and the unsummarized tail is never deleted — with
 hysteresis before LLM compaction and smaller mechanical fallbacks. Requests
 estimated past the input budget fail fast with `AgentErrorKind::InputTooLarge`
-before any provider call. Summary-maintenance turns are forced onto the fast
-tier with an explicit cap.
+before any provider call. The summary is structured working memory (the
+user's requests near verbatim, decisions, files and paths, artifacts, concrete
+findings, open todos including the current todo file, current state, and any
+interruption host notes), written on the strong route at the planning stage
+with a 6,144-token output cap from a digest of up to 60,000 characters. The
+transcript stays framed as untrusted data.
 
 ## Security model
 

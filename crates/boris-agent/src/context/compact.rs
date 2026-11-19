@@ -18,7 +18,10 @@ use super::{Context, Message, MessageOrigin, Role};
 /// Compaction only removes complete turns represented in this payload. If the
 /// oldest removable turn does not fit, summary compaction is skipped rather
 /// than silently discarding content the summarizer never saw.
-pub(crate) const SUMMARY_DIGEST_MAX_CHARS: usize = 20_000;
+///
+/// 60k characters (~15k tokens) lets one pass fold several long turns into a
+/// structured 2-4k token summary on the planning tier.
+pub(crate) const SUMMARY_DIGEST_MAX_CHARS: usize = 60_000;
 
 /// Input-side budget derived from a model's combined context window.
 ///
@@ -858,7 +861,10 @@ mod tests {
     #[test]
     fn summary_plan_skips_when_oldest_complete_turn_cannot_fit() {
         let mut ctx = Context::new(20);
-        ctx.push(Role::User, format!("too-large-{}", "x".repeat(25_000)));
+        ctx.push(
+            Role::User,
+            format!("too-large-{}", "x".repeat(SUMMARY_DIGEST_MAX_CHARS + 5_000)),
+        );
         ctx.push(Role::Assistant, "answer");
         ctx.push(Role::User, "recent");
         let before = ctx.messages.len();

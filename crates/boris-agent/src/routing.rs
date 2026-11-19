@@ -241,14 +241,15 @@ impl RoutingClient {
         tool_error: Option<bool>,
     ) -> (RouteMode, CompleteOptions) {
         if is_summary_maintenance(messages) {
+            // The summary replaces real history: strong route, planning stage.
             tracing::debug!(
-                route = RouteMode::Fast.as_str(),
-                stage = ?RequestStage::SimpleVoice,
+                route = RouteMode::Strong.as_str(),
+                stage = ?RequestStage::ToolPlanning,
                 "llm route for summary maintenance"
             );
             return (
-                RouteMode::Fast,
-                CompleteOptions::for_stage(RequestStage::SimpleVoice),
+                RouteMode::Strong,
+                CompleteOptions::for_stage(RequestStage::ToolPlanning),
             );
         }
         let text = last_user_text(messages).unwrap_or_default();
@@ -1124,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_maintenance_uses_fast_route_and_explicit_output_cap() {
+    async fn summary_maintenance_uses_strong_route_and_explicit_output_cap() {
         let fast_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let strong_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let client = RoutingClient::new(
@@ -1137,8 +1138,8 @@ mod tests {
                 options: std::sync::Arc::clone(&strong_options),
             }),
         );
-        let mut options = CompleteOptions::for_stage(RequestStage::SimpleVoice);
-        options.max_tokens = Some(512);
+        let mut options = CompleteOptions::for_stage(RequestStage::ToolPlanning);
+        options.max_tokens = Some(6_144);
         client
             .complete_stream(
                 json!([
@@ -1155,8 +1156,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(client.route(), RouteMode::Fast);
-        assert_eq!(fast_options.lock().unwrap().as_slice(), &[options]);
-        assert!(strong_options.lock().unwrap().is_empty());
+        assert_eq!(client.route(), RouteMode::Strong);
+        assert_eq!(strong_options.lock().unwrap().as_slice(), &[options]);
+        assert!(fast_options.lock().unwrap().is_empty());
     }
 }

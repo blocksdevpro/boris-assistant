@@ -90,6 +90,8 @@ impl Default for FinishGateBudget {
 struct TodoItem {
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    content: String,
 }
 
 /// Status strings treated as still-open work.
@@ -109,6 +111,21 @@ pub fn pending_todo_count(todos_file: &Path) -> usize {
         return 0;
     };
     items.iter().filter(|t| is_open_status(&t.status)).count()
+}
+
+/// Text of each open todo (best-effort; empty when the file is missing).
+pub fn open_todo_texts(todos_file: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(todos_file) else {
+        return Vec::new();
+    };
+    let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&raw) else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter(|t| is_open_status(&t.status) && !t.content.trim().is_empty())
+        .map(|t| t.content.trim().to_string())
+        .collect()
 }
 
 /// System-reminder text when open todos remain after a content-only reply.

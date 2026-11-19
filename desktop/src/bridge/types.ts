@@ -94,6 +94,30 @@ export type StatusPicture = {
   input?: InputPeek | null;
   /** Why "Hey Boris" may not be working right now (Armed only). */
   listen_hint?: ListenHint | null;
+  /** Latest on-device self-check (in progress or finished). */
+  self_check?: SelfCheckReport | null;
+};
+
+/** Mirrors `boris_pipeline::SelfCheckReport`. */
+export type SelfCheckReport = {
+  running: boolean;
+  ok: boolean;
+  steps: SelfCheckStep[];
+};
+
+/** Mirrors `boris_pipeline::SelfCheckStep`. */
+export type SelfCheckStep = {
+  /** voice | wake | speech_detect | transcribe | microphone | speaker */
+  id: string;
+  ok: boolean;
+  detail: string;
+  ms: number;
+};
+
+/** Mirrors `boris_pipeline::ApiKeyStatus`. */
+export type ApiKeyStatus = {
+  state: "ok" | "no_credit" | "rejected" | "unreachable" | "missing" | string;
+  detail: string;
 };
 
 /** Mirrors `boris_pipeline::ListenHint` (snake_case). */
@@ -214,6 +238,8 @@ export type AppSettings = {
   voice_barge_in: boolean;
   /** Ignore TV / Translate / TTS out of a speaker after a live enroll. */
   ignore_speaker_playback: boolean;
+  /** Soft chime the moment "Hey Boris" is heard. */
+  wake_chime: boolean;
   /** Long-term markdown memory. */
   long_term_memory: boolean;
   /**
@@ -242,6 +268,10 @@ export type AppSettings = {
   start_with_windows: boolean;
   /** App-update feed: GitHub latest (`stable`) or the `beta` pre-release. */
   update_channel: UpdateChannel;
+  /** The first-run welcome flow was finished (or skipped) on this PC. */
+  onboarding_complete: boolean;
+  /** Show developer-level controls in Settings and the developer monitor. */
+  show_advanced_settings: boolean;
   /** Optional log filter (`info`, `boris=debug`, …). */
   logging_filter: string;
 };
@@ -275,6 +305,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   model_residency: "balanced",
   voice_barge_in: true,
   ignore_speaker_playback: true,
+  wake_chime: true,
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
@@ -286,6 +317,8 @@ export const EMPTY_SETTINGS: AppSettings = {
   start_engine_on_launch: true,
   start_with_windows: false,
   update_channel: "stable",
+  onboarding_complete: false,
+  show_advanced_settings: false,
   logging_filter: "",
 };
 
@@ -347,6 +380,7 @@ export const OFF_STATUS: StatusPicture = {
   wake_enroll: null,
   input: null,
   listen_hint: null,
+  self_check: null,
 };
 
 /** Normalize partial / missing Option fields from serde. */
@@ -373,6 +407,7 @@ export function normalizeStatus(
     wake_enroll: raw.wake_enroll ?? null,
     input: raw.input ?? null,
     listen_hint: raw.listen_hint ?? null,
+    self_check: raw.self_check ?? null,
   };
 }
 
@@ -397,6 +432,7 @@ export function normalizeSettings(
     model_residency: normalizeResidency(raw?.model_residency),
     voice_barge_in: raw?.voice_barge_in ?? true,
     ignore_speaker_playback: raw?.ignore_speaker_playback ?? true,
+    wake_chime: raw?.wake_chime ?? true,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),
@@ -415,6 +451,8 @@ export function normalizeSettings(
     start_engine_on_launch: raw?.start_engine_on_launch ?? true,
     start_with_windows: raw?.start_with_windows ?? false,
     update_channel: normalizeUpdateChannel(raw?.update_channel),
+    onboarding_complete: raw?.onboarding_complete ?? false,
+    show_advanced_settings: raw?.show_advanced_settings ?? false,
     logging_filter: raw?.logging_filter ?? "",
   };
 }

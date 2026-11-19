@@ -34,8 +34,13 @@ use tauri::{Emitter, Manager, WindowEvent};
 /// Process entry used by `main.rs` (and mobile entry when enabled).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before any thread can load ONNX Runtime.
+    let pinned_ort = pin_onnx_runtime_dylib();
     logging::init_tracing();
     tracing::info!("starting Tauri app");
+    if let Some(dll) = pinned_ort {
+        tracing::info!(path = %dll.display(), present = dll.is_file(), "ONNX Runtime pinned to bundled DLL");
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -50,6 +55,8 @@ pub fn run() {
             commands::engine::wake_liveness_status,
             commands::engine::start_wake_enroll,
             commands::engine::clear_wake_profile,
+            commands::engine::run_self_check,
+            commands::engine::check_api_key,
             commands::engine::list_input_devices,
             commands::engine::list_output_devices,
             commands::engine::switch_input,
@@ -75,6 +82,32 @@ pub fn run() {
         .on_window_event(on_main_window_event)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Point ONNX Runtime at the copy shipped beside the exe.
+///
+/// `ort` loads `onnxruntime.dll` at runtime (`load-dynamic`, enabled through
+/// `st-tts`). A bare DLL name searches the exe folder and then System32, and
+/// Windows 11 ships an old ONNX Runtime (1.17) there that hangs against the
+/// 1.24 API Boris needs instead of failing. With an explicit path, a missing
+/// or quarantined DLL is a load error the UI can explain. An `ORT_DYLIB_PATH`
+/// the user already set wins. Returns the path it pinned.
+#[cfg(windows)]
+fn pin_onnx_runtime_dylib() -> Option<std::path::PathBuf> {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return None;
+    }
+    let dll = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("onnxruntime.dll");
+    std::env::set_var("ORT_DYLIB_PATH", &dll);
+    Some(dll)
+}
+
+#[cfg(not(windows))]
+fn pin_onnx_runtime_dylib() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// One-time shell setup after the Tauri runtime is ready.

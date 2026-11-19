@@ -6,6 +6,7 @@ import { COMMANDS, EVENTS } from "../ipc";
 import {
   normalizeStatus,
   OFF_STATUS,
+  type ApiKeyStatus,
   type LivenessStatus,
   type PreflightReport,
   type StatusPicture,
@@ -160,4 +161,24 @@ export async function startWakeEnroll(takes = 4): Promise<void> {
 
 export async function clearWakeProfile(): Promise<void> {
   await invoke(COMMANDS.clearWakeProfile);
+}
+
+/** Run the on-device self-check; progress arrives as `status.self_check`. */
+export async function runSelfCheck(): Promise<void> {
+  try {
+    await invoke(COMMANDS.runSelfCheck);
+  } catch (e) {
+    const msg = invokeErrorMessage(e);
+    logger.warn("run_self_check failed", msg);
+    throw new Error(msg);
+  }
+}
+
+/** Ask OpenRouter whether `apiKey` works. Never throws. */
+export async function checkApiKey(apiKey: string): Promise<ApiKeyStatus> {
+  try {
+    return await invoke<ApiKeyStatus>(COMMANDS.checkApiKey, { apiKey });
+  } catch (e) {
+    return { state: "unreachable", detail: invokeErrorMessage(e) };
+  }
 }

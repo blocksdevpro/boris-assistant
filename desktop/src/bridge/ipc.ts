@@ -17,6 +17,8 @@ export const COMMANDS = {
   wakeLivenessStatus: "wake_liveness_status",
   startWakeEnroll: "start_wake_enroll",
   clearWakeProfile: "clear_wake_profile",
+  runSelfCheck: "run_self_check",
+  checkApiKey: "check_api_key",
   listInputDevices: "list_input_devices",
   listOutputDevices: "list_output_devices",
   switchInput: "switch_input",

@@ -18,7 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/blocksdevpro/boris-assistant/releases/latest"><strong>Download for Windows</strong></a>
+  <a href="https://boris.blocksdev.pro"><strong>Website</strong></a>
+  ·
+  <a href="https://boris.blocksdev.pro/download"><strong>Download for Windows</strong></a>
   ·
   <a href="CHANGELOG.md">Changelog</a>
   ·

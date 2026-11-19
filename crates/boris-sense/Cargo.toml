@@ -14,9 +14,9 @@ categories  = ["multimedia::audio"]
 [features]
 default = ["vad", "wake", "speaker"]
 # Silero VAD adapter (ORT session). Independent of LiveKit; shares process ORT.
-vad = ["dep:ort"]
+vad = ["dep:ort", "dep:libloading"]
 # LiveKit open-wake-word ONNX path (`livekit-wakeword` + `ort`).
-wake = ["dep:livekit-wakeword", "dep:ort"]
+wake = ["dep:livekit-wakeword", "dep:ort", "dep:libloading"]
 # Live-vs-loudspeaker acoustics + optional CAM++ speaker embeddings (ORT).
 speaker = ["dep:rustfft", "dep:ort"]
 
@@ -32,3 +32,8 @@ livekit-wakeword = { git = "https://github.com/blocksdevpro/rust-sdks", rev = "9
 # Same line as livekit-wakeword; we configure the process-global ORT env
 # before any wakeword sessions are created (shared pool + no spin).
 ort        = { version = "2.0.0-rc.11", default-features = true, features = ["ndarray"], optional = true }
+
+# Windows: check onnxruntime.dll before `ort` loads it (see `ort::preflight_dylib`).
+# Same major as `ort`'s own copy, so no second build.
+[target.'cfg(windows)'.dependencies]
+libloading = { version = "0.9", optional = true }

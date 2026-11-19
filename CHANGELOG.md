@@ -5,6 +5,80 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- First-run welcome flow: connect an OpenRouter key, choose fast replies or a
+  lighter PC, pick a microphone, then download the voice models. Finishing or
+  skipping it is remembered in `[ui] onboarding_complete`.
+- On-device setup check. Boris synthesizes "Hey Boris, what time is it?" in
+  memory and runs it through the real wake, speech-detection, and
+  speech-to-text models, plus a short live-mic and speaker check. It runs
+  automatically the first time Boris is listening and can be rerun from the
+  app. Results arrive as `StatusPicture.self_check`.
+- OpenRouter key check (`check_api_key`) that says whether the key works, has
+  no credit left, was rejected, or could not be reached, shown during setup and
+  in Connections settings.
+- Microphone and speaker recovery without a restart. Unpicked devices follow
+  the Windows default; an unplugged pick falls back to the default and is taken
+  back when it is plugged in again. `boris-audio` exposes per-stream health
+  (`AudioHealth`, `StreamHealth`) for this.
+- Idle problems surface even with every window hidden: the island shows once
+  when the mic is silent or a wake was ignored by the taught-voice filter, and
+  the tray tooltip says when Boris can't hear the mic.
+- A soft two-note chime the moment "Hey Boris" is accepted, so you know Boris
+  is listening before you speak. On by default; turn it off in Voice & Audio
+  settings (`[speech] wake_chime`, or `BORIS_WAKE_CHIME=0`).
+- "Repair voice models" in the setup check actually repairs them: Boris stops,
+  hash-checks every installed model, re-downloads damaged files with progress
+  in the toast, restarts, and runs the check again.
+- Privacy settings page, and a "Show advanced settings" toggle
+  (`[ui] show_advanced_settings`) that hides developer-level controls by
+  default.
+
+### Changed
+
+- New installs start listening on launch once models are downloaded and a key
+  is saved. Changing the key or model while idle restarts the engine so the
+  change takes effect without Stop/Start.
+- Status labels show the real device names instead of "Default mic".
+- When a silent mic starts working again, the warning turns into a brief
+  "Mic is working" instead of just disappearing.
+- Running the setup check while Boris is mid-reply waits for the turn to end
+  and then runs, instead of failing with "Boris was busy". The Home
+  "Run setup check" button stays available during a turn.
+- "Check key again" in the setup check re-checks only the OpenRouter key.
+- Changing barge-in, "Ignore TVs and videos", or the wake chime takes effect
+  right away (Boris restarts between turns), instead of after the next
+  Stop/Start.
+- The Windows build ships the Visual C++ runtime DLLs next to
+  `onnxruntime.dll`, so clean installs (including Windows Sandbox) can load the
+  speech engine.
+
+### Fixed
+
+- Choosing "Quit Boris" from the tray while Boris was running froze the whole
+  app. Status delivery held a lock that the UI thread also needed while
+  waiting on the UI thread itself. Quit now hides every window at once, stops
+  the engine in the background, and exits within 4 seconds even if the
+  engine is stuck. Lock overlay from the tray and other engine commands no
+  longer block the window either.
+- A fresh install could sit silent with no explanation. Boris now says when
+  the mic delivers only digital silence (Windows mic privacy, mute key, dead
+  input), with a button that opens the Windows microphone privacy page, and
+  when a wake was ignored by the speaker or taught-voice filter.
+- When the ONNX Runtime library cannot load, the app shows why (missing
+  `onnxruntime.dll` or Visual C++ runtime) instead of the engine dying
+  silently. A missing, quarantined, or too-old `onnxruntime.dll` used to hang
+  Boris at "Starting…" forever: `ort` 2.0.0-rc.12 deadlocks while reporting a
+  failed library load. Boris now checks the library itself before `ort`
+  loads it, and loads only the copy next to `boris-desktop.exe`, never the
+  older ONNX Runtime that Windows 11 keeps in System32. An engine-thread panic now publishes a Fault status instead of
+  leaving the UI on "Starting".
+- A device switch during the brief pause before a yes/no confirmation no longer
+  cancels the pending action; the question is re-asked on the new device.
+- A setup-check request during a turn is ignored (the UI asks to retry) instead
+  of cancelling a pending confirmation.
+
 ## [1.3.0-beta.1] - 2026-10-08
 
 First beta of the 1.3 line for Windows x64, with an NSIS installer.

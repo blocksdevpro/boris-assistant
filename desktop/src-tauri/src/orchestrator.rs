@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 use boris_pipeline::{
-    devices, paths, DeviceDto, Engine, EngineCommand, EngineHandle, LlmPrefs, PipelineConfig,
-    PreflightReport, StatusPicture, DebugCapture, DebugSnapshot,
+    devices, paths, DebugCapture, DebugSnapshot, DeviceDto, Engine, EngineCommand, EngineHandle,
+    LlmPrefs, PipelineConfig, PreflightReport, StatusPicture,
 };
 use boris_tts_supertone::SUPERTONE_SAMPLE_RATE;
 use tracing::{debug, error, info, warn};
@@ -133,7 +133,15 @@ impl StatusMirrorState {
 /// Shared app state: engine handle + latest status snapshot + device prefs.
 pub struct AppState {
     debug_capture: Arc<DebugCapture>,
+    /// Latest snapshot. Held only to read or update the cache, never across a
+    /// UI dispatch: overlay calls marshal to the UI thread, and the UI thread
+    /// (tray menu, sync commands, quit) locks this too. Holding it while
+    /// dispatching froze the app on tray "Quit Boris".
     status: Arc<Mutex<StatusMirrorState>>,
+    /// Serializes status delivery (overlay + event) so snapshots reach the UI
+    /// in cache order, including across engine rebuilds. Lock order:
+    /// `emit_order` → `status`. Never taken on the UI thread.
+    emit_order: Arc<Mutex<()>>,
     handle: Mutex<Option<EngineHandle>>,
     /// Join handle + shutdown sender; taken on teardown / rebuild.
     engine: Mutex<Option<Engine>>,
@@ -149,6 +157,7 @@ impl AppState {
         Self {
             debug_capture: Arc::new(DebugCapture::default()),
             status: Arc::new(Mutex::new(StatusMirrorState::new())),
+            emit_order: Arc::new(Mutex::new(())),
             handle: Mutex::new(None),
             engine: Mutex::new(None),
             live_llm: Mutex::new(None),
@@ -173,11 +182,16 @@ impl AppState {
         self.debug_capture.clear();
     }
 
-    /// Dispatch while holding the mirror lock so Stop cannot emit an older
-    /// snapshot after a new engine has already published its first status.
+    /// Dispatch the current snapshot in delivery order, so Stop cannot emit
+    /// an older snapshot after a new engine has already published its first
+    /// status.
+    ///
+    /// Must not run on the UI thread: it waits for `emit_order`, whose holder
+    /// may itself be waiting for the UI thread.
     pub fn with_status(&self, dispatch: impl FnOnce(StatusPicture)) {
-        let status = lock_or_recover(&self.status, "status");
-        dispatch(status.picture.clone());
+        let _order = lock_or_recover(&self.emit_order, "emit_order");
+        let picture = lock_or_recover(&self.status, "status").picture.clone();
+        dispatch(picture);
     }
 
     /// Model paths / readiness for the UI Start gate (`boris_pipeline::paths`).
@@ -357,7 +371,13 @@ impl AppState {
             status.last_pipeline_seq = None;
             status.generation
         };
-        Self::spawn_status_mirror(self.status.clone(), generation, status_rx, on_status);
+        Self::spawn_status_mirror(
+            self.status.clone(),
+            self.emit_order.clone(),
+            generation,
+            status_rx,
+            on_status,
+        );
         Ok(())
     }
 
@@ -385,6 +405,7 @@ impl AppState {
     /// Background thread: cache each snapshot and forward to the UI emit callback.
     fn spawn_status_mirror(
         status_cache: Arc<Mutex<StatusMirrorState>>,
+        emit_order: Arc<Mutex<()>>,
         generation: u64,
         status_rx: std::sync::mpsc::Receiver<StatusPicture>,
         on_status: Arc<dyn Fn(StatusPicture) + Send + Sync + 'static>,
@@ -397,10 +418,12 @@ impl AppState {
                     phase = ?picture.phase,
                     "status snapshot"
                 );
-                let mut status = lock_or_recover(&status_cache, "status");
-                if let Some(picture) = status.accept(generation, picture) {
-                    // Keep the native overlay and Tauri event in the same order
-                    // as the cached snapshots, including across engine rebuilds.
+                // `emit_order` keeps the native overlay and Tauri event in cache
+                // order across engine rebuilds; `status` is released before
+                // dispatch so the UI thread can always read it.
+                let _order = lock_or_recover(&emit_order, "emit_order");
+                let accepted = lock_or_recover(&status_cache, "status").accept(generation, picture);
+                if let Some(picture) = accepted {
                     on_status(picture);
                 }
             }
@@ -522,6 +545,18 @@ impl AppState {
         Ok(())
     }
 
+    /// Run the on-device self-check. Needs a live engine (it reuses the
+    /// engine's loaded models); progress arrives on the status stream.
+    pub fn run_self_check(&self) -> Result<(), String> {
+        let handle_g = lock_or_recover(&self.handle, "handle");
+        let Some(handle) = handle_g.as_ref() else {
+            return Err("Start Boris first, then run the check.".into());
+        };
+        handle
+            .run_self_check()
+            .map_err(|e| format!("self-check: {e}"))
+    }
+
     pub fn list_inputs() -> Vec<DeviceDto> {
         let list = devices::list_input_devices();
         debug!(count = list.len(), "list_input_devices");
@@ -604,5 +639,52 @@ mod tests {
         let accepted_fault = mirror.accept(2, fault).unwrap();
         assert_eq!(accepted_fault.seq, 5);
         assert_eq!(accepted_fault.detail.as_deref(), Some("model failed"));
+    }
+
+    /// Regression: tray "Quit Boris" froze the app. Delivery marshals overlay
+    /// calls to the UI thread, and the UI thread locks `status`; holding that
+    /// lock across delivery deadlocked the two.
+    #[test]
+    fn status_stays_readable_while_a_snapshot_is_being_delivered() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let state = AppState::new();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        // Stands in for an overlay call waiting on the (busy) UI thread.
+        let on_status: Arc<dyn Fn(StatusPicture) + Send + Sync> = Arc::new(move |_| {
+            let _ = entered_tx.send(());
+            let _ = lock_or_recover(&release_rx, "release").recv_timeout(Duration::from_secs(5));
+        });
+        let (tx, rx) = mpsc::channel();
+        AppState::spawn_status_mirror(
+            state.status.clone(),
+            state.emit_order.clone(),
+            0,
+            rx,
+            on_status,
+        );
+        let mut picture = StatusPicture::off();
+        picture.seq = 1;
+        tx.send(picture).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("snapshot delivered");
+
+        // The "UI thread" reads the cache while delivery is still blocked.
+        let (read_tx, read_rx) = mpsc::channel();
+        let cache = state.status.clone();
+        thread::spawn(move || {
+            let _ = lock_or_recover(&cache, "status").picture.clone();
+            let _ = read_tx.send(());
+        });
+        let readable = read_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let _ = release_tx.send(());
+        assert!(
+            readable,
+            "status lock is held across UI dispatch (deadlock risk)"
+        );
     }
 }

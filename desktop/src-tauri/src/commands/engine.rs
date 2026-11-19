@@ -52,6 +52,7 @@ pub async fn start_engine(
             move |picture| {
                 // Cached prefs only — never load_settings on the status hot path.
                 overlay_win::sync_visibility(&app_for_status, &picture);
+                crate::tray::sync_tooltip(&app_for_status, &picture);
                 let _ = app_for_status.emit(EVENT_STATUS, picture);
             },
         )
@@ -118,6 +119,7 @@ pub(crate) fn start_engine_with_settings(
         pin_provider,
         move |picture| {
             overlay_win::sync_visibility(&app_for_status, &picture);
+            crate::tray::sync_tooltip(&app_for_status, &picture);
             let _ = app_for_status.emit(EVENT_STATUS, picture);
         },
     )
@@ -164,14 +166,28 @@ pub fn wake_liveness_status() -> boris_pipeline::LivenessStatus {
     boris_pipeline::liveness_status()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_wake_enroll(state: State<'_, AppState>, takes: Option<u32>) -> Result<(), String> {
     state.start_wake_enroll(takes.unwrap_or(4))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_wake_profile(state: State<'_, AppState>) -> Result<(), String> {
     state.clear_wake_profile()
+}
+
+/// Start the on-device voice-chain self-check (results stream via status).
+#[tauri::command(async)]
+pub fn run_self_check(state: State<'_, AppState>) -> Result<(), String> {
+    tracing::info!("run_self_check command");
+    state.run_self_check()
+}
+
+/// Ask OpenRouter whether `api_key` works and has credit. Never errors:
+/// failures come back as a state the UI can explain.
+#[tauri::command]
+pub async fn check_api_key(api_key: String) -> boris_pipeline::ApiKeyStatus {
+    boris_pipeline::check_api_key(&api_key).await
 }
 
 #[tauri::command]

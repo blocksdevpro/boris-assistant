@@ -128,6 +128,8 @@ pub struct PipelineConfig {
     /// Reject speaker-played wake hits (TV / Translate / TTS) when a live
     /// profile is enrolled. Live mouths always pass.
     pub ignore_speaker_playback: bool,
+    /// Chime when a wake is accepted (`BORIS_WAKE_CHIME=0` disables).
+    pub wake_chime: bool,
 }
 
 impl PipelineConfig {
@@ -203,6 +205,7 @@ impl PipelineConfig {
             model_residency: resolve_model_residency(&saved),
             voice_barge_in: resolve_voice_barge_in(&saved),
             ignore_speaker_playback: resolve_ignore_speaker_playback(&saved),
+            wake_chime: env_truthy("BORIS_WAKE_CHIME").unwrap_or(saved.wake_chime),
         }
     }
 }

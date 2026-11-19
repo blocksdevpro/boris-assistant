@@ -16,6 +16,7 @@ use boris_core::{AudioBuffer, AudioSample, Error, Result, AUDIO_TARGET_RATE};
 use cpal::traits::{DeviceTrait, StreamTrait};
 
 use crate::frontend::{try_send_far_end, FarEnd};
+use crate::health::{on_stream_error, FailFlag};
 use crate::resampler::{OutputResampler, Resampler};
 
 /// Empty device callbacks required after the software queue empties before
@@ -161,6 +162,7 @@ impl OutputPipeline {
         event_tx: crossbeam_channel::Sender<OutputEvent>,
         source_rate: u32,
         far_end_tx: FarEndTx,
+        failed: FailFlag,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let device_id = device
@@ -192,6 +194,7 @@ impl OutputPipeline {
                 state.clone(),
                 event_tx.clone(),
                 event_drops.clone(),
+                failed.clone(),
             )?,
             cpal::SampleFormat::I16 => build_output_stream::<i16>(
                 device,
@@ -199,6 +202,7 @@ impl OutputPipeline {
                 state.clone(),
                 event_tx.clone(),
                 event_drops.clone(),
+                failed.clone(),
             )?,
             cpal::SampleFormat::U16 => build_output_stream::<u16>(
                 device,
@@ -206,6 +210,7 @@ impl OutputPipeline {
                 state.clone(),
                 event_tx.clone(),
                 event_drops.clone(),
+                failed.clone(),
             )?,
             cpal::SampleFormat::I32 => build_output_stream::<i32>(
                 device,
@@ -213,6 +218,7 @@ impl OutputPipeline {
                 state.clone(),
                 event_tx.clone(),
                 event_drops.clone(),
+                failed.clone(),
             )?,
             cpal::SampleFormat::U32 => build_output_stream::<u32>(
                 device,
@@ -220,6 +226,7 @@ impl OutputPipeline {
                 state.clone(),
                 event_tx.clone(),
                 event_drops.clone(),
+                failed.clone(),
             )?,
             other => {
                 return Err(Error::audio(format!(
@@ -459,6 +466,7 @@ fn build_output_stream<T>(
     state: Arc<Mutex<OutputStreamState>>,
     event_tx: crossbeam_channel::Sender<OutputEvent>,
     event_drops: Arc<AtomicU64>,
+    failed: FailFlag,
 ) -> Result<cpal::Stream>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + 'static,
@@ -534,7 +542,7 @@ where
                     }
                 }
             },
-            |err| tracing::error!("OutputStream error: {err}"),
+            move |err| on_stream_error("output", &failed, &err),
             None,
         )
         .map_err(|e| Error::audio(format!("build_output_stream failed: {e}")))

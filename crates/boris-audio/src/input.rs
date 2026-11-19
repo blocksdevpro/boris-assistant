@@ -19,6 +19,7 @@ use cpal::{
 use boris_core::{ArcAudioBuffer, AudioBuffer, AudioSample, Error, Result};
 
 use crate::frontend::{CaptureFrontEnd, FarEnd};
+use crate::health::{on_stream_error, FailFlag};
 use crate::resampler::InputResampler;
 
 /// Bounded queue capacity for raw capture frames (~2–3s headroom at ~10ms callbacks).
@@ -58,6 +59,7 @@ impl InputPipeline {
         device: &cpal::Device,
         subscribers: InputSubscribers,
         far_end: crossbeam_channel::Receiver<FarEnd>,
+        failed: FailFlag,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (audio_tx, audio_rx) =
@@ -105,6 +107,7 @@ impl InputPipeline {
                 audio_tx,
                 capture_drops.clone(),
                 scratch_return_rx,
+                failed.clone(),
             )?,
             cpal::SampleFormat::I16 => build_input_stream::<i16>(
                 device,
@@ -112,6 +115,7 @@ impl InputPipeline {
                 audio_tx,
                 capture_drops.clone(),
                 scratch_return_rx,
+                failed.clone(),
             )?,
             cpal::SampleFormat::U16 => build_input_stream::<u16>(
                 device,
@@ -119,6 +123,7 @@ impl InputPipeline {
                 audio_tx,
                 capture_drops.clone(),
                 scratch_return_rx,
+                failed.clone(),
             )?,
             cpal::SampleFormat::I32 => build_input_stream::<i32>(
                 device,
@@ -126,6 +131,7 @@ impl InputPipeline {
                 audio_tx,
                 capture_drops.clone(),
                 scratch_return_rx,
+                failed.clone(),
             )?,
             cpal::SampleFormat::U32 => build_input_stream::<u32>(
                 device,
@@ -133,6 +139,7 @@ impl InputPipeline {
                 audio_tx,
                 capture_drops.clone(),
                 scratch_return_rx,
+                failed.clone(),
             )?,
             other => {
                 return Err(Error::audio(format!(
@@ -285,6 +292,7 @@ fn build_input_stream<T>(
     audio_tx: crossbeam_channel::Sender<AudioBuffer>,
     capture_drops: Arc<AtomicU64>,
     scratch_return_rx: crossbeam_channel::Receiver<AudioBuffer>,
+    failed: FailFlag,
 ) -> Result<cpal::Stream>
 where
     T: cpal::Sample + cpal::SizedSample + 'static,
@@ -318,7 +326,7 @@ where
                     }
                 }
             },
-            |err| tracing::error!("InputStream error: {err}"),
+            move |err| on_stream_error("input", &failed, &err),
             None,
         )
         .map_err(|e| Error::audio(format!("build_input_stream failed: {e}")))

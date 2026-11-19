@@ -34,7 +34,8 @@
 .boris-orb[data-state="awaiting-input"],
 .boris-orb[data-state="awaiting-reply"] { opacity: 0.72; }
 .boris-orb[data-state="fault"] { --orb-accent: var(--boris-red, #ff827b); }
-.boris-orb[data-state="confirm"] { --orb-accent: var(--boris-orange, #efbd72); }
+.boris-orb[data-state="confirm"],
+.boris-orb[data-state="attention"] { --orb-accent: var(--boris-orange, #efbd72); }
 @media (prefers-reduced-motion: reduce) {
   .boris-orb__canvas { transition: none; }
 }

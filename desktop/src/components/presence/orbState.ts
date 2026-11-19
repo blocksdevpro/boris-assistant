@@ -5,7 +5,7 @@ import { bargeInStage, isToolActivity } from "@/lib/statusPresentation";
 export type BorisOrbState =
   | "off" | "starting" | "ready" | "hearing" | "reading" | "thinking"
   | "searching" | "working" | "weaving" | "shaping" | "talking"
-  | "awaiting-reply" | "awaiting-input" | "confirm" | "fault";
+  | "awaiting-reply" | "awaiting-input" | "confirm" | "attention" | "fault";
 
 type OrbPresentation = { animation: OrbState; label: string; speed: number; paused?: boolean };
 
@@ -24,12 +24,13 @@ export const ORB_PRESENTATIONS: Record<BorisOrbState, OrbPresentation> = {
   "awaiting-reply": { animation: "listening", label: "Boris is waiting for your spoken reply", speed: 0.4 },
   "awaiting-input": { animation: "breathing", label: "Boris is waiting for typed input", speed: 0.4, paused: true },
   confirm: { animation: "breathing", label: "Boris needs your confirmation", speed: 0.4, paused: true },
+  attention: { animation: "breathing", label: "Boris can't hear your microphone", speed: 0.4, paused: true },
   fault: { animation: "breathing", label: "Boris needs attention", speed: 0.4, paused: true },
 };
 
 /** Tool details become a small set of stable visual categories, never audio amplitude. */
 export function orbStateFromStatus(
-  status: Pick<StatusPicture, "engine" | "phase" | "activity">,
+  status: Pick<StatusPicture, "engine" | "phase" | "activity" | "listen_hint">,
 ): BorisOrbState {
   if (status.engine === "Fault") return "fault";
   if (status.engine === "Starting") return "starting";
@@ -46,7 +47,7 @@ export function orbStateFromStatus(
     case "Reading": return "reading";
     case "Talking": return "talking";
     case "Quiet":
-    case "Armed": return "ready";
+    case "Armed": return status.listen_hint === "mic_silent" ? "attention" : "ready";
     case "Thinking": {
       const activity = status.activity?.toLowerCase() ?? "";
       if (activity.startsWith("thinking")) return "thinking";

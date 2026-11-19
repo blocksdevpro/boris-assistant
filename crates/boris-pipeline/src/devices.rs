@@ -28,7 +28,9 @@ fn device_id_key(id: &impl std::fmt::Display) -> String {
     id.to_string()
 }
 
-fn ids_match(device: &DeviceInfo, key: &str) -> bool {
+/// A device matches a stored key by id (`host:device`) or, for older
+/// configs and UI strings, by its display name.
+pub(crate) fn ids_match(device: &DeviceInfo, key: &str) -> bool {
     let k = key.trim();
     if k.is_empty() {
         return false;

@@ -10,6 +10,7 @@ Shared foundation types for the Boris assistant workspace.
 | `AUDIO_TARGET_RATE` (16 kHz mono f32) | LLM HTTP clients |
 | `TurnId` | Engine phase / UI status |
 | Shared `Error` / `Result` | Session FSM / worker buses |
+| `panic_message` (caught panic payload → text) | |
 
 ## Public API (crate root)
 
@@ -18,7 +19,7 @@ Prefer importing from the crate root. Modules are private; only re-exports are p
 ```rust
 use boris_core::{
     AudioBuffer, AudioSample, ArcAudioBuffer, AUDIO_TARGET_RATE,
-    TurnId, Error, Result,
+    TurnId, Error, Result, panic_message,
 };
 ```
 

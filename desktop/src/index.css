@@ -361,7 +361,7 @@
   z-index: 1;
 }
 
-.overlay-island[data-state="confirm"] {
+.overlay-island:is([data-state="confirm"], [data-state="attention"]) {
   --overlay-state-tint: rgba(255, 159, 10, 0.075);
   border-color: rgba(255, 190, 92, 0.22);
 }
@@ -371,7 +371,7 @@
   border-color: rgba(255, 105, 97, 0.2);
 }
 
-.overlay-island:is([data-state="confirm"], [data-state="fault"])::after {
+.overlay-island:is([data-state="confirm"], [data-state="attention"], [data-state="fault"])::after {
   opacity: 1;
 }
 
@@ -844,4 +844,68 @@
     transition-duration: 0.01ms !important;
   }
 
+}
+
+/* ── Setup check toast (main window, bottom-right) ───────────────────── */
+.setup-toast {
+  overflow: hidden;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--boris-surface-2) 88%, transparent);
+  backdrop-filter: blur(24px) saturate(1.3);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 4px 14px rgba(0, 0, 0, 0.28),
+    0 24px 64px rgba(0, 0, 0, 0.46);
+}
+
+/* ── Listen pill (Home status: mic silent / wake ignored) ────────────── */
+.listen-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 4px 0 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.78);
+}
+.listen-pill[data-tone="attention"] {
+  background: color-mix(in srgb, var(--boris-orange) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--boris-orange) 30%, transparent);
+  color: #ffd59a;
+}
+.listen-pill[data-tone="ok"] {
+  background: color-mix(in srgb, var(--boris-green) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--boris-green) 26%, transparent);
+  color: #bdf2cf;
+}
+.listen-pill[data-quiet="true"] { padding-right: 12px; }
+.listen-pill__action {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  transition: background-color 180ms var(--boris-ease-out, ease-out);
+}
+.listen-pill__action:hover { background: rgba(255, 255, 255, 0.2); }
+.listen-pill__action:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3); }
+
+.listen-popover {
+  width: 288px;
+  border-radius: 16px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--boris-surface-2) 92%, transparent);
+  backdrop-filter: blur(24px) saturate(1.3);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 18px 50px rgba(0, 0, 0, 0.5);
+  transform-origin: var(--radix-popover-content-transform-origin);
 }

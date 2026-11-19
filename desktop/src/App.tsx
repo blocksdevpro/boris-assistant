@@ -59,6 +59,15 @@ function isOverlayFixtureMatrix(): boolean {
   );
 }
 
+const SetupCheckPreview = import.meta.env.DEV
+  ? lazy(() => import("@/preview/SetupCheckPreview"))
+  : null;
+
+function isSetupCheckPreview(): boolean {
+  if (!import.meta.env.DEV || isTauriRuntime()) return false;
+  return new URLSearchParams(window.location.search).get("preview") === "setup-check";
+}
+
 function devFixtureName(): string | null {
   if (!import.meta.env.DEV || isTauriRuntime()) return null;
   return new URLSearchParams(window.location.search).get("fixture");
@@ -165,6 +174,16 @@ function App() {
           fallback={<SurfaceFallback label="Preparing preview gallery" />}
         >
           <OverlayFixtureMatrix />
+        </Suspense>
+      </AppErrorBoundary>
+    );
+  }
+
+  if (isSetupCheckPreview() && SetupCheckPreview) {
+    return (
+      <AppErrorBoundary>
+        <Suspense fallback={<SurfaceFallback label="Preparing setup check lab" />}>
+          <SetupCheckPreview />
         </Suspense>
       </AppErrorBoundary>
     );

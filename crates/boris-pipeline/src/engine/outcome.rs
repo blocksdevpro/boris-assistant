@@ -266,14 +266,17 @@ pub(super) fn resolve_agent_outcome(
         ctx.picture.activity = Some("confirm · say yes or no".into());
         ctx.picture.publish();
         if let Err(e) = hear::settle_after_confirm(ctx.mic, ctx.cmd_rx, ctx.running) {
-            ctx.agent.abort();
             ctx.picture.clear_activity();
+            // Device switches below re-ask the same pending confirmation, so
+            // only the arms that end the turn may cancel it.
             return match e {
                 HearBreak::Stopped if !*ctx.running => {
+                    ctx.agent.abort();
                     ctx.go_off();
                     OutcomeResolve::Stopped
                 }
                 HearBreak::Disconnected => {
+                    ctx.agent.abort();
                     end_session(ctx.store, ctx.active_session, ctx.transcript_len, ctx.agent);
                     release_voice_models(ctx.stt.as_mut(), ctx.tts.as_mut(), "disconnected");
                     ctx.picture.mark_devices_dead();
@@ -303,12 +306,17 @@ pub(super) fn resolve_agent_outcome(
                 }
                 // Teach page stole the mic mid-confirm: yield. `abort()`
                 // cancels the pending tool inside the agent — nothing dangles.
-                HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile => {
-                    tracing::info!(turn = %ctx.turn, "wake enroll during confirm — yielding turn");
+                // (`RunSelfCheck` is only produced while Armed.)
+                HearBreak::StartWakeEnroll { .. }
+                | HearBreak::ClearWakeProfile
+                | HearBreak::RunSelfCheck => {
+                    tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
+                    ctx.agent.abort();
                     ctx.picture.set_phase(Phase::Armed);
                     OutcomeResolve::ReArm
                 }
                 HearBreak::Stopped => {
+                    ctx.agent.abort();
                     ctx.picture.set_phase(Phase::Armed);
                     OutcomeResolve::ReArm
                 }
@@ -355,8 +363,12 @@ pub(super) fn resolve_agent_outcome(
                 };
                 continue;
             }
-            Err(HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile) => {
-                tracing::info!(turn = %ctx.turn, "wake enroll during confirm — yielding turn");
+            Err(
+                HearBreak::StartWakeEnroll { .. }
+                | HearBreak::ClearWakeProfile
+                | HearBreak::RunSelfCheck,
+            ) => {
+                tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
                 ctx.agent.abort();
                 ctx.picture.set_phase(Phase::Armed);
                 return OutcomeResolve::ReArm;
@@ -758,8 +770,14 @@ fn wait_typed_input(
                     &device_id,
                 );
             }
-            Ok(EngineCommand::StartWakeEnroll { .. } | EngineCommand::ClearWakeProfile) => {
-                tracing::debug!("wake enroll command ignored while waiting for typed input");
+            Ok(
+                EngineCommand::StartWakeEnroll { .. }
+                | EngineCommand::ClearWakeProfile
+                | EngineCommand::RunSelfCheck,
+            ) => {
+                tracing::debug!(
+                    "wake profile / self-check command ignored while waiting for typed input"
+                );
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

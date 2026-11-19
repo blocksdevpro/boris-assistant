@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use boris_pipeline::{AppSettings, EngineState, Phase, StatusPicture};
+use boris_pipeline::{AppSettings, EngineState, ListenHint, Phase, StatusPicture};
 use serde::Serialize;
 use tauri::{
     AppHandle, Emitter, Listener, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl,
@@ -60,6 +60,8 @@ const OVERLAY_MAX_HEIGHT: f64 = OVERLAY_CARD_BASE_HEIGHT * OVERLAY_MAX_SCALE;
 const READY_LINGER: Duration = Duration::from_millis(6_500);
 const CARD_LINGER: Duration = Duration::from_millis(15_000);
 const FAULT_LINGER: Duration = Duration::from_millis(8_000);
+/// "Can't hear your mic" while idle: long enough to read, then out of the way.
+const MIC_ALERT_LINGER: Duration = Duration::from_millis(8_000);
 
 /// React keeps outgoing content mounted while the island material morphs.
 /// The native viewport must not contract underneath that exit animation.
@@ -132,6 +134,42 @@ pub fn overlay_prefs_dirty() -> bool {
 /// Desired layout so prefs/scale changes keep a live card sized.
 /// 0 = presence, 1 = thought, 2 = card.
 static OVERLAY_LAYOUT: AtomicU8 = AtomicU8::new(0);
+
+/// A problem worth surfacing on the island while Boris is idle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum IdleAlert {
+    Clear = 0,
+    MicSilent = 1,
+    VoiceIgnored = 2,
+}
+
+impl IdleAlert {
+    fn of(status: &StatusPicture) -> Self {
+        if status.engine != EngineState::On || !matches!(status.phase, Phase::Armed | Phase::Quiet)
+        {
+            return Self::Clear;
+        }
+        match status.listen_hint {
+            Some(ListenHint::MicSilent) => Self::MicSilent,
+            Some(ListenHint::IgnoredVoice) => Self::VoiceIgnored,
+            // Speaker / TV rejections are the filter working: no island.
+            Some(ListenHint::IgnoredPlayback) | None => Self::Clear,
+        }
+    }
+
+    fn linger(self) -> Duration {
+        match self {
+            Self::MicSilent => MIC_ALERT_LINGER,
+            Self::VoiceIgnored | Self::Clear => READY_LINGER,
+        }
+    }
+}
+
+/// Idle alert last surfaced on the island ([`IdleAlert`] as `u8`).
+/// Edge-triggered: a lasting problem shows once, not per snapshot, and shows
+/// again only after it clears and comes back.
+static LAST_IDLE_ALERT: AtomicU8 = AtomicU8::new(IdleAlert::Clear as u8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayLayout {
@@ -288,7 +326,8 @@ fn ensure_overlay<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow
     app.get_webview_window("overlay")
 }
 
-fn hide_if_present<R: Runtime>(app: &AppHandle<R>) {
+/// Hide the island if it exists (never creates or restyles a fresh one).
+pub(crate) fn hide_if_present<R: Runtime>(app: &AppHandle<R>) {
     OVERLAY_REVEAL_PENDING.store(false, Ordering::Release);
     GEOMETRY_EPOCH.fetch_add(1, Ordering::SeqCst);
     PENDING_GEOMETRY.store(0, Ordering::Release);
@@ -395,6 +434,9 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings)
 pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
     let epoch = VISIBILITY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     let show_on_wake = SHOW_OVERLAY_ON_WAKE.load(Ordering::Relaxed);
+    let alert = IdleAlert::of(status);
+    let previous = LAST_IDLE_ALERT.swap(alert as u8, Ordering::Relaxed);
+    let new_alert = alert != IdleAlert::Clear && previous != alert as u8;
 
     if !show_on_wake || status.engine == EngineState::Off {
         hide_if_present(app);
@@ -439,6 +481,25 @@ pub fn sync_visibility<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
             | Phase::AwaitingInput
     );
     OVERLAY_AWAIT_INPUT.store(status.phase == Phase::AwaitingInput, Ordering::Release);
+
+    if !active && new_alert {
+        // The main window is usually hidden: surface an idle problem once.
+        if let Some(overlay) = ensure_overlay(app) {
+            OVERLAY_LAYOUT.store(OverlayLayout::Presence as u8, Ordering::Relaxed);
+            if overlay_is_visible(&overlay) {
+                coordinate_overlay_geometry(
+                    app,
+                    &overlay,
+                    scale_percent,
+                    LAYOUT_CONTRACTION_SETTLE,
+                );
+            } else {
+                request_reveal(&overlay, OverlayLayout::Presence);
+            }
+            schedule_hide(app.clone(), epoch, alert.linger());
+        }
+        return;
+    }
 
     if !active {
         // Armed/Quiet: never create or resurrect the island at startup.
@@ -788,12 +849,33 @@ fn apply_cursor_passthrough<R: Runtime>(overlay: &tauri::WebviewWindow<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boris_pipeline::{ArtifactPeek, EngineState, Phase, StatusPicture};
+    use boris_pipeline::{ArtifactPeek, EngineState, ListenHint, Phase, StatusPicture};
 
     fn on() -> StatusPicture {
         let mut picture = StatusPicture::off();
         picture.engine = EngineState::On;
         picture
+    }
+
+    #[test]
+    fn idle_alerts_only_surface_while_listening() {
+        let mut picture = on();
+        picture.phase = Phase::Armed;
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::Clear);
+        picture.listen_hint = Some(ListenHint::MicSilent);
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::MicSilent);
+        picture.listen_hint = Some(ListenHint::IgnoredVoice);
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::VoiceIgnored);
+        // Speaker / TV rejections are the filter working: no island.
+        picture.listen_hint = Some(ListenHint::IgnoredPlayback);
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::Clear);
+        // Mid-turn or engine off: never an idle alert.
+        picture.listen_hint = Some(ListenHint::MicSilent);
+        picture.phase = Phase::Thinking;
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::Clear);
+        picture.phase = Phase::Armed;
+        picture.engine = EngineState::Off;
+        assert_eq!(IdleAlert::of(&picture), IdleAlert::Clear);
     }
 
     #[test]

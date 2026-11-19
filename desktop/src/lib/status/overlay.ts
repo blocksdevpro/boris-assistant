@@ -23,6 +23,16 @@ export function pickOverlayPresence(
     status.engine === "On" ? bargeInPresence(status.activity) : null;
   if (barge) return barge;
 
+  // Idle problems the island surfaces on its own (main window is usually hidden).
+  if (status.engine === "On" && (phase === "Armed" || phase === "Quiet")) {
+    if (status.listen_hint === "mic_silent") {
+      return { primary: "Can’t hear your mic", secondary: "Unmute it, or open Boris to fix" };
+    }
+    if (status.listen_hint === "ignored_voice") {
+      return { primary: "Didn’t sound like you", secondary: "Re-teach your voice in Boris" };
+    }
+  }
+
   // Typed input wins even if the snapshot still says Thinking for a frame.
   if (status.input) {
     return {

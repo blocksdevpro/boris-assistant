@@ -156,6 +156,9 @@ pub struct AppSettings {
     /// Ignore TV / Translate / TTS coming out of a speaker after enroll.
     #[serde(default = "default_true")]
     pub ignore_speaker_playback: bool,
+    /// Play a short chime when a wake is accepted.
+    #[serde(default = "default_true")]
+    pub wake_chime: bool,
     /// Canonical evidence-backed memory (legacy config key retained for compatibility).
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
@@ -190,6 +193,12 @@ pub struct AppSettings {
     /// App-update feed: `stable` (GitHub latest) or `beta` (pre-release tag `beta`).
     #[serde(default = "default_update_channel")]
     pub update_channel: String,
+    /// The first-run welcome flow has been finished (or skipped) on this PC.
+    #[serde(default)]
+    pub onboarding_complete: bool,
+    /// Show developer-level controls in Settings (routing, diagnostics, …).
+    #[serde(default)]
+    pub show_advanced_settings: bool,
     /// Optional log filter hint (`info`, `boris=debug`, …). Host may apply on restart.
     #[serde(default)]
     pub logging_filter: String,
@@ -212,6 +221,7 @@ impl Default for AppSettings {
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
+            wake_chime: true,
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
@@ -223,6 +233,8 @@ impl Default for AppSettings {
             start_engine_on_launch: default_start_engine_on_launch(),
             start_with_windows: false,
             update_channel: default_update_channel(),
+            onboarding_complete: false,
+            show_advanced_settings: false,
             logging_filter: String::new(),
         }
     }
@@ -259,6 +271,7 @@ impl std::fmt::Debug for AppSettings {
             .field("long_term_memory", &self.long_term_memory)
             .field("trusted_auto_moderate", &self.trusted_auto_moderate)
             .field("max_confirms_per_turn", &self.max_confirms_per_turn)
+            .field("wake_chime", &self.wake_chime)
             .field("show_overlay_on_wake", &self.show_overlay_on_wake)
             .field("overlay_caption_mode", &self.overlay_caption_mode)
             .field("overlay_position", &self.overlay_position)
@@ -267,6 +280,8 @@ impl std::fmt::Debug for AppSettings {
             .field("start_engine_on_launch", &self.start_engine_on_launch)
             .field("start_with_windows", &self.start_with_windows)
             .field("update_channel", &self.update_channel)
+            .field("onboarding_complete", &self.onboarding_complete)
+            .field("show_advanced_settings", &self.show_advanced_settings)
             .field("logging_filter", &self.logging_filter)
             .finish()
     }
@@ -331,6 +346,8 @@ struct SpeechSection {
     voice_barge_in: bool,
     #[serde(default = "default_true")]
     ignore_speaker_playback: bool,
+    #[serde(default = "default_true")]
+    wake_chime: bool,
 }
 
 impl Default for SpeechSection {
@@ -340,6 +357,7 @@ impl Default for SpeechSection {
             model_residency: default_model_residency(),
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
+            wake_chime: true,
         }
     }
 }
@@ -382,6 +400,10 @@ struct UiSection {
     start_with_windows: bool,
     #[serde(default = "default_update_channel")]
     update_channel: String,
+    #[serde(default)]
+    onboarding_complete: bool,
+    #[serde(default)]
+    show_advanced_settings: bool,
 }
 
 impl Default for UiSection {
@@ -395,6 +417,8 @@ impl Default for UiSection {
             start_engine_on_launch: default_start_engine_on_launch(),
             start_with_windows: false,
             update_channel: default_update_channel(),
+            onboarding_complete: false,
+            show_advanced_settings: false,
         }
     }
 }
@@ -423,6 +447,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.model_residency = normalize_model_residency(cfg.speech.model_residency);
     out.voice_barge_in = cfg.speech.voice_barge_in;
     out.ignore_speaker_playback = cfg.speech.ignore_speaker_playback;
+    out.wake_chime = cfg.speech.wake_chime;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
@@ -434,6 +459,8 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.start_engine_on_launch = cfg.ui.start_engine_on_launch;
     out.start_with_windows = cfg.ui.start_with_windows;
     out.update_channel = normalize_update_channel(cfg.ui.update_channel);
+    out.onboarding_complete = cfg.ui.onboarding_complete;
+    out.show_advanced_settings = cfg.ui.show_advanced_settings;
     out.logging_filter = cfg.logging.filter;
 }
 
@@ -563,6 +590,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         model_residency: normalize_model_residency(settings.model_residency.clone()),
         voice_barge_in: settings.voice_barge_in,
         ignore_speaker_playback: settings.ignore_speaker_playback,
+        wake_chime: settings.wake_chime,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
@@ -578,6 +606,8 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         start_engine_on_launch: settings.start_engine_on_launch,
         start_with_windows: settings.start_with_windows,
         update_channel: normalize_update_channel(settings.update_channel.clone()),
+        onboarding_complete: settings.onboarding_complete,
+        show_advanced_settings: settings.show_advanced_settings,
     };
     let logging = LoggingSection {
         filter: settings.logging_filter.clone(),
@@ -1055,6 +1085,7 @@ mod tests {
             model_residency: "balanced".into(),
             voice_barge_in: false,
             ignore_speaker_playback: true,
+            wake_chime: false,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
@@ -1066,6 +1097,8 @@ mod tests {
             start_engine_on_launch: true,
             start_with_windows: true,
             update_channel: "beta".into(),
+            onboarding_complete: true,
+            show_advanced_settings: true,
             logging_filter: "info".into(),
         };
         save_settings(&s).expect("save");
@@ -1114,6 +1147,9 @@ mod tests {
         assert!(loaded.start_engine_on_launch);
         assert!(loaded.start_with_windows);
         assert_eq!(loaded.update_channel, "beta");
+        assert!(!loaded.wake_chime);
+        assert!(loaded.onboarding_complete);
+        assert!(loaded.show_advanced_settings);
         assert_eq!(loaded.logging_filter, "info");
         assert!(raw_cfg.contains("update_channel"));
 

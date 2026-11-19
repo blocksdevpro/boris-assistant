@@ -4,7 +4,8 @@
 //!
 //! Close on the console window hides it (app + overlay keep running).
 //! The tray is the way back: left-click or "Open Boris" shows the console;
-//! "Quit Boris" stops the engine (via [`AppState`]) and exits fully.
+//! "Quit Boris" hides every window at once, stops the engine (via
+//! [`AppState`]) off the UI thread with a grace period, and exits fully.
 //!
 //! Overlay input lock is delegated to [`crate::overlay_win`] — tray only
 //! exposes menu actions. No voice/engine policy lives here.
@@ -15,11 +16,38 @@ use tauri::{
     AppHandle, Manager, Runtime,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use boris_pipeline::{EngineState, ListenHint, StatusPicture};
+
 use crate::orchestrator::AppState;
 use crate::overlay_win;
 
 const TRAY_ID: &str = "boris-tray";
 const TRAY_TOOLTIP: &str = "Boris — voice assistant";
+const TRAY_TOOLTIP_MIC: &str = "Boris can't hear your mic";
+
+/// Tooltip currently shows the mic warning (avoids a Win32 call per snapshot).
+static TRAY_MIC_WARNING: AtomicBool = AtomicBool::new(false);
+
+/// Hovering the tray says when Boris can't hear the mic, even with every
+/// window hidden.
+pub fn sync_tooltip<R: Runtime>(app: &AppHandle<R>, status: &StatusPicture) {
+    let warn =
+        status.engine == EngineState::On && status.listen_hint == Some(ListenHint::MicSilent);
+    if TRAY_MIC_WARNING.swap(warn, Ordering::Relaxed) == warn {
+        return;
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let text = if warn { TRAY_TOOLTIP_MIC } else { TRAY_TOOLTIP };
+        if let Err(e) = tray.set_tooltip(Some(text)) {
+            tracing::debug!(error = %e, "tray tooltip");
+        }
+    }
+}
 
 const MENU_OPEN: &str = "open";
 const MENU_OVERLAY_UNLOCK: &str = "overlay_unlock";
@@ -115,13 +143,62 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Stop the voice engine if running, then exit the process.
+/// Longest "Quit Boris" waits for the engine to stop before exiting anyway.
+const QUIT_GRACE: Duration = Duration::from_secs(4);
+
+/// Set once quit starts, so a second click cannot start a second teardown.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// Hide every window now, stop the engine off the UI thread, then exit.
+///
+/// Runs from the tray menu handler, i.e. **on the UI thread**. Stopping joins
+/// the engine thread (seconds while audio and models shut down), and status
+/// delivery marshals overlay calls to the UI thread, so blocking here froze
+/// the whole app. The UI thread only hides windows and returns.
 fn quit_app<R: Runtime>(app: &AppHandle<R>) {
-    tracing::info!("tray: quit requested");
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Err(e) = state.stop() {
-            tracing::warn!(error = %e, "stop engine on quit");
-        }
+    if QUITTING.swap(true, Ordering::AcqRel) {
+        return;
     }
-    app.exit(0);
+    tracing::info!("tray: quit requested");
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    overlay_win::hide_if_present(app);
+
+    let worker = app.clone();
+    let spawned = thread::Builder::new()
+        .name("boris-quit".into())
+        .spawn(move || {
+            stop_engine_within(&worker, QUIT_GRACE);
+            tracing::info!("tray: exiting");
+            worker.exit(0);
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "quit thread not started — exiting without engine stop");
+        app.exit(0);
+    }
+}
+
+/// Stop the engine, waiting at most `grace`. A wedged engine thread must not
+/// keep the process alive: exit tears it down regardless.
+fn stop_engine_within<R: Runtime>(app: &AppHandle<R>, grace: Duration) {
+    let (done_tx, done_rx) = mpsc::channel();
+    let stopper = app.clone();
+    let started = thread::Builder::new()
+        .name("boris-quit-stop".into())
+        .spawn(move || {
+            if let Some(state) = stopper.try_state::<AppState>() {
+                if let Err(e) = state.stop() {
+                    tracing::warn!(error = %e, "stop engine on quit");
+                }
+            }
+            let _ = done_tx.send(());
+        });
+    if started.is_err() {
+        tracing::warn!("engine stop thread not started");
+        return;
+    }
+    if done_rx.recv_timeout(grace).is_err() {
+        tracing::warn!(?grace, "engine did not stop in time — exiting anyway");
+    }
 }

@@ -19,6 +19,8 @@ export {
   wakeLivenessStatus,
   startWakeEnroll,
   clearWakeProfile,
+  runSelfCheck,
+  checkApiKey,
   type StartEngineOptions,
 } from "./commands/engine";
 export {
@@ -67,6 +69,9 @@ export {
   type PreflightReport,
   type StatusPicture,
   type ListenHint,
+  type SelfCheckReport,
+  type SelfCheckStep,
+  type ApiKeyStatus,
   type WakeEnrollPeek,
   type InputPeek,
 } from "./types";

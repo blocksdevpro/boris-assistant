@@ -32,6 +32,7 @@
 //! | Typed errors | [`error`] |
 //! | System prompt text | [`prompt`] |
 
+pub mod api_key;
 pub mod artifacts;
 pub mod config;
 pub mod devices;
@@ -48,14 +49,15 @@ pub mod prompt;
 pub mod settings;
 pub mod status;
 
+pub use api_key::{check_api_key, ApiKeyState, ApiKeyStatus};
 pub use artifacts::{get_session_artifact, list_session_artifacts, ArtifactCard, ArtifactListItem};
-pub use config::{LlmPrefs, PipelineConfig};
 pub use boris_agent::{DebugCapture, DebugSnapshot};
+pub use config::{LlmPrefs, PipelineConfig};
 pub use devices::DeviceDto;
 pub use diagnostics::{log_environment, log_model_load_failure};
 pub use download::{
-    install_models, models_status, DownloadFileStatus, DownloadProgress, ModelComponent,
-    ModelsInstallReport, ModelsStatus, BORIS_MODEL_BASE_URL_ENV,
+    install_models, models_status, repair_models, DownloadFileStatus, DownloadProgress,
+    ModelComponent, ModelsInstallReport, ModelsStatus, BORIS_MODEL_BASE_URL_ENV,
 };
 pub use engine::{Engine, EngineCommand, EngineHandle};
 pub use error::{PipelineError, Result as PipelineResult};
@@ -74,6 +76,6 @@ pub use settings::{
     DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_PROVIDER,
 };
 pub use status::{
-    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, StatusPicture,
-    WakeEnrollPeek,
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, SelfCheckReport,
+    SelfCheckStep, SelfCheckStepId, StatusPicture, WakeEnrollPeek,
 };

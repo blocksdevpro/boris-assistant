@@ -7,6 +7,7 @@ use cpal::{traits::HostTrait, DeviceId};
 
 use crate::devices::{self, device_name};
 use crate::frontend::FarEnd;
+use crate::health::{new_fail_flag, AudioHealth, FailFlag};
 use crate::input::{InputPipeline, InputSubscribers};
 use crate::output::{FarEndTx, OutputCommand, OutputEvent, OutputPipeline};
 
@@ -67,6 +68,8 @@ pub struct AudioService {
     far_end_tx: FarEndTx,
     /// Sample rate of PCM passed to [`Self::play`] (must match TTS).
     source_rate: u32,
+    /// Which devices are open and whether their streams died.
+    health: AudioHealth,
 }
 
 impl AudioService {
@@ -128,11 +131,25 @@ impl AudioService {
         let input_name = device_name(&input_device);
         tracing::info!(%input_name, "opening default input device");
 
+        let health = AudioHealth::default();
         let input_subscribers: InputSubscribers = Arc::new(Mutex::new(Vec::new()));
         let (far_tx, far_rx) = crossbeam_channel::bounded::<FarEnd>(FAR_END_QUEUE);
         let far_end_tx: FarEndTx = Arc::new(Mutex::new(far_tx));
-        let input_pipeline =
-            InputPipeline::from_device(&input_device, input_subscribers.clone(), far_rx)?;
+        let input_failed = new_fail_flag();
+        let input_pipeline = InputPipeline::from_device(
+            &input_device,
+            input_subscribers.clone(),
+            far_rx,
+            input_failed.clone(),
+        )?;
+        // Opened from the host default handle: cpal reroutes it when the
+        // Windows default changes, so it keeps following the default.
+        health.set(
+            Direction::Input,
+            &input_pipeline.device_id,
+            input_failed,
+            true,
+        );
         tracing::info!(%input_name, "input pipeline open");
 
         let output_device = host.default_output_device().ok_or_else(|| {
@@ -144,8 +161,19 @@ impl AudioService {
         let output_name = device_name(&output_device);
         tracing::info!(%output_name, source_rate, "opening default output device");
 
-        let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&output_device, source_rate, far_end_tx.clone())?;
+        let output_failed = new_fail_flag();
+        let (output_event_channel, output_command_channel, output_pipeline) = open_output_pipeline(
+            &output_device,
+            source_rate,
+            far_end_tx.clone(),
+            output_failed.clone(),
+        )?;
+        health.set(
+            Direction::Output,
+            &output_pipeline.device_id,
+            output_failed,
+            true,
+        );
         tracing::info!(%output_name, "output pipeline open");
 
         Ok(Self {
@@ -156,6 +184,7 @@ impl AudioService {
             output_command_channel,
             far_end_tx,
             source_rate,
+            health,
         })
     }
 
@@ -167,6 +196,11 @@ impl AudioService {
     /// Configured play source rate (Hz).
     pub fn source_rate(&self) -> u32 {
         self.source_rate
+    }
+
+    /// Shared view of the open devices and stream failures (for watchers).
+    pub fn health(&self) -> AudioHealth {
+        self.health.clone()
     }
 
     // ── input ────────────────────────────────────────────────────────────────
@@ -192,9 +226,11 @@ impl AudioService {
 
     /// Switch capture to `id`. Does **not** fall back to default on failure.
     ///
+    /// Reopens the same device when its stream died (re-plugged headset).
     /// On stream open failure the previous input pipeline is left running.
     pub fn switch_input(&mut self, id: &DeviceId) -> Result<()> {
-        if &self.input_pipeline.device_id == id {
+        let current = self.health.input();
+        if &self.input_pipeline.device_id == id && !current.failed && !current.follows_default {
             tracing::debug!(?id, "input already selected");
             return Ok(());
         }
@@ -203,14 +239,41 @@ impl AudioService {
                 "input device not found (id={id:?}) — unplugged or no longer available"
             ))
         })?;
-        let name = device_name(&device);
-        tracing::info!(%name, "opening input device");
+        self.open_input(&device, false)
+    }
+
+    /// Capture from the OS default microphone, following it when Windows
+    /// changes the default. No-op when already following a live default.
+    pub fn use_default_input(&mut self) -> Result<()> {
+        if self.health.input().is_live_default() {
+            return Ok(());
+        }
+        let device = cpal::default_host()
+            .default_input_device()
+            .ok_or_else(|| Error::audio("no default microphone is available"))?;
+        self.open_input(&device, true)
+    }
+
+    fn open_input(&mut self, device: &cpal::Device, follows_default: bool) -> Result<()> {
+        let name = device_name(device);
+        tracing::info!(%name, follows_default, "opening input device");
         // Open new pipeline before replacing so a failure keeps the old stream
         // and the old AEC sender.
         let (far_tx, far_rx) = crossbeam_channel::bounded::<FarEnd>(FAR_END_QUEUE);
-        let new_pipeline =
-            InputPipeline::from_device(&device, self.input_subscribers.clone(), far_rx)?;
+        let failed = new_fail_flag();
+        let new_pipeline = InputPipeline::from_device(
+            device,
+            self.input_subscribers.clone(),
+            far_rx,
+            failed.clone(),
+        )?;
         replace_far_end(&self.far_end_tx, far_tx);
+        self.health.set(
+            Direction::Input,
+            &new_pipeline.device_id,
+            failed,
+            follows_default,
+        );
         self.input_pipeline = new_pipeline;
         Ok(())
     }
@@ -224,7 +287,8 @@ impl AudioService {
     ///
     /// On open failure the previous output pipeline is left running.
     pub fn switch_output(&mut self, id: &DeviceId) -> Result<bool> {
-        if &self.output_pipeline.device_id == id {
+        let current = self.health.output();
+        if &self.output_pipeline.device_id == id && !current.failed && !current.follows_default {
             tracing::debug!(?id, "output already selected");
             return Ok(false);
         }
@@ -233,15 +297,44 @@ impl AudioService {
                 "output device not found (id={id:?}) — unplugged or no longer available"
             ))
         })?;
-        let name = device_name(&device);
-        tracing::info!(%name, "opening output device");
+        self.open_output(&device, false)?;
+        Ok(true)
+    }
 
-        let (output_event_channel, output_command_channel, output_pipeline) =
-            open_output_pipeline(&device, self.source_rate, self.far_end_tx.clone())?;
+    /// Play on the OS default speaker, following it when Windows changes the
+    /// default. Returns `Ok(true)` when the pipeline was rebuilt (in-flight
+    /// Play dropped), `Ok(false)` when already following a live default.
+    pub fn use_default_output(&mut self) -> Result<bool> {
+        if self.health.output().is_live_default() {
+            return Ok(false);
+        }
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| Error::audio("no default speaker is available"))?;
+        self.open_output(&device, true)?;
+        Ok(true)
+    }
+
+    fn open_output(&mut self, device: &cpal::Device, follows_default: bool) -> Result<()> {
+        let name = device_name(device);
+        tracing::info!(%name, follows_default, "opening output device");
+        let failed = new_fail_flag();
+        let (output_event_channel, output_command_channel, output_pipeline) = open_output_pipeline(
+            device,
+            self.source_rate,
+            self.far_end_tx.clone(),
+            failed.clone(),
+        )?;
+        self.health.set(
+            Direction::Output,
+            &output_pipeline.device_id,
+            failed,
+            follows_default,
+        );
         self.output_command_channel = output_command_channel;
         self.output_event_channel = output_event_channel;
         self.output_pipeline = output_pipeline;
-        Ok(true)
+        Ok(())
     }
 
     /// Queue mono PCM at [`Self::source_rate`] for playback.
@@ -440,6 +533,7 @@ fn open_output_pipeline(
     device: &cpal::Device,
     source_rate: u32,
     far_end_tx: FarEndTx,
+    failed: FailFlag,
 ) -> Result<(EventChannel, CommandChannel, OutputPipeline)> {
     let output_event_channel = crossbeam_channel::bounded::<OutputEvent>(OUTPUT_EVENT_CAPACITY);
     let output_command_channel =
@@ -453,6 +547,7 @@ fn open_output_pipeline(
         output_event_tx,
         source_rate,
         far_end_tx,
+        failed,
     )?;
 
     Ok((

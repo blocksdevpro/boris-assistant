@@ -44,13 +44,16 @@
 mod activity;
 mod artifact;
 mod barge;
+mod chime;
 mod confirm;
 mod device_switch;
+mod device_watch;
 mod llm;
 mod models;
 mod outcome;
 mod picture;
 mod playback;
+mod self_check;
 mod session;
 mod setup;
 mod speech;
@@ -121,6 +124,8 @@ pub enum EngineCommand {
     },
     /// Forget the stored live-mic profile.
     ClearWakeProfile,
+    /// Run the on-device self-check while idle (ignored mid-turn).
+    RunSelfCheck,
     /// Typed / pasted value for a pending collect_input pause.
     SubmitInput {
         id: String,
@@ -135,14 +140,33 @@ pub enum EngineCommand {
 #[derive(Clone)]
 pub struct EngineHandle {
     cmd_tx: Sender<EngineCommand>,
+    /// Devices the user picked; the device watcher returns to them after an
+    /// unplug and otherwise follows the OS default.
+    pins: device_watch::SharedPins,
 }
 
 impl EngineHandle {
+    /// Send a command. `SwitchInput` / `SwitchOutput` from the host also
+    /// record the pick (`"default"` / empty = follow the OS default).
     pub fn send(
         &self,
         cmd: EngineCommand,
     ) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        match &cmd {
+            EngineCommand::SwitchInput { device_id } => {
+                self.pins().input = device_watch::pin_from_request(device_id);
+            }
+            EngineCommand::SwitchOutput { device_id } => {
+                self.pins().output = device_watch::pin_from_request(device_id);
+            }
+            _ => {}
+        }
         self.cmd_tx.send(cmd)
+    }
+
+    fn pins(&self) -> std::sync::MutexGuard<'_, device_watch::DevicePins> {
+        // Two `Option<String>`s: a panic mid-write cannot leave them invalid.
+        self.pins.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn start(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
@@ -166,6 +190,11 @@ impl EngineHandle {
 
     pub fn clear_wake_profile(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
         self.send(EngineCommand::ClearWakeProfile)
+    }
+
+    /// Run the on-device self-check; progress arrives as `StatusPicture.self_check`.
+    pub fn run_self_check(&self) -> std::result::Result<(), mpsc::SendError<EngineCommand>> {
+        self.send(EngineCommand::RunSelfCheck)
     }
 
     pub fn submit_input(
@@ -202,12 +231,34 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
         let shutdown_tx = cmd_tx.clone();
+        let pins = device_watch::SharedPins::default();
+        let (watch_tx, watch_pins) = (cmd_tx.clone(), pins.clone());
+        let crash_tx = status_tx.clone();
+        let (mic_label, speaker_label) = (config.mic_label.clone(), config.speaker_label.clone());
 
         let join = thread::Builder::new()
             .name("boris-engine".into())
             .spawn(move || {
-                if let Err(e) = run(config, cmd_rx, status_tx) {
-                    tracing::error!(error = %e, "engine thread exited with error");
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(config, cmd_rx, status_tx, watch_tx, watch_pins)
+                }));
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::error!(error = %e, "engine thread exited with error"),
+                    Err(payload) => {
+                        // Without this the UI keeps the last snapshot (often
+                        // "Starting · initializing…") forever.
+                        let reason =
+                            boris_core::panic_message(payload.as_ref()).unwrap_or("internal error");
+                        tracing::error!(panic = %reason, "engine thread panicked");
+                        // `u64::MAX` outranks any snapshot this engine sent.
+                        let _ = crash_tx.send(setup::fault_picture(
+                            u64::MAX,
+                            format!("Boris stopped unexpectedly: {reason}"),
+                            mic_label,
+                            speaker_label,
+                        ));
+                    }
                 }
             })
             .map_err(|e| PipelineError::init(format!("spawn boris-engine: {e}")))?;
@@ -217,7 +268,7 @@ impl Engine {
                 join: Some(join),
                 shutdown_tx: Some(shutdown_tx),
             },
-            EngineHandle { cmd_tx },
+            EngineHandle { cmd_tx, pins },
             status_rx,
         ))
     }
@@ -329,7 +380,9 @@ fn on_hear_break(
             on_soft_stop();
             LoopReact::Continue
         }
-        HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile => LoopReact::Continue,
+        HearBreak::StartWakeEnroll { .. }
+        | HearBreak::ClearWakeProfile
+        | HearBreak::RunSelfCheck => LoopReact::Continue,
         HearBreak::Disconnected => {
             end_session(
                 &rt.store,
@@ -411,8 +464,12 @@ fn run(
     config: PipelineConfig,
     cmd_rx: Receiver<EngineCommand>,
     status_tx: Sender<StatusPicture>,
+    watch_tx: Sender<EngineCommand>,
+    pins: device_watch::SharedPins,
 ) -> Result<()> {
     let mut rt = init_runtime(config, status_tx)?;
+    // Recovers from unplugged / re-plugged devices for the engine's lifetime.
+    let _device_watch = device_watch::DeviceWatch::spawn(rt.audio.health(), pins, watch_tx);
 
     let mut running = false;
     let mut next_turn: u64 = 1;
@@ -505,6 +562,9 @@ fn run(
                     rt.picture.set_wake_enroll(None);
                     tracing::info!("wake liveness profile cleared");
                 }
+                Ok(EngineCommand::RunSelfCheck) => {
+                    self_check::run_self_check(&mut rt);
+                }
                 Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
             }
             continue;
@@ -573,35 +633,39 @@ fn run(
             let mic_known_silent =
                 rt.picture.listen_hint == Some(crate::status::ListenHint::MicSilent);
             let picture = &mut rt.picture;
-            let wake_window =
-                match hear::wait_for_wake(
-                    &rt.mic,
-                    &mut rt.wake,
-                    &cmd_rx,
-                    &mut running,
-                    mic_known_silent,
-                    |signal| match signal {
-                        hear::MicSignal::Silent => picture
-                            .set_listen_hint(Some(crate::status::ListenHint::MicSilent)),
-                        hear::MicSignal::Live => picture.set_listen_hint(None),
-                    },
-                ) {
-                    Ok(w) => w,
-                    Err(HearBreak::StartWakeEnroll { takes }) => {
-                        enroll_left = takes.clamp(2, 8);
-                        continue;
+            let wake_window = match hear::wait_for_wake(
+                &rt.mic,
+                &mut rt.wake,
+                &cmd_rx,
+                &mut running,
+                mic_known_silent,
+                |signal| match signal {
+                    hear::MicSignal::Silent => {
+                        picture.set_listen_hint(Some(crate::status::ListenHint::MicSilent))
                     }
-                    Err(HearBreak::ClearWakeProfile) => {
-                        rt.liveness.clear();
-                        enroll_left = 0;
-                        rt.picture.set_wake_enroll(None);
-                        continue;
-                    }
-                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
-                        LoopReact::Continue => continue,
-                        LoopReact::Exit => return Ok(()),
-                    },
-                };
+                    hear::MicSignal::Live => picture.set_listen_hint(None),
+                },
+            ) {
+                Ok(w) => w,
+                Err(HearBreak::StartWakeEnroll { takes }) => {
+                    enroll_left = takes.clamp(2, 8);
+                    continue;
+                }
+                Err(HearBreak::ClearWakeProfile) => {
+                    rt.liveness.clear();
+                    enroll_left = 0;
+                    rt.picture.set_wake_enroll(None);
+                    continue;
+                }
+                Err(HearBreak::RunSelfCheck) => {
+                    self_check::run_self_check(&mut rt);
+                    continue;
+                }
+                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
+                    LoopReact::Continue => continue,
+                    LoopReact::Exit => return Ok(()),
+                },
+            };
 
             if go_off_if_not_running(&mut rt, &mut sess, running) {
                 continue;
@@ -701,6 +765,15 @@ fn run(
                     tracing::debug!(hops = crop.speech_hops, "wake accepted — live speech");
                 }
                 crate::liveness::WakeOrigin::Unknown => {}
+            }
+
+            // Wake accepted: an audible "listening" cue before capture starts.
+            // Fire-and-forget; AEC removes it from the capture, and the reply
+            // path drains stale output events before it plays.
+            if let Some(chime) = &rt.wake_chime {
+                if let Err(e) = rt.audio.play(chime.clone()) {
+                    tracing::debug!(error = %e, "wake chime not played");
+                }
             }
 
             // New user turn — drop previous line now that we're listening again.

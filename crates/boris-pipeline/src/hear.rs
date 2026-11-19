@@ -90,6 +90,9 @@ pub enum HearBreak {
     StartWakeEnroll { takes: u32 },
     /// Drop the stored live-mic profile.
     ClearWakeProfile,
+    /// Run the on-device self-check. Only [`wait_for_wake`] returns this;
+    /// mid-turn helpers drop the request.
+    RunSelfCheck,
 }
 
 /// Capture mode for utterance recording.
@@ -107,8 +110,20 @@ pub enum CaptureKind {
     BargeIn,
 }
 
-/// Poll host commands while blocking on audio.
+/// Poll host commands while blocking on audio mid-turn. A self-check request
+/// is dropped here: it may only take the engine thread while Armed (see
+/// [`poll_commands`]); the UI times out and asks the user to retry.
 fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result<(), HearBreak> {
+    poll_commands(cmd_rx, running, false)
+}
+
+/// Poll host commands. `armed` = waiting for the wake word, the only state in
+/// which [`HearBreak::RunSelfCheck`] is returned.
+fn poll_commands(
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    armed: bool,
+) -> Result<(), HearBreak> {
     loop {
         match cmd_rx.try_recv() {
             Ok(EngineCommand::Stop) | Ok(EngineCommand::Shutdown) => {
@@ -129,6 +144,12 @@ fn still_running(cmd_rx: &Receiver<EngineCommand>, running: &mut bool) -> Result
             }
             Ok(EngineCommand::ClearWakeProfile) => {
                 return Err(HearBreak::ClearWakeProfile);
+            }
+            Ok(EngineCommand::RunSelfCheck) if armed => {
+                return Err(HearBreak::RunSelfCheck);
+            }
+            Ok(EngineCommand::RunSelfCheck) => {
+                tracing::info!("self-check ignored mid-turn");
             }
             Ok(EngineCommand::SubmitInput { .. } | EngineCommand::CancelInput { .. }) => {}
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
@@ -157,7 +178,7 @@ fn next_frame(
 /// Peak at or below this is digital silence. Windows delivers exact zeros when
 /// microphone privacy blocks desktop apps, and hardware mute keys do the same;
 /// even a very quiet live mic sits well above it.
-const MIC_SILENT_PEAK: f32 = 1e-5;
+pub(crate) const MIC_SILENT_PEAK: f32 = 1e-5;
 /// How long the input must stay digitally silent (or deliver nothing) before
 /// the UI is told. Long enough to skip stream warm-up.
 const MIC_SILENT_AFTER: Duration = Duration::from_secs(3);
@@ -257,7 +278,7 @@ pub fn wait_for_wake(
     const POLL: Duration = Duration::from_millis(40);
 
     loop {
-        still_running(cmd_rx, running)?;
+        poll_commands(cmd_rx, running, true)?;
         let frame = match mic.recv_timeout(POLL) {
             Ok(frame) => frame,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {

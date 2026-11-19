@@ -129,3 +129,13 @@ commands.allow = ["check_app_update"]
 identifier = "allow-open-mic-privacy-settings"
 description = "Open the fixed Windows microphone privacy settings page"
 commands.allow = ["open_mic_privacy_settings"]
+
+[[permission]]
+identifier = "allow-run-self-check"
+description = "Run the on-device voice self-check"
+commands.allow = ["run_self_check"]
+
+[[permission]]
+identifier = "allow-check-api-key"
+description = "Ask OpenRouter whether the configured API key works"
+commands.allow = ["check_api_key"]

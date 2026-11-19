@@ -76,6 +76,7 @@ pub(super) fn poll_running(
             Ok(
                 EngineCommand::StartWakeEnroll { .. }
                 | EngineCommand::ClearWakeProfile
+                | EngineCommand::RunSelfCheck
                 | EngineCommand::SubmitInput { .. }
                 | EngineCommand::CancelInput { .. },
             ) => {

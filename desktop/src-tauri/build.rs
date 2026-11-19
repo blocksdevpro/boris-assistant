@@ -55,6 +55,18 @@ fn is_release_profile() -> bool {
 #[cfg(windows)]
 const ESSENTIAL_DLL_NAMES: &[&str] = &["onnxruntime.dll", "DirectML.dll"];
 
+/// Visual C++ runtime that `onnxruntime.dll` imports. Clean Windows installs
+/// (and Windows Sandbox) do not have it; without these beside the exe the
+/// ORT library fails to load and nothing can listen. Shipped app-local, as
+/// Microsoft's VC++ redistributable terms allow.
+#[cfg(windows)]
+const CRT_DLL_NAMES: &[&str] = &[
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+];
+
 /// Copy ORT / DirectML DLLs into `resources/ort/` for the Windows installer.
 #[cfg(windows)]
 fn stage_ort_runtime_dlls(dest_dir: &Path) -> Result<(), String> {
@@ -102,14 +114,25 @@ fn stage_ort_runtime_dlls(dest_dir: &Path) -> Result<(), String> {
         }
     }
 
+    for dir in crt_redist_dirs() {
+        if CRT_DLL_NAMES
+            .iter()
+            .all(|name| seen.contains(&name.to_ascii_lowercase()))
+        {
+            break;
+        }
+        stage_named_from_dir(&dir, CRT_DLL_NAMES, dest_dir, &mut staged, &mut seen)?;
+    }
+
     let missing: Vec<&str> = ESSENTIAL_DLL_NAMES
         .iter()
+        .chain(CRT_DLL_NAMES)
         .copied()
         .filter(|name| !seen.contains(&name.to_ascii_lowercase()))
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "missing required runtime DLL(s): {}; searched target/ and the ort.pyke.io cache; \
+            "missing required runtime DLL(s): {}; searched target/, the ort.pyke.io cache, the VC++ redist folder and System32; \
              run a full Windows build first so ort can download/copy them",
             missing.join(", ")
         ));
@@ -235,4 +258,82 @@ fn ort_cache_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// Where to copy the VC++ runtime from, best first: the redist folder of the
+/// Visual Studio that is building us (the files Microsoft ships for app-local
+/// use), then any installed VS, then this machine's System32.
+#[cfg(windows)]
+fn crt_redist_dirs() -> Vec<PathBuf> {
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86") => "x86",
+        _ => "x64",
+    };
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // Set inside a VS developer prompt: ...\VC\Redist\MSVC\<version>\
+    if let Ok(dir) = env::var("VCToolsRedistDir") {
+        roots.push(PathBuf::from(dir));
+    }
+    for install in vs_install_dirs() {
+        let msvc = install.join("VC").join("Redist").join("MSVC");
+        let Ok(entries) = fs::read_dir(&msvc) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        versions.sort();
+        versions.reverse(); // newest toolset first
+        roots.extend(versions);
+    }
+
+    let mut dirs = Vec::new();
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root.join(arch)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            // Microsoft.VC143.CRT, Microsoft.VC145.CRT, …
+            if name.starts_with("microsoft.vc") && name.ends_with(".crt") {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    if arch == "x64" {
+        if let Ok(root) = env::var("SystemRoot") {
+            dirs.push(PathBuf::from(root).join("System32"));
+        }
+    }
+    dirs
+}
+
+/// Visual Studio installs reported by `vswhere`, newest first.
+#[cfg(windows)]
+fn vs_install_dirs() -> Vec<PathBuf> {
+    let Some(program_files) = env::var_os("ProgramFiles(x86)") else {
+        return Vec::new();
+    };
+    let vswhere = PathBuf::from(program_files)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    let Ok(out) = std::process::Command::new(vswhere)
+        .args([
+            "-all",
+            "-products",
+            "*",
+            "-sort",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }

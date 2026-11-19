@@ -14,8 +14,8 @@ use std::time::Instant;
 use boris_core::TurnId;
 
 use crate::status::{
-    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, StatusPicture,
-    WakeEnrollPeek,
+    ArtifactPeek, DeviceHealth, EngineState, InputPeek, ListenHint, Phase, SelfCheckReport,
+    StatusPicture, WakeEnrollPeek,
 };
 
 /// Max wire chars for the activity chip (overlay renders one line).
@@ -65,6 +65,7 @@ pub(super) struct Picture {
     pub wake_enroll: Option<WakeEnrollPeek>,
     pub input: Option<InputPeek>,
     pub listen_hint: Option<ListenHint>,
+    pub self_check: Option<SelfCheckReport>,
     pub status_tx: Sender<StatusPicture>,
     /// The agent-event closure updates this same snapshot while thinking.
     pub latest: Arc<Mutex<StatusPicture>>,
@@ -99,6 +100,7 @@ impl Picture {
             wake_enroll: self.wake_enroll.clone(),
             input: self.input.clone(),
             listen_hint: self.listen_hint,
+            self_check: self.self_check.clone(),
         };
         let mut latest = self
             .latest
@@ -269,6 +271,7 @@ mod tests {
             wake_enroll: None,
             input: None,
             listen_hint: None,
+            self_check: None,
             status_tx,
             latest: Arc::new(Mutex::new(StatusPicture::off())),
             phase_started: Instant::now(),
@@ -329,6 +332,5 @@ mod tests {
             .unwrap()
             .fallback_report
             .is_none());
-
     }
 }

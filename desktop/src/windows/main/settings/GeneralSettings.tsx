@@ -1,18 +1,25 @@
 import { LoaderCircle, RefreshCw } from "lucide-react";
-import { SettingsGroup, SettingsRow, Toggle } from "@/components/settings";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import {
+  SegmentedControl,
+  SettingsGroup,
+  SettingsRow,
+  Toggle,
+} from "@/components/settings";
 import type { AppSettings } from "@/bridge";
 import type { AvailableUpdate, UpdateProgress } from "@/lib/updater";
+import { softEase } from "@/lib/mainMotion";
 import {
-  CAPABILITY_OPTIONS,
-  type CapabilityOption,
+  RESIDENCY_OPTIONS,
   selectCompactClass,
   type UpdateUiState,
 } from "../mainWindowShared";
 
+/** Startup, performance, and updates — the "how Boris runs" page. */
 export function GeneralSettings({
   settings,
-  locked,
-  capability,
+  advanced,
+  engineOn,
   appVer,
   updateUi,
   availableUpdate,
@@ -23,8 +30,8 @@ export function GeneralSettings({
   onInstallUpdate,
 }: {
   settings: AppSettings;
-  locked: boolean;
-  capability: CapabilityOption;
+  advanced: boolean;
+  engineOn: boolean;
   appVer: string | null;
   updateUi: UpdateUiState;
   availableUpdate: AvailableUpdate | null;
@@ -34,6 +41,11 @@ export function GeneralSettings({
   onCheckUpdate: () => void;
   onInstallUpdate: () => void;
 }) {
+  const reduceMotion = useReducedMotion();
+  const residency =
+    RESIDENCY_OPTIONS.find((o) => o.id === settings.model_residency) ??
+    RESIDENCY_OPTIONS[1]!;
+
   const checking = updateUi === "checking";
   const downloading = updateUi === "downloading";
   const hasUpdate = updateUi === "available" || downloading;
@@ -63,17 +75,10 @@ export function GeneralSettings({
 
   return (
     <div className="flex flex-col gap-6">
-      <SettingsGroup
-        title="General"
-        footer={
-          locked
-            ? "Some changes apply after Boris is stopped."
-            : capability.footer
-        }
-      >
+      <SettingsGroup title="Startup">
         <SettingsRow
           label="Start with Windows"
-          subtitle="At sign-in, stay in the tray and turn Boris on"
+          subtitle="Boris waits quietly in the tray after you sign in"
         >
           <Toggle
             checked={settings.start_with_windows}
@@ -81,55 +86,69 @@ export function GeneralSettings({
             aria-label="Start with Windows"
           />
         </SettingsRow>
-        <SettingsRow label="Start Boris when the app opens">
+        <SettingsRow
+          label="Start listening when the app opens"
+          subtitle="Otherwise press Start on the Home page"
+          last
+        >
           <Toggle
             checked={settings.start_engine_on_launch}
             onChange={(v) => onPatch({ start_engine_on_launch: v })}
-            aria-label="Start Boris when the app opens"
+            aria-label="Start listening when the app opens"
           />
-        </SettingsRow>
-        <SettingsRow
-          label="Boris memory"
-          subtitle="Builds evidence-backed context across conversations"
-        >
-          <Toggle
-            checked={settings.long_term_memory}
-            disabled={locked}
-            onChange={(v) => onPatch({ long_term_memory: v })}
-            aria-label="Boris memory"
-          />
-        </SettingsRow>
-        <SettingsRow label="Tool access" labelFor="capability-preset" last>
-          <select
-            id="capability-preset"
-            className={selectCompactClass}
-            value={
-              CAPABILITY_OPTIONS.some(
-                (p) => p.id === settings.capability_preset,
-              )
-                ? settings.capability_preset
-                : "full"
-            }
-            disabled={locked}
-            onChange={(e) => onPatch({ capability_preset: e.target.value })}
-          >
-            {CAPABILITY_OPTIONS.map((p) => (
-              <option
-                key={p.id}
-                value={p.id}
-                className="bg-[#1c1c1e] text-white"
-              >
-                {p.label}
-              </option>
-            ))}
-          </select>
         </SettingsRow>
       </SettingsGroup>
 
       <SettingsGroup
-        title="Updates"
-        footer="Updates are signed and downloaded from GitHub Releases. Beta uses a separate pre-release feed. The app restarts after install."
+        title="Performance"
+        footer={
+          engineOn
+            ? "Boris restarts for a second between conversations to apply a change."
+            : "You can change this anytime."
+        }
       >
+        <div className="flex flex-col gap-3 px-4 py-3.5">
+          <div>
+            <p className="text-[14px] font-medium tracking-[-0.01em] text-white/90">
+              Speed or memory
+            </p>
+            <p className="mt-1 text-[12px] leading-snug text-[var(--boris-label-tertiary)]">
+              Choose how much of your PC's memory Boris keeps ready.
+            </p>
+          </div>
+          <SegmentedControl
+            aria-label="Speed or memory"
+            options={RESIDENCY_OPTIONS}
+            value={residency.id}
+            onChange={(id) => onPatch({ model_residency: id })}
+          />
+          <div className="relative min-h-[18px]">
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.p
+                key={residency.id}
+                initial={reduceMotion ? false : { opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -3 }}
+                transition={{ duration: reduceMotion ? 0 : 0.16, ease: softEase }}
+                className="text-[12px] leading-snug text-[var(--boris-label-secondary)]"
+              >
+                {residency.detail}
+              </motion.p>
+            </AnimatePresence>
+          </div>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Updates"
+        footer={
+          advanced
+            ? "Updates are signed and downloaded from GitHub Releases. Beta uses a separate pre-release feed. The app restarts after install."
+            : "Boris checks for updates on his own. The app restarts after an install."
+        }
+      >
+        {advanced ? (
+          <>
         <SettingsRow
           label="Channel"
           subtitle="Beta gets new builds first. Switch back to Stable anytime."
@@ -154,6 +173,8 @@ export function GeneralSettings({
             </option>
           </select>
         </SettingsRow>
+          </>
+        ) : null}
         <SettingsRow
           label="Version"
           subtitle={statusSubtitle}

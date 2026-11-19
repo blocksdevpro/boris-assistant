@@ -16,12 +16,17 @@ export async function getModelsStatus(): Promise<ModelsStatus> {
 
 /**
  * Download missing models (blocks until finished).
+ * With `repair`, every installed model is hash-checked first and damaged
+ * files are downloaded again; stop the engine before repairing.
  * Subscribe with {@link onModelsProgress} for per-file updates.
  */
-export async function downloadModels(): Promise<ModelsInstallReport> {
-  logger.info("downloadModels start");
+export async function downloadModels(
+  options: { repair?: boolean } = {},
+): Promise<ModelsInstallReport> {
+  const repair = options.repair ?? false;
+  logger.info("downloadModels start", { repair });
   try {
-    const report = await invoke<ModelsInstallReport>(COMMANDS.downloadModels);
+    const report = await invoke<ModelsInstallReport>(COMMANDS.downloadModels, { repair });
     logger.info("downloadModels done", {
       ok: report.ok,
       files_downloaded: report.files_downloaded,

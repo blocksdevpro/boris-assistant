@@ -48,6 +48,8 @@ pub(super) struct EngineRuntime {
     pub liveness: crate::liveness::WakeLiveness,
     /// Wake-word barge-in while Talking or Thinking.
     pub barge_in: bool,
+    /// Pre-rendered "listening" chime at the output rate (`None` = off).
+    pub wake_chime: Option<boris_core::AudioBuffer>,
     /// Voice HITL budget mirrored from agent policy (pipeline loop must not
     /// cap below what the policy allows — see `outcome::resolve_agent_outcome`).
     pub max_confirms_per_turn: u32,
@@ -150,6 +152,10 @@ pub(super) fn init_runtime(
     }
     let store = SessionStore::new(paths::sessions_dir());
 
+    // Audio opened the OS defaults; show their real names, not "Default mic".
+    let mic_label = super::device_switch::default_name(AudioService::list_input_devices());
+    let speaker_label = super::device_switch::default_name(AudioService::list_output_devices());
+    tracing::info!(%mic_label, %speaker_label, "audio devices in use");
     let picture = Picture {
         engine: EngineState::Off,
         phase: Phase::Off,
@@ -157,11 +163,11 @@ pub(super) fn init_runtime(
         heard: None,
         said: None,
         mic: DeviceHealth {
-            label: config.mic_label,
+            label: mic_label,
             ok: true,
         },
         speaker: DeviceHealth {
-            label: config.speaker_label,
+            label: speaker_label,
             ok: true,
         },
         turn: None,
@@ -175,6 +181,7 @@ pub(super) fn init_runtime(
         wake_enroll: None,
         input: None,
         listen_hint: None,
+        self_check: None,
         status_tx,
         latest: std::sync::Arc::new(std::sync::Mutex::new(StatusPicture::off())),
         phase_started: std::time::Instant::now(),
@@ -208,6 +215,9 @@ pub(super) fn init_runtime(
             load_speaker_embedder(),
         ),
         barge_in: config.voice_barge_in,
+        wake_chime: config
+            .wake_chime
+            .then(|| super::chime::wake_chime(play_rate)),
         max_confirms_per_turn: config.max_confirms_per_turn.max(1),
         maintenance,
     })
@@ -240,6 +250,7 @@ fn publish_starting(status_tx: &std::sync::mpsc::Sender<StatusPicture>, config: 
         wake_enroll: None,
         input: None,
         listen_hint: None,
+        self_check: None,
     });
 }
 
@@ -420,19 +431,35 @@ fn fault(
     // Recovery is host-side — drop the `Engine` and construct a new one
     // (usually after Install models / device fix). The Fault snapshot stays
     // up so the UI can show the reason instead of a silent Off.
-    let _ = status_tx.send(StatusPicture {
-        seq: 1,
+    let _ = status_tx.send(fault_picture(
+        1,
+        detail.into(),
+        config.mic_label.clone(),
+        config.speaker_label.clone(),
+    ));
+}
+
+/// Terminal Fault snapshot. `seq` must beat every snapshot already sent by
+/// this engine, or the host mirror drops it as stale.
+pub(super) fn fault_picture(
+    seq: u64,
+    detail: String,
+    mic_label: String,
+    speaker_label: String,
+) -> StatusPicture {
+    StatusPicture {
+        seq,
         engine: EngineState::Fault,
         phase: Phase::Off,
-        detail: Some(detail.into()),
+        detail: Some(detail),
         heard: None,
         said: None,
         mic: DeviceHealth {
-            label: config.mic_label.clone(),
+            label: mic_label,
             ok: false,
         },
         speaker: DeviceHealth {
-            label: config.speaker_label.clone(),
+            label: speaker_label,
             ok: false,
         },
         turn: None,
@@ -446,7 +473,8 @@ fn fault(
         wake_enroll: None,
         input: None,
         listen_hint: None,
-    });
+        self_check: None,
+    }
 }
 
 fn build_agent(config: &PipelineConfig) -> Agent {

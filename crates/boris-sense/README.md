@@ -66,6 +66,15 @@ Call `init_onnx_runtime()` **once** at process start **before** constructing
 wake or Silero VAD sessions. It configures a process-global 1-thread pool with
 spin disabled and returns `Result<()>` so hosts can log hard pool-setup failures.
 
+On Windows it first checks the ONNX Runtime library `ort` is about to load
+(same path rules as `ort`: `ORT_DYLIB_PATH`, else `onnxruntime.dll` beside the
+exe, else the DLL search). A library that will not load, lacks
+`OrtGetApiBase`, or is older than `ort` needs returns an `Error` with a
+user-facing fix. This matters because with `ort/load-dynamic`, `ort`
+2.0.0-rc.12 deadlocks instead of failing on any of those (its error path
+re-enters the `std::sync::Once` it is initializing). If the library loads but
+`ort` still panics, the panic is caught and returned as an `Error` too.
+
 ```rust
 use boris_sense::{
     init_onnx_runtime,

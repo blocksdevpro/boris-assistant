@@ -10,6 +10,7 @@
 //! - Audio sample/buffer aliases and the pipeline sample rate constant
 //! - Turn identity used to drop late async results
 //! - A small shared [`Error`] type for speech/audio adapters
+//! - [`panic_message`] for threads that catch and report a panic
 //!
 //! # What does **not** belong here
 //!
@@ -29,9 +30,11 @@
 #![deny(missing_docs)]
 
 mod error;
+mod panic;
 mod types;
 
 // ── Crate-root re-exports (preferred import path for hosts & siblings) ───────
 
 pub use error::{Error, Result};
+pub use panic::panic_message;
 pub use types::{ArcAudioBuffer, AudioBuffer, AudioSample, TurnId, AUDIO_TARGET_RATE};

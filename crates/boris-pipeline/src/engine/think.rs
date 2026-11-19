@@ -240,7 +240,11 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                             apply_output_switch(audio, output_events, picture, &device_id);
                             activity_events_enabled.store(true, Ordering::Release);
                         }
-                        Err(HearBreak::StartWakeEnroll { .. } | HearBreak::ClearWakeProfile) => {
+                        Err(
+                            HearBreak::StartWakeEnroll { .. }
+                            | HearBreak::ClearWakeProfile
+                            | HearBreak::RunSelfCheck,
+                        ) => {
                             activity_events_enabled.store(true, Ordering::Release);
                         }
                     }

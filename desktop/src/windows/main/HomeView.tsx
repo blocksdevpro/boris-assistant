@@ -7,7 +7,7 @@ import {
   Power,
   PowerOff,
 } from "lucide-react";
-import { motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { CollectInputField } from "@/components/CollectInputField";
 import { SessionArtifactDesk } from "@/components/artifacts";
 import { Button } from "@/components/ui/button";
@@ -34,9 +34,10 @@ import type {
   SettingsCategory,
   UpdateUiState,
 } from "./mainWindowShared";
-import { ListenHintBanner } from "./ListenHintBanner";
+import { ListenHintPill } from "./ListenHintPill";
 
 export function HomeView({
+  showDetails,
   status,
   tone,
   contextMeter,
@@ -60,7 +61,10 @@ export function HomeView({
   onDismissUpdate,
   onOpenSettings,
   onTeachVoice,
+  onRunSetupCheck,
 }: {
+  /** Developer readouts (turn id, context meter). */
+  showDetails: boolean;
   status: StatusPicture;
   tone: ReturnType<typeof toneFor>;
   contextMeter: string | null;
@@ -84,6 +88,8 @@ export function HomeView({
   onDismissUpdate: () => void;
   onOpenSettings: (category?: SettingsCategory) => void;
   onTeachVoice: () => void;
+  /** Present when a setup check can start now (engine idle). */
+  onRunSetupCheck?: () => void;
 }) {
   const reduceMotion = useReducedMotion();
   const act = humanizeActivity(status.activity);
@@ -127,7 +133,28 @@ export function HomeView({
             </div>
             <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--boris-label-secondary)]">
               {statusHint}
+              <AnimatePresence initial={false}>
+                {onRunSetupCheck ? (
+                  <motion.button
+                    key="check-setup"
+                    type="button"
+                    onClick={onRunSetupCheck}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] }}
+                    className="ml-2 text-[12px] text-[var(--boris-label-tertiary)] underline-offset-2 transition-colors duration-200 hover:text-white/70 hover:underline"
+                  >
+                    Check setup
+                  </motion.button>
+                ) : null}
+              </AnimatePresence>
             </p>
+            <ListenHintPill
+              status={status}
+              onChooseMic={() => onOpenSettings("speech")}
+              onTeachVoice={onTeachVoice}
+            />
             {showActivity ? (
               <motion.p
                 key={act}
@@ -138,7 +165,7 @@ export function HomeView({
                 {act}
               </motion.p>
             ) : null}
-            {engineOn && (status.turn || contextMeter) ? (
+            {showDetails && engineOn && (status.turn || contextMeter) ? (
               <p className="mt-2.5 text-[11px] text-[var(--boris-label-tertiary)]">
                 {status.turn ? `Current turn ${status.turn}` : ""}
                 {status.turn && contextMeter ? " · " : ""}
@@ -168,7 +195,7 @@ export function HomeView({
               )}
               title={
                 !stopAvailable && !modelsReady
-                  ? "Open Speech settings to finish setup"
+                  ? "Open Voice & Audio settings to finish setup"
                   : undefined
               }
             >
@@ -205,13 +232,6 @@ export function HomeView({
           <span className="min-w-0 break-words">{error}</span>
         </p>
       ) : null}
-      <ListenHintBanner
-        status={status}
-        onOpenMicSettings={() => onOpenSettings("speech")}
-        onOpenSpeechSettings={() => onOpenSettings("speech")}
-        onTeachVoice={onTeachVoice}
-      />
-
       {engineFault && !error && !status.detail ? (
         <p role="alert" className="text-[13px] text-amber-200/80">
           Something went wrong — try Stop, then Start again.
@@ -288,14 +308,14 @@ function ModelsBanner({
           Speech model check failed
         </p>
         <p className="mt-1 text-[12px] text-white/50">
-          Open Speech settings to retry. No download has started.
+          Open Voice & Audio settings to retry. No download has started.
         </p>
         <button
           type="button"
           onClick={onOpenSettings}
           className="mt-3 min-h-9 rounded-full bg-white/10 px-3.5 text-[13px] text-white/80 hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
         >
-          Open Speech settings
+          Open Voice & Audio settings
         </button>
       </div>
     );

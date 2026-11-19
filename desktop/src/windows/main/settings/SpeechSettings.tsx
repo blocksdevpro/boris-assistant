@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { Check, RefreshCw, Trash2 } from "lucide-react";
 import { AlertDialog } from "radix-ui";
 import { SettingsGroup, SettingsRow, Toggle } from "@/components/settings";
 import {
@@ -11,13 +11,70 @@ import {
   type LivenessStatus,
 } from "@/bridge";
 import {
+  SYSTEM_DEFAULT_DEVICE,
   type ModelCheckState,
   selectDeviceClass,
   shortDeviceName,
 } from "../mainWindowShared";
 
+/**
+ * Mic / speaker picker. "System default" follows Windows when the default
+ * changes; a picked device that is unplugged stays selected (shown as not
+ * connected) and Boris returns to it when it is plugged back in.
+ */
+function DevicePicker({
+  id,
+  devices,
+  selected,
+  busy,
+  noun,
+  onChange,
+}: {
+  id: string;
+  devices: DeviceDto[];
+  selected: string;
+  busy: boolean;
+  noun: string;
+  onChange: (id: string) => void;
+}) {
+  const current = devices.find((d) => d.id === selected);
+  const defaultDevice = devices.find((d) => d.is_default);
+  const missing = selected !== SYSTEM_DEFAULT_DEVICE && !current;
+  return (
+    <select
+      id={id}
+      className={selectDeviceClass}
+      value={selected}
+      disabled={busy}
+      title={
+        current?.name ??
+        (missing
+          ? `Not connected — using the system default until it is back`
+          : defaultDevice?.name)
+      }
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value={SYSTEM_DEFAULT_DEVICE} className="bg-[#1c1c1e] text-white">
+        System default
+        {defaultDevice ? ` · ${shortDeviceName(defaultDevice.name)}` : ""}
+      </option>
+      {missing ? (
+        <option value={selected} className="bg-[#1c1c1e] text-white">
+          {`Chosen ${noun} · not connected`}
+        </option>
+      ) : null}
+      {devices.map((d) => (
+        <option key={d.id} value={d.id} className="bg-[#1c1c1e] text-white">
+          {shortDeviceName(d.name)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function SpeechSettings({
   settings,
+  advanced,
   busy,
   inputs,
   outputs,
@@ -36,6 +93,7 @@ export function SpeechSettings({
   onTeachVoice,
 }: {
   settings: AppSettings;
+  advanced: boolean;
   busy: boolean;
   inputs: DeviceDto[];
   outputs: DeviceDto[];
@@ -59,10 +117,10 @@ export function SpeechSettings({
       : modelCheckState === "error"
         ? "Check failed"
         : modelsReady
-          ? "Ready"
+          ? "Ready to listen and speak"
           : installing
             ? "Downloading…"
-            : "Not installed";
+            : "Not downloaded yet · about 900 MB";
   const [live, setLive] = useState<LivenessStatus>({
     enrolled: false,
     takes: 0,
@@ -94,28 +152,71 @@ export function SpeechSettings({
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup
-        title="False wakes"
-        footer={
-          live.enrolled
-            ? "TV, Translate, and TTS from a speaker are ignored. A live person still wakes Boris."
-            : "Start Boris, tap Teach, then say “Hey Boris” four times. Until then this filter stays off."
+        title="Microphone and speakers"
+        footer="System default follows whatever Windows is using."
+        action={
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onRefreshDevices}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-[12px] text-white/55 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
+          >
+            <RefreshCw className="size-3.5" /> Refresh
+          </button>
         }
       >
+        <SettingsRow label="Microphone" labelFor="input-device" stacked>
+          <DevicePicker
+            id="input-device"
+            devices={inputs}
+            selected={selectedInput}
+            busy={busy}
+            noun="microphone"
+            onChange={onInputChange}
+          />
+        </SettingsRow>
+        <SettingsRow label="Speakers" labelFor="output-device" stacked last>
+          <DevicePicker
+            id="output-device"
+            devices={outputs}
+            selected={selectedOutput}
+            busy={busy}
+            noun="speaker"
+            onChange={onOutputChange}
+          />
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="“Hey Boris”"
+        footer={
+          live.enrolled
+            ? "Voices from a TV, video, or speaker won't wake Boris. You still will."
+            : "Say “Hey Boris” four times so Boris can tell you apart from a TV or video."
+        }
+      >
+        <SettingsRow label="Chime when listening" subtitle="A soft tone the moment Boris hears you">
+          <Toggle
+            checked={settings.wake_chime}
+            onChange={(v) => onPatch({ wake_chime: v })}
+            aria-label="Chime when listening"
+          />
+        </SettingsRow>
         <SettingsRow
-          label="Ignore speakers and TV"
+          label="Ignore TVs and videos"
           subtitle={
             live.enrolled
-              ? `Listening for a live voice · ${live.takes} takes`
-              : "Needs a short voice sample first"
+              ? `Using your voice sample · ${live.takes} takes`
+              : "Teach Boris your voice to turn this on"
           }
         >
           <Toggle
             checked={settings.ignore_speaker_playback}
             onChange={(v) => onPatch({ ignore_speaker_playback: v })}
-            aria-label="Ignore speakers and TV"
+            aria-label="Ignore TVs and videos"
           />
         </SettingsRow>
-        <SettingsRow label="Voice sample" last>
+        <SettingsRow label="Your voice sample" last>
           {live.enrolled ? (
             <AlertDialog.Root
               open={clearDialogOpen}
@@ -178,7 +279,7 @@ export function SpeechSettings({
               onClick={onTeachVoice}
               className="min-h-9 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
             >
-              Teach
+              Teach Boris your voice
             </button>
           )}
         </SettingsRow>
@@ -186,13 +287,14 @@ export function SpeechSettings({
           <p className="px-4 pb-3 text-[12px] text-red-300/80">{enrollErr}</p>
         ) : null}
       </SettingsGroup>
+
       <SettingsGroup
-        title="While Boris is talking or working"
-        footer="Talking: say “Hey Boris”, or just talk over him. Stay quiet, or say continue, and he picks up where he left off. Say stop to drop the rest. Working: say “Hey Boris”, then stop or a new ask. Stay quiet and he keeps going."
+        title="Interrupting"
+        footer="Say “stop” to end his answer, or keep quiet and he carries on."
       >
         <SettingsRow
-          label="Say Hey Boris to interrupt"
-          subtitle="Pauses leftover speech, or cancels a running turn after he hears you. Talking louder than the speakers works while he is speaking. A false hit resumes."
+          label="Say “Hey Boris” to interrupt"
+          subtitle="Cut in while Boris is talking or working on something"
           last
         >
           <Toggle
@@ -202,103 +304,46 @@ export function SpeechSettings({
           />
         </SettingsRow>
       </SettingsGroup>
+
       <SettingsGroup
         id="speech-models"
-        title="Speech Models"
-        footer="Speech processing runs locally on this computer."
+        title="Voice"
+        footer="Listening and speaking happen on this computer. Your voice isn't uploaded."
       >
-        <SettingsRow label="Voice" subtitle="More voices are coming">
+        <SettingsRow label="Boris's voice" subtitle="More voices are coming">
           <span className="rounded-lg bg-white/[0.06] px-3 py-2 text-[13px] text-white/65">
             M4 · Default
           </span>
         </SettingsRow>
         <SettingsRow
-          label="Local speech models"
+          label="Speech files"
           subtitle={label}
           last={!installing}
         >
-          <button
-            type="button"
-            disabled={installing || modelCheckState === "loading"}
-            onClick={
-              modelCheckState === "missing" ? onInstall : onRefreshModels
-            }
-            className="min-h-9 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
-          >
-            {installing
-              ? "Downloading…"
-              : modelCheckState === "missing"
-                ? "Download"
-                : modelCheckState === "error"
-                  ? "Retry"
-                  : "Refresh"}
-          </button>
+          {modelsReady && !advanced ? (
+            <span className="inline-flex items-center gap-1.5 px-2 text-[13px] text-emerald-300/80">
+              <Check className="size-3.5" strokeWidth={2.5} /> Installed
+            </span>
+          ) : (
+            <button
+              type="button"
+              disabled={installing || modelCheckState === "loading"}
+              onClick={
+                modelCheckState === "missing" ? onInstall : onRefreshModels
+              }
+              className="min-h-9 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
+            >
+              {installing
+                ? "Downloading…"
+                : modelCheckState === "missing"
+                  ? "Download"
+                  : modelCheckState === "error"
+                    ? "Retry"
+                    : "Re-check"}
+            </button>
+          )}
         </SettingsRow>
         {installing ? <DownloadProgressView progress={progress} /> : null}
-      </SettingsGroup>
-      <SettingsGroup
-        title="Sound"
-        action={
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onRefreshDevices}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-[12px] text-white/55 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 disabled:opacity-40"
-          >
-            <RefreshCw className="size-3.5" /> Refresh devices
-          </button>
-        }
-      >
-        <SettingsRow label="Microphone" labelFor="input-device" stacked>
-          <select
-            id="input-device"
-            className={selectDeviceClass}
-            value={selectedInput}
-            disabled={busy || inputs.length === 0}
-            title={inputs.find((d) => d.id === selectedInput)?.name}
-            onChange={(e) => onInputChange(e.target.value)}
-          >
-            {inputs.length === 0 ? (
-              <option value="">No devices found</option>
-            ) : (
-              inputs.map((d) => (
-                <option
-                  key={d.id}
-                  value={d.id}
-                  className="bg-[#1c1c1e] text-white"
-                >
-                  {shortDeviceName(d.name)}
-                  {d.is_default ? " · default" : ""}
-                </option>
-              ))
-            )}
-          </select>
-        </SettingsRow>
-        <SettingsRow label="Speakers" labelFor="output-device" stacked last>
-          <select
-            id="output-device"
-            className={selectDeviceClass}
-            value={selectedOutput}
-            disabled={busy || outputs.length === 0}
-            title={outputs.find((d) => d.id === selectedOutput)?.name}
-            onChange={(e) => onOutputChange(e.target.value)}
-          >
-            {outputs.length === 0 ? (
-              <option value="">No devices found</option>
-            ) : (
-              outputs.map((d) => (
-                <option
-                  key={d.id}
-                  value={d.id}
-                  className="bg-[#1c1c1e] text-white"
-                >
-                  {shortDeviceName(d.name)}
-                  {d.is_default ? " · default" : ""}
-                </option>
-              ))
-            )}
-          </select>
-        </SettingsRow>
       </SettingsGroup>
     </div>
   );

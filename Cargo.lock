@@ -581,6 +581,7 @@ name = "boris-sense"
 version = "1.0.0"
 dependencies = [
  "boris-core",
+ "libloading 0.9.0",
  "livekit-wakeword",
  "ort",
  "rustfft",

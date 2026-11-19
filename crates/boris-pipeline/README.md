@@ -52,8 +52,9 @@ a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
  the agent HITL budget (`max_confirms_per_turn`, default 12 via
  `BORIS_MAX_CONFIRMS`); post-confirm tool rounds update the context meter,
  the turn trace, and the artifact peek. Mid-confirm device switches re-speak
- the prompt on the new device, wake-enroll yields the turn, and disconnects
- mark devices dead until the next Start. Reusable STT
+ the prompt on the new device, wake-enroll yields the turn, and a lost audio
+ worker (the capture channel itself closing) marks devices dead until the next
+ Start. Reusable STT
  and TTS loader threads live for the engine lifetime instead of being recreated
  per turn. Status is pushed for the UI (latest-wins by monotonic `seq`;
 activity is capped at 160 chars, the reasoning tail at 512, and the thinking
@@ -100,14 +101,84 @@ Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
 maintenance lane. Generation latency excludes audible playback. Read the JSONL
 directly for local p50/p95 summaries.
 
+## Devices
+
+A `boris-device-watch` helper thread checks the open streams and the OS device
+list once a second (about 8 ms per check) and sends the engine the same
+`SwitchInput` / `SwitchOutput` commands the settings picker uses, so every
+phase applies recovery the way it already applies a user switch:
+
+| Situation | What happens |
+|-----------|--------------|
+| Nothing picked (`"default"`) | Follow the Windows default; cpal reroutes the stream itself |
+| Default stream died (no default left, driver reset) | Reopen on the default when one exists |
+| Picked device unplugged | Fall back to the default within about a second |
+| Picked device plugged back in | Switch back to it |
+| Picked device keeps failing to open | Use the default for 30 s, then try again |
+| Speaker lost mid-reply | Reply playback aborts instead of waiting out its drain deadline |
+
+`EngineHandle::send` records host `SwitchInput` / `SwitchOutput` requests as
+the user's pick (`"default"` or empty = follow the default); watcher-sent
+switches do not change the pick. A pick that is not connected is kept without
+an error and used once it appears. The engine thread owns the watcher guard,
+so the watcher is stopped and joined whenever the engine loop exits (including
+by panic); engine shutdown still goes through `Shutdown` as before.
+
+The watcher reads each stream through `AudioHealth::stream(direction)`, one
+consistent snapshot (device id, follows-default, failed), so a switch landing
+mid-check is never seen half-applied.
+
+## Wake chime
+
+When a wake is accepted (after the liveness gate, before capture), the engine
+plays a 190 ms two-note chime synthesized in code (`engine/chime`), rendered
+once at the output rate. It goes through the normal output pipeline, so AEC
+removes it from the capture that follows, and the reply path drains stale
+output events before playing. Barge-in and follow-up turns get no chime.
+`[speech] wake_chime` (default on) or `BORIS_WAKE_CHIME=0` turns it off.
+
+## Self-check
+
+`EngineHandle::run_self_check` (or `EngineCommand::RunSelfCheck`) proves the
+voice chain on this PC without anyone speaking. Steps, published as
+`StatusPicture.self_check` after each one finishes:
+
+| Step id | Checks |
+|---------|--------|
+| `microphone` | 1.5 s live listen delivers audio above digital silence |
+| `speaker` | Playback stream is open and has not reported loss |
+| `voice` | TTS synthesizes "Hey Boris, what time is it?" (in memory, never played) |
+| `wake` | Wake model fires on that audio, scored like `wait_for_wake` |
+| `speech_detect` | Silero finds at least 320 ms of speech in it |
+| `transcribe` | STT returns the phrase's words ("Boris" itself may be misheard) |
+
+A failed model step can be fixed with `repair_models(on_progress)`: it hashes
+every installed model against its pinned SHA-256 (about 1 GB read), deletes
+the ones that fail, then runs `install_models` to fetch them again. Stop the
+engine first; loaded models can hold their files open on Windows.
+
+It runs on the engine thread with the engine's own model instances, only while
+idle or Armed. Mid-turn (hearing, thinking, talking, confirming, typed input)
+the request is dropped and the turn continues; the desktop UI times out and
+asks the user to retry. Models are released afterwards per residency policy.
+
+## API key check
+
+`check_api_key(key).await` asks OpenRouter's `GET /key` whether the key works
+and returns an `ApiKeyStatus { state, detail }`. `ApiKeyState` serializes as
+`ok` | `no_credit` | `rejected` | `unreachable` | `missing`. Rate limits (429),
+timeouts (408), and 5xx are `unreachable`, never blamed on the key. A blank key
+is `missing` without a network call.
+
 ## Public surface
 
 | Type | Role |
 |------|------|
 | [`Engine`](src/engine/mod.rs) | Owns the engine thread join handle |
-| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch / wake enroll / typed input) |
+| [`EngineHandle`](src/engine/mod.rs) | Cloneable command sender (`Start` / `Stop` / `Shutdown` / device switch / wake enroll / self-check / typed input) |
 | [`PipelineConfig`](src/config.rs) / [`LlmPrefs`](src/config.rs) | Host spawn configuration |
-| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail; `seq` is the latest-wins order key) |
+| [`StatusPicture`](src/status.rs) | UI DTO (mirrors desktop TS types; `thinking` is the live reasoning tail; `seq` is the latest-wins order key; `listen_hint` / `self_check` explain idle problems) |
+| [`check_api_key`](src/api_key.rs) / `ApiKeyStatus` | OpenRouter key verdict for setup screens |
 | [`AppSettings`](src/settings.rs) | Prefs + API key (`config.toml` + `auth.json`) |
 | [`PipelineError`](src/error.rs) | Typed errors (settings / install / init / IO / other) |
 
@@ -216,6 +287,7 @@ still match the catalog hash.
 | `BORIS_PROGRESSIVE_TOOLS` / `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` | Tool runtime |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
+| `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
 | `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |
@@ -260,6 +332,10 @@ not in this crate’s unit suite.
 | `download` | Model HTTP install |
 | `config` | `PipelineConfig` / `LlmPrefs` |
 | `devices` | Device list DTOs |
+| `engine/device_watch` | Unplug / re-plug recovery (helper thread + pure policy) |
+| `engine/self_check` | On-device voice-chain self-check |
+| `engine/chime` | Synthesized wake chime |
+| `api_key` | OpenRouter key check DTO |
 | `diagnostics` | Startup environment dump |
 | `artifacts` | Session artifact store |
 | `liveness` | Taught-wake liveness enroll + scoring |

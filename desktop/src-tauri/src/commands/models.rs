@@ -32,17 +32,29 @@ pub async fn models_status() -> ModelsStatus {
 
 /// Download missing STT/TTS models into `~/.boris/models`.
 ///
+/// With `repair`, first hashes every installed model and re-downloads the
+/// damaged ones (the host stops the engine first so no file is held open).
+///
 /// Runs on a worker thread so the UI stays responsive for multi-hundred-MB
 /// transfers. Emits [`EVENT_MODELS_PROGRESS`] ([`DownloadProgress`]) while running.
 #[tauri::command]
-pub async fn download_models(app: AppHandle) -> Result<ModelsInstallReport, String> {
-    tracing::info!("download_models started");
+pub async fn download_models(
+    app: AppHandle,
+    repair: Option<bool>,
+) -> Result<ModelsInstallReport, String> {
+    let repair = repair.unwrap_or(false);
+    tracing::info!(repair, "download_models started");
     // Blocking reqwest must not run on the async/UI path — that freezes the
     // window ("Not Responding") for the entire install (~900 MB).
     let report = tauri::async_runtime::spawn_blocking(move || {
-        boris_pipeline::install_models(|progress: DownloadProgress| {
+        let emit = |progress: DownloadProgress| {
             let _ = app.emit(EVENT_MODELS_PROGRESS, &progress);
-        })
+        };
+        if repair {
+            boris_pipeline::repair_models(emit)
+        } else {
+            boris_pipeline::install_models(emit)
+        }
     })
     .await
     .map_err(|e| {

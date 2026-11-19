@@ -108,6 +108,69 @@ pub struct StatusPicture {
     /// wake). Set while Armed; cleared when a turn starts or the cause ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_hint: Option<ListenHint>,
+    /// Latest on-device self-check (in progress or finished).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_check: Option<SelfCheckReport>,
+}
+
+/// Result of the on-device self-check: the voice chain run end to end on a
+/// synthetic "Hey Boris" plus a short live-mic and speaker check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfCheckReport {
+    /// Still running; `steps` holds the ones finished so far.
+    pub running: bool,
+    /// Every step passed (meaningful once `running` is false).
+    pub ok: bool,
+    pub steps: Vec<SelfCheckStep>,
+}
+
+/// One self-check step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfCheckStep {
+    pub id: SelfCheckStepId,
+    pub ok: bool,
+    /// Short human detail (score, transcript, device name, or the failure).
+    pub detail: String,
+    /// Wall time the step took.
+    pub ms: u64,
+}
+
+/// Stable self-check step ids (wire form is snake_case, e.g. `speech_detect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfCheckStepId {
+    /// Live mic delivers real (non-zero) audio.
+    Microphone,
+    /// Playback stream is open and healthy.
+    Speaker,
+    /// TTS synthesized the test phrase.
+    Voice,
+    /// Wake model fired on the synthesized phrase.
+    Wake,
+    /// VAD found speech in the synthesized phrase.
+    SpeechDetect,
+    /// STT returned the test phrase's words.
+    Transcribe,
+}
+
+impl SelfCheckStepId {
+    /// Wire / log name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Microphone => "microphone",
+            Self::Speaker => "speaker",
+            Self::Voice => "voice",
+            Self::Wake => "wake",
+            Self::SpeechDetect => "speech_detect",
+            Self::Transcribe => "transcribe",
+        }
+    }
+}
+
+impl std::fmt::Display for SelfCheckStepId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Something the user should know while Boris is listening for the wake word.
@@ -177,6 +240,7 @@ impl StatusPicture {
             wake_enroll: None,
             input: None,
             listen_hint: None,
+            self_check: None,
         }
     }
 }

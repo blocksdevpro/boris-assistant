@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { Activity, Sparkles } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   SettingsField,
@@ -8,123 +8,97 @@ import {
 } from "@/components/settings";
 import type { AppSettings } from "@/bridge";
 import { cn } from "@/lib/utils";
-import {
-  fieldInputClass,
-  selectCompactClass,
-} from "../mainWindowShared";
+import { fieldInputClass } from "../mainWindowShared";
 import { ProviderField } from "./ModelFields";
 
+const rowButtonClass =
+  "inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25";
+
+/** Developer page: only reachable with "Show advanced options" on. */
 export function AdvancedSettings({
   settings,
   locked,
-  advancedOpen,
   logPath,
-  onToggleAdvanced,
   onPatch,
+  onOpenMonitor,
+  onReplayOnboarding,
 }: {
   settings: AppSettings;
   locked: boolean;
-  advancedOpen: boolean;
   logPath: string;
-  onToggleAdvanced: () => void;
   onPatch: (p: Partial<AppSettings>) => void;
+  onOpenMonitor: () => void;
+  onReplayOnboarding: () => void;
 }) {
   return (
     <div className="flex flex-col gap-6">
-      <SettingsGroup title="Safety">
+      <SettingsGroup title="Tools">
         <SettingsRow
-          label="Trusted mode"
-          subtitle="Automatically allow notes and writes inside the safe workspace"
+          label="Developer monitor"
+          subtitle="Live phases, events, and turn timings"
+        >
+          <button type="button" onClick={onOpenMonitor} className={rowButtonClass}>
+            <Activity className="size-3.5" /> Open
+          </button>
+        </SettingsRow>
+        <SettingsRow
+          label="Welcome tour"
+          subtitle="Walk through first-run setup again"
+          last
+        >
+          <button type="button" onClick={onReplayOnboarding} className={rowButtonClass}>
+            <Sparkles className="size-3.5" /> Replay
+          </button>
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Model routing"
+        footer={
+          locked
+            ? "Stop Boris to change routing."
+            : "Leave on Auto unless a specific inference provider is required."
+        }
+      >
+        <ProviderField
+          label="Primary provider"
+          value={settings.openrouter_model_provider}
+          disabled={locked}
+          onChange={(v) => onPatch({ openrouter_model_provider: v })}
+        />
+        <ProviderField
+          label="Fast provider"
+          value={settings.openrouter_fast_provider}
+          disabled={locked}
+          onChange={(v) => onPatch({ openrouter_fast_provider: v })}
+        />
+        <SettingsRow
+          label="Require selected providers"
+          subtitle="Do not use another provider if these are unavailable"
           last
         >
           <Toggle
-            checked={settings.trusted_auto_moderate}
-            disabled={locked}
-            onChange={(v) => onPatch({ trusted_auto_moderate: v })}
-            aria-label="Trusted mode"
-          />
-        </SettingsRow>
-      </SettingsGroup>
-      <SettingsGroup
-        title="Speech"
-        footer="Balanced keeps voice models warm through active follow-ups, then releases them when idle. Low latency keeps them warm for the session."
-      >
-        <SettingsRow label="Model residency" labelFor="model-residency" last>
-          <select
-            id="model-residency"
-            className={selectCompactClass}
-            value={settings.model_residency}
-            disabled={locked}
-            onChange={(e) =>
-              onPatch({
-                model_residency: e.target
-                  .value as AppSettings["model_residency"],
-              })
+            checked={settings.openrouter_pin_provider}
+            disabled={
+              locked ||
+              (!settings.openrouter_model_provider.trim() &&
+                !settings.openrouter_fast_provider.trim())
             }
-          >
-            <option value="low_memory">Low memory</option>
-            <option value="balanced">Balanced</option>
-            <option value="low_latency">Low latency</option>
-          </select>
+            onChange={(v) => onPatch({ openrouter_pin_provider: v })}
+            aria-label="Require selected providers"
+          />
         </SettingsRow>
       </SettingsGroup>
-      <SettingsGroup
-        title="Model Routing"
-        footer="Optional. Leave this on Auto unless a specific inference provider is required."
-      >
-        <button
-          type="button"
-          onClick={onToggleAdvanced}
-          aria-expanded={advancedOpen}
-          aria-controls="provider-routing-controls"
-          className="flex min-h-11 w-full items-center justify-between px-4 py-2.5 text-left text-[15px] text-white/80 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25"
-        >
-          <span>Provider routing</span>
-          <ChevronRight
-            className={cn(
-              "size-4 text-white/35 transition-transform",
-              advancedOpen && "rotate-90",
-            )}
-          />
-        </button>
-        {advancedOpen ? (
-          <div id="provider-routing-controls">
-            <ProviderField
-              label="Primary provider"
-              value={settings.openrouter_model_provider}
-              disabled={locked}
-              onChange={(v) => onPatch({ openrouter_model_provider: v })}
-            />
-            <ProviderField
-              label="Fast provider"
-              value={settings.openrouter_fast_provider}
-              disabled={locked}
-              onChange={(v) => onPatch({ openrouter_fast_provider: v })}
-            />
-            <SettingsRow
-              label="Require selected providers"
-              subtitle="Do not use another provider if these are unavailable"
-              last
-            >
-              <Toggle
-                checked={settings.openrouter_pin_provider}
-                disabled={
-                  locked ||
-                  (!settings.openrouter_model_provider.trim() &&
-                    !settings.openrouter_fast_provider.trim())
-                }
-                onChange={(v) => onPatch({ openrouter_pin_provider: v })}
-                aria-label="Require selected providers"
-              />
-            </SettingsRow>
-          </div>
-        ) : null}
-      </SettingsGroup>
+
       <SettingsGroup
         title="Diagnostics"
         footer="The log filter applies after restart."
       >
-        <SettingsField label="Log filter" labelFor="logging-filter">
+        <SettingsField
+          label="Log filter"
+          labelFor="logging-filter"
+          last={!logPath}
+        >
           <Input
             id="logging-filter"
             placeholder="info or boris=debug"
@@ -137,7 +111,7 @@ export function AdvancedSettings({
           <div className="px-4 py-3">
             <p className="text-[13px] text-white/55">Log file</p>
             <p
-              className="mt-1 break-all font-mono text-[11px] leading-snug text-white/50"
+              className="mt-1 select-text break-all font-mono text-[11px] leading-snug text-white/50"
               title={logPath}
             >
               {logPath.replace(/\\/g, "/")}

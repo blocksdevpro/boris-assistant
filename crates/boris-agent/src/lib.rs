@@ -71,9 +71,10 @@ pub mod types;
 
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
 pub use boris_ai::{
-    parse_provider_list, split_model_and_provider, CompleteOptions, LlmClient, LlmError,
-    LlmErrorKind, LlmStreamEvent, OpenRouterClient, ReasoningConfig, ReasoningEffort, RequestStage,
-    TokenUsage, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS,
+    check_openrouter_key, parse_provider_list, split_model_and_provider, CompleteOptions,
+    LlmClient, LlmError, LlmErrorKind, LlmStreamEvent, OpenRouterClient, OpenRouterKeyCheck,
+    ReasoningConfig, ReasoningEffort, RequestStage, TokenUsage,
+    DEFAULT_BASE_URL as OPENROUTER_BASE_URL, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS,
 };
 
 pub use activity::{
@@ -121,13 +122,13 @@ pub use speech_sanitize::{
 pub use stats::AgentStats;
 pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
-    InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolRisk,
-    ToolOutputStore, MAX_SKILL_RESULT_CHARS, MAX_TOOL_RESULT_CHARS, MAX_STORED_CHARS,
+    InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolOutputStore,
+    ToolRisk, MAX_SKILL_RESULT_CHARS, MAX_STORED_CHARS, MAX_TOOL_RESULT_CHARS,
 };
 pub use tool_context::ToolCallContext;
 pub use tools::{
-    artifact_tools, artifact_tools_at, bash_tools, builtin_tools, fs_tools, os_tools,
-    output_tools, output_tools_at, register_builtin_tools, register_builtin_tools_with_options,
+    artifact_tools, artifact_tools_at, bash_tools, builtin_tools, fs_tools, os_tools, output_tools,
+    output_tools_at, register_builtin_tools, register_builtin_tools_with_options,
     register_builtin_tools_with_preset, register_mcp_tools, web_tools, BuiltinToolPaths,
 };
 pub use trace::{percentile_ms, summarize_traces, TraceSummary, TurnTrace};

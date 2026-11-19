@@ -36,7 +36,9 @@
 //! **UI status / skip decisions** use size + path presence only (plus the
 //! Supertonic generation check). Full SHA-256 over ~1 GB of weights is reserved
 //! for the download path — re-hashing on every `models_status` poll froze the
-//! desktop main window for tens of seconds ("Not Responding").
+//! desktop main window for tens of seconds ("Not Responding"). The one
+//! exception is [`repair_models`], an explicit user action that hashes every
+//! installed file once and re-downloads the ones that fail.
 //!
 //! `BORIS_MODEL_BASE_URL` must use `https://`. The SHA-256 verification is
 //! still required for mirrors, so a TLS-valid but malicious or stale mirror
@@ -435,6 +437,47 @@ pub fn models_status() -> ModelsStatus {
             .ok()
             .filter(|s| !s.is_empty()),
     }
+}
+
+/// Verify every installed model file against its pinned SHA-256, delete the
+/// ones that fail, then [`install_models`] to download them again.
+///
+/// Reads every model once (about 1 GB), so it is reserved for an explicit
+/// "repair" after a failed self-check. Each file being hashed is reported as
+/// [`DownloadFileStatus::Starting`] with a "checking" message. The host must
+/// stop the engine first: loaded models can hold the files open on Windows.
+pub fn repair_models(
+    mut on_progress: impl FnMut(DownloadProgress),
+) -> PipelineResult<ModelsInstallReport> {
+    let root = models_dir();
+    let mut discarded = 0u32;
+    for entry in CATALOG {
+        let dest = root.join(entry.local_rel);
+        if !dest.is_file() {
+            continue;
+        }
+        on_progress(DownloadProgress {
+            component: entry.component,
+            file_name: file_name_of(entry.local_rel),
+            relative_path: entry.local_rel.to_string(),
+            bytes_downloaded: 0,
+            total_bytes: None,
+            status: DownloadFileStatus::Starting,
+            message: Some("checking".into()),
+        });
+        if let Err(problem) = verify_sha256(&dest, entry.sha256) {
+            tracing::warn!(file = entry.local_rel, %problem, "model failed verification — re-downloading");
+            fs::remove_file(&dest).map_err(|e| {
+                PipelineError::download(format!(
+                    "remove damaged {}: {e} (is Boris still running?)",
+                    entry.local_rel
+                ))
+            })?;
+            discarded += 1;
+        }
+    }
+    tracing::info!(discarded, "model repair: verification done");
+    install_models(on_progress)
 }
 
 /// Download missing model files into `~/.boris/models`.

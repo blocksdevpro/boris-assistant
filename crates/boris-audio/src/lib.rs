@@ -12,6 +12,7 @@
 //! | [`channels`] | Downmix / upmix helpers |
 //! | [`buffer`] | Sliding + recording buffers for wake/hear |
 //! | [`devices`] | Device enumeration |
+//! | [`health`] | Stream-loss flags + open device ids for device watchers |
 //!
 //! # Rates
 //!
@@ -24,6 +25,7 @@ pub mod buffer;
 pub mod channels;
 pub mod devices;
 pub mod frontend;
+pub mod health;
 pub mod input;
 pub mod output;
 pub mod resampler;
@@ -33,6 +35,7 @@ pub mod service;
 pub use boris_core::AUDIO_TARGET_RATE;
 pub use devices::{DeviceInfo, Direction};
 pub use frontend::{CaptureFrontEnd, FarEnd, FRAME_SAMPLES};
+pub use health::{AudioHealth, StreamHealth};
 pub use output::{OutputCommand, OutputEvent};
 pub use service::AudioService;
 

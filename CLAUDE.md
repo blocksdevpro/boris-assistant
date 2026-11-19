@@ -113,6 +113,8 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 
 `Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
 
+Two helpers sit beside the engine thread without breaking the single-pipeline rule: `engine/device_watch` (owned by the engine loop) polls `AudioHealth` once a second and recovers from unplug/re-plug by sending the ordinary `SwitchInput`/`SwitchOutput` commands; `EngineHandle::send` records host switches as the user's pick. `RunSelfCheck` runs the on-device voice-chain check on the engine thread only while idle or Armed — mid-turn hear helpers drop it, and it must never cancel a turn or a pending confirmation.
+
 TTS loading overlaps agent work. Reply synthesis begins only after final-answer
 acceptance and speech sanitization; later sentence synthesis overlaps playback.
 The agent loop does not forward `ContentDelta` events to TTS. Speculative
@@ -152,6 +154,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
 | `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
+| `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
@@ -167,6 +170,8 @@ Dev secrets go in `.env` (copy from `.env.example`), gitignored.
 - **Keep low-level crates thin.** `boris-core` has only `thiserror` by design; `boris-inference` has no `ort`/vendor SDKs/Tokio; adapters map failures to `boris_core::Error` at the trait edge. Don't add HTTP/ORT/Tokio deps to a crate whose README says it's deliberately kept small.
 - **Import from crate roots**, not internal modules, unless the crate's own README says otherwise (e.g. `boris-agent` marks nested modules public for the pipeline but not a stability guarantee).
 - **Never block inside a cpal RT callback** (`boris-audio`) — convert/`try_send` only; do real work on the worker thread.
+- **Never let `ort` load an ONNX Runtime library it cannot use.** With `ort/load-dynamic` (pulled in by `st-tts`), `ort` 2.0.0-rc.12 deadlocks — no panic, no log — on any failed load (missing DLL, too old, not ORT). `boris_sense::init_onnx_runtime` pre-checks the library first (`preflight_dylib`), and `boris-desktop` pins `ORT_DYLIB_PATH` to the DLL beside the exe (Windows 11 ships ORT 1.17 in System32). Keep both until `ort` fixes the re-entrant `Once`. Running `boris-sense` tests in one `cargo test` with `boris-desktop` unifies `load-dynamic`; `lock_ort_for_test` points those builds at `target/<profile>/onnxruntime.dll`.
+- **Never block the Tauri UI thread** (`boris-desktop`). Tray/menu handlers and non-`async` commands run on it, and window calls from other threads (overlay `is_visible`, `scale_factor`, …) marshal to it and wait. So: no engine stop/join there (tray Quit stops on a background thread), commands that lock the engine `handle` are `#[tauri::command(async)]`, and `AppState.status` is never held across a UI dispatch — `emit_order` orders delivery instead (lock order `emit_order` → `status`). Breaking this froze the app on tray "Quit Boris".
 - **Preserve tool execution status.** Carry `ToolObservation` through runtime,
   batching, and resumes. Read its status before rendering text; successful logs
   can contain error-related words. Internal `_tool_ok` survives history and

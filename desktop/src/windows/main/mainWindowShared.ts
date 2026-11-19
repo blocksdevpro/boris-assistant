@@ -2,12 +2,26 @@ import { cn } from "@/lib/utils";
 
 export type View = "home" | "settings" | "teach" | "debug";
 
+/**
+ * Settings pages, in sidebar order. `advanced` is the Developer page and only
+ * shows when "Show advanced options" is on.
+ */
 export type SettingsCategory =
   | "general"
-  | "overlay"
   | "speech"
+  | "overlay"
+  | "privacy"
   | "connections"
   | "advanced";
+
+/** Device id meaning "use the Windows default, and follow it when it changes". */
+export const SYSTEM_DEFAULT_DEVICE = "default";
+
+/** Empty or "default" settings follow the OS default device. */
+export function followsDefaultDevice(id: string | null | undefined): boolean {
+  const t = id?.trim() ?? "";
+  return t === "" || t.toLowerCase() === SYSTEM_DEFAULT_DEVICE;
+}
 
 export type ModelCheckState = "loading" | "ready" | "missing" | "error";
 
@@ -24,22 +38,60 @@ export type UpdateUiState =
 export const CAPABILITY_OPTIONS = [
   {
     id: "full",
-    label: "Full",
-    footer: "Shell, web, and files. Approvals still apply.",
+    label: "Everything",
+    footer: "Files, apps, the web, and commands. Boris asks before anything risky.",
   },
   {
     id: "local_power",
-    label: "Local only",
-    footer: "Files and system helpers. No shell or network.",
+    label: "This PC only",
+    footer: "Files and apps on this computer. No internet or commands.",
   },
   {
     id: "voice_safe",
-    label: "Voice-safe",
-    footer: "Light tools only — time, notes, profile, skills.",
+    label: "Just the basics",
+    footer: "Time, notes, and what he remembers about you. Nothing else.",
   },
 ] as const;
 
 export type CapabilityOption = (typeof CAPABILITY_OPTIONS)[number];
+
+export type Residency = "low_memory" | "balanced" | "low_latency";
+
+/** How long Boris keeps his voice models in memory, in plain words. */
+export const RESIDENCY_OPTIONS: readonly {
+  id: Residency;
+  label: string;
+  tagline: string;
+  detail: string;
+}[] = [
+  {
+    id: "low_latency",
+    label: "Fastest",
+    tagline: "Answers right away",
+    detail: "Keeps his voice loaded while Boris is on. Uses the most memory.",
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    tagline: "Quick, then tidies up",
+    detail: "Stays quick during a conversation, then frees memory when you're done.",
+  },
+  {
+    id: "low_memory",
+    label: "Light",
+    tagline: "Easy on your PC",
+    detail: "Frees memory after every reply. Each reply takes a moment longer to start.",
+  },
+];
+
+/**
+ * Best guess for this PC. WebView2 reports RAM in coarse buckets capped at
+ * 8 GB, so this can only spot small machines, which is the case that matters.
+ */
+export function recommendedResidency(): Residency {
+  const gb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+  return typeof gb === "number" && gb > 0 && gb <= 4 ? "low_memory" : "balanced";
+}
 
 /** Compact trailing control (Tools, Voice, short picks). */
 export const selectCompactClass = cn(

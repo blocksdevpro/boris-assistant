@@ -1,0 +1,79 @@
+/* First-run welcome flow. Calm surface; the only glow lives behind the orb. */
+
+.onboarding {
+  position: relative;
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.onboarding__stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.onboarding__halo {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 240px;
+  height: 240px;
+  margin: -120px 0 0 -120px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--onboarding-glow, #8fb4ff) 22%, transparent) 0%,
+    transparent 64%
+  );
+  filter: blur(6px);
+  pointer-events: none;
+  animation: onboarding-breathe 5.5s ease-in-out infinite;
+}
+
+.onboarding[data-tone="success"] { --onboarding-glow: #6ee7b7; }
+.onboarding[data-tone="warn"] { --onboarding-glow: #fcd34d; }
+
+@keyframes onboarding-breathe {
+  0%, 100% { transform: scale(0.9); opacity: 0.65; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+
+.onboarding__footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--boris-surface-canvas) 38%
+  );
+}
+
+/* Moving sheen on the indeterminate part of the download bar. */
+.onboarding__sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.22),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: onboarding-sheen 1.6s ease-in-out infinite;
+}
+
+@keyframes onboarding-sheen {
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding__halo,
+  .onboarding__sheen { animation: none; }
+}
+
+@media (max-height: 560px) {
+  .onboarding__halo { width: 160px; height: 160px; margin: -80px 0 0 -80px; }
+}

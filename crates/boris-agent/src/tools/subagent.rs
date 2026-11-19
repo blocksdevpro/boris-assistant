@@ -282,6 +282,8 @@ impl Tool for SpawnSubagentTool {
             // Give routing the actual child task instead of mutable global state.
             task: Some(crate::task::classify_task(&goal)),
             debug: None,
+            // Bounded by the parent's tool timeout and its own round cap.
+            time_budget: None,
         };
         let emit = child_progress_emit(ctx);
         let cancel = ctx

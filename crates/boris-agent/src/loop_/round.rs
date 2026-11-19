@@ -21,9 +21,10 @@ const REASONING_PREVIEW_CHARS: usize = 900;
 /// Injected when the next round will be the hard tool-round cap (tools still available this round).
 pub(super) const NUDGE_NEAR_TOOL_CAP: &str = "\
 <system-reminder>\n\
-Tool budget is nearly exhausted. Stop calling tools. \
-Give a short spoken status of what you finished and what \
-(if anything) is left. 1–2 sentences only.\n\
+This turn's work budget is used up, so tools are paused. Give a short spoken \
+progress check-in: what is done, what is left, and that the user can say \
+\"continue\" to pick it up. Do not say the task is finished unless it is. \
+1–2 sentences only.\n\
 </system-reminder>";
 
 /// Injected at cap when the model returned tool_calls/empty content and must speak.

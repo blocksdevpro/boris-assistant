@@ -45,6 +45,7 @@ pub(super) fn finish_paused(
         tools_used,
         pending_turn: Some(pending_turn),
         token_accounting,
+        budget_exhausted: false,
     })
 }
 
@@ -86,6 +87,7 @@ pub(super) fn finish_with_speech(
         tools_used,
         pending_turn: None,
         token_accounting,
+        budget_exhausted: false,
     })
 }
 

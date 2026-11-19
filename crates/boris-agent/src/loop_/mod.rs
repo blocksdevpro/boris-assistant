@@ -153,7 +153,13 @@ pub async fn agent_loop_with_budget(
     let mut tool_rounds = tool_rounds;
     let mut confirms_used = confirms_used;
     let mut token_accounting = initial_accounting;
-    let max_rounds = config.max_tool_rounds as usize;
+    // Hard safety ceiling regardless of host or per-turn configuration.
+    let max_rounds = config
+        .max_tool_rounds
+        .min(crate::types::MAX_TOOL_ROUNDS_CEILING) as usize;
+    let started = std::time::Instant::now();
+    // Set when the round cap or wall-clock budget stops ongoing tool work.
+    let mut budget_exhausted = false;
     // Full path to todos.json (session-bound or sandbox fallback).
     let todos_file = todos_file
         .unwrap_or_else(|| crate::finish_gate::default_sandbox_guess().join("todos.json"));
@@ -177,8 +183,22 @@ pub async fn agent_loop_with_budget(
             round: round as u32,
         });
 
-        // On the final allowed round, withhold tools so the model must speak.
-        let at_cap = round >= max_rounds;
+        // On the final allowed round, or once the wall-clock budget is spent,
+        // withhold tools so the model must speak.
+        let out_of_time = round > 0
+            && config
+                .time_budget
+                .is_some_and(|budget| started.elapsed() >= budget);
+        let at_cap = round >= max_rounds || out_of_time;
+        if at_cap && tool_rounds > 0 && !budget_exhausted {
+            // Ongoing tool work hit the budget: ask for a progress check-in
+            // and keep the task open so "continue" resumes it.
+            budget_exhausted = true;
+            if out_of_time {
+                tracing::info!(round, "turn time budget spent; asking for a check-in");
+            }
+            state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
+        }
         let response = match complete_round(
             &mut state,
             user_text,
@@ -223,10 +243,7 @@ pub async fn agent_loop_with_budget(
             response
         };
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
-            // One round before cap: run tools, then inject a finish nudge and
-            // continue so the next iteration (at_cap) produces a spoken reply.
-            let force_finish_next = round + 1 >= max_rounds;
-
+            // The next iteration (at cap) pushes the check-in nudge itself.
             tool_rounds += 1;
             state.context.push(Role::Assistant, response.clone());
             emit(AgentEvent::MessageEnd {
@@ -308,9 +325,6 @@ pub async fn agent_loop_with_budget(
                         // Any real tool execution resets the unknown streak.
                         // (Unknown soft-fails never count as success.)
                         consecutive_unknown_rounds = 0;
-                    }
-                    if force_finish_next {
-                        state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
                     }
                     emit(AgentEvent::TurnEnd {
                         round: round as u32,
@@ -416,14 +430,16 @@ pub async fn agent_loop_with_budget(
             }
         }
 
-        return finish_with_speech(
+        let mut result = finish_with_speech(
             &emit,
             round as u32,
             reply,
             tool_rounds,
             tools_used,
             token_accounting,
-        );
+        )?;
+        result.budget_exhausted = budget_exhausted;
+        return Ok(result);
     }
 
     // Unreachable with 0..=max_rounds + return inside, but keep a soft landing.
@@ -433,6 +449,7 @@ pub async fn agent_loop_with_budget(
         tools_used,
         pending_turn: None,
         token_accounting,
+        budget_exhausted: true,
     })
 }
 
@@ -763,6 +780,7 @@ pub async fn resume_pending_tool(
                 tools_used,
                 pending_turn: Some(pending_turn),
                 token_accounting: restored_accounting,
+                budget_exhausted: false,
             });
         }
     }
@@ -1826,5 +1844,73 @@ mod tests {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Finished."),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spent_time_budget_asks_for_check_in_and_flags_budget() {
+        struct Recording {
+            responses: Mutex<Vec<Value>>,
+            requests: Mutex<Vec<(Value, Value)>>,
+        }
+        #[async_trait]
+        impl LlmClient for Recording {
+            async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
+                self.requests.lock().unwrap().push((messages, tools));
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let client = Recording {
+            responses: Mutex::new(vec![
+                json!({"role":"assistant", "content": null, "tool_calls":[
+                    {"id":"t1", "type":"function", "function":{"name":"get_time", "arguments":"{}"}}
+                ]}),
+                json!({"role":"assistant", "content":"Checked the clock; the rest is left. Say continue."}),
+            ]),
+            requests: Mutex::new(vec![]),
+        };
+        let tools: Vec<std::sync::Arc<dyn Tool>> =
+            vec![std::sync::Arc::new(crate::tools::time::GetTimeTool)];
+        let runtime = ToolRuntime::new(
+            crate::SandboxConfig::default(),
+            Box::new(crate::NullAuditSink),
+        );
+        let mut context = Context::new(20);
+        context.push(Role::System, "policy");
+        context.push(Role::User, "refactor the parser");
+        context.begin_task("refactor the parser");
+        let config = AgentLoopConfig {
+            max_tool_rounds: 40,
+            time_budget: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        };
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = agent_loop(
+            state,
+            "refactor the parser",
+            &config,
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.budget_exhausted);
+        assert_eq!(result.tool_rounds, 1);
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "one tool round, then the check-in");
+        let (messages, tools) = &requests[1];
+        assert!(tools.is_null() || tools.as_array().is_some_and(|t| t.is_empty()));
+        assert!(messages.to_string().contains("work budget is used up"));
     }
 }

@@ -190,8 +190,21 @@ impl Agent {
         } else {
             user_text
         };
+        let task = crate::task::classify_task(objective);
+        // Coding / multi-step / complex work gets real headroom; the
+        // wall-clock budget and the hard ceiling still bound every turn.
+        let wants_room = task.coding
+            || task.multi_step
+            || task.complexity == crate::task::TaskComplexity::Complex;
+        let max_tool_rounds = if wants_room {
+            self.max_tool_rounds
+                .max(crate::types::COMPLEX_MAX_TOOL_ROUNDS)
+        } else {
+            self.max_tool_rounds
+        }
+        .min(crate::types::MAX_TOOL_ROUNDS_CEILING);
         AgentLoopConfig {
-            max_tool_rounds: self.max_tool_rounds,
+            max_tool_rounds,
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             features: self.features.clone(),
@@ -199,8 +212,9 @@ impl Agent {
             // Routing only: use the host's original utterance (or the objective
             // a short follow-up continues), never an injected reminder. The
             // tool listing does not depend on it.
-            task: Some(crate::task::classify_task(objective)),
+            task: Some(task),
             debug: self.debug.clone(),
+            time_budget: Some(crate::types::DEFAULT_TURN_TIME_BUDGET),
         }
     }
 
@@ -874,6 +888,11 @@ impl Agent {
                 text,
                 expect_reply: true,
             } => (TaskStatus::WaitingForInput, text.as_str()),
+            // A budget stop is a progress check-in: keep the task open so a
+            // "continue" follow-up resumes it.
+            AgentOutcome::Speak { text, .. } if loop_out.budget_exhausted => {
+                (TaskStatus::Active, text.as_str())
+            }
             AgentOutcome::Speak { text, .. } => (TaskStatus::Completed, text.as_str()),
             AgentOutcome::Silent => (TaskStatus::Completed, ""),
             AgentOutcome::NeedsConfirmation { .. } => (TaskStatus::WaitingForConfirmation, ""),
@@ -1626,6 +1645,7 @@ mod retrieval_tests {
             tools_used: Vec::new(),
             pending_turn: None,
             token_accounting: crate::types::TokenAccounting::default(),
+            budget_exhausted: false,
         };
 
         agent
@@ -1638,5 +1658,48 @@ mod retrieval_tests {
             .messages()
             .iter()
             .any(|message| message.origin == crate::MessageOrigin::HostControl));
+    }
+
+    #[tokio::test]
+    async fn budget_check_in_keeps_the_task_open_for_continue() {
+        let mut agent = super::Agent::new(Box::new(NoopClient), "sys");
+        agent.context.push(super::Role::User, "refactor the parser");
+        agent.context.begin_task("refactor the parser");
+        let result = crate::LoopResult {
+            outcome: crate::AgentOutcome::Speak {
+                text: "Parser half done; say continue.".into(),
+                expect_reply: false,
+            },
+            tool_rounds: 40,
+            tools_used: vec!["file_edit".into()],
+            pending_turn: None,
+            token_accounting: crate::types::TokenAccounting::default(),
+            budget_exhausted: true,
+        };
+        agent
+            .finish_loop(std::time::Instant::now(), "refactor the parser", result)
+            .await
+            .unwrap();
+        assert_eq!(agent.context.task_state().status, crate::TaskStatus::Active);
+    }
+
+    #[test]
+    fn coding_turns_get_more_rounds_within_the_ceiling() {
+        let mut agent = super::Agent::new(Box::new(NoopClient), "sys");
+        assert_eq!(
+            agent.loop_config("what time is it").max_tool_rounds,
+            crate::types::DEFAULT_MAX_TOOL_ROUNDS
+        );
+        assert_eq!(
+            agent
+                .loop_config("fix the failing test in src/parser.rs")
+                .max_tool_rounds,
+            crate::types::COMPLEX_MAX_TOOL_ROUNDS
+        );
+        agent.set_max_tool_rounds(500);
+        assert_eq!(
+            agent.loop_config("what time is it").max_tool_rounds,
+            crate::types::MAX_TOOL_ROUNDS_CEILING
+        );
     }
 }

@@ -451,7 +451,13 @@ Developer capture records `parallel_expansion`, `parallel_batch_start`, and
 `parallel_batch_end` (IDs, scheduler limit, wall time, failures, pauses, cancellation).
 Home/overlay keep an explicit parallel batch activity label while child tools run.
 
-Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
+Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28;
+coding, multi-step, or complex turns get `COMPLEX_MAX_TOOL_ROUNDS` = 40), every
+loop invocation also has a 10-minute wall-clock budget (`DEFAULT_TURN_TIME_BUDGET`),
+and nothing exceeds `MAX_TOOL_ROUNDS_CEILING` = 64. When the cap or the clock
+stops ongoing tool work, tools are withheld and the model gives a short spoken
+progress check-in; `LoopResult::budget_exhausted` keeps the task state open
+(`Active`) so a "continue" follow-up resumes it.
 HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).
 
 **Trusted session** (`trusted_auto_moderate`): auto-allows ≤ Moderate tools **and** Dangerous sandbox `FsWrite` (file_write/file_edit under write roots). Shell, open URL, and Critical still need yes.

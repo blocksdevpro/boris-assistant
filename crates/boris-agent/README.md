@@ -207,6 +207,26 @@ and downscaled to 1568 px), JPEG, GIF, and WebP images (passed through up to
 ~3.7 MB) so the model can see them; BMP and PDF get a text envelope (no PDF text
 extraction), and the host can open the file on screen.
 
+## Shell sessions and background jobs
+
+`bash`, `bash_output`, and `bash_kill` share the agent's `ShellSession`
+(`Agent::shell_session`). The last working directory a `bash` call used is
+reused by later calls in the same session until the model sets `cwd` again; a
+`cd` inside a command is not tracked (no robust way across Git Bash and the
+PowerShell fallback). `run_in_background: true` spawns the command with
+stdout and stderr redirected by the OS to `<session_dir>/jobs/<id>.log` and
+returns a job id at once, with no timeout. `bash_output` returns output written
+since the previous read (head and tail past 120 KB, older bytes stay in the
+log) plus the status; `bash_kill` stops the job's whole process tree. At most
+four jobs run at once, and a job whose log passes 256 MB is killed when polled.
+Jobs are killed on session change, `unbind_session` (session end, engine off,
+shutdown), and when the agent is dropped; on Windows each job sits in a Job
+Object with kill-on-close, so the OS also kills the tree if Boris crashes.
+They are OS processes owned by the tool runtime, not engine workers or a
+scheduler. Starting a job is a `bash` call with the same policy and HITL;
+`bash_output` is a safe read and `bash_kill` is moderate. Presets that drop
+`bash` drop both job tools.
+
 ## Images and screen capture
 
 `screen_capture` (Windows, GDI) captures the primary monitor or the active

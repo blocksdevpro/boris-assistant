@@ -44,6 +44,7 @@ pub mod tool_search;
 pub mod web;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent::Agent;
 use crate::capability::{filter_tools_for_preset, CapabilityPreset};
@@ -191,13 +192,28 @@ pub fn web_tools() -> Vec<Box<dyn Tool>> {
     out
 }
 
-/// Bash tool (requires host shell policy + HITL for dangerous runs).
+/// Bash tools with their own [`bash::ShellSession`] (requires host shell
+/// policy + HITL for dangerous runs). Agents use [`bash_tools_with_session`]
+/// with [`Agent::shell_session`] so session bind/unbind manage jobs.
 pub fn bash_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
+    bash_tools_with_session(paths, bash::ShellSession::new())
+}
+
+/// `bash`, `bash_output`, and `bash_kill` sharing one session cwd and job set.
+pub fn bash_tools_with_session(
+    paths: &BuiltinToolPaths,
+    shell: Arc<bash::ShellSession>,
+) -> Vec<Box<dyn Tool>> {
     let cwd_roots = paths.read_roots_flat();
-    vec![Box::new(bash::BashTool::new(
-        cwd_roots,
-        paths.sandbox_root.clone(),
-    ))]
+    vec![
+        Box::new(bash::BashTool::with_session(
+            cwd_roots,
+            paths.sandbox_root.clone(),
+            Arc::clone(&shell),
+        )),
+        Box::new(bash::BashOutputTool::new(Arc::clone(&shell))),
+        Box::new(bash::BashKillTool::new(shell)),
+    ]
 }
 
 /// Register already-discovered MCP tools (async discovery via [`mcp::discover_mcp_tools`]).
@@ -301,7 +317,7 @@ pub fn register_builtin_tools_with_preset(
         tools.extend(os_tools(&paths));
         tools.extend(fs_tools(&paths));
         tools.extend(web_tools());
-        tools.extend(bash_tools(&paths));
+        tools.extend(bash_tools_with_session(&paths, agent.shell_session()));
     }
 
     let tools = filter_tools_for_preset(tools, preset);
@@ -429,7 +445,17 @@ mod tests {
     fn shell_allowlist_style_integration_via_bash_meta() {
         let paths = test_paths();
         let tools = bash_tools(&paths);
-        assert_eq!(tools.len(), 1);
+        let names: Vec<_> = tools.iter().map(|t| t.name().to_string()).collect();
+        assert_eq!(names, ["bash", "bash_output", "bash_kill"]);
+        // Presets that drop bash drop its job tools too.
+        for t in &tools {
+            assert_eq!(
+                t.meta().kind,
+                crate::tool::ToolKind::Execute,
+                "{}",
+                t.name()
+            );
+        }
         let m = tools[0].meta();
         assert!(m.permissions.contains(&crate::tool::Permission::Shell));
         assert_eq!(m.read_only, Some(false));

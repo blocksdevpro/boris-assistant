@@ -127,6 +127,8 @@ pub struct Agent {
     artifacts_dir: Option<PathBuf>,
     /// Session root for subagent artifacts (shared so tools can observe rebinds).
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Bash session cwd + background jobs (killed on unbind and drop).
+    shell: Arc<crate::tools::bash::ShellSession>,
     /// Background LTM / extract / index (owned by host or tests).
     maintenance: Option<crate::maintenance::MaintenanceHandle>,
     /// Workspace facts for the system prompt (host-provided).
@@ -353,6 +355,7 @@ impl Agent {
             todos_path: None,
             artifacts_dir: None,
             subagent_session_root: Arc::new(Mutex::new(None)),
+            shell: crate::tools::bash::ShellSession::new(),
             maintenance: None,
             workspace: None,
         }
@@ -638,6 +641,17 @@ impl Agent {
         }
     }
 
+    /// Shell state shared by the bash tools: session cwd and background jobs.
+    pub fn shell_session(&self) -> Arc<crate::tools::bash::ShellSession> {
+        Arc::clone(&self.shell)
+    }
+
+    /// Kill every background bash job now (e.g. before app exit). Dropping
+    /// the agent does the same.
+    pub fn kill_background_jobs(&self) -> usize {
+        self.shell.kill_all()
+    }
+
     /// Shared handle to the subagent session root (live updates via rebind).
     pub fn subagent_session_root(&self) -> Arc<Mutex<Option<PathBuf>>> {
         Arc::clone(&self.subagent_session_root)
@@ -685,6 +699,8 @@ impl Agent {
         self.set_output_store_dir(Some(session_dir.join("tool_outputs")));
         self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
         self.set_subagent_session_root(Some(session_dir.to_path_buf()));
+        // A different session kills the previous session's background jobs.
+        self.shell.bind(session_id, session_dir);
         if let Some(ltm) = &self.long_term {
             ltm.set_session_dir(Some(session_dir.to_path_buf()));
         }
@@ -702,6 +718,8 @@ impl Agent {
         self.set_artifacts_dir(None);
         self.set_audit_path(None);
         self.set_subagent_session_root(None);
+        // Session end: background jobs die and the bash cwd resets.
+        self.shell.unbind();
         if let Some(ltm) = &self.long_term {
             ltm.set_session_dir(None);
         }

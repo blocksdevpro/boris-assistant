@@ -107,6 +107,8 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 - `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
 - `NetworkPolicy::Open` still SSRF-blocks loopback/RFC1918/link-local/metadata hosts on `web_fetch`; residual DNS-rebinding risk is documented in code, not solved.
 - HITL (human-in-the-loop) pauses dangerous tool calls for yes/no; after approval the runtime still enforces hard path/shell/network gates.
+- `bash` keeps a per-session cwd and can start `run_in_background` jobs (`bash_output` / `bash_kill`, max 4 running). They are OS processes owned by the agent's `ShellSession`, not engine workers, and are killed with their process tree on session change, `unbind_session` (engine off / shutdown), and agent drop (Windows Job Object kill-on-close also covers crashes).
+- `file_edit`, and `file_write` over an existing file, require a `file_read` of it this session and refuse if it changed on disk since; `Tool::precheck` runs that before HITL.
 - **Wave scheduling** (default): one assistant turn can return many `tool_calls`; read-only tools run in parallel waves (`max_parallel_tools`, default 16), writes run sequentially. Falls back to `max_parallel_tools`-bounded legacy `join_all` or fully sequential HITL-safe mode depending on config/risk. Tunable via `BORIS_WAVE_SCHEDULING`, `BORIS_MAX_PARALLEL_TOOLS`, `BORIS_MAX_CONFIRMS`, `BORIS_TRUSTED`.
 
 ### `boris-pipeline` engine phases

@@ -38,11 +38,13 @@
 //! - Host must grant shell policy; registration is via [`crate::tools::bash_tools`].
 
 mod exec;
+mod jobs;
 mod output;
 mod policy;
 mod steer;
 
 pub use exec::{shell_label, BashTool};
+pub use jobs::{BashKillTool, BashOutputTool, ShellSession, MAX_RUNNING_JOBS};
 
 /// Default command timeout when the model omits `timeout`.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;

@@ -1125,6 +1125,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unlisted_registered_extension_executes_with_schema_validation() {
+        use crate::tool::{ToolError, ToolMeta};
+
+        struct Ext;
+        #[async_trait]
+        impl Tool for Ext {
+            fn name(&self) -> &str {
+                "plugin__lookup"
+            }
+            fn description(&self) -> &str {
+                "lookup"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().read_only(true)
+            }
+            fn is_extension(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                args: serde_json::Value,
+            ) -> Result<String, ToolError> {
+                Ok(format!("found {}", args["id"].as_str().unwrap_or_default()))
+            }
+        }
+
+        struct Capturing {
+            schemas: Mutex<Vec<Value>>,
+            responses: Mutex<Vec<Value>>,
+        }
+        #[async_trait]
+        impl LlmClient for Capturing {
+            async fn complete(&self, _: Value, tools: Value) -> Result<Value, LlmError> {
+                self.schemas.lock().unwrap().push(tools);
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let call = |id: &str, args: Value| {
+            json!({"role":"assistant","content":"","tool_calls":[{
+                "id":id,"type":"function",
+                "function":{"name":"plugin__lookup","arguments":args.to_string()}
+            }]})
+        };
+        let client = Capturing {
+            schemas: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                call("bad", json!({"id": 7})),
+                call("good", json!({"id": "abc"})),
+                json!({"role":"assistant","content":"Found it."}),
+            ]),
+        };
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "look it up");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Ext)];
+        let activated = crate::runtime::new_activation_set();
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: Some(&activated),
+        };
+        let result = agent_loop(
+            state,
+            "look it up",
+            &AgentLoopConfig::default(),
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        // The extension was not listed on the first request, yet calling it
+        // ran through the runtime: invalid args are rejected by its schema,
+        // valid args execute. Neither is treated as an unknown tool.
+        assert!(client.schemas.lock().unwrap()[0].is_null());
+        let observations: Vec<String> = context
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .map(|m| m.content["content"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(observations.len(), 2);
+        assert!(!observations[0].contains("not available in this session"));
+        assert!(observations[0].contains("id"), "{}", observations[0]);
+        assert_eq!(observations[1], "found abc");
+        assert!(activated.lock().unwrap().contains("plugin__lookup"));
+        match result.outcome {
+            AgentOutcome::Speak { text, .. } => assert_eq!(text, "Found it."),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn loop_runs_parallel_safe_tools_then_speaks() {
         use crate::tool::{ToolError, ToolMeta};
         use std::sync::Arc;

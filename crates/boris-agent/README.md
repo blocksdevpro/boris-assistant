@@ -95,8 +95,10 @@ They stay out of the default listing so a large registry cannot crowd the
 schema budget. `tool_search` is listed only when at least one extension is
 registered, and it activates matching extensions. Activations are
 session-scoped (32-entry LRU, 15-minute expiry), cleared on session bind and
-unbind, and recovered by failed turns and checkpoint restores. A call to a
-registered extension executes, schema-validated, even before it is listed.
+unbind, and recovered by failed turns and checkpoint restores. Discovery
+results include each extension's parameter schema, and a call to a registered
+extension executes (validated against that schema) even before it is listed,
+so a found tool can be called in the very next response.
 
 The serialized table stays within 64 KiB (`MAX_TOOL_SCHEMA_CHARS`). Over
 budget, unactivated opt-in extensions go first, then shared builtins, then the

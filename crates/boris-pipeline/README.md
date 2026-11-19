@@ -46,6 +46,17 @@ drained before Thinking's wake watch resumes. Only the first Thinking pass of a
 turn streams; confirm and typed-input resumes speak after acceptance.
 `BORIS_STREAM_SPEECH=0` turns streaming off.
 
+On a long tool turn, once tool work has run for 7 s, Boris speaks one short
+progress line: the model's latest progress note (the content it sent with its
+tool calls), sanitized and cut to one sentence of at most 120 characters, or
+"Still working on it." if no note is usable. It is spoken at most once per
+turn, never after anything else was already audible, never once an approval
+or typed-input prompt has been raised, and not during confirm/input resumes.
+It plays through the same Talking barge watch as replies (AEC reference, no
+Armed liveness), so Boris's own voice is not scored as a wake; a barge-in that
+resumes drops the rest of the line. `[speech] progress_line` (default on, also
+in the desktop settings) or `BORIS_PROGRESS_LINE=0` turns it off.
+
 Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
 helper thread fed by one turn-scoped producer;
 the engine remains the sole owner of phases and playback state. Bounded helpers
@@ -322,6 +333,7 @@ still match the catalog hash.
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
 | `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
+| `BORIS_PROGRESS_LINE` | `0` disables the one spoken progress line on long tool turns |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
 | `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |

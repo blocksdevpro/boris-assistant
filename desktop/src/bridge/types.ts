@@ -240,6 +240,8 @@ export type AppSettings = {
   ignore_speaker_playback: boolean;
   /** Soft chime the moment "Hey Boris" is heard. */
   wake_chime: boolean;
+  /** One short spoken update when tool work runs long (`[speech] progress_line`). */
+  progress_line: boolean;
   /** Long-term markdown memory. */
   long_term_memory: boolean;
   /**
@@ -312,6 +314,7 @@ export const EMPTY_SETTINGS: AppSettings = {
   voice_barge_in: true,
   ignore_speaker_playback: true,
   wake_chime: true,
+  progress_line: true,
   long_term_memory: true,
   trusted_auto_moderate: true,
   max_confirms_per_turn: 12,
@@ -440,6 +443,7 @@ export function normalizeSettings(
     voice_barge_in: raw?.voice_barge_in ?? true,
     ignore_speaker_playback: raw?.ignore_speaker_playback ?? true,
     wake_chime: raw?.wake_chime ?? true,
+    progress_line: raw?.progress_line ?? true,
     long_term_memory: raw?.long_term_memory ?? true,
     trusted_auto_moderate: raw?.trusted_auto_moderate ?? true,
     max_confirms_per_turn: normalizeMaxConfirms(raw?.max_confirms_per_turn),

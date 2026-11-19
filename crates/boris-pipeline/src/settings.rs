@@ -171,6 +171,9 @@ pub struct AppSettings {
     /// Play a short chime when a wake is accepted.
     #[serde(default = "default_true")]
     pub wake_chime: bool,
+    /// Speak one short progress line when tool work runs long.
+    #[serde(default = "default_true")]
+    pub progress_line: bool,
     /// Canonical evidence-backed memory (legacy config key retained for compatibility).
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
@@ -239,6 +242,7 @@ impl Default for AppSettings {
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
             wake_chime: true,
+            progress_line: true,
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
@@ -290,6 +294,7 @@ impl std::fmt::Debug for AppSettings {
             .field("trusted_auto_moderate", &self.trusted_auto_moderate)
             .field("max_confirms_per_turn", &self.max_confirms_per_turn)
             .field("wake_chime", &self.wake_chime)
+            .field("progress_line", &self.progress_line)
             .field("show_overlay_on_wake", &self.show_overlay_on_wake)
             .field("overlay_caption_mode", &self.overlay_caption_mode)
             .field("overlay_position", &self.overlay_position)
@@ -366,6 +371,8 @@ struct SpeechSection {
     ignore_speaker_playback: bool,
     #[serde(default = "default_true")]
     wake_chime: bool,
+    #[serde(default = "default_true")]
+    progress_line: bool,
 }
 
 impl Default for SpeechSection {
@@ -376,6 +383,7 @@ impl Default for SpeechSection {
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
             wake_chime: true,
+            progress_line: true,
         }
     }
 }
@@ -469,6 +477,7 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.voice_barge_in = cfg.speech.voice_barge_in;
     out.ignore_speaker_playback = cfg.speech.ignore_speaker_playback;
     out.wake_chime = cfg.speech.wake_chime;
+    out.progress_line = cfg.speech.progress_line;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
@@ -679,6 +688,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         voice_barge_in: settings.voice_barge_in,
         ignore_speaker_playback: settings.ignore_speaker_playback,
         wake_chime: settings.wake_chime,
+        progress_line: settings.progress_line,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
@@ -1197,6 +1207,7 @@ mod tests {
             voice_barge_in: false,
             ignore_speaker_playback: true,
             wake_chime: false,
+            progress_line: false,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
@@ -1262,6 +1273,7 @@ mod tests {
         assert!(loaded.start_with_windows);
         assert_eq!(loaded.update_channel, "beta");
         assert!(!loaded.wake_chime);
+        assert!(!loaded.progress_line);
         assert!(loaded.onboarding_complete);
         assert!(loaded.show_advanced_settings);
         assert_eq!(loaded.logging_filter, "info");

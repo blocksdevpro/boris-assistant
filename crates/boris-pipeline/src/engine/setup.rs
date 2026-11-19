@@ -50,6 +50,8 @@ pub(super) struct EngineRuntime {
     pub barge_in: bool,
     /// Pre-rendered "listening" chime at the output rate (`None` = off).
     pub wake_chime: Option<boris_core::AudioBuffer>,
+    /// Speak one short progress line when tool work runs long.
+    pub progress_line: bool,
     /// Voice HITL budget mirrored from agent policy (pipeline loop must not
     /// cap below what the policy allows — see `outcome::resolve_agent_outcome`).
     pub max_confirms_per_turn: u32,
@@ -218,6 +220,7 @@ pub(super) fn init_runtime(
         wake_chime: config
             .wake_chime
             .then(|| super::chime::wake_chime(play_rate)),
+        progress_line: config.progress_line,
         max_confirms_per_turn: config.max_confirms_per_turn.max(1),
         maintenance,
     })

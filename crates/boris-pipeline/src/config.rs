@@ -132,6 +132,9 @@ pub struct PipelineConfig {
     pub ignore_speaker_playback: bool,
     /// Chime when a wake is accepted (`BORIS_WAKE_CHIME=0` disables).
     pub wake_chime: bool,
+    /// One spoken progress line on long tool turns (`[speech] progress_line`,
+    /// `BORIS_PROGRESS_LINE=0` disables).
+    pub progress_line: bool,
 }
 
 impl PipelineConfig {
@@ -209,6 +212,7 @@ impl PipelineConfig {
             voice_barge_in: resolve_voice_barge_in(&saved),
             ignore_speaker_playback: resolve_ignore_speaker_playback(&saved),
             wake_chime: env_truthy("BORIS_WAKE_CHIME").unwrap_or(saved.wake_chime),
+            progress_line: env_truthy("BORIS_PROGRESS_LINE").unwrap_or(saved.progress_line),
         }
     }
 }

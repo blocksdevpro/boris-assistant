@@ -94,6 +94,7 @@ function engineFingerprint(s: AppSettings): string {
     s.voice_barge_in,
     s.ignore_speaker_playback,
     s.wake_chime,
+    s.progress_line,
   ]);
 }
 

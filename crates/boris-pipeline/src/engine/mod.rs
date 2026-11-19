@@ -1273,7 +1273,7 @@ fn run(
             speech: Some(ThinkSpeech {
                 feed: &mut speech_feed,
                 tts: &mut tts_slot,
-                progress_line: false,
+                progress_line: rt.progress_line,
                 report: &mut early,
             }),
         });

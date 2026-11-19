@@ -170,6 +170,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
 | `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
+| `BORIS_PROGRESS_LINE` | `0` disables the one spoken progress line on long tool turns (`[speech] progress_line`) |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |

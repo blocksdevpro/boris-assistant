@@ -65,6 +65,12 @@ default-model constants, which stay `boris_ai`-only.
   `reasoning.text` fragments are joined into one block; encrypted blocks are
   kept whole. Display-only `reasoning` / `reasoning_content` strings are not
   kept on the message.
+- Streams have a first-byte budget (headers + first chunk, default 20 s) and an
+  idle budget between chunks (default 30 s); SSE keepalive comments count as
+  bytes. A stall before any delta reached the caller is retried once; after
+  that (or after deltas) it fails fast with a `Timeout` error and does not
+  fall back to the blocking request. `with_first_byte_timeout` /
+  `with_idle_timeout(None)` disable them. The 180 s total deadline still applies.
 - Assistant `content` is normalized to a **string** for the agent loop.
 - `CompleteOptions::tool_error` carries host-known current-turn tool failure
   evidence for internal routing. `Some(false)` prevents successful output

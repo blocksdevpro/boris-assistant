@@ -72,10 +72,14 @@ pub(super) fn build_openrouter_client(
     let mut client = OpenRouterClient::new(api_key.to_string(), Some(model.to_string()))
         .with_session_id(session_id)
         .with_reasoning(reasoning)
-        .with_context_window_tokens(context_window_tokens);
+        .with_context_window_tokens(context_window_tokens)
+        // Stall detection (retry once, then fail fast) instead of a silent
+        // 180 s hang. `0` disables a budget.
+        .with_first_byte_timeout(stream_budget("BORIS_LLM_FIRST_BYTE_SECS", 20))
+        .with_idle_timeout(stream_budget("BORIS_LLM_IDLE_SECS", 30));
     // Intentionally unwired client knobs: `with_max_tokens` (implicit
     // `DEFAULT_MAX_TOKENS` — per-round stage budgets in the agent own this),
-    // `with_request_timeout/with_idle_timeout` (client defaults; voice has its
+    // `with_request_timeout` (client default; stall budgets are wired above; voice has its
     // own turn-level deadlines), `with_referer/with_title` (no attribution
     // needed for a local desktop app), `with_base_url` (default OpenRouter).
     // Wire one only when the product needs it, with a comment why.
@@ -98,6 +102,15 @@ pub(super) fn build_openrouter_client(
         "OpenRouter reasoning configured"
     );
     client
+}
+
+/// Seconds from `var` (default `default_secs`); `0` disables the budget.
+fn stream_budget(var: &str, default_secs: u64) -> Option<std::time::Duration> {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(default_secs);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
 }
 
 #[cfg(test)]

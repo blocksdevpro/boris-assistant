@@ -164,6 +164,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
 | `BORIS_TTS_VOICE` | TTS voice id |
+| `BORIS_LLM_FIRST_BYTE_SECS` / `BORIS_LLM_IDLE_SECS` | LLM stream stall budgets (default 20 / 30 s; `0` disables); a stall is retried once |
 | `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
 | `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` / `BORIS_PIN_PROVIDER` | OpenRouter host order / pinning |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |

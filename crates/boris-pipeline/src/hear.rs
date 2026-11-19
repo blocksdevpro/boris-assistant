@@ -67,6 +67,14 @@ pub fn max_utterance_secs(kind: CaptureKind) -> u32 {
     }
 }
 
+/// True when a captured clip ended because it hit the length cap for `kind`
+/// (the speaker may still have been talking), not because of silence.
+pub fn clip_hit_cap(samples: usize, kind: CaptureKind) -> bool {
+    let cap = max_utterance_secs(kind) as usize * AUDIO_TARGET_RATE as usize;
+    // `exceeded_max` fires on the frame that crosses the cap.
+    samples + AUDIO_TARGET_RATE as usize / 10 >= cap
+}
+
 /// Pure parse + clamp for [`max_utterance_secs`] (unit-testable without env).
 fn resolve_max_secs(raw: Option<String>) -> u32 {
     match raw.and_then(|v| v.trim().parse::<u32>().ok()) {
@@ -1077,6 +1085,8 @@ mod tests {
 
     #[test]
     fn utterance_cap_defaults_parses_and_clamps() {
+        assert!(clip_hit_cap(16_000 * 8, CaptureKind::AwaitConfirm));
+        assert!(!clip_hit_cap(16_000 * 3, CaptureKind::AwaitConfirm));
         assert_eq!(resolve_max_secs(None), 30);
         assert_eq!(resolve_max_secs(Some("".into())), 30);
         assert_eq!(resolve_max_secs(Some("abc".into())), 30);

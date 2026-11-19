@@ -318,6 +318,154 @@ pub(super) fn decide_thinking_barge_listen(speech_hops: u32, transcript: &str) -
     BargeDecision::TakeTurn(user_text.to_string())
 }
 
+/// Turn-start requests the host answers without a model round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostIntent {
+    /// "stop", "never mind", "nothing", "that's all": stay quiet, re-arm.
+    Dismiss,
+    /// "new session", "start over": end this session and start a fresh one.
+    NewSession,
+}
+
+/// Classify a whole transcript as a host intent.
+///
+/// Only exact, unambiguous phrases match, after wake syntax, filler words,
+/// and immediate repeats are removed ("Nothing, nothing." → "nothing").
+/// `fresh` is a turn started by the wake word; in a follow-up (Boris asked
+/// something) only closing phrases dismiss, since a bare "stop" or "no" can
+/// be the answer. Everything else, including "continue", goes to the agent.
+pub(super) fn host_intent(transcript: &str, fresh: bool) -> Option<HostIntent> {
+    let normalized = normalize_utterance(strip_raw_wake_prefix(transcript).trim());
+    let mut candidates = vec![core_phrase(&normalized, false)];
+    // A misheard wake word ("Heyboat is just stop"): drop a hey-like first
+    // word and filler, but still require an exact phrase afterwards.
+    if let Some((first, rest)) = normalized.split_once(' ') {
+        if first.len() > 3 && (first.starts_with("hey") || first.starts_with("okay")) {
+            candidates.push(core_phrase(rest, true));
+        }
+    }
+    for phrase in candidates.iter().filter(|phrase| !phrase.is_empty()) {
+        if is_new_session_phrase(phrase) {
+            return Some(HostIntent::NewSession);
+        }
+        if is_closing_phrase(phrase) || (fresh && is_dismiss_phrase(phrase)) {
+            return Some(HostIntent::Dismiss);
+        }
+    }
+    None
+}
+
+/// Trim filler words at both ends and collapse immediate repeats.
+fn core_phrase(normalized: &str, misheard_wake: bool) -> String {
+    const LEAD: &[&str] = &[
+        "uh", "um", "oh", "okay", "ok", "so", "well", "just", "please", "hey", "boris",
+        "actually",
+    ];
+    const TRAIL: &[&str] = &["please", "now", "thanks", "boris", "then"];
+    let mut words: Vec<&str> = normalized.split(' ').filter(|w| !w.is_empty()).collect();
+    while words
+        .first()
+        .is_some_and(|w| LEAD.contains(w) || (misheard_wake && matches!(*w, "is" | "boat")))
+    {
+        words.remove(0);
+    }
+    loop {
+        if words.ends_with(&["thank", "you"]) {
+            words.truncate(words.len() - 2);
+        } else if words.last().is_some_and(|w| TRAIL.contains(w)) {
+            words.pop();
+        } else {
+            break;
+        }
+    }
+    words.dedup();
+    let phrase = words.join(" ");
+    // "never mind never mind" → "never mind".
+    let half = phrase.len() / 2;
+    if phrase.len() > 2
+        && phrase.len() % 2 == 1
+        && phrase.as_bytes()[half] == b' '
+        && phrase[..half] == phrase[half + 1..]
+    {
+        return phrase[..half].to_string();
+    }
+    phrase
+}
+
+/// Polite closers: dismiss even in a follow-up window.
+fn is_closing_phrase(text: &str) -> bool {
+    matches!(
+        text,
+        "nothing"
+            | "nothing else"
+            | "nothing never mind"
+            | "never mind nothing"
+            | "never mind"
+            | "nevermind"
+            | "never mind that"
+            | "thats all"
+            | "that is all"
+            | "thats it"
+            | "that is it"
+            | "no thanks"
+            | "no thank you"
+            | "im good"
+            | "i am good"
+            | "all good"
+            | "forget it"
+            | "forget about it"
+            | "forget that"
+    )
+}
+
+/// Stop-family commands: dismiss a fresh turn.
+fn is_dismiss_phrase(text: &str) -> bool {
+    matches!(
+        text,
+        "stop"
+            | "stop it"
+            | "stop that"
+            | "stop talking"
+            | "cancel"
+            | "cancel that"
+            | "cancel it"
+            | "abort"
+            | "enough"
+            | "thats enough"
+            | "that is enough"
+            | "shut up"
+            | "be quiet"
+            | "quiet"
+            | "silence"
+    )
+}
+
+fn is_new_session_phrase(text: &str) -> bool {
+    matches!(
+        text,
+        "new session"
+            | "new chat"
+            | "new conversation"
+            | "start over"
+            | "start again"
+            | "start fresh"
+            | "fresh start"
+            | "lets start over"
+            | "let us start over"
+            | "start a new session"
+            | "start a new chat"
+            | "start a new conversation"
+            | "start a fresh session"
+            | "open a new session"
+            | "begin a new session"
+            | "reset the conversation"
+            | "reset conversation"
+            | "clear the conversation"
+            | "clear the chat"
+            | "clear chat"
+    )
+}
+
 /// True when the utterance is only the wake word, so we should wait for a
 /// follow-up ("Boris" … "stop") instead of treating it as resume immediately.
 #[cfg(test)]
@@ -879,5 +1027,52 @@ mod tests {
             watch.poll().is_none(),
             "constant speaker echo must not look like barge-in"
         );
+    }
+}
+
+#[cfg(test)]
+mod host_intent_tests {
+    use super::*;
+
+    #[test]
+    fn dismissals_from_real_sessions_skip_the_model() {
+        for text in [
+            "Stop.",
+            "Nothing, nothing.",
+            "Heyboat is just stop.",
+            "Hey Boris, never mind.",
+            "uh that's all, thanks",
+            "Cancel that please",
+            "Never mind. Never mind.",
+        ] {
+            assert_eq!(host_intent(text, true), Some(HostIntent::Dismiss), "{text}");
+        }
+    }
+
+    #[test]
+    fn requests_and_ambiguous_replies_still_reach_the_model() {
+        for text in [
+            "We are doing like bad and",
+            "continue",
+            "no",
+            "stop the timer",
+            "don't stop",
+            "never mind, what's the weather",
+            "start over the download",
+            "nothing works on my laptop",
+        ] {
+            assert_eq!(host_intent(text, true), None, "{text}");
+        }
+        // In a follow-up window a bare stop can answer Boris's question.
+        assert_eq!(host_intent("stop", false), None);
+        assert_eq!(host_intent("that's all", false), Some(HostIntent::Dismiss));
+    }
+
+    #[test]
+    fn new_session_phrases() {
+        for text in ["Hey Boris, start over.", "new chat", "Let's start over please"] {
+            assert_eq!(host_intent(text, true), Some(HostIntent::NewSession), "{text}");
+            assert_eq!(host_intent(text, false), Some(HostIntent::NewSession), "{text}");
+        }
     }
 }

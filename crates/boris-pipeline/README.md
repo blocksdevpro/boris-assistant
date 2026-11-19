@@ -49,7 +49,14 @@ a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
  request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). An abandoned turn
  keeps any tool work that already executed (its undelivered reply is dropped
  and a host note records the interruption); a turn where nothing ran is
- rolled back to its pre-turn checkpoint (`Agent::abandon_turn`). Confirm prompts
+ rolled back to its pre-turn checkpoint (`Agent::abandon_turn`). Before any
+ model call the host answers simple intents itself: a fresh-turn "stop",
+ "cancel", "never mind", "nothing", or "that's all" (closing phrases also in a
+ follow-up window) re-arms silently, and "new session" / "start over" ends the
+ session, starts a fresh one, and says so. Background or non-directed speech
+ can be answered by the model with `[silent]`, which the host keeps quiet. A
+ clip cut by the capture cap (`BORIS_MAX_UTTERANCE_SECS`) reaches the model
+ with a host note that it may be incomplete. Confirm prompts
  and re-asks use the same barge watch: a wake word mid-prompt stops playback
  and listens for the yes/no instead of auto-denying. Voice confirms follow
  the agent HITL budget (`max_confirms_per_turn`, default 12 via

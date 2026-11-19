@@ -242,6 +242,12 @@ is restored to its pre-turn snapshot exactly. Hosts handling a barge-in call
 `Agent::abandon_turn(checkpoint)`, which applies the same rule against a
 checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
 
+## Staying silent
+
+A model reply of exactly `[silent]` (`SILENCE_TOKEN`) becomes
+`AgentOutcome::Silent` when no tool ran this turn, so a host can stay quiet on
+background or non-directed speech. After tool work the agent always speaks.
+
 ## Finish checks
 
 A content-only reply ends the turn unless one of three non-keyword checks

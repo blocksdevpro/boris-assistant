@@ -5,6 +5,19 @@
 
 use crate::runtime::PendingToolCall;
 
+/// Exact reply a model gives to stay silent (non-directed or background
+/// speech). Mapped to [`AgentOutcome::Silent`] when no tool ran this turn.
+pub const SILENCE_TOKEN: &str = "[silent]";
+
+/// True when `reply` is the silence sentinel (case-insensitive, trimmed,
+/// tolerating trailing punctuation).
+pub fn is_silence_reply(reply: &str) -> bool {
+    reply
+        .trim()
+        .trim_end_matches(['.', '!'])
+        .eq_ignore_ascii_case(SILENCE_TOKEN)
+}
+
 /// What the agent decided after one user message (tool loop finished or paused).
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentOutcome {
@@ -15,7 +28,8 @@ pub enum AgentOutcome {
         /// word (AwaitingReply), so the user can answer a question.
         expect_reply: bool,
     },
-    /// Model returned no speakable content.
+    /// Nothing to say: the model answered with [`SILENCE_TOKEN`] (speech not
+    /// meant for Boris, e.g. background conversation). Host stays quiet.
     Silent,
     /// Tool loop paused for HITL. Host should speak `text`, collect yes/no,
     /// then call [`crate::Agent::resume_confirmation`].

@@ -317,6 +317,44 @@ struct SessionRefs<'a> {
     transcript_len: &'a mut usize,
 }
 
+/// Speak one short host-authored line (no agent, no barge watch): recovery
+/// lines and host-intent acknowledgements. A wake word during it is caught
+/// by the next Armed wait.
+fn speak_host_line(
+    rt: &mut EngineRuntime,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    line: &str,
+) {
+    rt.picture.said = Some(line.into());
+    rt.picture.publish();
+    if rt.tts.load().is_ok() {
+        if let Ok(pcm) = rt.tts.synthesize(line) {
+            drain_output_events(&rt.output_events);
+            if let Err(e) = rt.audio.play(pcm) {
+                tracing::error!(error = %e, "host line play failed");
+            }
+            let _ = wait_playback_started(
+                &mut rt.output_events,
+                cmd_rx,
+                running,
+                &mut rt.audio,
+                &mut rt.picture,
+                None,
+            );
+            wait_playback_or_stop(
+                &mut rt.output_events,
+                cmd_rx,
+                running,
+                &mut rt.audio,
+                &mut rt.picture,
+                None,
+            );
+        }
+        let _ = rt.tts.unload();
+    }
+}
+
 fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
     match cmd {
         EngineCommand::SwitchInput { device_id } => {
@@ -804,13 +842,13 @@ fn run(
         // still keep the last card; a new utterance must not resurrect it.
         rt.picture.clear_artifacts();
 
-        let (text, stt_ms, interrupted_text) = if let Some(barge) = barge_turn {
+        let (text, stt_ms, interrupted_text, cut_by_cap) = if let Some(barge) = barge_turn {
             let text = barge.user_text;
             turn_trace.mark("barge_in_turn", None);
             tracing::info!(%turn, %text, "turn begin — barge-in transcript");
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
-            (text, 0u64, barge.interrupted_text)
+            (text, 0u64, barge.interrupted_text, false)
         } else {
             // Hearing only while the mic is actually recording (not during STT).
             rt.picture.set_phase(Phase::Hearing);
@@ -942,7 +980,8 @@ fn run(
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
             tracing::info!(%turn, %text, "heard");
-            (text, stt_ms, None)
+            let cut_by_cap = crate::hear::clip_hit_cap(clip.len(), capture_kind);
+            (text, stt_ms, None, cut_by_cap)
         };
 
         // Host guard: skip agent on empty / whitespace / junk transcripts.
@@ -966,6 +1005,58 @@ fn run(
             }
             continue;
         }
+
+        // Host intents: a dismissal or a new-session request needs no model
+        // round (a ~5 s LLM call just to say "Stopped." otherwise).
+        if interrupted_text.is_none() {
+            let fresh = matches!(capture_kind, CaptureKind::AfterWake);
+            match barge::host_intent(&text, fresh) {
+                Some(barge::HostIntent::Dismiss) => {
+                    turn_trace.mark("host_dismiss", None);
+                    tracing::info!(%turn, %text, "host intent: dismiss — no agent call");
+                    rt.picture.activity = Some("okay — standing by".into());
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+                Some(barge::HostIntent::NewSession) => {
+                    turn_trace.mark("host_new_session", None);
+                    tracing::info!(%turn, %text, "host intent: new session — no agent call");
+                    end_session(
+                        &rt.store,
+                        sess.active_session,
+                        sess.transcript_len,
+                        &mut rt.agent,
+                    );
+                    begin_session(
+                        &rt.store,
+                        sess.active_session,
+                        sess.transcript_len,
+                        &mut rt.agent,
+                        &rt.system_prompt,
+                    );
+                    rt.picture.clear_artifacts();
+                    speak_host_line(&mut rt, &cmd_rx, &mut running, "Okay, fresh start.");
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+                None => {}
+            }
+        }
+        // The capture cap (not silence) ended this clip: say so, so the model
+        // does not act on a request that was cut off mid-sentence.
+        let text = if cut_by_cap {
+            turn_trace.mark("utterance_cut_by_cap", None);
+            format!(
+                "{text} [host note: the recording reached its {}-second limit while the user was still speaking; this request may be cut off mid-sentence]",
+                crate::hear::max_utterance_secs(capture_kind)
+            )
+        } else {
+            text
+        };
 
         if !poll_running(
             &cmd_rx,
@@ -1249,38 +1340,12 @@ fn run(
                 rt.picture.detail = None;
                 rt.picture.clear_activity();
                 // Recoverable spoken line instead of silent Ready.
-                let recovery =
-                    "I glitched mid-task. Wake me and say continue if you want me to finish.";
-                rt.picture.said = Some(recovery.into());
-                rt.picture.publish();
-                if rt.tts.load().is_ok() {
-                    if let Ok(pcm) = rt.tts.synthesize(recovery) {
-                        drain_output_events(&rt.output_events);
-                        if let Err(e) = rt.audio.play(pcm) {
-                            tracing::error!(error = %e, "recovery play failed");
-                        }
-                        // No barge watch: this is a fire-and-forget error line
-                        // with no listener following — a wake word during it
-                        // is caught by the next Armed wait.
-                        let _ = wait_playback_started(
-                            &mut rt.output_events,
-                            &cmd_rx,
-                            &mut running,
-                            &mut rt.audio,
-                            &mut rt.picture,
-                            None,
-                        );
-                        wait_playback_or_stop(
-                            &mut rt.output_events,
-                            &cmd_rx,
-                            &mut running,
-                            &mut rt.audio,
-                            &mut rt.picture,
-                            None,
-                        );
-                    }
-                    let _ = rt.tts.unload();
-                }
+                speak_host_line(
+                    &mut rt,
+                    &cmd_rx,
+                    &mut running,
+                    "I glitched mid-task. Wake me and say continue if you want me to finish.",
+                );
                 follow_up_depth = 0;
                 rt.picture.set_phase(Phase::Armed);
                 continue;
@@ -1426,6 +1491,22 @@ fn run(
             })),
         );
         tracing::info!(%turn, agent_ms, "agent done");
+
+        // The model chose silence (speech not meant for Boris). Tool work
+        // never reaches here as Silent: the agent always reports it.
+        if matches!(outcome, AgentOutcome::Silent) && report.tools_used.is_empty() {
+            turn_trace.mark("agent_silent", None);
+            tracing::info!(%turn, "agent chose silence; nothing spoken");
+            if let Some(ref sid) = *sess.active_session {
+                enqueue_transcript_sync(&rt.store, sid, sess.transcript_len, &rt.agent);
+            }
+            rt.picture.clear_activity();
+            maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+            follow_up_depth = 0;
+            await_reply = false;
+            rt.picture.set_phase(Phase::Armed);
+            continue;
+        }
 
         let (reply, expect_reply) = match outcome {
             AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {

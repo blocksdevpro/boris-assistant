@@ -100,7 +100,7 @@ pub use memory::{
     PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
-pub use outcome::AgentOutcome;
+pub use outcome::{is_silence_reply, AgentOutcome, SILENCE_TOKEN};
 pub use prompt_profile::{PromptContext, UserInfo};
 pub use workspace::{KnownProject, WorkspaceProfile};
 pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};

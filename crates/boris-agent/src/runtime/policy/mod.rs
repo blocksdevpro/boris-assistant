@@ -27,7 +27,7 @@ use crate::tool::{Permission, ToolMeta, ToolRisk};
 
 use paths::{args_path_strings, check_path_allowed, PathAccess};
 pub use paths::{
-    default_user_read_roots, normalize_path, path_is_within, path_within_root,
+    default_user_read_roots, describe_roots, normalize_path, path_is_within, path_within_root,
     re_resolve_after_open, resolve_in_roots, resolve_path_for_policy, resolve_under_roots,
 };
 

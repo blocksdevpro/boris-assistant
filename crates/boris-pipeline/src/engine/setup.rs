@@ -477,6 +477,61 @@ pub(super) fn fault_picture(
     }
 }
 
+/// Workspace facts for the system prompt: sandbox, real shell, roots, known
+/// projects (configured + bounded cached discovery), and `~/.boris/BORIS.md`.
+fn workspace_profile(
+    (sandbox_root, allow_read, allow_write): (
+        std::path::PathBuf,
+        Vec<std::path::PathBuf>,
+        Vec<std::path::PathBuf>,
+    ),
+    settings: &crate::settings::WorkspaceSettings,
+    configured: Vec<std::path::PathBuf>,
+    power_tools: bool,
+) -> boris_agent::WorkspaceProfile {
+    use boris_agent::workspace::{discover_git_repos_cached, DiscoveryLimits};
+    let mut projects: Vec<boris_agent::KnownProject> = Vec::new();
+    // Without file tools, project paths would be unusable noise.
+    if power_tools {
+        projects.extend(
+            configured
+                .iter()
+                .map(|path| boris_agent::KnownProject::at(path, true)),
+        );
+        if settings.discover_projects {
+            let started = std::time::Instant::now();
+            let found = discover_git_repos_cached(
+                &paths::boris_home().join("state").join("projects.json"),
+                &allow_read,
+                std::time::Duration::from_secs(24 * 3600),
+                DiscoveryLimits::default(),
+            );
+            tracing::info!(
+                found = found.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "project discovery (cached daily)"
+            );
+            projects.extend(
+                found
+                    .iter()
+                    .map(|path| boris_agent::KnownProject::at(path, false)),
+            );
+        }
+    }
+    let mut write_roots = vec![sandbox_root.clone()];
+    write_roots.extend(allow_write);
+    let mut read_roots = vec![sandbox_root.clone()];
+    read_roots.extend(allow_read);
+    boris_agent::WorkspaceProfile {
+        sandbox_root: Some(sandbox_root),
+        shell: power_tools.then(boris_agent::tools::bash::shell_label),
+        read_roots,
+        write_roots,
+        projects,
+        user_instructions: boris_agent::workspace::load_user_instructions(&paths::boris_home()),
+    }
+}
+
 fn build_agent(config: &PipelineConfig) -> Agent {
     let started = std::time::Instant::now();
     tracing::info!("building OpenRouter client + Agent…");
@@ -590,6 +645,29 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     // Enforce the load-bearing order at the type level: preset lockdown threads
     // into `configure_runtime` below (VoiceSafe/LocalPower ⇒ Off/Denied).
     let mut sandbox = preset.apply_to_sandbox_owned(sandbox);
+    // Known projects from `[workspace]` become read roots (never write roots;
+    // writes stay policy- and HITL-gated).
+    let workspace_settings = crate::settings::load_workspace_settings();
+    let configured_projects: Vec<std::path::PathBuf> = workspace_settings
+        .projects
+        .iter()
+        .filter(|project| project.is_dir())
+        .cloned()
+        .collect();
+    for project in &configured_projects {
+        if !sandbox
+            .allow_read
+            .iter()
+            .any(|root| boris_agent::runtime::path_is_within(project, root))
+        {
+            sandbox.allow_read.push(project.clone());
+        }
+    }
+    let workspace_roots = (
+        sandbox.sandbox_root.clone(),
+        sandbox.allow_read.clone(),
+        sandbox.allow_write.clone(),
+    );
     let tool_paths = BuiltinToolPaths {
         notes_path: paths::notes_path(),
         profile_path: paths::profile_path(),
@@ -630,6 +708,13 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     let loaded = boris_agent::load_skills(cwd.as_deref(), &paths::boris_home(), &[], true);
     let skill_count = loaded.skills.len();
     agent.enable_skills(loaded);
+
+    agent.set_workspace(workspace_profile(
+        workspace_roots,
+        &workspace_settings,
+        configured_projects,
+        power,
+    ));
 
     if config.long_term_memory {
         let legacy_paths = boris_agent::LegacyMemoryPaths {

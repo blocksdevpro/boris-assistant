@@ -113,6 +113,21 @@ schema budget. It uses actual builtin schemas and scripted model replies and
 executes no external model, web, or shell calls. Pass a request-event JSON
 export after `--` to use its `data.tools` schemas.
 
+## Workspace awareness
+
+`Agent::set_workspace(WorkspaceProfile)` renders a stable `<workspace>` block
+into the system prompt: the Boris sandbox (default cwd for `bash` and file
+tools), the shell the `bash` tool really runs (`tools::bash::shell_label`),
+readable and writable roots, known projects, and the user's
+`~/.boris/BORIS.md` as trusted `<user_instructions>` (bounded to 8,000
+characters). `<user_info>` reports the sandbox root and real shell instead of
+the process cwd and `COMSPEC`. Projects come from the host; `workspace`
+provides bounded, cached git-repository discovery (`discover_git_repos_cached`)
+under existing read roots. A project with its own `BORIS.md` is marked
+`[has BORIS.md]` and the model reads it before working there. Listing a
+project never widens write roots. Path denials list the allowed roots
+(`describe_roots`) so the model can recover instead of guessing again.
+
 ## Canonical memory
 
 Hosts should call `enable_memory_store` before registering built-in tools. It

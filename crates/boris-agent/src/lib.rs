@@ -68,6 +68,7 @@ pub mod tool_context;
 pub mod tools;
 pub mod trace;
 pub mod types;
+pub mod workspace;
 
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
 pub use boris_ai::{
@@ -101,6 +102,7 @@ pub use memory::{
 pub use observe::{TurnOutcomeKind, TurnReport};
 pub use outcome::AgentOutcome;
 pub use prompt_profile::{PromptContext, UserInfo};
+pub use workspace::{KnownProject, WorkspaceProfile};
 pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};
 pub use runtime::{
     default_user_read_roots, ActivationSet, InputKind, JsonlAuditSink, ListToolsContext,

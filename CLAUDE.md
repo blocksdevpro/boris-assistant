@@ -128,6 +128,7 @@ first-unit synthesis remains unimplemented.
                  #   [agent], [ui] unconditionally, and [logging] when a filter is set;
                  #   unknown tables/keys outside those are preserved
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
+  BORIS.md       # optional user instructions (system prompt <user_instructions>)
   models/        # parakeet/, supertone/onnx/, supertone/voices/, optional livekit/ + silero/ seeds
   sessions/      # transcripts + per-session artifacts/
   memory/        # memory.sqlite canonical store + optional notes.jsonl
@@ -136,7 +137,10 @@ first-unit synthesis remains unimplemented.
   traces/        # turns.jsonl per-turn latency traces
   speaker/       # live.json — wake liveness enroll (acoustic takes)
   state/workspace/ # sandboxed agent workspace
+  state/projects.json # daily cache of discovered git repos (known projects)
 ```
+
+Optional hand-edited `[workspace]` in `config.toml` (`projects = [...]`, `discover_projects`) lists known projects; they become read roots only and are rendered into the system prompt with the sandbox, real shell, and roots.
 
 Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the repo's `assets/` (only the wake classifier + Silero graph are tracked there).
 
@@ -151,6 +155,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate-risk tools |
 | `BORIS_MEMORY` | `0` disables long-term memory |
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
+| `BORIS_DISCOVER_PROJECTS` | `0` disables git-repo discovery for the known-projects list |
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
 | `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |

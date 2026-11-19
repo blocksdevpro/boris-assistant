@@ -121,6 +121,20 @@ impl BashTool {
     }
 }
 
+/// Human-readable name of the shell the `bash` tool actually runs, for the
+/// system prompt (the process `COMSPEC` is never used by this tool).
+pub fn shell_label() -> String {
+    match resolved_shell() {
+        ResolvedShell::Bash(path) => format!("bash (bash -c via {})", path.display()),
+        #[cfg(windows)]
+        ResolvedShell::PowerShell => {
+            "Windows PowerShell (no Git Bash found; commands run with powershell -Command)".into()
+        }
+        #[cfg(not(windows))]
+        ResolvedShell::Sh => "sh (sh -c)".into(),
+    }
+}
+
 /// Which launcher to use. Resolved once — never probe WSL `bash.exe` per call.
 #[derive(Debug, Clone)]
 enum ResolvedShell {

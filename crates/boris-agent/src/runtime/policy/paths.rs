@@ -142,10 +142,33 @@ pub(super) fn check_path_allowed(
         }
     }
 
+    let kind = match access {
+        PathAccess::Read => "readable",
+        PathAccess::Write => "writable",
+    };
     Err(format!(
-        "path `{}` is outside allowed roots",
-        resolved.display()
+        "path `{}` is outside the {kind} roots. Allowed {kind} roots: {}",
+        resolved.display(),
+        describe_roots(&roots)
     ))
+}
+
+/// Bounded, model-readable list of roots for a denial, so the model can pick
+/// an allowed location instead of guessing again.
+pub fn describe_roots(roots: &[PathBuf]) -> String {
+    const MAX_LISTED: usize = 12;
+    if roots.is_empty() {
+        return "(none)".into();
+    }
+    let mut listed = roots
+        .iter()
+        .take(MAX_LISTED)
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>();
+    if roots.len() > MAX_LISTED {
+        listed.push(format!("…and {} more", roots.len() - MAX_LISTED));
+    }
+    listed.join("; ")
 }
 
 /// Build the absolute path policy should check for `raw`.
@@ -413,6 +436,22 @@ mod tests {
             result.is_ok(),
             "relative write under sandbox should be allowed: {result:?}"
         );
+    }
+
+    #[test]
+    fn denial_lists_the_allowed_roots_for_recovery() {
+        let sandbox = PathBuf::from(r"C:\Users\me\.boris\state\workspace");
+        let mut cfg = test_sandbox_cfg(sandbox);
+        cfg.allow_read = vec![PathBuf::from(r"C:\Users\me\Desktop")];
+        let read = check_path_allowed(&cfg, r"C:\Users\me\AppData\Local\Boris", PathAccess::Read)
+            .unwrap_err();
+        assert!(read.contains("Allowed readable roots"), "{read}");
+        assert!(read.contains(r"C:\Users\me\Desktop") && read.contains("workspace"), "{read}");
+        let write = check_path_allowed(&cfg, r"C:\Users\me\Desktop\x.txt", PathAccess::Write)
+            .unwrap_err();
+        let allowed = write.split("Allowed writable roots:").nth(1).unwrap();
+        assert!(!allowed.contains("Desktop"), "read-only roots are not offered for writes");
+        assert_eq!(describe_roots(&[]), "(none)");
     }
 
     #[test]

@@ -42,7 +42,7 @@ mod output;
 mod policy;
 mod steer;
 
-pub use exec::BashTool;
+pub use exec::{shell_label, BashTool};
 
 /// Default command timeout when the model omits `timeout`.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;

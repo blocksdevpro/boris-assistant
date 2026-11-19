@@ -9,7 +9,7 @@
 //! | [`UserInfo`] | Host facts for the `<user_info>` block |
 //! | [`PromptContext`] | Inspectable sections + stable `render()` order |
 //!
-//! Render order is fixed: base → user_info → skills policy → memory hint.
+//! Render order is fixed: base → user_info → workspace → skills policy → memory hint.
 //! Empty / whitespace-only optional sections are omitted.
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,9 @@ pub struct PromptContext {
     pub base: String,
     /// OS / cwd / date block.
     pub user_info: Option<UserInfo>,
+    /// Pre-rendered workspace block (sandbox, shell, roots, known projects,
+    /// user BORIS.md); see [`crate::workspace::WorkspaceProfile`].
+    pub workspace: Option<String>,
     /// Static host-authored policy for using the separately injected catalog.
     pub skills_policy: Option<String>,
     /// Optional memory / RAG hint when long-term memory is enabled.
@@ -121,6 +124,11 @@ impl PromptContext {
 
     pub fn with_user_info(mut self, info: UserInfo) -> Self {
         self.user_info = Some(info);
+        self
+    }
+
+    pub fn with_workspace(mut self, block: Option<String>) -> Self {
+        self.workspace = block.filter(|s| !s.trim().is_empty());
         self
     }
 
@@ -146,6 +154,13 @@ impl PromptContext {
             user_block = info.render_block();
             if !user_block.is_empty() {
                 parts.push(&user_block);
+            }
+        }
+
+        if let Some(w) = &self.workspace {
+            let t = w.trim();
+            if !t.is_empty() {
+                parts.push(t);
             }
         }
 

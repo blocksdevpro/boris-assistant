@@ -551,6 +551,72 @@ pub fn load_settings() -> Result<AppSettings> {
     Ok(out)
 }
 
+/// Optional `[workspace]` table in `config.toml`.
+///
+/// Not a managed section: [`save_settings`] preserves it as an unknown table,
+/// so hand edits survive settings saves.
+///
+/// ```toml
+/// [workspace]
+/// projects = ['C:\Users\me\code\app']  # known project roots (read access only)
+/// discover_projects = true                # bounded, cached git-repo scan of read roots
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSettings {
+    pub projects: Vec<PathBuf>,
+    pub discover_projects: bool,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            projects: Vec::new(),
+            discover_projects: true,
+        }
+    }
+}
+
+/// Read `[workspace]` from `config.toml`; missing or invalid → defaults.
+/// `BORIS_DISCOVER_PROJECTS=0` disables discovery.
+pub fn load_workspace_settings() -> WorkspaceSettings {
+    let mut settings = fs::read_to_string(config_path())
+        .map(|raw| parse_workspace_settings(&raw))
+        .unwrap_or_default();
+    if std::env::var("BORIS_DISCOVER_PROJECTS").is_ok_and(|v| v.trim() == "0") {
+        settings.discover_projects = false;
+    }
+    settings
+}
+
+fn parse_workspace_settings(raw: &str) -> WorkspaceSettings {
+    let mut out = WorkspaceSettings::default();
+    let Ok(value) = raw.parse::<toml::Value>() else {
+        return out;
+    };
+    let Some(table) = value.get("workspace").and_then(toml::Value::as_table) else {
+        return out;
+    };
+    if let Some(projects) = table.get("projects").and_then(toml::Value::as_array) {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from);
+        out.projects = projects
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| match (path.strip_prefix("~/").or(path.strip_prefix("~\\")), &home) {
+                (Some(rest), Some(home)) => home.join(rest),
+                _ => PathBuf::from(path),
+            })
+            .collect();
+    }
+    if let Some(discover) = table.get("discover_projects").and_then(toml::Value::as_bool) {
+        out.discover_projects = discover;
+    }
+    out
+}
+
 /// Persist prefs to `config.toml` and secrets to `auth.json`.
 ///
 /// **Merge policy:** managed sections (`models`, `capability`, `audio`,
@@ -1016,6 +1082,28 @@ fn restrict_to_current_user_windows(path: &std::path::Path) {
                 "failed to run icacls to restrict secrets file ACL (best-effort, continuing)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_settings_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_table_is_optional_and_parsed() {
+        assert_eq!(parse_workspace_settings(""), WorkspaceSettings::default());
+        assert_eq!(
+            parse_workspace_settings("[workspace]\nprojects = 3"),
+            WorkspaceSettings::default()
+        );
+        let parsed = parse_workspace_settings(
+            "[models]\nstrong = 'x'\n\n[workspace]\nprojects = ['C:/code/app', '  ', 'D:/other']\ndiscover_projects = false\n",
+        );
+        assert_eq!(
+            parsed.projects,
+            vec![PathBuf::from("C:/code/app"), PathBuf::from("D:/other")]
+        );
+        assert!(!parsed.discover_projects);
     }
 }
 

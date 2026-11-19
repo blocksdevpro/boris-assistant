@@ -213,8 +213,9 @@ Override root with `BORIS_HOME`.
 
 ```text
 ~/.boris/
-  config.toml          # prefs: [models], [capability], [audio], [speech], [agent], [ui]; optional [logging]
+  config.toml          # prefs: [models], [capability], [audio], [speech], [agent], [ui]; optional [logging], [workspace]
   auth.json            # secrets: openrouter_api_key, exa_api_key
+  BORIS.md             # optional user instructions, injected into the system prompt
   models/
     parakeet/          # STT
     supertone/onnx/    # TTS graphs
@@ -229,6 +230,7 @@ Override root with `BORIS_HOME`.
   traces/              # turns.jsonl per-turn latency traces
   speaker/             # live.json — wake liveness enroll (acoustic takes)
   state/workspace/     # sandboxed agent workspace
+  state/projects.json  # daily cache of discovered git repositories
 ```
 
 `save_settings` unconditionally rewrites `[models]`, `[capability]`, `[audio]`, `[speech]`,
@@ -237,7 +239,18 @@ filter is set, so fresh installs don't get a stray empty section). All other roo
 unknown keys outside those managed sections are preserved on save (see `save_settings` /
 `apply_config_file` in `src/settings.rs`). There is currently no genuinely hand-edit-only
 managed table in `config.toml` — anything the desktop settings UI can persist ends up in one
-of the sections above.
+of the sections above. The optional, hand-edited `[workspace]` table is not managed, so it is
+preserved:
+
+```toml
+[workspace]
+projects = ['C:\Users\me\code\app']  # known project roots, added as read roots
+discover_projects = true                # bounded git-repo scan of read roots (BORIS_DISCOVER_PROJECTS=0 disables)
+```
+
+Known projects are rendered into the system prompt with the sandbox, the real `bash` shell,
+and the readable/writable roots. Configured projects become read roots only; write roots are
+never widened.
 
 ## Boris memory
 

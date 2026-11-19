@@ -129,6 +129,8 @@ pub struct Agent {
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
     /// Background LTM / extract / index (owned by host or tests).
     maintenance: Option<crate::maintenance::MaintenanceHandle>,
+    /// Workspace facts for the system prompt (host-provided).
+    workspace: Option<crate::workspace::WorkspaceProfile>,
 }
 
 #[cfg(test)]
@@ -352,6 +354,7 @@ impl Agent {
             artifacts_dir: None,
             subagent_session_root: Arc::new(Mutex::new(None)),
             maintenance: None,
+            workspace: None,
         }
     }
 

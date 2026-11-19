@@ -1161,9 +1161,12 @@ fn run(
             },
             None => AgentWork::Prompt(&text),
         };
-        // Cancellation is cooperative. If the old turn finishes while the user
-        // is still dictating an interruption, restore this pre-turn state so the
-        // discarded answer cannot leak into the next model request.
+        // Cancellation is cooperative. On a barge-in stop or replacement the
+        // agent abandons the turn against this pre-turn checkpoint: the
+        // undelivered answer never leaks into the next model request, while
+        // tools that already executed stay visible (with a host note) so
+        // their side effects are not redone or contradicted. A turn where
+        // nothing executed is restored to this checkpoint exactly.
         let turn_checkpoint = rt.agent.checkpoint();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
@@ -1197,7 +1200,7 @@ fn run(
             ThinkResolve::StopTurn => {
                 turn_trace.mark("thinking_barge_stop", None);
                 unsub();
-                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.agent.abandon_turn(turn_checkpoint.clone());
                 rt.picture.clear_activity();
                 maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
                 follow_up_depth = 0;
@@ -1212,7 +1215,7 @@ fn run(
                     Some(serde_json::json!({ "text": next })),
                 );
                 unsub();
-                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.agent.abandon_turn(turn_checkpoint.clone());
                 rt.picture.clear_activity();
                 pending_barge_turn = Some(PendingBargeTurn {
                     user_text: next,

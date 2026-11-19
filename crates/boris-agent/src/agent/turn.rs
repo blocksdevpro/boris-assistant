@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::context::{ContextBudget, RetrievedMemory, Role, TaskStatus};
+use crate::context::{ContextBudget, RetrievedMemory, Role, TaskStatus, TurnEnd};
 use crate::error::{AgentError, AgentErrorKind};
 use crate::loop_::{self, LoopState};
 use crate::observe::{TurnOutcomeKind, TurnReport};
@@ -588,9 +588,17 @@ impl Agent {
                 self.finish_loop(started, user_text, loop_out).await
             }
             Err(e) => {
-                self.context = turn_snapshot;
-                if let Ok(mut table) = self.activated.lock() {
-                    *table = activation_snapshot;
+                // Tool side effects stay done: keep executed work (closing
+                // unrun calls, with a persisted host note) so "continue" does
+                // not redo or contradict it. Roll back only when nothing ran.
+                if !self
+                    .context
+                    .salvage_interrupted_turn(turn_snapshot.history().len(), turn_end_for(&e))
+                {
+                    self.context = turn_snapshot;
+                    if let Ok(mut table) = self.activated.lock() {
+                        *table = activation_snapshot;
+                    }
                 }
                 self.pending_turn = None;
                 if e.kind() == AgentErrorKind::Cancelled {
@@ -692,6 +700,7 @@ impl Agent {
                 self.finish_loop(started, &user_text, loop_out).await
             }
             Err(e) => {
+                self.settle_failed_resume(&e);
                 if e.kind() == AgentErrorKind::Cancelled {
                     info!(
                         duration_ms = started.elapsed().as_millis() as u64,
@@ -785,6 +794,7 @@ impl Agent {
                 self.finish_loop(started, &user_text, loop_out).await
             }
             Err(e) => {
+                self.settle_failed_resume(&e);
                 if e.kind() == AgentErrorKind::Cancelled {
                     info!(
                         duration_ms = started.elapsed().as_millis() as u64,
@@ -802,6 +812,18 @@ impl Agent {
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// A resumed (post-HITL) turn failed: keep executed work with a host note,
+    /// and never leave an unresolved tool call behind.
+    fn settle_failed_resume(&mut self, error: &AgentError) {
+        let start = self.context.current_turn_history_start();
+        if !self
+            .context
+            .salvage_interrupted_turn(start, turn_end_for(error))
+        {
+            self.context.resolve_pending_tool_calls_as_cancelled();
         }
     }
 
@@ -961,6 +983,14 @@ impl Agent {
             }
         }
         self.learn_personal_heuristic(user_text);
+    }
+}
+
+fn turn_end_for(error: &AgentError) -> TurnEnd {
+    if error.kind() == AgentErrorKind::Cancelled {
+        TurnEnd::Interrupted
+    } else {
+        TurnEnd::Failed
     }
 }
 

@@ -46,7 +46,10 @@ a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
  or “continue” resumes from the cut. While Thinking, the same toggle uses wake
  plus the Armed live-mic gate; work keeps running until STT decides. Silence
  or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
- request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Confirm prompts
+ request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). An abandoned turn
+ keeps any tool work that already executed (its undelivered reply is dropped
+ and a host note records the interruption); a turn where nothing ran is
+ rolled back to its pre-turn checkpoint (`Agent::abandon_turn`). Confirm prompts
  and re-asks use the same barge watch: a wake word mid-prompt stops playback
  and listens for the yes/no instead of auto-denying. Voice confirms follow
  the agent HITL budget (`max_confirms_per_turn`, default 12 via

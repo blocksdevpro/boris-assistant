@@ -22,6 +22,7 @@
 //! - Prefer pure helpers in submodules with unit tests over growing `Context` methods.
 
 mod compact;
+mod interrupt;
 mod message;
 #[cfg(test)]
 mod reasoning_tests;
@@ -34,6 +35,7 @@ use serde_json::{json, Value};
 
 pub(crate) use compact::estimate_serialized_tokens;
 pub use compact::ContextBudget;
+pub(crate) use interrupt::TurnEnd;
 pub use message::{Message, MessageOrigin};
 pub(crate) use message::REASONING_DETAILS_KEY;
 pub use retrieval::RetrievedMemory;

@@ -132,6 +132,9 @@ pub struct Agent {
 }
 
 #[cfg(test)]
+mod interrupt_tests;
+
+#[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use boris_ai::{LlmClient, LlmError};
@@ -734,9 +737,35 @@ impl Agent {
         }
     }
 
-    /// Abandon the current turn and restore a previously captured checkpoint.
+    /// Abandon the current turn and restore a previously captured checkpoint
+    /// exactly, discarding everything since (including executed tool calls).
+    /// Hosts handling an interruption should prefer [`Self::abandon_turn`].
     pub fn restore_checkpoint(&mut self, checkpoint: AgentCheckpoint) {
         self.abort();
+        self.context = checkpoint.context;
+        if let Ok(mut table) = self.activated.lock() {
+            *table = checkpoint.activations;
+        }
+    }
+
+    /// Abandon an interrupted turn (barge-in stop or replacement).
+    ///
+    /// Tool side effects since `checkpoint` are real, so when any tool
+    /// executed the human message, assistant tool calls, and results are
+    /// kept, unrun calls are closed with a synthetic failed result, an
+    /// undelivered final reply is dropped, and a persisted host note records
+    /// the interruption. When nothing executed, the checkpoint is restored
+    /// exactly, like [`Self::restore_checkpoint`].
+    pub fn abandon_turn(&mut self, checkpoint: AgentCheckpoint) {
+        self.abort();
+        let start = checkpoint.context.history().len();
+        if self
+            .context
+            .salvage_interrupted_turn(start, crate::context::TurnEnd::Interrupted)
+        {
+            info!("interrupted turn kept its executed tool work");
+            return;
+        }
         self.context = checkpoint.context;
         if let Ok(mut table) = self.activated.lock() {
             *table = checkpoint.activations;

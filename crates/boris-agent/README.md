@@ -198,6 +198,19 @@ capture includes a `tool_listing` event with names, estimated schema tokens,
 and availability changes for each model request. Discovery hits are keyword
 matches, not proof of a capability.
 
+## Failed and interrupted turns
+
+Tool side effects are real, so a turn that errors or is cancelled after a tool
+executed is not rolled back. The human message, assistant tool calls, and tool
+results stay in context and history; any unrun call of the latest batch gets a
+failed `Error: not run: turn interrupted` result so the provider sequence stays
+valid; an undelivered final reply is dropped; and a short persisted
+assistant-role `[Host note: …]` names the tools that ran and how the turn
+ended. A turn where nothing executed (synthetic cancellation rows do not count)
+is restored to its pre-turn snapshot exactly. Hosts handling a barge-in call
+`Agent::abandon_turn(checkpoint)`, which applies the same rule against a
+checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
+
 ## Tool execution status
 
 `Tool::execute` returns `Result<String, ToolError>`. Failed operations return

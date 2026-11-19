@@ -471,13 +471,13 @@ pub(super) fn resolve_agent_outcome(
                                 return OutcomeResolve::ReArm;
                             }
                             ThinkResolve::StopTurn => {
-                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
                                 ctx.picture.clear_activity();
                                 ctx.picture.set_phase(Phase::Armed);
                                 return OutcomeResolve::ReArm;
                             }
                             ThinkResolve::TakeTurn(text) => {
-                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
                                 ctx.picture.clear_activity();
                                 return OutcomeResolve::TakeTurn {
                                     user_text: text,
@@ -706,13 +706,13 @@ fn collect_typed_input(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             Err(OutcomeResolve::TakeTurn {
                 user_text: text,
@@ -844,13 +844,13 @@ fn resume_after_confirm(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             Err(OutcomeResolve::TakeTurn {
                 user_text: text,

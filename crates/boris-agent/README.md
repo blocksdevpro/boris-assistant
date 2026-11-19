@@ -154,7 +154,8 @@ behind the bundled version (legacy stock files without a version upgrade too;
 user forks are left alone). `load_skills` discovers project skills by walking
 up from the working directory through every `.boris/skills` to the git root,
 then user skills from `<boris_home>/skills`, followed by any explicit extra
-paths; the first skill with a given name wins.
+paths; user skills win a name clash. The walk skips the user skills directory
+itself (canonical-path compare), which a cwd under the home directory reaches.
 
 Only skill names and descriptions enter the prompt, as a bounded JSON
 `<skills_catalog_data>` user-role envelope paired with a small static trusted

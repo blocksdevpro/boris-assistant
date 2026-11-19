@@ -402,7 +402,7 @@ impl Agent {
             Arc::clone(&self.shared_tools),
             Arc::clone(&self.activated),
         );
-        self.insert_tool(Arc::new(tool));
+        self.insert_tool(Arc::new(tool), false);
         info!("tool_search registered");
     }
 
@@ -427,7 +427,7 @@ impl Agent {
             self.sandbox_snapshot.clone(),
             Arc::clone(&self.subagent_session_root),
         );
-        self.insert_tool(Arc::new(tool));
+        self.insert_tool(Arc::new(tool), false);
         info!("spawn_subagent tool enabled");
     }
 
@@ -621,7 +621,7 @@ impl Agent {
     pub fn set_todos_path(&mut self, path: Option<PathBuf>) {
         self.todos_path = path.clone();
         if let Some(p) = path {
-            self.register_tools(crate::tools::plan_tools_at(&p));
+            self.rebind_tools(crate::tools::plan_tools_at(&p));
         }
     }
 
@@ -669,7 +669,7 @@ impl Agent {
     pub fn set_artifacts_dir(&mut self, dir: Option<PathBuf>) {
         self.artifacts_dir = dir.clone();
         if let Some(p) = dir {
-            self.register_tools(crate::tools::artifact_tools_at(&p));
+            self.rebind_tools(crate::tools::artifact_tools_at(&p));
         }
     }
 
@@ -685,7 +685,7 @@ impl Agent {
     pub fn set_output_store_dir(&mut self, dir: Option<PathBuf>) {
         self.runtime.set_output_store_dir(dir.clone());
         if let Some(p) = dir {
-            self.register_tools(crate::tools::output_tools_at(&p));
+            self.rebind_tools(crate::tools::output_tools_at(&p));
         }
     }
 
@@ -851,21 +851,35 @@ impl Agent {
     /// Register a tool. If a tool with the same name already exists, it is
     /// **replaced** and a warning is logged (dedupe by name).
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
-        self.insert_tool(Arc::from(tool));
+        self.insert_tool(Arc::from(tool), false);
     }
 
     /// Register many tools (each name-deduped via [`Self::register_tool`]).
     pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         for tool in tools {
-            self.insert_tool(Arc::from(tool));
+            self.insert_tool(Arc::from(tool), false);
+        }
+    }
+
+    /// Swap session-bound tools (todos, artifacts, tool outputs) for copies
+    /// pointing at new paths. Same name, same position, so the listing order
+    /// stays stable; this is an expected rebind, not a duplicate, so it is
+    /// not logged as one.
+    fn rebind_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        for tool in tools {
+            self.insert_tool(Arc::from(tool), true);
         }
     }
 
     /// Single mutation path for `tools` + live `shared_tools` mirror.
-    fn insert_tool(&mut self, tool: Arc<dyn Tool>) {
+    fn insert_tool(&mut self, tool: Arc<dyn Tool>, rebind: bool) {
         let name = tool.name().to_string();
         if let Some(pos) = self.tools.iter().position(|t| t.name() == name) {
-            warn!(%name, "replacing existing tool registration (name dedupe)");
+            if rebind {
+                tracing::debug!(%name, "rebinding session tool");
+            } else {
+                warn!(%name, "replacing existing tool registration (name dedupe)");
+            }
             self.tools[pos] = tool;
         } else {
             self.tools.push(tool);

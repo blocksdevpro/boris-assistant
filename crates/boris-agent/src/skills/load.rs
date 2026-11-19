@@ -145,7 +145,14 @@ pub fn load_skills(
     }
 
     if let Some(cwd) = cwd {
+        // Walking up from a cwd under the home directory reaches
+        // `~/.boris/skills` itself. That is the user dir, not a project dir:
+        // rescanning it as Project only produced a shadow diagnostic per skill.
+        let user_canonical = std::fs::canonicalize(user_skills_dir(boris_home)).ok();
         for dir in project_skills_dirs(cwd) {
+            if user_canonical.is_some() && std::fs::canonicalize(&dir).ok() == user_canonical {
+                continue;
+            }
             let (s, d) = scan_skills_dir(&dir, SkillSource::Project);
             add(s, d);
         }
@@ -302,6 +309,42 @@ mod tests {
         let body = load_skill_body(skill).unwrap();
         assert!(body.contains("user body"));
         assert!(!body.contains("project body"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_skills_dir_reached_from_cwd_is_not_a_project_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "boris-skill-userwalk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Home layout: <root>/.boris is boris_home, cwd is below <root>.
+        let home = root.join(".boris");
+        write_skill(&home.join("skills"), "mine", "user body");
+        let cwd = root.join("work").join("deep");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Stop the walk at <root> so it never reaches the real home dir.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let loaded = load_skills(Some(&cwd), &home, &[], true);
+        assert_eq!(loaded.skills.len(), 1);
+        assert_eq!(loaded.skills[0].source, SkillSource::User);
+        assert!(
+            loaded.diagnostics.is_empty(),
+            "no shadow noise: {:?}",
+            loaded
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+        // Even without user skills it is never loaded as an untrusted project skill.
+        let loaded = load_skills(Some(&cwd), &home, &[], false);
+        assert!(loaded.skills.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

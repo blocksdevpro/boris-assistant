@@ -82,40 +82,34 @@ LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 
 ## Tool listing
 
-The host selects builtin tool bundles from the user request before the first
-completion. Research gets web and recall tools; coding gets workspace and
-planning tools. Other requests add bundles for time, profile, clipboard,
-system, artifacts, opening URLs or paths, and skills. This local selection
-adds no model request and only lists tools registered by the host.
+Every builtin and host-registered tool is listed on every request, in
+registration order. The listing never depends on the request text, so
+mishearings, Hinglish, or paraphrases cannot hide a capability, and the
+serialized schema table stays byte-identical for the whole session (the
+provider prompt-cache prefix stays warm). Tools that become unusable mid-turn
+stay listed and refuse the call themselves; for example `present_artifact`
+returns a recovery hint once its delivery budget is spent.
 
-The shared set contains `tool_search`, `remember_note`, `present_artifact`, and
-`collect_input`. Matching plugin categories add at most four tools. Discovery
-adds specialized tools for the current objective, including short follow-ups
-such as "continue" and "try again". A new objective clears those activations;
-failed turns and checkpoint restores recover the preceding set. The existing
-32-tool activation cap and 15-minute expiry still apply. Schema order follows
-registration order, and the serialized table stays within 64 KiB.
+Extensions (MCP servers and plugins, `Tool::is_extension`) are the exception.
+They stay out of the default listing so a large registry cannot crowd the
+schema budget. `tool_search` is listed only when at least one extension is
+registered, and it activates matching extensions. Activations are
+session-scoped (32-entry LRU, 15-minute expiry), cleared on session bind and
+unbind, and recovered by failed turns and checkpoint restores. A call to a
+registered extension executes, schema-validated, even before it is listed.
 
-`force_list_all` and disabling `progressive_listing` retain full listing,
-subject to the schema budget. Explicit `should_list` opt-ins remain supported.
-When the schema budget is exceeded, activated tools take priority over unused
-shared tools; `tool_search` is removed last. Progressive turns ensure discovery
-is registered even after `Agent::set_tools` replaces the registry.
-
-`Agent::prompt` supplies selection automatically. Direct loop callers can set
-`AgentLoopConfig::tool_selection` with
-`boris_agent::runtime::ToolSelection::for_request`. Direct listing callers use
-`ListToolsContext::selection`. Both fields default to `None`; task traits still
-provide a fallback selection. Struct literals must include the new field or use
-`..Default::default()`.
+The serialized table stays within 64 KiB (`MAX_TOOL_SCHEMA_CHARS`). Over
+budget, unactivated opt-in extensions go first, then shared builtins, then the
+core set (`remember_note`, `present_artifact`, `collect_input`); activated
+extensions are kept longest and `tool_search` is removed last.
+`force_list_all` and disabling `progressive_listing` list every registered
+tool, extensions included.
 
 Run `cargo run -p boris-agent --example tool_selection_audit` for an offline
-comparison of full listing and task selection through `Agent::prompt`. It uses
-actual builtin schemas and scripted model replies, reporting estimated schema
-tokens and request counts. It executes no external model, web, or shell calls.
-Pass a request-event JSON export after `--` to use its `data.tools` schemas.
-The default audit excludes optional memory, profile, skill, and plugin tools.
-These estimates do not measure live model latency.
+check that the listing is identical across unrelated requests and fits the
+schema budget. It uses actual builtin schemas and scripted model replies and
+executes no external model, web, or shell calls. Pass a request-event JSON
+export after `--` to use its `data.tools` schemas.
 
 ## Canonical memory
 
@@ -196,14 +190,11 @@ If saving also fails, the host still receives the full body for on-screen displa
 The runtime permits one corrected retry, then withholds presentation for the
 rest of the turn. Recovery cards remain available through list/get after restart.
 
-Tools selected for the current objective are listed within the schema budget.
-Use `tool_search` for a needed capability absent from that list. See
-[tool listing](#tool-listing) for bundles and activation lifetime.
-`tool_search` distinguishes actual current availability from new activations;
-debug capture includes a `tool_listing` event with names,
-estimated schema tokens, and availability changes for each model request.
-Discovery hits are keyword matches, not proof of a capability. Check their actual
-descriptions before using them, and repeat discovery only for a specific new lead.
+All builtins are listed within the schema budget; `tool_search` only finds
+extensions. See [tool listing](#tool-listing) for activation lifetime. Debug
+capture includes a `tool_listing` event with names, estimated schema tokens,
+and availability changes for each model request. Discovery hits are keyword
+matches, not proof of a capability.
 
 ## Tool execution status
 

@@ -1,10 +1,10 @@
-//! Progressive tool listing: core + per-turn top-k + LRU/TTL activation.
+//! Tool listing: every builtin in a stable order, plus extensions (MCP /
+//! plugins) activated through `tool_search` (bounded LRU + TTL).
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::ToolSelection;
 use crate::task::TaskTraits;
 use crate::tool::Tool;
 
@@ -19,8 +19,6 @@ pub fn new_activation_set() -> ActivationSet {
 pub const MAX_ACTIVATED: usize = 32;
 /// Activations expire so a session-long set cannot keep growing forever.
 pub const ACTIVATION_TTL: Duration = Duration::from_secs(15 * 60);
-/// Host-side top-k listed on top of the always-on core (when progressive).
-pub const DEFAULT_TOP_K: usize = 4;
 /// Maximum serialized OpenAI-style tool definitions sent in one request.
 ///
 /// Message compaction cannot make an oversized schema table smaller, so the
@@ -110,7 +108,8 @@ impl ActivationTable {
     }
 }
 
-/// Small shared set. Task bundles provide work tools before the first request.
+/// Names given extra schema-budget protection. Every builtin is listed; these
+/// are only the last builtins dropped when the schema table is over budget.
 pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "remember_note",
     "tool_search",
@@ -118,10 +117,14 @@ pub const DEFAULT_CORE_TOOL_NAMES: &[&str] = &[
     "collect_input",
 ];
 
+/// Discovery meta-tool name. Listed only when extensions are registered.
+pub const TOOL_SEARCH_NAME: &str = "tool_search";
+
 /// Feature flags for listing / concurrency / progress (owned by [`crate::Agent`]).
 #[derive(Debug, Clone)]
 pub struct ToolRuntimeFeatures {
-    /// List shared tools, task bundles, matching plugins, activations, and opt-ins.
+    /// List every builtin plus activated or opted-in extensions. When false,
+    /// every registered tool (extensions included) is listed.
     pub progressive_listing: bool,
     /// Ignore progressive filter; list everything.
     pub force_list_all: bool,
@@ -143,7 +146,7 @@ pub struct ToolRuntimeFeatures {
 impl Default for ToolRuntimeFeatures {
     fn default() -> Self {
         Self {
-            // Shared tools + task bundles + plugin top-k + discovery fallback.
+            // Every builtin + discovered extensions + discovery when needed.
             progressive_listing: true,
             force_list_all: false,
             // Parallel reads + sequential writes for multi-tool assistant messages.
@@ -164,9 +167,9 @@ pub struct ListToolsContext {
     /// Activated names snapshot for this round (immutable).
     pub activated: Arc<HashSet<String>>,
     pub features: ToolRuntimeFeatures,
-    /// Latest user-task traits (drives host-side top-k / domain tools).
+    /// Latest user-task traits (informational for `should_list` opt-ins; the
+    /// builtin listing never depends on them).
     pub task: Option<TaskTraits>,
-    pub selection: Option<ToolSelection>,
 }
 
 impl Default for ListToolsContext {
@@ -177,7 +180,6 @@ impl Default for ListToolsContext {
             activated: Arc::new(HashSet::new()),
             features: ToolRuntimeFeatures::default(),
             task: None,
-            selection: None,
         }
     }
 }
@@ -200,9 +202,8 @@ pub fn is_core_name(name: &str, features: &ToolRuntimeFeatures) -> bool {
 
 /// Filter tools for the model tool list.
 ///
-/// Pruning was previously silent; use [`pruned_tool_count`] or
-/// [`filter_listed_tools_with_count`] when the caller must surface how many
-/// definitions were dropped (Group A logs it alongside the schema budget).
+/// Use [`pruned_tool_count`] or [`filter_listed_tools_with_count`] when the
+/// caller must surface how many registered tools stayed unlisted.
 pub fn filter_listed_tools<'a>(
     tools: &'a [Arc<dyn Tool>],
     ctx: &ListToolsContext,
@@ -210,11 +211,10 @@ pub fn filter_listed_tools<'a>(
     filter_listed_tools_with_count(tools, ctx).0
 }
 
-/// Filter tools plus the number pruned (no scoring change).
+/// Filter tools plus the number left unlisted.
 ///
 /// Returns `(listed, pruned_count)` where `pruned_count = tools.len() -
-/// listed.len()`. Existing callers keep using [`filter_listed_tools`];
-/// new callers (Group A) use this to log the silent prune.
+/// listed.len()`.
 pub fn filter_listed_tools_with_count<'a>(
     tools: &'a [Arc<dyn Tool>],
     ctx: &ListToolsContext,
@@ -224,14 +224,18 @@ pub fn filter_listed_tools_with_count<'a>(
     (listed, pruned)
 }
 
-/// Number of tool definitions dropped by progressive listing.
-///
-/// `0` means everything is listed (progressive off, force-list-all, small
-/// registry, or everything selected). Does not change scoring.
+/// Number of registered tools left out of the listing (unactivated extensions,
+/// or `tool_search` when no extension is registered).
 pub fn pruned_tool_count(tools: &[Arc<dyn Tool>], ctx: &ListToolsContext) -> usize {
     filter_listed_tools_with_count(tools, ctx).1
 }
 
+/// Every builtin in registration order, plus activated or opted-in extensions.
+///
+/// The builtin set never depends on the request text, so the serialized
+/// schema table (and the provider prompt-cache prefix) stays identical for the
+/// whole session. `tool_search` is listed only when at least one extension is
+/// registered, because it finds nothing else.
 fn filter_listed_inner<'a>(
     tools: &'a [Arc<dyn Tool>],
     ctx: &ListToolsContext,
@@ -239,86 +243,66 @@ fn filter_listed_inner<'a>(
     if !ctx.features.progressive_listing || ctx.features.force_list_all {
         return tools.iter().collect();
     }
-    // Unclassified embedding callers with a small registry need no discovery.
-    if tools.len() <= 12 && ctx.task.is_none() && ctx.selection.is_none() {
-        return tools.iter().collect();
-    }
-    select_tools_for_turn(tools, ctx, DEFAULT_TOP_K)
-}
-
-/// Eager builtin bundles plus a bounded number of matching plugin tools.
-pub fn select_tools_for_turn<'a>(
-    tools: &'a [Arc<dyn Tool>],
-    ctx: &ListToolsContext,
-    top_k: usize,
-) -> Vec<&'a Arc<dyn Tool>> {
-    let selection = ctx
-        .selection
-        .clone()
-        .or_else(|| ctx.task.map(ToolSelection::for_task));
-    let mut scored: Vec<(i32, usize)> = tools
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            (
-                selection
-                    .as_ref()
-                    .map_or(0, |selection| selection.score(t.name(), t.meta().kind)),
-                i,
-            )
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-
-    let mut selected = HashSet::new();
-    let mut extras = 0usize;
-    for (score, i) in scored {
-        let t = &tools[i];
-        let name = t.name();
-        let core = is_core_name(name, &ctx.features) || name == "tool_search";
-        let activated = ctx.activated.contains(name);
-        let domain = score >= 400;
-        if core || activated || domain || t.should_list(ctx) {
-            selected.insert(i);
-            continue;
-        }
-        if extras < top_k && score > 0 {
-            selected.insert(i);
-            extras += 1;
-        }
-    }
-    // Preserve registration order even when relevance changes between requests.
+    let any_extension = tools.iter().any(|tool| tool.is_extension());
     tools
         .iter()
-        .enumerate()
-        .filter_map(|(i, tool)| selected.contains(&i).then_some(tool))
+        .filter(|tool| {
+            let name = tool.name();
+            if name == TOOL_SEARCH_NAME {
+                return any_extension;
+            }
+            !tool.is_extension()
+                || ctx.activated.contains(name)
+                || tool.should_list(ctx)
+                || ctx
+                    .features
+                    .core_tools
+                    .as_ref()
+                    .is_some_and(|names| names.iter().any(|n| n == name))
+        })
         .collect()
 }
 
 /// Retention priority when the serialized schema table exceeds its budget.
 ///
-/// Activated tools remain above shared tools, explicit opt-ins, and task-domain
-/// matches. The caller removes the lowest priority definitions
+/// Activated extensions outrank shared builtins; unactivated opt-in
+/// extensions go first. The caller removes the lowest priority definitions
 /// first (and may use definition size as a tie-breaker).
 pub(crate) fn schema_retention_priority(tool: &dyn Tool, ctx: &ListToolsContext) -> i32 {
     let name = tool.name();
-    if ctx.activated.contains(name) {
+    if tool.is_extension() && ctx.activated.contains(name) {
         return 11_000;
     }
-    if is_core_name(name, &ctx.features) || name == "tool_search" {
+    if is_core_name(name, &ctx.features) || name == TOOL_SEARCH_NAME {
         return 10_000;
+    }
+    if !tool.is_extension() {
+        return 5_000;
     }
     if tool.should_list(ctx) {
         return 4_500;
     }
-    ctx.selection.as_ref().map_or_else(
-        || {
-            ctx.task.map_or(0, |task| {
-                ToolSelection::for_task(task).score(name, tool.meta().kind)
+    0
+}
+
+/// Activate the extensions among `names`. Builtins are always listed, so they
+/// never consume activation slots.
+pub fn activate_used_extensions<'a>(
+    activated: &ActivationSet,
+    tools: &[Arc<dyn Tool>],
+    names: impl IntoIterator<Item = &'a String>,
+) {
+    activate_tools(
+        activated,
+        names
+            .into_iter()
+            .filter(|name| {
+                tools
+                    .iter()
+                    .any(|tool| tool.name() == name.as_str() && tool.is_extension())
             })
-        },
-        |selection| selection.score(name, tool.meta().kind),
-    )
+            .cloned(),
+    );
 }
 
 /// Insert names into the activation set (cap at [`MAX_ACTIVATED`], LRU + TTL).
@@ -338,7 +322,24 @@ mod tests {
 
     struct Named {
         name: &'static str,
+        extension: bool,
         list: bool,
+    }
+
+    fn builtin(name: &'static str) -> Arc<dyn Tool> {
+        Arc::new(Named {
+            name,
+            extension: false,
+            list: false,
+        })
+    }
+
+    fn extension(name: &'static str) -> Arc<dyn Tool> {
+        Arc::new(Named {
+            name,
+            extension: true,
+            list: false,
+        })
     }
 
     #[async_trait]
@@ -353,11 +354,10 @@ mod tests {
             json!({"type":"object","properties":{}})
         }
         fn meta(&self) -> ToolMeta {
-            if self.name.starts_with("web_plugin_") {
-                ToolMeta::safe_default().kind(crate::tool::ToolKind::Web)
-            } else {
-                ToolMeta::safe_default()
-            }
+            ToolMeta::safe_default()
+        }
+        fn is_extension(&self) -> bool {
+            self.extension
         }
         fn should_list(&self, _: &ListToolsContext) -> bool {
             self.list
@@ -371,125 +371,119 @@ mod tests {
         }
     }
 
-    #[test]
-    fn progressive_lists_core_and_opt_in_only() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Named {
-                name: "remember_note",
-                list: false,
-            }),
-            Arc::new(Named {
-                name: "web_fetch",
-                list: false,
-            }),
-            Arc::new(Named {
-                name: "bash",
-                list: false,
-            }),
-            Arc::new(Named {
-                name: "pinned_plugin",
-                list: true,
-            }),
-            Arc::new(Named {
-                name: "file_read",
-                list: false,
-            }),
-        ];
-        // pad so len > 12 triggers progressive filter
-        let mut many = tools;
-        for i in 0..15 {
-            many.push(Arc::new(Named {
-                name: Box::leak(format!("extra_{i}").into_boxed_str()),
-                list: false,
-            }));
-        }
-
-        let features = ToolRuntimeFeatures {
-            progressive_listing: true,
-            ..Default::default()
-        };
-        let mut activated = HashSet::new();
-        activated.insert("file_read".into());
-        activated.insert("extra_0".into());
-        let ctx = ListToolsContext {
-            activated: Arc::new(activated),
-            features,
-            selection: Some(ToolSelection::for_request(
-                "debug this repo then look up my GitHub profile",
-            )),
-            ..Default::default()
-        };
-        let listed: Vec<&str> = filter_listed_tools(&many, &ctx)
+    fn names<'a>(tools: &'a [Arc<dyn Tool>], ctx: &ListToolsContext) -> Vec<&'a str> {
+        filter_listed_tools(tools, ctx)
             .iter()
             .map(|t| t.name())
-            .collect();
-        assert!(listed.contains(&"remember_note"));
-        assert!(listed.contains(&"pinned_plugin"));
-        assert!(listed.contains(&"file_read"));
-        assert!(listed.contains(&"bash"));
-        assert!(listed.contains(&"web_fetch"));
-        assert!(listed.contains(&"extra_0"));
-        assert!(!listed.contains(&"extra_1"));
+            .collect()
     }
 
     #[test]
-    fn small_unclassified_registry_lists_all() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Named {
-                name: "a",
-                list: false,
-            }),
-            Arc::new(Named {
-                name: "b",
-                list: false,
-            }),
-        ];
-        let ctx = ListToolsContext::default();
-        assert_eq!(filter_listed_tools(&tools, &ctx).len(), 2);
-    }
-
-    #[test]
-    fn task_bundle_and_plugin_top_k_preserve_registration_order() {
+    fn every_builtin_is_listed_in_registration_order_regardless_of_task() {
         let tools: Vec<Arc<dyn Tool>> = [
-            "web_plugin_0",
-            "web_fetch",
-            "web_plugin_1",
-            "web_plugin_2",
-            "web_plugin_3",
-            "web_plugin_4",
-            "web_plugin_5",
-            "web_search",
             "bash",
+            "web_search",
+            "file_edit",
+            "get_time",
+            "clipboard_get",
+            "tool_search",
         ]
         .into_iter()
-        .map(|name| Arc::new(Named { name, list: false }) as Arc<dyn Tool>)
+        .map(builtin)
         .collect();
-        let mut ctx = ListToolsContext {
-            selection: Some(ToolSelection::for_request("look up the latest Rust news")),
-            activated: Arc::new(HashSet::from(["web_plugin_5".into()])),
+        let greeting = ListToolsContext {
+            task: Some(crate::task::classify_task("hi")),
             ..Default::default()
         };
-        let names = filter_listed_tools(&tools, &ctx)
-            .iter()
-            .map(|tool| tool.name())
-            .collect::<Vec<_>>();
+        let coding = ListToolsContext {
+            task: Some(crate::task::classify_task("debug this repo")),
+            ..Default::default()
+        };
+        let expected = ["bash", "web_search", "file_edit", "get_time", "clipboard_get"];
+        assert_eq!(names(&tools, &greeting), expected);
         assert_eq!(
-            names,
-            [
-                "web_plugin_0",
-                "web_fetch",
-                "web_plugin_1",
-                "web_plugin_2",
-                "web_plugin_3",
-                "web_plugin_5",
-                "web_search"
-            ]
+            names(&tools, &coding),
+            expected,
+            "listing must not depend on the request text"
         );
+    }
+
+    #[test]
+    fn extensions_need_activation_and_bring_tool_search() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            builtin("file_read"),
+            extension("github__search"),
+            builtin("tool_search"),
+            Arc::new(Named {
+                name: "pinned__plugin",
+                extension: true,
+                list: true,
+            }),
+            extension("slack__post"),
+        ];
+        let mut ctx = ListToolsContext::default();
+        assert_eq!(
+            names(&tools, &ctx),
+            ["file_read", "tool_search", "pinned__plugin"]
+        );
+        ctx.activated = Arc::new(HashSet::from(["slack__post".to_string()]));
+        assert_eq!(
+            names(&tools, &ctx),
+            ["file_read", "tool_search", "pinned__plugin", "slack__post"]
+        );
+        assert_eq!(pruned_tool_count(&tools, &ctx), 1);
+    }
+
+    #[test]
+    fn force_list_all_and_disabled_progressive_list_everything() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            builtin("file_read"),
+            extension("github__search"),
+            builtin("tool_search"),
+        ];
+        let mut ctx = ListToolsContext::default();
         ctx.features.force_list_all = true;
         assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
         ctx.features.force_list_all = false;
         ctx.features.progressive_listing = false;
         assert_eq!(filter_listed_tools(&tools, &ctx).len(), tools.len());
+    }
+
+    #[test]
+    fn activated_extensions_outrank_builtins_for_schema_budget() {
+        let ctx = ListToolsContext {
+            activated: Arc::new(HashSet::from(["github__search".to_string()])),
+            ..Default::default()
+        };
+        let active = extension("github__search");
+        let idle = extension("slack__post");
+        let shared = builtin("bash");
+        let core = builtin("remember_note");
+        assert!(
+            schema_retention_priority(active.as_ref(), &ctx)
+                > schema_retention_priority(core.as_ref(), &ctx)
+        );
+        assert!(
+            schema_retention_priority(core.as_ref(), &ctx)
+                > schema_retention_priority(shared.as_ref(), &ctx)
+        );
+        assert!(
+            schema_retention_priority(shared.as_ref(), &ctx)
+                > schema_retention_priority(idle.as_ref(), &ctx)
+        );
+    }
+
+    #[test]
+    fn only_used_extensions_consume_activation_slots() {
+        let tools: Vec<Arc<dyn Tool>> = vec![builtin("bash"), extension("github__search")];
+        let activated = new_activation_set();
+        activate_used_extensions(
+            &activated,
+            &tools,
+            &["bash".to_string(), "github__search".to_string(), "ghost".to_string()],
+        );
+        let snapshot = activated.lock().unwrap().snapshot();
+        assert_eq!(snapshot, HashSet::from(["github__search".to_string()]));
     }
 
     #[test]
@@ -499,39 +493,6 @@ mod tests {
         assert!(f.max_parallel_tools >= 16);
         assert!(f.progressive_listing, "progressive listing on by default");
         assert!(f.progress_events);
-    }
-
-    #[test]
-    fn greeting_omits_unrelated_work_tools() {
-        let names = [
-            "file_read",
-            "file_write",
-            "file_edit",
-            "list_dir",
-            "glob",
-            "grep",
-            "bash",
-            "web_search",
-            "web_fetch",
-            "memory_search",
-            "memory_get",
-            "present_artifact",
-            "list_artifacts",
-            "get_artifact",
-        ];
-        let tools: Vec<Arc<dyn Tool>> = names
-            .iter()
-            .map(|name| Arc::new(Named { name, list: false }) as Arc<dyn Tool>)
-            .collect();
-        let ctx = ListToolsContext {
-            task: Some(crate::task::classify_task("hi")),
-            ..Default::default()
-        };
-        let listed = filter_listed_tools(&tools, &ctx)
-            .iter()
-            .map(|tool| tool.name())
-            .collect::<Vec<_>>();
-        assert_eq!(listed, ["present_artifact"]);
     }
 
     #[test]
@@ -551,41 +512,18 @@ mod tests {
     }
 
     #[test]
-    fn pruned_count_matches_listed_difference_without_breaking_callers() {
-        // Build a registry large enough to trigger progressive filtering.
-        let mut many: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Named {
-                name: "get_time",
-                list: false,
-            }),
-            Arc::new(Named {
-                name: "bash",
-                list: false,
-            }),
-        ];
-        for i in 0..15 {
-            many.push(Arc::new(Named {
-                name: Box::leak(format!("extra_{i}").into_boxed_str()),
-                list: false,
-            }));
+    fn pruned_count_matches_listed_difference() {
+        let mut many: Vec<Arc<dyn Tool>> = vec![builtin("get_time"), builtin("bash")];
+        for name in ["a__x", "b__y", "c__z"] {
+            many.push(extension(name));
         }
-        let ctx = ListToolsContext {
-            features: ToolRuntimeFeatures {
-                progressive_listing: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let ctx = ListToolsContext::default();
         let listed = filter_listed_tools(&many, &ctx);
         let (listed2, pruned) = filter_listed_tools_with_count(&many, &ctx);
         assert_eq!(listed.len(), listed2.len());
         assert_eq!(pruned, pruned_tool_count(&many, &ctx));
-        assert_eq!(pruned, many.len().saturating_sub(listed.len()));
-        // Small registry: no prune.
-        let small: Vec<Arc<dyn Tool>> = vec![Arc::new(Named {
-            name: "a",
-            list: false,
-        })];
+        assert_eq!(pruned, 3);
+        let small: Vec<Arc<dyn Tool>> = vec![builtin("a")];
         assert_eq!(pruned_tool_count(&small, &ListToolsContext::default()), 0);
     }
 }

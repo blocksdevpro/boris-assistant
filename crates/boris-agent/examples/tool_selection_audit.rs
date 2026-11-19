@@ -1,4 +1,5 @@
-//! Compare builtin or exported schemas through Agent::prompt with a scripted client.
+//! Check that builtin (or exported) schemas are listed identically for every
+//! request and fit the schema budget, through Agent::prompt with a scripted client.
 //! cargo run -p boris-agent --example tool_selection_audit [-- request-export.json]
 //! No web, shell, or external model calls are executed.
 
@@ -96,7 +97,7 @@ async fn run(tools: &[Value], prompt: &str, progressive: bool, research: bool) -
     let requests = requests.lock().unwrap();
     assert!(
         requests.windows(2).all(|pair| pair[0] == pair[1]),
-        "schemas should remain stable within the task"
+        "schemas must remain byte-identical within the turn"
     );
     json!({
         "model_requests":requests.len(),
@@ -142,19 +143,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }})).collect()
     };
     let eager = run(&tools, "look up my website", false, true).await;
-    let selected = run(&tools, "look up my website", true, true).await;
+    let research = run(&tools, "look up my website", true, true).await;
     let greeting = run(&tools, "hi", true, false).await;
     assert_eq!(
-        eager["model_requests"], selected["model_requests"],
-        "selection must not add a discovery round"
+        eager["model_requests"], research["model_requests"],
+        "listing must not add a discovery round"
     );
-    let names = selected["first_request_tools"].as_array().unwrap();
-    assert!(names.contains(&json!("web_search")) && names.contains(&json!("web_fetch")));
-    assert!(!names.contains(&json!("bash")) && !names.contains(&json!("file_edit")));
+    assert_eq!(
+        research["first_request_tools"], greeting["first_request_tools"],
+        "the builtin listing must not depend on the request text"
+    );
+    let names = research["first_request_tools"].as_array().unwrap();
+    for needed in ["web_search", "web_fetch", "bash", "file_edit", "get_time"] {
+        assert!(names.contains(&json!(needed)), "{needed} must be listed");
+    }
+    let schema_chars = serde_json::to_string(&tools)?.len();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "eager":eager, "task_selected":selected, "greeting":greeting,
+            "full_listing":eager, "research":research, "greeting":greeting,
+            "builtin_schema_chars": schema_chars,
+            "schema_budget_chars": boris_agent::runtime::MAX_TOOL_SCHEMA_CHARS,
             "measurement":"Offline scripted task; estimated schema tokens only."
         }))?
     );

@@ -60,7 +60,11 @@ pub(super) async fn complete_round(
     cancel: &Option<CancellationToken>,
     accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
-    let mut tools_json = if at_cap {
+    // The listing stays identical for the whole turn (and session) so the
+    // provider prompt-cache prefix stays warm. Tools that become unusable
+    // mid-turn (e.g. `present_artifact` after its delivery budget is spent)
+    // stay listed; the runtime refuses the call with a recovery hint.
+    let tools_json = if at_cap {
         Value::Null
     } else {
         let (payload, pruned) = listed_tools_json(state.tools, config, state.activated);
@@ -73,11 +77,6 @@ pub(super) async fn complete_round(
         }
         payload
     };
-    if state.runtime.artifact_delivery_exhausted() {
-        if let Some(tools) = tools_json.as_array_mut() {
-            tools.retain(|tool| tool["function"]["name"] != "present_artifact");
-        }
-    }
     let listed_names: Vec<String> = tools_json
         .as_array()
         .into_iter()

@@ -42,7 +42,7 @@ pub(super) fn unknown_tool_observation(name: &str) -> String {
     )
 }
 
-/// Build listing context (progressive disclosure / force-list-all).
+/// Build listing context (builtins + activated extensions / force-list-all).
 pub(super) fn build_list_ctx(
     config: &AgentLoopConfig,
     activated: Option<&ActivationSet>,
@@ -60,7 +60,6 @@ pub(super) fn build_list_ctx(
         activated: Arc::new(activated_snap),
         features,
         task: config.task,
-        selection: config.tool_selection.clone(),
     }
 }
 
@@ -394,6 +393,23 @@ mod tests {
     struct LargeDefinitionTool {
         name: String,
         description: String,
+        extension: bool,
+    }
+
+    fn large(name: &str, description: String) -> Arc<dyn Tool> {
+        Arc::new(LargeDefinitionTool {
+            name: name.into(),
+            description,
+            extension: false,
+        })
+    }
+
+    fn large_extension(name: &str, description: String) -> Arc<dyn Tool> {
+        Arc::new(LargeDefinitionTool {
+            name: name.into(),
+            description,
+            extension: true,
+        })
     }
 
     #[async_trait]
@@ -414,6 +430,10 @@ mod tests {
             ToolMeta::safe_default()
         }
 
+        fn is_extension(&self) -> bool {
+            self.extension
+        }
+
         async fn execute(
             &self,
             _ctx: &crate::tool_context::ToolCallContext,
@@ -426,18 +446,9 @@ mod tests {
     #[test]
     fn tool_payload_prunes_low_priority_definitions_to_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "core".into(),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "activated_tool".into(),
-                description: "a".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "low_priority_tool".into(),
-                description: "z".repeat(40_000),
-            }),
+            large("remember_note", "core".into()),
+            large_extension("activated_tool", "a".repeat(40_000)),
+            large("low_priority_tool", "z".repeat(40_000)),
         ];
         let mut activated = HashSet::new();
         activated.insert("activated_tool".to_string());
@@ -461,7 +472,7 @@ mod tests {
         );
         assert!(
             names.contains(&"activated_tool"),
-            "actual-use activation must outrank an unselected tool"
+            "an activated extension must outrank a shared builtin"
         );
         assert!(!names.contains(&"low_priority_tool"));
         assert_eq!(
@@ -473,18 +484,9 @@ mod tests {
     #[test]
     fn schema_budget_keeps_discoveries_above_unused_shared_tools() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "n".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "activated_tool".into(),
-                description: "a".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "tool_search".into(),
-                description: "discovery".into(),
-            }),
+            large("remember_note", "n".repeat(40_000)),
+            large_extension("activated_tool", "a".repeat(40_000)),
+            large("tool_search", "discovery".into()),
         ];
         let ctx = ListToolsContext {
             activated: Arc::new(HashSet::from(["activated_tool".into()])),
@@ -505,14 +507,8 @@ mod tests {
     #[test]
     fn tool_payload_prunes_core_when_core_alone_exceeds_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "t".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "present_artifact".into(),
-                description: "d".repeat(40_000),
-            }),
+            large("remember_note", "t".repeat(40_000)),
+            large("present_artifact", "d".repeat(40_000)),
         ];
 
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
@@ -527,10 +523,11 @@ mod tests {
 
     #[test]
     fn individually_oversized_tool_search_is_omitted() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "tool_search".into(),
-            description: "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1),
-        })];
+        // An unactivated extension keeps discovery listed but is not listed itself.
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            large("tool_search", "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1)),
+            large_extension("plugin__hidden", "hidden".into()),
+        ];
 
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(payload.is_null());
@@ -667,15 +664,12 @@ mod tests {
     fn pruning_retains_tool_search_as_last_resort_and_reports_count() {
         // tool_search must survive pruning so the model can discover dropped
         // tools; the pruned count lets `complete_round` log a budget-aware warn.
-        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "tool_search".into(),
-            description: "search".into(),
-        })];
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            large("tool_search", "search".into()),
+            large_extension("plugin__hidden", "hidden".into()),
+        ];
         for i in 0..6 {
-            tools.push(Arc::new(LargeDefinitionTool {
-                name: format!("filler-{i}"),
-                description: "x".repeat(20_000),
-            }));
+            tools.push(large(&format!("filler-{i}"), "x".repeat(20_000)));
         }
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(pruned >= 1, "expected at least one prune, got {pruned}");
@@ -700,10 +694,7 @@ mod tests {
 
     #[test]
     fn no_prune_reports_zero() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "get_time".into(),
-            description: "core".into(),
-        })];
+        let tools: Vec<Arc<dyn Tool>> = vec![large("get_time", "core".into())];
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert_eq!(pruned, 0);
         assert!(payload.is_array());

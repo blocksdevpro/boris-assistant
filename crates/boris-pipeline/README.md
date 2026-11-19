@@ -73,10 +73,10 @@ The system prompt separates short speech from thorough tool work and detailed
 screen reports. Shared rules are stated once; research and retry depth follows
 unresolved evidence gaps rather than fixed query or tool-round quotas.
 
-Before each initial model request, the agent selects common tool bundles from
-the human objective. The prompt directs the model to use listed tools and
-discover a capability only when needed tools are absent. Short follow-ups such
-as "continue" retain the preceding objective's selection and discoveries.
+Every built-in tool is listed on every model request in a stable order, so a
+misheard or paraphrased request cannot hide a capability and the provider
+prompt-cache prefix stays warm. `tool_search` appears only when optional
+extension tools are registered (the Desktop host registers none).
 See [agent tool listing](../boris-agent/README.md#tool-listing) for details.
 
 Independent tools can use the explicit `parallel` API or native multi-tool calls.

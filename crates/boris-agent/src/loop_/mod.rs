@@ -242,16 +242,10 @@ pub async fn agent_loop_with_budget(
             )
             .await?;
             if let Some(activated) = state.activated {
-                crate::runtime::activate_tools(
+                crate::runtime::activate_used_extensions(
                     activated,
-                    tools_used[activation_start..]
-                        .iter()
-                        .filter(|name| {
-                            name.as_str() != "tool_search"
-                                && !crate::runtime::is_core_name(name, &config.features)
-                                && state.tools.iter().any(|tool| tool.name() == name.as_str())
-                        })
-                        .cloned(),
+                    state.tools,
+                    &tools_used[activation_start..],
                 );
             }
 
@@ -526,12 +520,10 @@ pub async fn resume_pending_input(
         tool_rounds = tool_rounds.saturating_add(1);
     }
     if let Some(activated) = state.activated {
-        crate::runtime::activate_tools(
+        crate::runtime::activate_used_extensions(
             activated,
-            tools_used[activation_start..]
-                .iter()
-                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
-                .cloned(),
+            state.tools,
+            &tools_used[activation_start..],
         );
     }
 
@@ -743,12 +735,10 @@ pub async fn resume_pending_tool(
         tool_rounds = tool_rounds.saturating_add(1);
     }
     if let Some(activated) = state.activated {
-        crate::runtime::activate_tools(
+        crate::runtime::activate_used_extensions(
             activated,
-            tools_used[activation_start..]
-                .iter()
-                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
-                .cloned(),
+            state.tools,
+            &tools_used[activation_start..],
         );
     }
 
@@ -907,11 +897,9 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool["function"]["name"] == "present_artifact"));
-        assert!(!schemas[2]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool["function"]["name"] == "present_artifact"));
+        // The listing stays stable (prompt-cache prefix); the runtime refuses
+        // further presentation instead of the tool disappearing mid-turn.
+        assert_eq!(schemas[0], schemas[2]);
         assert_eq!(
             events
                 .lock()
@@ -1070,6 +1058,10 @@ mod tests {
             }
             fn meta(&self) -> ToolMeta {
                 ToolMeta::safe_default()
+            }
+            // Only extensions use activation slots (builtins are always listed).
+            fn is_extension(&self) -> bool {
+                true
             }
             async fn execute(
                 &self,

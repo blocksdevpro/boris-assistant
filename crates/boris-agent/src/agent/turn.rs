@@ -145,17 +145,16 @@ impl Agent {
         } else {
             user_text
         };
-        let selection = crate::runtime::ToolSelection::for_request(objective);
         AgentLoopConfig {
             max_tool_rounds: self.max_tool_rounds,
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             features: self.features.clone(),
             force_list_all: false,
-            // Use the host's original utterance, never an injected user-role
-            // research/finish reminder appended later in the same turn.
-            task: Some(selection.task),
-            tool_selection: Some(selection),
+            // Routing only: use the host's original utterance (or the objective
+            // a short follow-up continues), never an injected reminder. The
+            // tool listing does not depend on it.
+            task: Some(crate::task::classify_task(objective)),
             debug: self.debug.clone(),
         }
     }
@@ -433,7 +432,7 @@ impl Agent {
         }
 
         // Default construction and set_tools can omit the discovery tool.
-        // Every progressively filtered request must retain a path to hidden tools.
+        // It is listed only when extension tools are registered.
         if self.features.progressive_listing {
             self.ensure_tool_search();
         }
@@ -442,15 +441,13 @@ impl Agent {
         self.runtime.clear_turn_grants();
 
         let turn_snapshot = self.context.clone();
+        // Extension activations are session-scoped (bounded LRU + TTL) so the
+        // listed schema table does not change between objectives.
         let activation_snapshot = self
             .activated
             .lock()
             .map(|table| table.clone())
             .unwrap_or_default();
-        if replacement_control.is_some() || !crate::runtime::selection::is_task_followup(user_text)
-        {
-            self.clear_activations();
-        }
         self.context.clear_host_controls();
         // Refresh dynamic memory/catalog data as well as environment facts.
         // Canonical memory can change in the background without `personal`.
@@ -1094,6 +1091,10 @@ mod retrieval_tests {
         fn meta(&self) -> crate::tool::ToolMeta {
             crate::tool::ToolMeta::safe_default().read_only(true)
         }
+        /// Names with `__` stand in for MCP/plugin extensions.
+        fn is_extension(&self) -> bool {
+            self.0.contains("__")
+        }
         async fn execute(
             &self,
             _: &crate::tool_context::ToolCallContext,
@@ -1103,16 +1104,17 @@ mod retrieval_tests {
         }
     }
 
+    const BUILTIN_NAMES: [&str; 6] = [
+        "web_search",
+        "web_fetch",
+        "bash",
+        "file_read",
+        "file_edit",
+        "get_time",
+    ];
+
     fn listing_tools(agent: &mut super::Agent) {
-        for name in [
-            "web_search",
-            "web_fetch",
-            "bash",
-            "file_read",
-            "file_edit",
-            "get_time",
-            "rare_tool",
-        ] {
+        for name in BUILTIN_NAMES {
             agent.register_tool(Box::new(ListingTool(name)));
         }
     }
@@ -1127,23 +1129,27 @@ mod retrieval_tests {
     }
 
     #[tokio::test]
-    async fn task_tools_are_available_on_the_first_request_without_discovery() {
+    async fn every_builtin_is_listed_identically_for_unrelated_requests() {
         let client = RecordingClient::default();
         let schemas = client.schemas.clone();
         let mut agent = super::Agent::new(Box::new(client), "sys");
         listing_tools(&mut agent);
         agent.prompt("what is the weather today").await.unwrap();
+        agent.prompt("hi").await.unwrap();
+        agent.prompt("mujhe screen dikhao").await.unwrap();
         let requests = schemas.lock().unwrap();
-        assert_eq!(requests.len(), 1, "selection must not add a model request");
-        let names = schema_names(&requests[0]);
-        assert!(names.contains(&"tool_search"));
-        assert!(names.contains(&"web_search") && names.contains(&"web_fetch"));
-        assert!(!names.contains(&"bash") && !names.contains(&"file_edit"));
-        assert!(!names.contains(&"rare_tool"));
+        assert_eq!(requests.len(), 3, "listing must not add a model request");
+        assert_eq!(schema_names(&requests[0]), BUILTIN_NAMES);
+        assert!(
+            requests.windows(2).all(|pair| pair[0] == pair[1]),
+            "the schema table must be byte-identical across turns"
+        );
+        // No extension is registered, so discovery has nothing to find.
+        assert!(!schema_names(&requests[0]).contains(&"tool_search"));
     }
 
     #[tokio::test]
-    async fn discovery_survives_followups_but_not_a_new_objective() {
+    async fn discovered_extensions_stay_listed_for_the_session() {
         struct DiscoveryClient(Arc<Mutex<Vec<Value>>>);
         #[async_trait]
         impl LlmClient for DiscoveryClient {
@@ -1154,9 +1160,9 @@ mod retrieval_tests {
                 let call = match round {
                     0 => Some((
                         "tool_search",
-                        serde_json::json!({"query":"rare_tool","limit":1}),
+                        serde_json::json!({"query":"rare","limit":1}),
                     )),
-                    1 => Some(("rare_tool", serde_json::json!({}))),
+                    1 => Some(("plugin__rare", serde_json::json!({}))),
                     _ => None,
                 };
                 Ok(match call {
@@ -1172,24 +1178,24 @@ mod retrieval_tests {
         let schemas = Arc::new(Mutex::new(Vec::new()));
         let mut agent = super::Agent::new(Box::new(DiscoveryClient(schemas.clone())), "sys");
         listing_tools(&mut agent);
+        agent.register_tool(Box::new(ListingTool("plugin__rare")));
         agent.prompt("what is the weather today").await.unwrap();
-        assert!(!schema_names(&schemas.lock().unwrap()[0]).contains(&"rare_tool"));
-        assert!(schema_names(&schemas.lock().unwrap()[1]).contains(&"rare_tool"));
-        agent.prompt("continue").await.unwrap();
-        agent.prompt("please keep going").await.unwrap();
         {
             let requests = schemas.lock().unwrap();
-            assert_eq!(requests.len(), 5);
-            for request in &requests[3..] {
-                let names = schema_names(request);
-                assert!(names.contains(&"rare_tool") && names.contains(&"web_search"));
-                assert!(!names.contains(&"bash"));
-            }
+            let first = schema_names(&requests[0]);
+            assert!(first.contains(&"tool_search") && !first.contains(&"plugin__rare"));
+            assert!(BUILTIN_NAMES.iter().all(|name| first.contains(name)));
+            assert!(schema_names(&requests[1]).contains(&"plugin__rare"));
         }
+        agent.prompt("continue").await.unwrap();
         agent.prompt("hi").await.unwrap();
         let requests = schemas.lock().unwrap();
-        let names = schema_names(requests.last().unwrap());
-        assert!(!names.contains(&"rare_tool") && !names.contains(&"web_search"));
+        assert_eq!(requests.len(), 5);
+        for request in &requests[1..] {
+            let names = schema_names(request);
+            assert!(names.contains(&"plugin__rare") && names.contains(&"bash"));
+        }
+        assert_eq!(requests[2], requests[4], "a new objective keeps the table");
     }
 
     #[tokio::test]

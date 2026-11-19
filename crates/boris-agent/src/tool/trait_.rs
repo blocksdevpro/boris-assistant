@@ -78,10 +78,22 @@ pub trait Tool: Send + Sync {
         ToolMeta::with_risk(ToolRisk::Moderate).confirm(true)
     }
 
-    /// Progressive listing opt-in. Default **`false`**.
+    /// Extension tool (MCP server or plugin) found through `tool_search`.
+    /// Default **`false`**.
     ///
-    /// When progressive listing is on, only core tools, activated tools, and
-    /// tools that return `true` here appear in the model tool list.
+    /// Builtin and host-registered tools are listed on every request in a
+    /// stable order. Extensions stay out of the default listing until
+    /// `tool_search` activates them, so a large plugin registry cannot crowd
+    /// the schema budget. A call to a registered extension still executes
+    /// (schema-validated) even before it is listed.
+    fn is_extension(&self) -> bool {
+        false
+    }
+
+    /// Listing opt-in for an [extension](Self::is_extension). Default **`false`**.
+    ///
+    /// Builtins are always listed; this only lets an extension appear without
+    /// a `tool_search` activation.
     fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
         false
     }

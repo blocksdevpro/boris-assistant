@@ -160,6 +160,13 @@ Only skill names and descriptions enter the prompt, as a bounded JSON
 `<skills_catalog_data>` user-role envelope paired with a small static trusted
 `SKILLS_SYSTEM_POLICY`. `load_skill` reads a
 full body on demand, so specialized guidance does not expand every turn.
+Loaded playbooks are framed by source: the user's own skills (installed or
+bundled under `<boris_home>/skills`, plus host-supplied extra paths) read as
+guidance to follow where it fits the request, with the current user message
+winning. Project skills found by walking up from the working directory stay
+framed as untrusted reference data, since a cloned repository could plant one,
+and are marked `"project": true` in the catalog. Every body keeps its
+`</skill>` closers escaped.
 The redundant `list_skills` tool has been removed; the supplied catalog already
 contains names and descriptions. The bundled set includes task execution,
 research, daily briefs, remembering,

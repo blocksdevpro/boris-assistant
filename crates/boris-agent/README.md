@@ -166,7 +166,10 @@ guidance to follow where it fits the request, with the current user message
 winning. Project skills found by walking up from the working directory stay
 framed as untrusted reference data, since a cloned repository could plant one,
 and are marked `"project": true` in the catalog. Every body keeps its
-`</skill>` closers escaped.
+`</skill>` closers escaped. `load_skill` takes only `name`
+(`additionalProperties: false`) and says it returns playbook text without
+running anything; extra keys such as an `args` task string are ignored with a
+short hint instead of failing the call.
 The redundant `list_skills` tool has been removed; the supplied catalog already
 contains names and descriptions. The bundled set includes task execution,
 research, daily briefs, remembering,

@@ -363,7 +363,15 @@ a reasoning model does not re-plan from scratch each round. A new human turn
 spoken, and encrypted payloads are excluded from token estimates.
 Summary compaction is lossless — only complete oldest turns fold into a
 single `Summary` message and the unsummarized tail is never deleted — with
-hysteresis before LLM compaction and smaller mechanical fallbacks. Requests
+hysteresis before LLM compaction and smaller mechanical fallbacks.
+Mechanical compaction is cache-stable: each tool observation is capped once,
+at a fixed 24,000 characters, when it enters context (head and tail, keeping
+any saved-output hint, idempotent so it is never rewritten again). Below the
+hard budget no earlier message changes, so consecutive requests share a
+byte-identical serialized prefix and the provider prompt cache stays warm.
+Over the hard budget, old tool chains collapse in one deep pass (down to four,
+then two recent turns until under the soft budget) rather than a little more
+every round. Requests
 estimated past the input budget fail fast with `AgentErrorKind::InputTooLarge`
 before any provider call. The summary is structured working memory (the
 user's requests near verbatim, decisions, files and paths, artifacts, concrete

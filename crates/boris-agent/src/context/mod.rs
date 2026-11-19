@@ -233,6 +233,9 @@ impl Context {
         content: String,
         ok: bool,
     ) {
+        // Capped once, here, at a fixed size (keeping any saved-output hint),
+        // so later requests never rewrite this message.
+        let content = compact::cap_tool_text(&content, compact::TOOL_RESULT_CONTEXT_MAX_CHARS);
         let reminder = crate::reminder::reminder_for(tool_name, &content, ok);
         self.record_tool_result(tool_name, call_id, ok, &content);
         self.push(

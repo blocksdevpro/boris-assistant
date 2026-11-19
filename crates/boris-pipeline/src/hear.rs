@@ -101,6 +101,9 @@ pub enum HearBreak {
     /// Run the on-device self-check. Only [`wait_for_wake`] returns this;
     /// mid-turn helpers drop the request.
     RunSelfCheck,
+    /// A timer or reminder is due. Only [`wait_for_wake`] returns this, so
+    /// due items wait for Armed instead of interrupting a turn.
+    RemindersDue,
 }
 
 /// Capture mode for utterance recording.
@@ -267,6 +270,7 @@ pub fn wait_for_wake(
     running: &mut bool,
     mic_known_silent: bool,
     mut on_mic: impl FnMut(MicSignal),
+    mut reminders_due: impl FnMut() -> bool,
 ) -> Result<AudioBuffer, HearBreak> {
     tracing::info!(
         threshold = WAKEWORD_THRESHOLD,
@@ -284,9 +288,17 @@ pub fn wait_for_wake(
     let mut mic_samples: u64 = 0;
     let mut watch = MicSilenceWatch::new(mic_known_silent);
     const POLL: Duration = Duration::from_millis(40);
+    const REMINDER_CHECK_EVERY: Duration = Duration::from_secs(1);
+    let mut last_reminder_check: Option<std::time::Instant> = None;
 
     loop {
         poll_commands(cmd_rx, running, true)?;
+        if last_reminder_check.is_none_or(|at| at.elapsed() >= REMINDER_CHECK_EVERY) {
+            last_reminder_check = Some(std::time::Instant::now());
+            if reminders_due() {
+                return Err(HearBreak::RemindersDue);
+            }
+        }
         let frame = match mic.recv_timeout(POLL) {
             Ok(frame) => frame,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -1197,5 +1209,34 @@ mod tests {
         // Device switch restarts the wait; a working new mic must clear the hint.
         let mut w = MicSilenceWatch::new(true);
         assert_eq!(w.on_frame(&[0.05; 320]), Some(MicSignal::Live));
+    }
+
+    struct NeverWake;
+    impl WakeWord for NeverWake {
+        fn predict(&mut self, _: &[f32]) -> boris_core::Result<f32> {
+            Ok(0.0)
+        }
+    }
+
+    #[test]
+    fn armed_wait_yields_for_due_reminders() {
+        let (_mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        let mut running = true;
+        let mut checks = 0;
+        let result = wait_for_wake(
+            &mic_rx,
+            &mut NeverWake,
+            &cmd_rx,
+            &mut running,
+            false,
+            |_| {},
+            || {
+                checks += 1;
+                true
+            },
+        );
+        assert_eq!(result.unwrap_err(), HearBreak::RemindersDue);
+        assert_eq!(checks, 1, "checked on entry, not after a 1 s wait");
     }
 }

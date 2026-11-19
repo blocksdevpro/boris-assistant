@@ -309,7 +309,8 @@ pub(super) fn resolve_agent_outcome(
                 // (`RunSelfCheck` is only produced while Armed.)
                 HearBreak::StartWakeEnroll { .. }
                 | HearBreak::ClearWakeProfile
-                | HearBreak::RunSelfCheck => {
+                | HearBreak::RunSelfCheck
+                | HearBreak::RemindersDue => {
                     tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
                     ctx.agent.abort();
                     ctx.picture.set_phase(Phase::Armed);
@@ -366,7 +367,8 @@ pub(super) fn resolve_agent_outcome(
             Err(
                 HearBreak::StartWakeEnroll { .. }
                 | HearBreak::ClearWakeProfile
-                | HearBreak::RunSelfCheck,
+                | HearBreak::RunSelfCheck
+                | HearBreak::RemindersDue,
             ) => {
                 tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
                 ctx.agent.abort();

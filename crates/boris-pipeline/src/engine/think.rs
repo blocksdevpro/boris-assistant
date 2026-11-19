@@ -339,7 +339,8 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                         Err(
                             HearBreak::StartWakeEnroll { .. }
                             | HearBreak::ClearWakeProfile
-                            | HearBreak::RunSelfCheck,
+                            | HearBreak::RunSelfCheck
+                            | HearBreak::RemindersDue,
                         ) => {
                             activity_events_enabled.store(true, Ordering::Release);
                         }
@@ -510,7 +511,8 @@ fn speak_while_thinking(
                             }
                             HearBreak::StartWakeEnroll { .. }
                             | HearBreak::ClearWakeProfile
-                            | HearBreak::RunSelfCheck => {}
+                            | HearBreak::RunSelfCheck
+                            | HearBreak::RemindersDue => {}
                         }
                         break SpeakStep::Continue;
                     }

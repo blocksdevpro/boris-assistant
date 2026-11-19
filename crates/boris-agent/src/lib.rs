@@ -56,6 +56,7 @@ pub mod observe;
 pub mod outcome;
 pub mod prompt_profile;
 pub mod reminder;
+pub mod reminders;
 pub mod routing;
 pub mod runtime;
 pub mod session;
@@ -123,6 +124,9 @@ pub use speech_sanitize::{
     contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
 pub use speech_stream::{SpeechSegmenter, SpeechSignal};
+pub use reminders::{
+    now_unix_ms, parse_duration, parse_when, Reminder, ReminderKind, ReminderStore,
+};
 pub use stats::AgentStats;
 pub use task::{classify_task, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{

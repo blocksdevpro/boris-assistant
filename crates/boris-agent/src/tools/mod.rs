@@ -33,6 +33,7 @@ pub mod open_tool;
 pub mod parallel;
 pub mod path_pattern;
 pub mod profile;
+pub mod reminders;
 pub mod screen;
 pub mod skills_tools;
 pub mod subagent;
@@ -311,6 +312,10 @@ pub fn register_builtin_tools_with_preset(
     tools.extend(artifact_tools(&paths));
     tools.extend(output_tools(&paths));
     tools.push(Box::new(collect_input::CollectInputTool));
+    // Timers and reminders: low risk, every preset (spoken by the host when due).
+    tools.extend(reminders::reminder_tools(
+        crate::reminders::ReminderStore::for_home(&paths.boris_home),
+    ));
     tools.extend(try_profile_tools(agent, &paths, llm_extract));
 
     if power_tools {

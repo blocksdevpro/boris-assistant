@@ -304,6 +304,18 @@ interrupted, waiting, or reported complete), open todos, and the last
 `[Host note: …]` if the previous turn was interrupted. Routing uses the same
 classifier.
 
+## Timers and reminders
+
+`reminders::ReminderStore::for_home(boris_home)` is the process-wide store for
+`<boris_home>/state/reminders.json` (atomic writes, reloaded on open). Builtin
+registration adds `timer_set` (`duration`: "10m", "1h30m", "90s"),
+`reminder_set` (`when`: "in 20 minutes", "5pm", "tomorrow 9am",
+"2026-11-20 09:00", RFC 3339; a passed time of day means the next one),
+`reminders_list`, and `reminder_cancel` (`id` or `match`). They are `Safe`,
+`Plan` kind, never confirm, and stay in `VoiceSafe`. The host speaks due items
+via `take_due` (see the pipeline README); `parse_duration` / `parse_when`
+are public for hosts.
+
 ## Streamed speech
 
 `Agent::set_stream_speech(true)` (off by default; the desktop pipeline turns it

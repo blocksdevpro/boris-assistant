@@ -158,6 +158,20 @@ jq -s '[.[] | .speech_end_to_first_audio_ms // empty] | sort
 `boris_agent::summarize_traces` returns the same p50 / p90 as
 `first_audio_p50_ms` / `first_audio_p90_ms`.
 
+## Timers and reminders
+
+The agent's `timer_set`, `reminder_set`, `reminders_list`, and
+`reminder_cancel` tools (low risk, no confirmation, every preset) keep a
+schedule in `~/.boris/state/reminders.json`, which survives restarts. The
+engine shares the same in-process `ReminderStore`. While Armed,
+`wait_for_wake` checks it once a second on the engine thread and returns
+`HearBreak::RemindersDue`; the engine speaks every due item (earliest first)
+as one host line, shows it as `said` with a `reminder` activity chip, removes
+it, and re-arms. Items that come due during a turn, a follow-up window, or a
+confirm wait stay queued until Boris is Armed again; while Boris is off they
+wait for the next Start. An item more than two minutes late says when it was
+due ("Reminder from 3:15 PM: …").
+
 ## Devices
 
 A `boris-device-watch` helper thread checks the open streams and the OS device

@@ -356,6 +356,30 @@ fn speak_host_line(
     }
 }
 
+/// Speak every due timer and reminder (earliest first) as one host line.
+/// Runs only from Armed, so a due item waits for the current turn to end.
+fn deliver_reminders(rt: &mut EngineRuntime, cmd_rx: &Receiver<EngineCommand>, running: &mut bool) {
+    let now = boris_agent::now_unix_ms();
+    let due = rt.reminders.take_due(now);
+    if due.is_empty() {
+        return;
+    }
+    let line = due
+        .iter()
+        .map(|item| item.spoken(now))
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::info!(count = due.len(), %line, "delivering due reminders");
+    rt.picture.activity = Some(if due.len() == 1 {
+        "reminder".into()
+    } else {
+        format!("{} reminders", due.len())
+    });
+    speak_host_line(rt, cmd_rx, running, &line);
+    rt.picture.clear_activity();
+    rt.picture.publish();
+}
+
 fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
     match cmd {
         EngineCommand::SwitchInput { device_id } => {
@@ -421,7 +445,8 @@ fn on_hear_break(
         }
         HearBreak::StartWakeEnroll { .. }
         | HearBreak::ClearWakeProfile
-        | HearBreak::RunSelfCheck => LoopReact::Continue,
+        | HearBreak::RunSelfCheck
+        | HearBreak::RemindersDue => LoopReact::Continue,
         HearBreak::Disconnected => {
             end_session(
                 &rt.store,
@@ -641,6 +666,7 @@ fn run(
             let mic_known_silent =
                 rt.picture.listen_hint == Some(crate::status::ListenHint::MicSilent);
             let picture = &mut rt.picture;
+            let reminders = &rt.reminders;
             let wake_window = match hear::wait_for_wake(
                 &rt.mic,
                 &mut rt.wake,
@@ -653,6 +679,7 @@ fn run(
                     }
                     hear::MicSignal::Live => picture.set_listen_hint(None),
                 },
+                || reminders.has_due(boris_agent::now_unix_ms()),
             ) {
                 Ok(w) => w,
                 Err(HearBreak::StartWakeEnroll { takes }) => {
@@ -667,6 +694,10 @@ fn run(
                 }
                 Err(HearBreak::RunSelfCheck) => {
                     self_check::run_self_check(&mut rt);
+                    continue;
+                }
+                Err(HearBreak::RemindersDue) => {
+                    deliver_reminders(&mut rt, &cmd_rx, &mut running);
                     continue;
                 }
                 Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {

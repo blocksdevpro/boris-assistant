@@ -6,8 +6,8 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::tool::{
-    truncate_tool_result_detailed, validate_args, Permission, Tool, ToolErrorKind, ToolMeta,
-    ToolObservation,
+    canonicalize_arg_aliases, truncate_tool_result_detailed, validate_args, Permission, Tool,
+    ToolErrorKind, ToolMeta, ToolObservation,
 };
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
@@ -348,7 +348,8 @@ impl ToolRuntime {
                 reason: "tool args must be a JSON object".into(),
             };
         }
-        let args = args.clone();
+        let mut args = args.clone();
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(tool.name(), &args);
         apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip)
@@ -358,10 +359,13 @@ impl ToolRuntime {
     pub async fn invoke(
         &self,
         tool: &dyn Tool,
-        inv: ToolInvocation,
+        mut inv: ToolInvocation,
         opts: InvokeOptions,
     ) -> InvokeResult {
         let meta = tool.meta();
+        // Unadvertised aliases (`cmd` → `command`) become canonical before
+        // validation, policy, the confirm prompt, and execute.
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut inv.args);
         if let Some(mut obs) = reject_invalid_args(tool, &inv.args) {
             // Invalid args never reach policy/execute, but must still audit
             // (decision=rejected) so the audit trail has no silent drops.

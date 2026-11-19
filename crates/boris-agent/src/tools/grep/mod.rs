@@ -7,8 +7,9 @@
 //! | `grep` | [`GrepTool`] | Regex/text search under allowed roots |
 //!
 //! Schema follows Grok Build / Claude Code: `-A`/`-B`/`-C`/`-i`, `type`,
-//! `multiline`, `output_mode`, `head_limit`. Boris aliases (`ignore_case`,
-//! `context`, `limit`) still work.
+//! `multiline`, `output_mode`, `head_limit`. Older Boris names (`ignore_case`,
+//! `context`, `limit`) are accepted as unadvertised aliases
+//! ([`Tool::arg_aliases`]) and never appear in the schema.
 //!
 //! Directory searches prefer `rg` (gitignore, speed). Single files and missing
 //! `rg` use the `regex` crate — never a silent substring fallback for regex.
@@ -67,8 +68,8 @@ impl Tool for GrepTool {
     }
 
     fn parameters(&self) -> Value {
-        // Lenient numeric/bool alias fields (`-B`/`-A`/`-C`/`-i`/`head_limit`/
-        // `multiline`/`ignore_case`/`context`/`limit`) deliberately omit `type`
+        // Lenient numeric/bool fields (`-B`/`-A`/`-C`/`-i`/`head_limit`/
+        // `multiline`) deliberately omit `type`
         // so the subset validator passes strings, floats, and bools through to
         // the lenient `coerce_*` path in `query.rs` (e.g. `"3"`, `12.0`,
         // `"true"`). Strict string fields keep `"type": "string"`.
@@ -112,19 +113,18 @@ impl Tool for GrepTool {
                 "output_mode": {
                     "type": "string",
                     "description": "content (default, matching lines), files_with_matches (paths only), or count (per-file counts)."
-                },
-                "ignore_case": {
-                    "description": "Alias of -i. Boolean; \"true\"/\"false\"/1/0 are accepted."
-                },
-                "context": {
-                    "description": "Alias of -C. Integer; numeric strings and floats (truncated) are accepted."
-                },
-                "limit": {
-                    "description": "Alias of head_limit. Integer; numeric strings and floats (truncated) are accepted."
                 }
             },
             "required": ["pattern"]
         })
+    }
+
+    fn arg_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("ignore_case", "-i"),
+            ("context", "-C"),
+            ("limit", "head_limit"),
+        ]
     }
 
     fn meta(&self) -> ToolMeta {

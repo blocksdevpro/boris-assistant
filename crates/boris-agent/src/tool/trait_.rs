@@ -98,6 +98,18 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Argument names accepted silently but never advertised, as
+    /// `(alias, canonical)` pairs. Default: none.
+    ///
+    /// The schema advertises only the canonical name. Before validation and
+    /// policy, the runtime renames an alias to its canonical key when the
+    /// canonical key is absent, and drops the alias when both are present
+    /// (the canonical value wins). `execute` should still accept the aliases
+    /// for direct calls that bypass the runtime.
+    fn arg_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     /// Run the tool with the JSON args the LLM supplied.
     ///
     /// The returned string is sent back to the LLM as the tool result only —

@@ -377,15 +377,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo. Aliases: cmd, shell."
-                },
-                "cmd": {
-                    "type": "string",
-                    "description": "Alias of command (accepted for model compatibility)."
-                },
-                "shell": {
-                    "type": "string",
-                    "description": "Alias of command (accepted for model compatibility)."
+                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo."
                 },
                 "cwd": {
                     "type": "string",
@@ -393,15 +385,19 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline. Must be an integer; floats are rejected. Alias: timeout_secs."
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": "Alias of timeout in seconds (default 120, max 300). Must be an integer; floats are rejected."
+                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline. Must be an integer; floats are rejected."
                 }
             },
-            "required": []
+            "required": ["command"]
         })
+    }
+
+    fn arg_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("cmd", "command"),
+            ("shell", "command"),
+            ("timeout_secs", "timeout"),
+        ]
     }
 
     fn meta(&self) -> ToolMeta {
@@ -420,11 +416,8 @@ impl Tool for BashTool {
         }
 
         let obj = require_object(&args)?;
-        let command = optional_string_keys(obj, &["command", "cmd", "shell"]).ok_or_else(|| {
-            ToolError::invalid_args(
-                "missing required string argument `command` (aliases: cmd, shell)",
-            )
-        })?;
+        let command = optional_string_keys(obj, &["command", "cmd", "shell"])
+            .ok_or_else(|| ToolError::invalid_args("missing required string argument `command`"))?;
         let command = command.trim();
         validate_command(command)?;
         if let Some(steer) = steer_simple_command(command) {
@@ -609,15 +602,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_exposes_aliases_and_integer_timeout() {
+    fn schema_advertises_one_canonical_name_per_arg() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new(vec![dir.clone()], dir);
         let schema = tool.parameters();
-        let props = &schema["properties"];
+        let props = schema["properties"].as_object().unwrap();
         assert_eq!(props["timeout"]["type"], "integer");
-        assert_eq!(props["timeout_secs"]["type"], "integer");
-        assert_eq!(props["cmd"]["type"], "string");
-        assert_eq!(props["shell"]["type"], "string");
+        assert_eq!(schema["required"], json!(["command"]));
+        for alias in ["cmd", "shell", "timeout_secs"] {
+            assert!(!props.contains_key(alias), "alias {alias} advertised");
+        }
+        let text = schema.to_string();
+        assert!(!text.contains("Alias"), "schema mentions aliases: {text}");
+    }
+
+    #[test]
+    fn aliases_canonicalize_before_validation() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(vec![dir.clone()], dir);
+        // Alias only: renamed to `command`, so `required` passes.
+        let mut args = json!({ "cmd": "git status", "timeout_secs": 30 });
+        crate::tool::canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        assert_eq!(args, json!({ "command": "git status", "timeout": 30 }));
+        crate::tool::validate_args(&tool.parameters(), &args, "").expect("valid");
+        // Both sent: the canonical value wins and the alias disappears.
+        let mut args = json!({ "cmd": "ls", "command": "git log" });
+        crate::tool::canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        assert_eq!(args, json!({ "command": "git log" }));
     }
 
     #[tokio::test]

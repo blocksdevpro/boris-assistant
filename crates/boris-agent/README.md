@@ -174,6 +174,12 @@ evidence rather than fixed search quotas; expected empty absence checks need no 
 
 ## Tool inputs and results
 
+Each schema advertises one canonical name per argument (`bash` takes a
+required `command` and `timeout`). Older names models still send (`cmd`,
+`shell`, `timeout_secs`; grep's `ignore_case`, `context`, `limit`) are declared
+in `Tool::arg_aliases`; the runtime renames them to the canonical key before
+validation and policy, and the canonical value wins when both are sent.
+
 `collect_input` supports exact values, secrets, large pastes, and numbered
 choices. A choice can include up to four short options for the host to speak;
 the returned number is resolved to its option before the agent resumes. Hosts

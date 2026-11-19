@@ -34,7 +34,25 @@ pub struct TurnTrace {
     /// Started → Drained of the last play job (not part of generation latency).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback_ms: Option<u64>,
+    /// End of the user's speech → first audible Boris audio of any kind
+    /// (progress line, streamed answer, or the answer after acceptance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_end_to_first_audio_ms: Option<u64>,
+    /// End of the user's speech → first audio of the answer itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_end_to_answer_audio_ms: Option<u64>,
+    /// `"streamed"` when the answer played while the agent was still
+    /// running, `"after_accept"` when it was synthesized after acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_speech: Option<String>,
 }
+
+/// Events that mean Boris became audible, for `speech_end_to_first_audio_ms`.
+pub const AUDIBLE_EVENTS: &[&str] = &[
+    "audio_started",
+    "progress_audio_started",
+    "early_audio_started",
+];
 
 impl TurnTrace {
     pub fn new(turn_id: impl Into<String>, session_id: Option<String>) -> Self {
@@ -45,6 +63,9 @@ impl TurnTrace {
             events: Vec::new(),
             response_generation_ms: None,
             playback_ms: None,
+            speech_end_to_first_audio_ms: None,
+            speech_end_to_answer_audio_ms: None,
+            answer_speech: None,
         }
     }
 
@@ -99,6 +120,30 @@ impl TurnTrace {
         ) {
             self.playback_ms = Some(d.t_ms.saturating_sub(s.t_ms));
         }
+        let speech_end = self
+            .events
+            .iter()
+            .find(|e| e.name == "speech_end")
+            .map(|e| e.t_ms);
+        let answer_audio = self
+            .events
+            .iter()
+            .find(|e| e.name == "audio_started")
+            .map(|e| e.t_ms);
+        if let Some(end) = speech_end {
+            self.speech_end_to_first_audio_ms = self
+                .events
+                .iter()
+                .filter(|e| AUDIBLE_EVENTS.contains(&e.name.as_str()) && e.t_ms >= end)
+                .map(|e| e.t_ms - end)
+                .min();
+            self.speech_end_to_answer_audio_ms =
+                answer_audio.map(|start| start.saturating_sub(end));
+        }
+        if answer_audio.is_some() {
+            let streamed = self.events.iter().any(|e| e.name == "answer_streamed");
+            self.answer_speech = Some(if streamed { "streamed" } else { "after_accept" }.into());
+        }
     }
 
     pub fn to_jsonl(&self) -> Result<String, serde_json::Error> {
@@ -125,19 +170,26 @@ pub fn percentile_ms(values: &[u64], pct: u8) -> u64 {
     v[idx.min(v.len() - 1)]
 }
 
-/// p50 / p95 of response-generation and playback from a set of traces.
+/// p50 / p95 of response-generation and playback, plus p50 / p90 of
+/// speech-end → first audio, from a set of traces.
 pub fn summarize_traces(traces: &[TurnTrace]) -> TraceSummary {
     let gen: Vec<u64> = traces
         .iter()
         .filter_map(|t| t.response_generation_ms)
         .collect();
     let play: Vec<u64> = traces.iter().filter_map(|t| t.playback_ms).collect();
+    let first: Vec<u64> = traces
+        .iter()
+        .filter_map(|t| t.speech_end_to_first_audio_ms)
+        .collect();
     TraceSummary {
         count: traces.len(),
         generation_p50_ms: percentile_ms(&gen, 50),
         generation_p95_ms: percentile_ms(&gen, 95),
         playback_p50_ms: percentile_ms(&play, 50),
         playback_p95_ms: percentile_ms(&play, 95),
+        first_audio_p50_ms: percentile_ms(&first, 50),
+        first_audio_p90_ms: percentile_ms(&first, 90),
     }
 }
 
@@ -148,12 +200,57 @@ pub struct TraceSummary {
     pub generation_p95_ms: u64,
     pub playback_p50_ms: u64,
     pub playback_p95_ms: u64,
+    #[serde(default)]
+    pub first_audio_p50_ms: u64,
+    #[serde(default)]
+    pub first_audio_p90_ms: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn event(name: &str, t_ms: u64) -> TraceEvent {
+        TraceEvent {
+            name: name.into(),
+            t_ms,
+            duration_ms: None,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn first_audio_counts_any_audible_event_after_speech_end() {
+        let mut t = TurnTrace::new("t1", None);
+        for (name, at) in [
+            ("wake_hit", 0),
+            ("speech_end", 1_000),
+            ("progress_audio_started", 9_000),
+            ("answer_streamed", 20_000),
+            ("audio_started", 21_500),
+        ] {
+            t.events.push(event(name, at));
+        }
+        t.finalize_generation();
+        assert_eq!(t.speech_end_to_first_audio_ms, Some(8_000));
+        assert_eq!(t.speech_end_to_answer_audio_ms, Some(20_500));
+        assert_eq!(t.answer_speech.as_deref(), Some("streamed"));
+
+        let mut plain = TurnTrace::new("t2", None);
+        plain.events.push(event("speech_end", 500));
+        plain.events.push(event("audio_started", 2_500));
+        plain.finalize_generation();
+        assert_eq!(plain.speech_end_to_first_audio_ms, Some(2_000));
+        assert_eq!(plain.answer_speech.as_deref(), Some("after_accept"));
+        let summary = summarize_traces(&[t, plain]);
+        assert_eq!(summary.first_audio_p50_ms, 8_000);
+
+        // Old trace lines without the new fields still parse.
+        let old: TurnTrace =
+            serde_json::from_str(r#"{"turn_id":"x","started_unix_ms":1,"events":[]}"#).unwrap();
+        assert_eq!(old.speech_end_to_first_audio_ms, None);
+    }
 
     #[test]
     fn generation_excludes_playback() {

@@ -95,6 +95,10 @@ pub(super) struct EarlySpeech {
     pub progress_spoken: bool,
     /// Anything (progress line or streamed answer) reached the speaker.
     pub audible: bool,
+    /// When the progress line became audible, from the start of Thinking.
+    pub progress_audio_ms: Option<u64>,
+    /// When a streamed answer that was later cancelled became audible.
+    pub cancelled_audio_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -427,6 +431,18 @@ fn speak_while_thinking(
         );
         tts = std::mem::replace(&mut speech.tts, lost_tts());
         sp.report.audible |= speech.played;
+        if let Some(started) = speech.audio_started_ms {
+            let at = started_after_ms.saturating_add(started);
+            match kind {
+                SpeakKind::Progress => {
+                    sp.report.progress_audio_ms.get_or_insert(at);
+                }
+                SpeakKind::Answer if speech.feed_cancelled => {
+                    sp.report.cancelled_audio_ms.get_or_insert(at);
+                }
+                SpeakKind::Answer => {}
+            }
+        }
         match speech.wait {
             PlaybackWait::Finished => {
                 if kind == SpeakKind::Answer {

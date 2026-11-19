@@ -1279,6 +1279,22 @@ fn run(
         });
         let (tts_owned, tts_load) = tts_slot.join();
         rt.tts = tts_owned;
+        if let Some(at) = early.progress_audio_ms {
+            turn_trace.mark_at(
+                "progress_audio_started",
+                think_trace_ms.saturating_add(at),
+                None,
+                None,
+            );
+        }
+        if let Some(at) = early.cancelled_audio_ms {
+            turn_trace.mark_at(
+                "early_audio_started",
+                think_trace_ms.saturating_add(at),
+                None,
+                None,
+            );
+        }
 
         let (outcome, report) = match think {
             ThinkResolve::Stopped => {
@@ -1608,6 +1624,7 @@ fn run(
         // The committed answer already played while the agent wrapped up.
         if let Some(done) = early.delivered.take() {
             speech_trace_start_ms = think_trace_ms.saturating_add(early.delivered_after_ms);
+            turn_trace.mark_at("answer_streamed", speech_trace_start_ms, None, None);
             speech = done;
         } else {
             loop {

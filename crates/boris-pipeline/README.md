@@ -132,6 +132,32 @@ Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
 maintenance lane. Generation latency excludes audible playback. Read the JSONL
 directly for local p50/p95 summaries.
 
+### Reading first-audio latency
+
+Each trace line carries three top-level fields for speech-end → first audio:
+
+| Field | Meaning |
+|-------|---------|
+| `speech_end_to_first_audio_ms` | User stopped talking → Boris first audible (progress line, a streamed answer later cancelled, or the answer) |
+| `speech_end_to_answer_audio_ms` | User stopped talking → the answer's own first audio (`audio_started`) |
+| `answer_speech` | `streamed` (answer played while the agent was still running) or `after_accept` |
+
+Matching events (`t_ms` from the turn start) are `speech_end`,
+`progress_audio_started`, `early_audio_started`, `answer_streamed`, and
+`audio_started`. Turns without a captured utterance (barge-in replacements,
+typed input) have no `speech_end` and leave the fields out; old lines parse
+with them absent. To compare before and after a change, take the p50 / p90 of
+`speech_end_to_first_audio_ms` over the same kind of turns, and split by
+`answer_speech` to see how often streaming applied, for example:
+
+```bash
+jq -s '[.[] | .speech_end_to_first_audio_ms // empty] | sort
+       | {n: length, p50: .[length/2|floor], p90: .[length*0.9|floor]}'    ~/.boris/traces/turns.jsonl
+```
+
+`boris_agent::summarize_traces` returns the same p50 / p90 as
+`first_audio_p50_ms` / `first_audio_p90_ms`.
+
 ## Devices
 
 A `boris-device-watch` helper thread checks the open streams and the OS device

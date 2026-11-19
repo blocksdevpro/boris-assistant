@@ -79,7 +79,7 @@ def check(base, origin, stable_version=None, beta_version=None):
 
     pages = {}
     images = set()
-    for path in ("/", "/download", "/releases"):
+    for path in ("/", "/download", "/releases", "/privacy", "/cortana-alternative"):
         headers, body = fetch(path)
         assert "text/html" in headers.get("Content-Type", ""), f"{path}: not HTML"
         assert "noindex" not in headers.get("X-Robots-Tag", "").lower(), f"{path}: blocked by header"

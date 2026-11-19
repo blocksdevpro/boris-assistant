@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 
 export const metadata = pageMetadata({
   title: "Download Boris Assistant for Windows 10 and 11",
-  description: `Download Boris Assistant for Windows x64. Choose stable ${stableRelease.version} or beta ${betaRelease.version}, compare installers, and set up local speech with your OpenRouter API key.`,
+  description: `Download Boris Assistant for Windows x64. Get stable ${stableRelease.version} or try beta ${betaRelease.version}, then set up local speech and your OpenRouter API key in four steps.`,
   path: "/download",
 });
 
@@ -43,10 +43,10 @@ export default function DownloadPage() {
 
       <section id="beta" className="download-release" aria-labelledby="beta-title">
         <div>
-          <span className="channel-label beta-label">Earlier 1.2 beta</span>
+          <span className="channel-label beta-label">Preview · Beta</span>
           <h2 id="beta-title">Boris {betaRelease.version}</h2>
-          <p>Released <time dateTime={betaRelease.date}>{betaRelease.dateLabel}</time>. {betaRelease.summary} This earlier preview uses an EXE installer only. Stable {stableRelease.version} includes the same app features.</p>
-          <p>Upgrading from beta.1 or earlier can migrate older memory using your configured LLM. Read the <Link href="/releases#beta">migration and privacy notes</Link> before upgrading.</p>
+          <p>Released <time dateTime={betaRelease.date}>{betaRelease.dateLabel}</time>. {betaRelease.summary} This preview of the next version uses an EXE installer only. Install it over Boris {stableRelease.version}; your local data and memory stay in place.</p>
+          <p>Read the <Link href="/releases#beta">beta release notes</Link> before upgrading. Choose the Beta update channel in Settings to keep receiving previews.</p>
         </div>
         <div className="download-actions">
           <a href={betaRelease.download} className={cn(buttonVariants({ size: "lg" }), "beta-download")}><Download /> Download beta EXE</a>

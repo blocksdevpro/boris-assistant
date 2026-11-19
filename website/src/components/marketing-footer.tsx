@@ -13,6 +13,8 @@ export function MarketingFooter() {
         <div className="footer-links">
           <Link href="/download">Download</Link>
           <Link href="/releases">Release notes</Link>
+          <Link href="/privacy">Privacy</Link>
+          <Link href="/cortana-alternative">Cortana alternative</Link>
           <Link href="/#faq">FAQ</Link>
           <a href={repo}>GitHub</a>
           <a href={`${repo}/blob/main/SECURITY.md`}>Security</a>

@@ -34,6 +34,15 @@ const structuredData = {
       name: siteName,
       alternateName: "Boris",
       url: `${siteUrl}/`,
+      publisher: { "@id": `${siteUrl}/#organization` },
+    },
+    {
+      "@type": "Organization",
+      "@id": `${siteUrl}/#organization`,
+      name: "BlocksDevPro",
+      url: `${siteUrl}/`,
+      logo: `${siteUrl}/boris-icon.png`,
+      sameAs: ["https://github.com/blocksdevpro"],
     },
     {
       "@type": "SoftwareApplication",
@@ -49,6 +58,8 @@ const structuredData = {
       screenshot: `${siteUrl}/boris-screenshot.png`,
       image: `${siteUrl}/boris-icon.png`,
       license: `${repo}/blob/main/LICENSE`,
+      author: { "@id": `${siteUrl}/#organization` },
+      publisher: { "@id": `${siteUrl}/#organization` },
       isAccessibleForFree: true,
       offers: { "@type": "Offer", price: "0", priceCurrency: "USD", url: `${siteUrl}/download` },
       sameAs: repo,
@@ -220,7 +231,7 @@ export default function Home() {
           <div>
             <p className="story-label"><span /> Local where it matters</p>
             <h2 className="local-title">Your voice shouldn’t need a round trip to the cloud.</h2>
-            <p className="local-copy">Wake detection, speech recognition, and speech generation run locally. Your transcribed request and relevant conversation, memory, or tool context go to your chosen model through OpenRouter. Raw microphone audio stays on your PC.</p>
+            <p className="local-copy">Wake detection, speech recognition, and speech generation run locally. Your transcribed request and relevant conversation, memory, or tool context go to your chosen model through OpenRouter. Raw microphone audio stays on your PC. <Link href="/privacy" className="inline-link">See exactly what stays local</Link>.</p>
           </div>
           <div className="local-stack">
             <div><span className="stack-icon"><AudioLines /></span><span><strong>Parakeet speech-to-text</strong><small>Runs locally with ONNX</small></span><em>On device</em></div>
@@ -272,6 +283,10 @@ export default function Home() {
           <details>
             <summary>What can Boris do on my computer?</summary>
             <p>Boris can search the web, read and work with files, search optional memory, and run system actions within its capability preset and workspace controls. Risky actions pause for your approval. Research results and code can appear as on-screen cards.</p>
+          </details>
+          <details>
+            <summary>Can Boris replace Cortana on Windows?</summary>
+            <p>Boris covers the core of what people used Cortana for: a wake word, spoken questions and answers, and help on your PC, plus file tools and memory. It does not manage calendars or smart-home devices out of the box. Read the <Link href="/cortana-alternative">Cortana alternative guide</Link>.</p>
           </details>
           <details>
             <summary>What changed in Boris {stableRelease.version}?</summary>

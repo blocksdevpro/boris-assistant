@@ -5,7 +5,7 @@ export const siteUrl = new URL(
 ).origin;
 export const repo = "https://github.com/blocksdevpro/boris-assistant";
 export const siteName = "Boris Assistant";
-export const siteTitle = "Boris Assistant | Open-source voice assistant for Windows";
+export const siteTitle = "Boris Assistant | Open-source AI voice assistant for Windows";
 export const siteDescription =
   "Boris is a free, open-source AI voice assistant for Windows 10 and 11. Local speech, file and web tools, optional memory, and your choice of AI model.";
 

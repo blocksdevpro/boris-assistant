@@ -304,6 +304,27 @@ interrupted, waiting, or reported complete), open todos, and the last
 `[Host note: …]` if the previous turn was interrupted. Routing uses the same
 classifier.
 
+## User hooks
+
+`Agent::set_hooks(Hooks::new(specs))` installs user hooks (`hooks.rs`); with
+none configured nothing changes and no process starts. **Hooks run arbitrary
+user commands.** Each `HookSpec` has an `event` (`pre_tool`, `post_tool`,
+`turn_end`), an optional tool-name glob `tool` (`*`, `?`), a `command` run
+through the `bash` tool's shell, and `timeout_secs` (default 10, 1–120). The
+hook gets one JSON object on stdin: `event`, `tool`, `call_id`, `args`,
+`session_id`, `turn_id`, plus `ok` and `output` (first 4,000 chars) for
+`post_tool`, or `user_text`, `outcome`, `reply`, `tools_used` for `turn_end`.
+
+`pre_tool` hooks run in order after policy and HITL approval and before
+execute (`ToolRuntime::execute_hooked`). The first that exits non-zero, times
+out, or cannot start blocks the call: the tool never runs and the model gets
+a failed `ToolObservation` (`hook_blocked`, the hook's stderr as the message).
+A call that needs a yes/no pauses for it before any hook runs. `post_tool`
+and `turn_end` are informational (failures are logged); `turn_end` runs in the
+background so it never delays the reply. A timed-out hook's whole process
+tree is killed (Job Object on Windows, process group elsewhere), and processes
+a hook leaves behind are stopped when it exits.
+
 ## Timers and reminders
 
 `reminders::ReminderStore::for_home(boris_home)` is the process-wide store for
@@ -437,6 +458,7 @@ transcript stays framed as untrusted data.
 | **Shell auto-allow** | User-managed prefixes on top of `OpenConfirm` (`SandboxConfig::shell_auto_allow`; desktop `[agent] shell_auto_allow = ["git status", "cargo check"]`). Skips the yes/no only for a single plain command that equals a prefix or continues it after a space; any `;` `&` `|` backtick `$` `>` `<` or line break anywhere (even quoted) means it still asks. Case-sensitive. Shell `Denied`/`Allowlist`, the bash deny list, and cwd roots still apply. This narrows prompts; it is not a sandbox. |
 | **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backends (DuckDuckGo + Wikipedia, or Exa when a key is set) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
+| **User hooks** | `[[hooks]]` in config.toml (`Agent::set_hooks`, off by default) **run arbitrary user commands** with the user's rights. `pre_tool` runs after policy and HITL, right before execute; a non-zero exit, timeout, or spawn failure blocks the call with its stderr as a `hook_blocked` failed observation. Hooks can only block, never widen policy, and the hard gates still run first. Not a sandbox. |
 | **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset (and only when risk ≤ Moderate with no confirm flag). |
 
 Desktop MVP: `SandboxConfig::for_desktop_mvp` opens network + shell-with-confirm and grants common user document roots for read.

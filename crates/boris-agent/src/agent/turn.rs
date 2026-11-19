@@ -900,6 +900,7 @@ impl Agent {
             AgentOutcome::NeedsInput { .. } => (TaskStatus::WaitingForInput, ""),
         };
         self.context.finish_task(task_status, assistant_task_text);
+        self.fire_turn_end_hooks(user_text, &loop_out.outcome, &loop_out.tools_used);
         if let Some(debug) = &self.debug {
             debug.record_history(self.turn_id.as_deref(), &self.context);
         }

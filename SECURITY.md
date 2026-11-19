@@ -53,6 +53,11 @@ sandbox.
   with execution-policy bypass for usability. That is **not** a sandbox.
 - **Web fetch** blocks common private/link-local/metadata hosts; residual
   DNS-rebinding and similar risks may remain.
+- **User hooks** (`[[hooks]]` in `~/.boris/config.toml`, off unless you add
+  them) run **arbitrary commands you configure**, with your rights, around
+  tool calls and at turn end. A `pre_tool` hook can block a call; hooks never
+  widen policy, but anyone who can edit `config.toml` can run code through
+  them.
 
 **Do not claim or assume a fully sandboxed shell.** Prefer HITL for high-risk
 actions and keep capability presets appropriate to the user’s trust level.

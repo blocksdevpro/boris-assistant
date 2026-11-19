@@ -48,6 +48,7 @@ pub mod debug;
 pub mod error;
 pub mod eval;
 pub mod finish_gate;
+pub mod hooks;
 /// Pure ReAct loop (`loop` is a keyword → `loop_`).
 pub mod loop_;
 pub mod maintenance;
@@ -127,6 +128,7 @@ pub use speech_stream::{SpeechSegmenter, SpeechSignal};
 pub use reminders::{
     now_unix_ms, parse_duration, parse_when, Reminder, ReminderKind, ReminderStore,
 };
+pub use hooks::{HookEvent, HookSpec, Hooks};
 pub use stats::AgentStats;
 pub use task::{classify_task, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{

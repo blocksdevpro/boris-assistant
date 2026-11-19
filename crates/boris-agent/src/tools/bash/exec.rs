@@ -125,6 +125,11 @@ impl BashTool {
     }
 }
 
+/// The resolved shell running a user hook command (stdio not configured).
+pub(crate) fn hook_command(command: &str, cwd: &Path) -> std::process::Command {
+    shell_command(command, cwd)
+}
+
 /// `std` command for the resolved shell (stdio not configured yet).
 fn shell_command(command: &str, cwd: &Path) -> std::process::Command {
     match resolved_shell() {

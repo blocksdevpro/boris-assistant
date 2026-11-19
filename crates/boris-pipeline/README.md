@@ -316,6 +316,20 @@ projects = ['C:\Users\me\code\app']  # known project roots, added as read roots
 discover_projects = true                # bounded git-repo scan of read roots (BORIS_DISCOVER_PROJECTS=0 disables)
 ```
 
+Optional, hand-edited `[[hooks]]` entries (also preserved on save) run user
+commands around tool calls and at turn end; they are off unless present and
+**run arbitrary commands** (see the agent README, "User hooks"):
+
+```toml
+[[hooks]]
+event = "pre_tool"                 # pre_tool | post_tool | turn_end
+tool = "bash"                      # optional tool-name glob
+command = "python C:/hooks/check.py"
+timeout_secs = 10                  # optional, 1-120
+```
+
+Hook commands start in `state/workspace/`.
+
 Known projects are rendered into the system prompt with the sandbox, the real `bash` shell,
 and the readable/writable roots. Configured projects become read roots only; write roots are
 never widened.

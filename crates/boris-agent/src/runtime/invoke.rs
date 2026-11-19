@@ -50,6 +50,9 @@ pub struct ToolRuntime {
     /// Images attached by tools this turn, drained by the loop before the
     /// next model request.
     images: crate::tool_context::ImageInbox,
+    /// User `[[hooks]]` (empty = no-op). `pre_tool` runs after policy and
+    /// HITL, right before execute.
+    hooks: crate::hooks::Hooks,
 }
 
 impl ToolRuntime {
@@ -67,7 +70,17 @@ impl ToolRuntime {
             gate: super::ConcurrencyGate::new(16),
             artifact_failures_this_turn: AtomicU64::new(0),
             images: Default::default(),
+            hooks: crate::hooks::Hooks::default(),
         }
+    }
+
+    /// Install user hooks (replaces any previous set).
+    pub fn set_hooks(&mut self, hooks: crate::hooks::Hooks) {
+        self.hooks = hooks;
+    }
+
+    pub fn hooks(&self) -> &crate::hooks::Hooks {
+        &self.hooks
     }
 
     /// Take every image tools attached since the last call (loop-only).
@@ -469,8 +482,57 @@ impl ToolRuntime {
                 }
             }
             PolicyDecision::Allow if meta.collects_input => self.pause_input(inv, meta, args),
-            PolicyDecision::Allow => self.execute_allowed(tool, inv, meta, args, opts).await,
+            PolicyDecision::Allow if self.hooks.is_empty() => {
+                self.execute_allowed(tool, inv, meta, args, opts).await
+            }
+            PolicyDecision::Allow => self.execute_hooked(tool, inv, meta, args, opts).await,
         }
+    }
+
+    /// Allowed call with user hooks: policy and HITL already passed, so
+    /// `pre_tool` may only block, never widen anything.
+    async fn execute_hooked(
+        &self,
+        tool: &dyn Tool,
+        inv: ToolInvocation,
+        meta: ToolMeta,
+        args: Value,
+        opts: InvokeOptions,
+    ) -> InvokeResult {
+        let name = inv.name.clone();
+        let call_id = inv.call_id.clone();
+        let session_id = inv.session_id.clone();
+        let turn_id = inv.turn_id.clone();
+        let call = crate::hooks::HookCall {
+            tool: &name,
+            call_id: &call_id,
+            args: &args,
+            session_id: session_id.as_deref(),
+            turn_id: turn_id.as_deref(),
+        };
+        if let Err(reason) = self.hooks.pre_tool(call).await {
+            self.audit_event(
+                &inv,
+                &meta,
+                "hook_blocked",
+                None,
+                Some(false),
+                Some("hook_blocked"),
+            );
+            return InvokeResult::Observation(ToolObservation::err(
+                crate::tool::ObservationError::new("hook_blocked", false, reason),
+                0,
+            ));
+        }
+        let result = self
+            .execute_allowed(tool, inv, meta, args.clone(), opts)
+            .await;
+        if let InvokeResult::Observation(obs) = &result {
+            self.hooks
+                .post_tool(call, obs.looks_ok(), &obs.to_provider_text())
+                .await;
+        }
+        result
     }
 
     fn pause_input(&self, inv: ToolInvocation, meta: ToolMeta, args: Value) -> InvokeResult {

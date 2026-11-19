@@ -43,7 +43,9 @@ mod output;
 mod policy;
 mod steer;
 
+pub(crate) use exec::hook_command;
 pub use exec::{shell_label, BashTool};
+pub(crate) use jobs::TreeGuard;
 pub use jobs::{BashKillTool, BashOutputTool, ShellSession, MAX_RUNNING_JOBS};
 
 /// Default command timeout when the model omits `timeout`.

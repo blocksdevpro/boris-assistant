@@ -106,6 +106,7 @@ pub struct Agent {
     turn_id: Option<String>,
     max_tool_rounds: u32,
     stream_speech: bool,
+    hooks: crate::hooks::Hooks,
     /// Event bus: `(listener_id, callback)` — unsubscribe removes by id.
     listeners: Arc<Mutex<Vec<(u64, EventListener)>>>,
     next_listener_id: AtomicU64,
@@ -345,6 +346,7 @@ impl Agent {
             turn_id: None,
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
             stream_speech: false,
+            hooks: crate::hooks::Hooks::default(),
             listeners: Arc::new(Mutex::new(Vec::new())),
             next_listener_id: AtomicU64::new(1),
             debug: None,
@@ -599,6 +601,45 @@ impl Agent {
         } else {
             self.runtime = ToolRuntime::new(policy, Box::new(NullAuditSink));
         }
+        self.runtime.set_hooks(self.hooks.clone());
+    }
+
+    /// Install user `[[hooks]]` (they run arbitrary user commands; see
+    /// [`crate::hooks`]). Kept across `configure_runtime`.
+    pub fn set_hooks(&mut self, hooks: crate::hooks::Hooks) {
+        self.hooks = hooks.clone();
+        self.runtime.set_hooks(hooks);
+    }
+
+    /// Fire `turn_end` hooks in the background (never delays the reply).
+    pub(crate) fn fire_turn_end_hooks(
+        &self,
+        user_text: &str,
+        outcome: &crate::AgentOutcome,
+        tools: &[String],
+    ) {
+        if self.hooks.is_empty() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (kind, reply) = match outcome {
+            crate::AgentOutcome::Speak { text, .. } => ("speak", text.as_str()),
+            crate::AgentOutcome::Silent => ("silent", ""),
+            crate::AgentOutcome::NeedsConfirmation { .. } => ("needs_confirmation", ""),
+            crate::AgentOutcome::NeedsInput { .. } => ("needs_input", ""),
+        };
+        let payload = serde_json::json!({
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "user_text": user_text,
+            "outcome": kind,
+            "reply": reply,
+            "tools_used": tools,
+        });
+        let hooks = self.hooks.clone();
+        handle.spawn(async move { hooks.turn_end(payload).await });
     }
 
     pub fn set_session_id(&mut self, id: Option<String>) {

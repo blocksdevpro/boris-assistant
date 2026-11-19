@@ -787,6 +787,13 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         }
     }
     agent.set_features(features.clone());
+    // User [[hooks]] (off unless configured). They run arbitrary user
+    // commands, after policy/HITL and before execute; see boris_agent::hooks.
+    let hook_specs = crate::settings::load_hook_settings();
+    if !hook_specs.is_empty() {
+        tracing::info!(count = hook_specs.len(), "user hooks enabled");
+        agent.set_hooks(boris_agent::Hooks::new(hook_specs).with_cwd(paths::workspace_dir()));
+    }
     // Speak the final answer sentence by sentence while it generates.
     // `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
     agent.set_stream_speech(!env_flag_false("BORIS_STREAM_SPEECH"));

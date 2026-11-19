@@ -648,6 +648,43 @@ fn parse_workspace_settings(raw: &str) -> WorkspaceSettings {
     out
 }
 
+/// Read the hand-edited `[[hooks]]` array from `config.toml`. Off by default:
+/// missing, empty, or unreadable → no hooks. Invalid entries are skipped
+/// with a warning. Hooks run arbitrary user commands (see `boris_agent::hooks`).
+///
+/// ```toml
+/// [[hooks]]
+/// event = "pre_tool"          # pre_tool | post_tool | turn_end
+/// tool = "bash"               # glob, optional (all tools)
+/// command = "python ~/hooks/check.py"
+/// timeout_secs = 10           # optional, 1–120
+/// ```
+pub fn load_hook_settings() -> Vec<boris_agent::HookSpec> {
+    fs::read_to_string(config_path())
+        .map(|raw| parse_hook_settings(&raw))
+        .unwrap_or_default()
+}
+
+fn parse_hook_settings(raw: &str) -> Vec<boris_agent::HookSpec> {
+    let Ok(value) = raw.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(entries) = value.get("hooks").and_then(toml::Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry.clone().try_into() {
+            Ok(spec) => Some(spec),
+            Err(error) => {
+                tracing::warn!(index, %error, "skipping invalid [[hooks]] entry");
+                None
+            }
+        })
+        .collect()
+}
+
 /// Persist prefs to `config.toml` and secrets to `auth.json`.
 ///
 /// **Merge policy:** managed sections (`models`, `capability`, `audio`,
@@ -1289,6 +1326,46 @@ mod tests {
         assert!(after.contains("foo"), "unknown key wiped: {after}");
         assert!(after.contains("mic-1"), "managed audio lost: {after}");
 
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hooks_parse_and_skip_invalid_entries() {
+        assert!(parse_hook_settings("[models]\nstrong = 'x'\n").is_empty());
+        let hooks = parse_hook_settings(
+            "[[hooks]]\nevent = 'pre_tool'\ntool = 'bash'\ncommand = 'check.sh'\n\n\
+             [[hooks]]\nevent = 'whenever'\ncommand = 'x'\n\n\
+             [[hooks]]\nevent = 'turn_end'\ncommand = 'log.sh'\ntimeout_secs = 3\n",
+        );
+        assert_eq!(hooks.len(), 2, "the unknown event is skipped");
+        assert_eq!(hooks[0].event, boris_agent::HookEvent::PreTool);
+        assert_eq!(hooks[0].tool.as_deref(), Some("bash"));
+        assert_eq!(hooks[1].timeout_secs, 3);
+    }
+
+    #[test]
+    fn save_keeps_hand_edited_hooks() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-hooks-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+        fs::write(
+            config_path(),
+            "[[hooks]]\nevent = 'pre_tool'\ncommand = 'check.sh'\n",
+        )
+        .unwrap();
+        save_settings(&AppSettings::default()).expect("save");
+        let hooks = load_hook_settings();
+        assert_eq!(hooks.len(), 1, "UI save must not wipe [[hooks]]");
+        assert_eq!(hooks[0].command, "check.sh");
         std::env::remove_var(paths::BORIS_HOME_ENV);
         let _ = fs::remove_dir_all(&dir);
     }

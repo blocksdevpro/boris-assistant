@@ -525,6 +525,72 @@ impl ProcessTree {
     }
 }
 
+/// Kills a short-lived process's whole tree when dropped (user hooks):
+/// a Job Object with kill-on-close on Windows, the process group elsewhere.
+/// Call [`TreeGuard::disarm`] once the process exited normally.
+pub(crate) struct TreeGuard {
+    #[cfg(windows)]
+    job: Option<windows_job::JobHandle>,
+    #[cfg(not(windows))]
+    pgid: Option<u32>,
+}
+
+impl TreeGuard {
+    /// Put the command in its own process group (no-op on Windows).
+    pub(crate) fn prepare(cmd: &mut std::process::Command) {
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        let _ = cmd;
+    }
+
+    pub(crate) fn attach(child: &tokio::process::Child) -> Self {
+        #[cfg(windows)]
+        {
+            let job = child
+                .raw_handle()
+                .and_then(|handle| windows_job::JobHandle::for_process(handle).ok());
+            Self { job }
+        }
+        #[cfg(not(windows))]
+        {
+            Self { pgid: child.id() }
+        }
+    }
+
+    pub(crate) fn disarm(mut self) {
+        #[cfg(windows)]
+        {
+            // Dropping a job handle kills its processes, which have exited.
+            self.job.take();
+        }
+        #[cfg(not(windows))]
+        {
+            self.pgid = None;
+        }
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
+        #[cfg(not(windows))]
+        if let Some(pgid) = self.pgid.take() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &format!("-{pgid}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /// Read new output and status of a background `bash` job.

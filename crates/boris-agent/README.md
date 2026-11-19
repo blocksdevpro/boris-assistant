@@ -540,6 +540,16 @@ src/
 
 ```bash
 cargo test -p boris-agent --lib
+cargo test -p boris-agent --test harness_eval   # offline harness eval
 ```
+
+`tests/harness_eval.rs` replays ten scripted scenarios through a mock
+`LlmClient` and real builtin registration, asserting harness behaviour only:
+a stable tool table across rounds, `reasoning_details` round-trip, executed
+work kept on interruption, "continue" restating the task, an unread edit
+refused before HITL, the round budget check-in, a reminder firing, a
+`pre_tool` hook blocking a call, tool notes never streamed as speech, and
+`[silent]`. Its `live_eval_tool_list_is_stable` variant is `#[ignore]`d and
+also needs `BORIS_LIVE_EVAL=1` plus `OPENROUTER_API_KEY`.
 
 Do not run `tests/tool_live_smoke.rs` in routine checks (live environment).

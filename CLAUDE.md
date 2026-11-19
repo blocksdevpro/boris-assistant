@@ -31,6 +31,8 @@ cargo check -p boris-desktop
 
 Prefer `cargo test -p boris-core -p boris-ai -p boris-agent --lib` for a quick validation subset; run the rest locally on Windows when touching audio/sense/pipeline.
 
+Offline harness eval (mock LLM, no network): `cargo test -p boris-agent --test harness_eval`. Its live variant is `#[ignore]`d and gated on `BORIS_LIVE_EVAL=1`.
+
 Do **not** run `crates/boris-agent/tests/tool_live_smoke.rs` in routine local checks — it exercises a live environment.
 
 ### Desktop app

@@ -781,6 +781,9 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         }
     }
     agent.set_features(features.clone());
+    // Speak the final answer sentence by sentence while it generates.
+    // `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
+    agent.set_stream_speech(!env_flag_false("BORIS_STREAM_SPEECH"));
     if features.progressive_listing {
         agent.ensure_tool_search();
     }

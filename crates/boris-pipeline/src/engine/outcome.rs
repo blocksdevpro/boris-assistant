@@ -452,6 +452,7 @@ pub(super) fn resolve_agent_outcome(
                                 approved: false,
                             },
                             turn: ctx.turn,
+                            speech: None,
                         }) {
                             ThinkResolve::Finished(Ok((o, report))) => {
                                 ctx.picture.update_context(
@@ -682,6 +683,7 @@ fn collect_typed_input(
             value: submitted,
         },
         turn: ctx.turn,
+        speech: None,
     }) {
         ThinkResolve::Finished(Ok((outcome, report))) => {
             ctx.picture.update_context(
@@ -820,6 +822,7 @@ fn resume_after_confirm(
             approved,
         },
         turn: ctx.turn,
+        speech: None,
     }) {
         ThinkResolve::Finished(Ok((outcome, report))) => {
             ctx.picture.update_context(

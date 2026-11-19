@@ -19,6 +19,8 @@
 mod batch_tests;
 #[cfg(test)]
 mod image_tests;
+#[cfg(test)]
+mod speech_tests;
 mod finish;
 mod helpers;
 mod message_parse;
@@ -49,7 +51,7 @@ use message_parse::{
     extract_reply_text, extract_tool_note, normalize_tool_calls, parse_raw_tool_calls,
 };
 use round::{
-    cancelled, complete_round, ensure_spoken_reply_at_cap, is_image_rejection,
+    cancelled, complete_round_streaming, ensure_spoken_reply_at_cap, is_image_rejection,
     should_reenter_finish_gate, tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
 };
 use tool_batch::{process_tool_calls, ToolBatchResult};
@@ -170,6 +172,11 @@ pub async fn agent_loop_with_budget(
     let mut last_speakable: Option<String> = None;
     // B11: consecutive unknown-tool-only rounds (no successful tools).
     let mut consecutive_unknown_rounds: u32 = 0;
+    // Streamed speech of the final answer (voice hosts opt in). One response
+    // at a time: a new request cancels whatever the previous one streamed.
+    let mut speech = config
+        .stream_speech
+        .then(crate::speech_stream::SpeechSegmenter::default);
 
     for round in 0..=max_rounds {
         if cancelled(&cancel) {
@@ -199,7 +206,10 @@ pub async fn agent_loop_with_budget(
             }
             state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
         }
-        let response = match complete_round(
+        if let Some(seg) = speech.as_mut() {
+            emit_speech(&emit, seg.reset());
+        }
+        let response = match complete_round_streaming(
             &mut state,
             user_text,
             config,
@@ -207,6 +217,7 @@ pub async fn agent_loop_with_budget(
             &emit,
             &cancel,
             &mut token_accounting,
+            speech.as_mut(),
         )
         .await
         {
@@ -216,7 +227,10 @@ pub async fn agent_loop_with_budget(
                 state
                     .context
                     .omit_tool_images("this model does not accept images");
-                complete_round(
+                if let Some(seg) = speech.as_mut() {
+                    emit_speech(&emit, seg.reset());
+                }
+                complete_round_streaming(
                     &mut state,
                     user_text,
                     config,
@@ -224,6 +238,7 @@ pub async fn agent_loop_with_budget(
                     &emit,
                     &cancel,
                     &mut token_accounting,
+                    speech.as_mut(),
                 )
                 .await?
             }
@@ -243,6 +258,10 @@ pub async fn agent_loop_with_budget(
             response
         };
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
+            // Content beside tool calls is a progress note, never speech.
+            if let Some(seg) = speech.as_mut() {
+                emit_speech(&emit, seg.on_tool_call());
+            }
             // The next iteration (at cap) pushes the check-in nudge itself.
             tool_rounds += 1;
             state.context.push(Role::Assistant, response.clone());
@@ -430,6 +449,9 @@ pub async fn agent_loop_with_budget(
             }
         }
 
+        if let Some(seg) = speech.as_mut() {
+            emit_speech(&emit, seg.finish(&reply));
+        }
         let mut result = finish_with_speech(
             &emit,
             round as u32,
@@ -451,6 +473,12 @@ pub async fn agent_loop_with_budget(
         token_accounting,
         budget_exhausted: true,
     })
+}
+
+fn emit_speech(emit: &EmitFn, signals: Vec<crate::speech_stream::SpeechSignal>) {
+    for signal in signals {
+        emit(AgentEvent::Speech { signal });
+    }
 }
 
 /// Continue after the host collected (or cancelled) typed input, then remaining tools.

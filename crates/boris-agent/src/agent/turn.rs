@@ -215,6 +215,7 @@ impl Agent {
             task: Some(task),
             debug: self.debug.clone(),
             time_budget: Some(crate::types::DEFAULT_TURN_TIME_BUDGET),
+            stream_speech: self.stream_speech,
         }
     }
 

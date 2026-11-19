@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use boris_agent::{Agent, AgentError, AgentOutcome, TurnReport};
 use boris_audio::output::OutputEvent;
@@ -20,11 +20,16 @@ use crate::hear::{self, CaptureKind, HearBreak};
 use crate::liveness::{WakeLiveness, WakeOrigin};
 use crate::status::Phase;
 
-use super::barge::{decide_thinking_barge_listen, BargeDecision, BargeWatch};
+use super::barge::{
+    decide_thinking_barge_listen, drain_mic, listen_after_pause, BargeDecision, BargeWatch,
+};
 use super::device_switch::{apply_input_switch, apply_output_switch};
-use super::models::SttBox;
+use super::early_speech::SpeechFeed;
+use super::models::{lost_tts, SttBox, TtsBox, TtsSlot};
 use super::picture::Picture;
-use super::playback::poll_running;
+use super::playback::{poll_running, PlaybackWait};
+use super::speech::{stream_reply, SpeechUnits, StreamedSpeech};
+use super::util::speakable_reply_units;
 use super::EngineCommand;
 
 const THINK_POLL: Duration = Duration::from_millis(15);
@@ -70,6 +75,39 @@ pub(super) enum AgentWork<'a> {
     },
 }
 
+/// Speech that may start before the agent turn returns (first Thinking pass
+/// of a turn only; confirm/input resumes pass `None`).
+pub(super) struct ThinkSpeech<'a> {
+    pub feed: &'a mut SpeechFeed,
+    pub tts: &'a mut TtsSlot,
+    pub progress_line: bool,
+    pub report: &'a mut EarlySpeech,
+}
+
+/// What early speech did during Thinking.
+#[derive(Default)]
+pub(super) struct EarlySpeech {
+    /// The committed final answer played to the end. Its `tts` is a
+    /// placeholder; the model went back to the slot.
+    pub delivered: Option<StreamedSpeech>,
+    /// When the delivered job started, measured from the start of Thinking.
+    pub delivered_after_ms: u64,
+    pub progress_spoken: bool,
+    /// Anything (progress line or streamed answer) reached the speaker.
+    pub audible: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpeakKind {
+    Answer,
+    Progress,
+}
+
+enum SpeakStep {
+    Continue,
+    Resolve(ThinkResolve),
+}
+
 pub(super) struct ThinkCtx<'a> {
     pub agent: &'a mut Agent,
     pub agent_rt: &'a tokio::runtime::Runtime,
@@ -89,6 +127,7 @@ pub(super) struct ThinkCtx<'a> {
     pub running: &'a mut bool,
     pub work: AgentWork<'a>,
     pub turn: TurnId,
+    pub speech: Option<ThinkSpeech<'a>>,
 }
 
 pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
@@ -109,7 +148,9 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
         running,
         work,
         turn,
+        mut speech,
     } = ctx;
+    let think_started = Instant::now();
 
     let handle = agent_rt.handle().clone();
     let cancel = agent.arm_cancel();
@@ -183,6 +224,57 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                 return ThinkResolve::Stopped;
             }
 
+            // Streamed answer first (even if the agent just finished, so a
+            // committed answer is still played from here), then the one-time
+            // progress line on long tool work.
+            if let Some(sp) = speech.as_mut() {
+                let agent_finished = agent_done.load(Ordering::Acquire);
+                sp.feed.drain();
+                let kind = if sp.feed.has_units() && sp.report.delivered.is_none() {
+                    Some(SpeakKind::Answer)
+                } else if sp.progress_line
+                    && !agent_finished
+                    && !sp.report.progress_spoken
+                    && !sp.report.audible
+                    && sp.feed.progress_due(Instant::now())
+                {
+                    Some(SpeakKind::Progress)
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    if let Some(tts) = sp.tts.take_loaded() {
+                        let step = speak_while_thinking(
+                            kind,
+                            tts,
+                            sp,
+                            &agent_done,
+                            think_started,
+                            SpeakEnv {
+                                audio: &mut *audio,
+                                output_events: &mut *output_events,
+                                cmd_rx,
+                                running: &mut *running,
+                                picture: &mut *picture,
+                                mic,
+                                vad: &mut *vad,
+                                stt: &mut *stt,
+                                watch: watch.as_mut(),
+                                turn,
+                            },
+                        );
+                        match step {
+                            SpeakStep::Continue => {}
+                            SpeakStep::Resolve(resolve) => {
+                                cancel.cancel();
+                                let _ = recv_done(&done_rx);
+                                return resolve;
+                            }
+                        }
+                    }
+                }
+            }
+
             match done_rx.try_recv() {
                 Ok(result) => return ThinkResolve::Finished(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -254,6 +346,178 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
             thread::sleep(THINK_POLL);
         }
     })
+}
+
+struct SpeakEnv<'e, 'w> {
+    audio: &'e mut AudioService,
+    output_events: &'e mut crossbeam_channel::Receiver<OutputEvent>,
+    cmd_rx: &'e Receiver<EngineCommand>,
+    running: &'e mut bool,
+    picture: &'e mut Picture,
+    mic: &'e crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &'e mut SileroVad,
+    stt: &'e mut SttBox,
+    watch: Option<&'e mut BargeWatch<'w>>,
+    turn: TurnId,
+}
+
+/// Play the streamed answer or the progress line while the agent keeps
+/// working. The job uses the Talking barge watch (lower wake threshold plus
+/// close-talk energy, AEC on the reference) exactly like normal replies, so
+/// Boris's own playback is treated the same way and a barge-in still pauses
+/// playback at once.
+fn speak_while_thinking(
+    kind: SpeakKind,
+    tts: TtsBox,
+    sp: &mut ThinkSpeech<'_>,
+    agent_done: &AtomicBool,
+    think_started: Instant,
+    env: SpeakEnv<'_, '_>,
+) -> SpeakStep {
+    let SpeakEnv {
+        audio,
+        output_events,
+        cmd_rx,
+        running,
+        picture,
+        mic,
+        vad,
+        stt,
+        mut watch,
+        turn,
+    } = env;
+    let gap_samples = tts.inter_unit_silence_samples();
+    let started_after_ms = think_started.elapsed().as_millis() as u64;
+    let mut progress_units = match kind {
+        SpeakKind::Answer => Vec::new(),
+        SpeakKind::Progress => {
+            sp.report.progress_spoken = true;
+            let line = sp.feed.progress_text();
+            tracing::info!(%turn, %line, "speaking progress line during tool work");
+            speakable_reply_units(&line)
+        }
+    };
+    if let Some(w) = watch.as_deref_mut() {
+        w.reset();
+    }
+    let prev_activity = picture.activity.clone();
+    let mut tts = tts;
+    let mut already_audible = false;
+    let step = loop {
+        let units = match kind {
+            SpeakKind::Answer => SpeechUnits::Feed {
+                feed: &mut *sp.feed,
+                agent_done,
+            },
+            SpeakKind::Progress => SpeechUnits::Fixed(std::mem::take(&mut progress_units)),
+        };
+        let mut speech = stream_reply(
+            tts,
+            units,
+            gap_samples,
+            turn,
+            already_audible,
+            audio,
+            output_events,
+            cmd_rx,
+            running,
+            picture,
+            mic,
+            watch.as_deref_mut(),
+        );
+        tts = std::mem::replace(&mut speech.tts, lost_tts());
+        sp.report.audible |= speech.played;
+        match speech.wait {
+            PlaybackWait::Finished => {
+                if kind == SpeakKind::Answer {
+                    if sp.feed.committed() {
+                        tracing::info!(%turn, "streamed answer delivered during thinking");
+                        sp.report.delivered = Some(speech);
+                        sp.report.delivered_after_ms = started_after_ms;
+                    }
+                    sp.feed.disable();
+                }
+                break SpeakStep::Continue;
+            }
+            PlaybackWait::Aborted => {
+                if kind == SpeakKind::Answer && !speech.feed_cancelled {
+                    // Device loss or a synthesis error: the normal path
+                    // speaks the full reply once the agent returns.
+                    tracing::warn!(%turn, error = ?speech.error, "streamed answer aborted");
+                    sp.feed.disable();
+                }
+                break SpeakStep::Continue;
+            }
+            PlaybackWait::Stopped => break SpeakStep::Resolve(ThinkResolve::Stopped),
+            PlaybackWait::BargedIn => {
+                tracing::info!(%turn, "barge-in during early speech");
+                match listen_after_pause(mic, vad, stt, picture, cmd_rx, running, false) {
+                    Ok(BargeDecision::Resume) if kind == SpeakKind::Answer => {
+                        if audio.resume().is_err() {
+                            audio.stop();
+                            sp.feed.disable();
+                            break SpeakStep::Continue;
+                        }
+                        already_audible = true;
+                        picture.set_phase(Phase::Talking);
+                        continue;
+                    }
+                    Ok(BargeDecision::Resume) => {
+                        // The progress line is filler: drop its rest.
+                        audio.stop();
+                        break SpeakStep::Continue;
+                    }
+                    Ok(BargeDecision::StopTalking) => {
+                        audio.stop();
+                        break SpeakStep::Resolve(ThinkResolve::StopTurn);
+                    }
+                    Ok(BargeDecision::TakeTurn(next)) => {
+                        audio.stop();
+                        break SpeakStep::Resolve(ThinkResolve::TakeTurn(next));
+                    }
+                    Err(error) => {
+                        audio.stop();
+                        sp.feed.disable();
+                        match error {
+                            HearBreak::Stopped if !*running => {
+                                break SpeakStep::Resolve(ThinkResolve::Stopped)
+                            }
+                            HearBreak::Stopped => break SpeakStep::Resolve(ThinkResolve::StopTurn),
+                            HearBreak::Disconnected => {
+                                break SpeakStep::Resolve(ThinkResolve::Stopped)
+                            }
+                            HearBreak::SwitchInput { device_id } => {
+                                apply_input_switch(audio, picture, &device_id);
+                            }
+                            HearBreak::SwitchOutput { device_id } => {
+                                apply_output_switch(audio, output_events, picture, &device_id);
+                            }
+                            HearBreak::StartWakeEnroll { .. }
+                            | HearBreak::ClearWakeProfile
+                            | HearBreak::RunSelfCheck => {}
+                        }
+                        break SpeakStep::Continue;
+                    }
+                }
+            }
+        }
+    };
+    sp.tts.give_back(tts);
+    // Our own playback tail must not be scored as a wake once Thinking resumes.
+    drain_mic(mic);
+    if let Some(w) = watch.as_deref_mut() {
+        w.reset();
+    }
+    if matches!(step, SpeakStep::Continue)
+        && sp.report.delivered.is_none()
+        && !agent_done.load(Ordering::Acquire)
+    {
+        picture.activity = prev_activity
+            .filter(|activity| !activity.starts_with("barge-in"))
+            .or_else(|| Some("thinking…".into()));
+        picture.set_phase(Phase::Thinking);
+    }
+    step
 }
 
 fn recv_done(

@@ -18,6 +18,55 @@ use boris_sense::{
     WAKEWORD_THRESHOLD, WAKEWORD_WINDOW_SIZE,
 };
 
+/// Speech is paused for a barge-in. Listen; resume / stop / new turn.
+pub(super) fn listen_after_pause(
+    mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &mut boris_sense::SileroVad,
+    stt: &mut super::models::SttBox,
+    picture: &mut super::picture::Picture,
+    cmd_rx: &std::sync::mpsc::Receiver<super::EngineCommand>,
+    running: &mut bool,
+    expect_reply: bool,
+) -> Result<BargeDecision, crate::hear::HearBreak> {
+    use crate::hear::{self, CaptureKind};
+    use crate::status::Phase;
+
+    picture.set_phase(Phase::Hearing);
+    picture.activity = Some("barge-in · listening".into());
+    picture.publish();
+    hear::settle_after_barge(mic, cmd_rx, running)?;
+    let clip = hear::capture_utterance(mic, vad, cmd_rx, running, CaptureKind::AfterWake)?;
+    let crop = hear::crop_speech(vad, &clip);
+    if crop.speech_hops < MIN_BARGE_SPEECH_HOPS {
+        tracing::info!(
+            hops = crop.speech_hops,
+            "barge-in listen was silence — resume"
+        );
+        picture.clear_activity();
+        return Ok(BargeDecision::Resume);
+    }
+
+    if let Err(e) = stt.load() {
+        tracing::warn!(error = %e, "barge-in stt load failed — resuming leftover");
+        picture.clear_activity();
+        return Ok(BargeDecision::Resume);
+    }
+
+    picture.set_phase(Phase::Reading);
+    match stt.transcribe(&clip) {
+        Ok(text) => {
+            tracing::info!(%text, hops = crop.speech_hops, "barge-in heard");
+            picture.clear_activity();
+            Ok(decide_barge_listen(crop.speech_hops, &text, expect_reply))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "barge-in stt failed — resuming leftover");
+            picture.clear_activity();
+            Ok(BargeDecision::Resume)
+        }
+    }
+}
+
 /// Shortest crop we treat as "the user said something" after a barge-in pause.
 /// Matches the live-mic enroll floor (~320 ms of Silero speech).
 const MIN_BARGE_SPEECH_HOPS: u32 = 10;

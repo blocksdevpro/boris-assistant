@@ -61,6 +61,25 @@ pub(super) async fn complete_round(
     cancel: &Option<CancellationToken>,
     accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
+    complete_round_streaming(
+        state, user_text, config, at_cap, emit, cancel, accounting, None,
+    )
+    .await
+}
+
+/// [`complete_round`] that also feeds content deltas into a speech segmenter,
+/// emitting [`AgentEvent::Speech`] for the host's streamed TTS.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_round_streaming(
+    state: &mut LoopState<'_>,
+    user_text: &str,
+    config: &AgentLoopConfig,
+    at_cap: bool,
+    emit: &EmitFn,
+    cancel: &Option<CancellationToken>,
+    accounting: &mut TokenAccounting,
+    mut speech: Option<&mut crate::speech_stream::SpeechSegmenter>,
+) -> Result<Value, AgentError> {
     // Images tools attached since the last request follow the resolved batch.
     for image in state.runtime.take_images() {
         state.context.push_tool_image(&image);
@@ -159,6 +178,18 @@ pub(super) async fn complete_round(
     let mut last_emit = Instant::now();
     let mut dirty = false;
     let mut on_event = |ev: LlmStreamEvent| {
+        if let Some(seg) = speech.as_deref_mut() {
+            let signals = match &ev {
+                LlmStreamEvent::ContentDelta { text } => seg.push_content(text, Instant::now()),
+                LlmStreamEvent::ToolCallDelta { .. } | LlmStreamEvent::ToolCallComplete { .. } => {
+                    seg.on_tool_call()
+                }
+                _ => seg.poll(Instant::now()),
+            };
+            for signal in signals {
+                emit(AgentEvent::Speech { signal });
+            }
+        }
         let text = match ev {
             LlmStreamEvent::Usage(usage) => {
                 accounting.record_provider_usage(&usage);

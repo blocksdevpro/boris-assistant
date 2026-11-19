@@ -190,6 +190,62 @@ pub(super) fn join_tts_load(job: ModelLoadJob<TtsBox>) -> (TtsBox, Result<(), St
     }
 }
 
+/// The turn's TTS model while it loads beside agent work. The engine thread
+/// can borrow it as soon as the load finishes (streamed speech during
+/// Thinking) without ever blocking on the loader.
+pub(super) enum TtsSlot {
+    Loading(ModelLoadJob<TtsBox>),
+    Ready(TtsBox, Result<(), String>),
+    /// Lent to a speech job; `give_back` returns it.
+    Lent,
+}
+
+impl TtsSlot {
+    fn poll(&mut self) {
+        let (tts, result) = match self {
+            Self::Loading(ModelLoadJob::Pending(rx)) => match rx.try_recv() {
+                Ok(pair) => pair,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!("tts loader disconnected before returning model");
+                    (lost_tts(), Err("tts loader disconnected".into()))
+                }
+            },
+            Self::Loading(ModelLoadJob::Ready(..)) => match std::mem::replace(self, Self::Lent) {
+                Self::Loading(ModelLoadJob::Ready(tts, result)) => (tts, result),
+                _ => return,
+            },
+            Self::Ready(..) | Self::Lent => return,
+        };
+        *self = Self::Ready(tts, result);
+    }
+
+    /// Take the model if it finished loading successfully. Never blocks.
+    pub fn take_loaded(&mut self) -> Option<TtsBox> {
+        self.poll();
+        if !matches!(self, Self::Ready(_, Ok(()))) {
+            return None;
+        }
+        match std::mem::replace(self, Self::Lent) {
+            Self::Ready(tts, _) => Some(tts),
+            _ => None,
+        }
+    }
+
+    pub fn give_back(&mut self, tts: TtsBox) {
+        *self = Self::Ready(tts, Ok(()));
+    }
+
+    /// Wait for the load and return the model with its load result.
+    pub fn join(self) -> (TtsBox, Result<(), String>) {
+        match self {
+            Self::Loading(job) => join_tts_load(job),
+            Self::Ready(tts, result) => (tts, result),
+            Self::Lent => (lost_tts(), Err("tts model was not returned".into())),
+        }
+    }
+}
+
 pub(super) fn unload_stt(stt: &mut dyn SpeechToText, turn: TurnId) {
     if let Err(e) = stt.unload() {
         tracing::warn!(error = %e, %turn, "stt unload failed");

@@ -61,6 +61,7 @@ pub mod runtime;
 pub mod session;
 pub mod skills;
 pub mod speech_sanitize;
+pub mod speech_stream;
 pub mod stats;
 pub mod task;
 pub mod tool;
@@ -121,6 +122,7 @@ pub use skills::{
 pub use speech_sanitize::{
     contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
+pub use speech_stream::{SpeechSegmenter, SpeechSignal};
 pub use stats::AgentStats;
 pub use task::{classify_task, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{

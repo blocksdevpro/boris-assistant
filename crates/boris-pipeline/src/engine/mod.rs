@@ -48,6 +48,7 @@ mod chime;
 mod confirm;
 mod device_switch;
 mod device_watch;
+mod early_speech;
 mod llm;
 mod models;
 mod outcome;
@@ -75,10 +76,10 @@ use crate::status::{EngineState, Phase, StatusPicture};
 
 use activity::{activity_label, is_tool_chip, note_tool_start};
 use artifact::peek_current;
-use barge::{decide_barge_listen, BargeDecision, BargeWatch};
+use barge::{BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
-    join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
+    join_stt_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
     release_voice_models,
 };
 use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve, ResolveDone};
@@ -88,7 +89,7 @@ use playback::{
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
-use think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
+use think::{run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech};
 use turn_trace::TurnTraceGuard;
 use util::{speakable_reply_units, transcript_usable};
 
@@ -443,46 +444,15 @@ fn listen_after_barge(
     running: &mut bool,
     expect_reply: bool,
 ) -> std::result::Result<BargeDecision, HearBreak> {
-    rt.picture.set_phase(Phase::Hearing);
-    rt.picture.activity = Some("barge-in · listening".into());
-    rt.picture.publish();
-    hear::settle_after_barge(&rt.mic, cmd_rx, running)?;
-    let clip = hear::capture_utterance(
+    barge::listen_after_pause(
         &rt.mic,
         &mut rt.vad,
+        &mut rt.stt,
+        &mut rt.picture,
         cmd_rx,
         running,
-        CaptureKind::AfterWake,
-    )?;
-    let crop = hear::crop_speech(&mut rt.vad, &clip);
-    if crop.speech_hops < 10 {
-        tracing::info!(
-            hops = crop.speech_hops,
-            "barge-in listen was silence — resume"
-        );
-        rt.picture.clear_activity();
-        return Ok(BargeDecision::Resume);
-    }
-
-    if let Err(e) = rt.stt.load() {
-        tracing::warn!(error = %e, "barge-in stt load failed — resuming leftover");
-        rt.picture.clear_activity();
-        return Ok(BargeDecision::Resume);
-    }
-
-    rt.picture.set_phase(Phase::Reading);
-    match rt.stt.transcribe(&clip) {
-        Ok(text) => {
-            tracing::info!(%text, hops = crop.speech_hops, "barge-in heard");
-            rt.picture.clear_activity();
-            Ok(decide_barge_listen(crop.speech_hops, &text, expect_reply))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "barge-in stt failed — resuming leftover");
-            rt.picture.clear_activity();
-            Ok(BargeDecision::Resume)
-        }
-    }
+        expect_reply,
+    )
 }
 
 fn go_off_if_not_running(
@@ -1083,7 +1053,11 @@ fn run(
         rt.picture.update_context_from_chars(approx_in + text.len());
 
         let agent_t = std::time::Instant::now();
-        let tts_job = rt.tts_loader.load(rt.tts);
+        let mut tts_slot = models::TtsSlot::Loading(rt.tts_loader.load(rt.tts));
+        // Streamed answer sentences and tool progress reach the engine thread
+        // through this channel; the subscriber only sends, never blocks.
+        let (feed_tx, mut speech_feed) = early_speech::SpeechFeed::channel();
+        let mut early = EarlySpeech::default();
         rt.agent.set_turn_id(Some(turn.to_string()));
         if let Some(ref sid) = *sess.active_session {
             rt.agent.set_session_id(Some(sid.to_string()));
@@ -1107,6 +1081,25 @@ fn run(
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
+            // Speech and progress signals bypass the UI gate below: a barge-in
+            // capture pauses UI repaint, not the speech queue.
+            let feed_msg = match ev {
+                AgentEvent::Speech { signal } => {
+                    let _ = feed_tx.send(early_speech::FeedMsg::Speech(signal.clone()));
+                    return;
+                }
+                AgentEvent::ToolExecutionStart { .. } => Some(early_speech::FeedMsg::ToolStarted),
+                AgentEvent::ToolNote { text } => {
+                    Some(early_speech::FeedMsg::ToolNote(text.clone()))
+                }
+                AgentEvent::NeedsConfirmation { .. } | AgentEvent::NeedsInput { .. } => {
+                    Some(early_speech::FeedMsg::Approval)
+                }
+                _ => None,
+            };
+            if let Some(msg) = feed_msg {
+                let _ = feed_tx.send(msg);
+            }
             if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
@@ -1259,6 +1252,7 @@ fn run(
         // their side effects are not redone or contradicted. A turn where
         // nothing executed is restored to this checkpoint exactly.
         let turn_checkpoint = rt.agent.checkpoint();
+        let think_trace_ms = turn_trace.elapsed_ms();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -1276,8 +1270,14 @@ fn run(
             running: &mut running,
             work,
             turn,
+            speech: Some(ThinkSpeech {
+                feed: &mut speech_feed,
+                tts: &mut tts_slot,
+                progress_line: false,
+                report: &mut early,
+            }),
         });
-        let (tts_owned, tts_load) = join_tts_load(tts_job);
+        let (tts_owned, tts_load) = tts_slot.join();
         rt.tts = tts_owned;
 
         let (outcome, report) = match think {
@@ -1601,101 +1601,107 @@ fn run(
         // both models across an active follow-up chain; low-memory reloads STT
         // while the next utterance is captured.
         let will_await = expect_reply && follow_up_depth < MAX_FOLLOW_UPS;
-        let speech_trace_start_ms = turn_trace.elapsed_ms();
+        let mut speech_trace_start_ms = turn_trace.elapsed_ms();
         let mut already_audible = false;
         let mut barge_terminal = false;
         let mut speech;
-        loop {
-            let tts = std::mem::replace(&mut rt.tts, lost_tts());
-            let barge_on = rt.barge_in;
-            let mut watch = if barge_on {
-                Some(BargeWatch::new(&rt.mic, &mut rt.wake))
-            } else {
-                None
-            };
-            speech = stream_reply(
-                tts,
-                units,
-                gap_samples,
-                turn,
-                already_audible,
-                &mut rt.audio,
-                &mut rt.output_events,
-                &cmd_rx,
-                &mut running,
-                &mut rt.picture,
-                &rt.mic,
-                watch.as_mut(),
-            );
-            rt.tts = speech.tts;
-            if speech.wait != PlaybackWait::BargedIn {
-                break;
-            }
-            turn_trace.mark("barge_in_pause", None);
-            tracing::info!(
-                %turn,
-                leftover = speech.remaining_units.len(),
-                "speech paused for barge-in"
-            );
-            match listen_after_barge(&mut rt, &cmd_rx, &mut running, will_await) {
-                Ok(BargeDecision::Resume) => {
-                    tracing::info!(%turn, "barge-in resume — leftover speech");
-                    turn_trace.mark("barge_in_resume", None);
-                    if let Err(error) = rt.audio.resume() {
-                        tracing::warn!(%turn, error = %error, "resume leftover speech failed");
-                        rt.audio.stop();
-                        speech.wait = PlaybackWait::Aborted;
-                        speech.error = Some(error.to_string());
-                        break;
+        // The committed answer already played while the agent wrapped up.
+        if let Some(done) = early.delivered.take() {
+            speech_trace_start_ms = think_trace_ms.saturating_add(early.delivered_after_ms);
+            speech = done;
+        } else {
+            loop {
+                let tts = std::mem::replace(&mut rt.tts, lost_tts());
+                let barge_on = rt.barge_in;
+                let mut watch = if barge_on {
+                    Some(BargeWatch::new(&rt.mic, &mut rt.wake))
+                } else {
+                    None
+                };
+                speech = stream_reply(
+                    tts,
+                    speech::SpeechUnits::Fixed(units),
+                    gap_samples,
+                    turn,
+                    already_audible,
+                    &mut rt.audio,
+                    &mut rt.output_events,
+                    &cmd_rx,
+                    &mut running,
+                    &mut rt.picture,
+                    &rt.mic,
+                    watch.as_mut(),
+                );
+                rt.tts = speech.tts;
+                if speech.wait != PlaybackWait::BargedIn {
+                    break;
+                }
+                turn_trace.mark("barge_in_pause", None);
+                tracing::info!(
+                    %turn,
+                    leftover = speech.remaining_units.len(),
+                    "speech paused for barge-in"
+                );
+                match listen_after_barge(&mut rt, &cmd_rx, &mut running, will_await) {
+                    Ok(BargeDecision::Resume) => {
+                        tracing::info!(%turn, "barge-in resume — leftover speech");
+                        turn_trace.mark("barge_in_resume", None);
+                        if let Err(error) = rt.audio.resume() {
+                            tracing::warn!(%turn, error = %error, "resume leftover speech failed");
+                            rt.audio.stop();
+                            speech.wait = PlaybackWait::Aborted;
+                            speech.error = Some(error.to_string());
+                            break;
+                        }
+                        units = speech.remaining_units;
+                        already_audible = speech.played || already_audible;
+                        rt.picture.set_phase(Phase::Talking);
+                        continue;
                     }
-                    units = speech.remaining_units;
-                    already_audible = speech.played || already_audible;
-                    rt.picture.set_phase(Phase::Talking);
-                    continue;
-                }
-                Ok(BargeDecision::StopTalking) => {
-                    tracing::info!(%turn, "barge-in stop — discarding leftover");
-                    turn_trace.mark("barge_in_stop", None);
-                    rt.audio.stop();
-                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
-                    follow_up_depth = 0;
-                    await_reply = false;
-                    rt.picture.clear_activity();
-                    rt.picture.set_phase(Phase::Armed);
-                    barge_terminal = true;
-                    break;
-                }
-                Ok(BargeDecision::TakeTurn(text)) => {
-                    tracing::info!(%turn, %text, "barge-in new turn — discarding leftover");
-                    turn_trace.mark("barge_in_take_turn", None);
-                    rt.audio.stop();
-                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
-                    // `heard` still holds this turn's original utterance:
-                    // speech never overwrites it. Carry it so the next turn's
-                    // replacement quotes the real request, not nothing.
-                    let interrupted_text = rt.picture.heard.clone();
-                    pending_barge_turn = Some(PendingBargeTurn {
-                        user_text: text,
-                        interrupted_text,
-                    });
-                    follow_up_depth = 0;
-                    await_reply = false;
-                    rt.picture.clear_activity();
-                    speech.wait = PlaybackWait::Aborted;
-                    break;
-                }
-                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
-                    follow_up_depth = 0;
-                    await_reply = false;
-                }) {
-                    LoopReact::Continue => {
+                    Ok(BargeDecision::StopTalking) => {
+                        tracing::info!(%turn, "barge-in stop — discarding leftover");
+                        turn_trace.mark("barge_in_stop", None);
                         rt.audio.stop();
                         maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                        follow_up_depth = 0;
+                        await_reply = false;
+                        rt.picture.clear_activity();
+                        rt.picture.set_phase(Phase::Armed);
+                        barge_terminal = true;
+                        break;
+                    }
+                    Ok(BargeDecision::TakeTurn(text)) => {
+                        tracing::info!(%turn, %text, "barge-in new turn — discarding leftover");
+                        turn_trace.mark("barge_in_take_turn", None);
+                        rt.audio.stop();
+                        maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                        // `heard` still holds this turn's original utterance:
+                        // speech never overwrites it. Carry it so the next turn's
+                        // replacement quotes the real request, not nothing.
+                        let interrupted_text = rt.picture.heard.clone();
+                        pending_barge_turn = Some(PendingBargeTurn {
+                            user_text: text,
+                            interrupted_text,
+                        });
+                        follow_up_depth = 0;
+                        await_reply = false;
+                        rt.picture.clear_activity();
                         speech.wait = PlaybackWait::Aborted;
                         break;
                     }
-                    LoopReact::Exit => return Ok(()),
-                },
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                        await_reply = false;
+                    }) {
+                        LoopReact::Continue => {
+                            rt.audio.stop();
+                            maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                            speech.wait = PlaybackWait::Aborted;
+                            break;
+                        }
+                        LoopReact::Exit => return Ok(()),
+                    },
+                }
             }
         }
         maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);

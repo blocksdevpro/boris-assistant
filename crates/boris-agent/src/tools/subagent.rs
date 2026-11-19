@@ -284,6 +284,7 @@ impl Tool for SpawnSubagentTool {
             debug: None,
             // Bounded by the parent's tool timeout and its own round cap.
             time_budget: None,
+            stream_speech: false,
         };
         let emit = child_progress_emit(ctx);
         let cancel = ctx

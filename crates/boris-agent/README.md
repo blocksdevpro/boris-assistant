@@ -302,6 +302,23 @@ interrupted, waiting, or reported complete), open todos, and the last
 `[Host note: …]` if the previous turn was interrupted. Routing uses the same
 classifier.
 
+## Streamed speech
+
+`Agent::set_stream_speech(true)` (off by default; the desktop pipeline turns it
+on) feeds each response's content deltas into a `SpeechSegmenter`
+(`speech_stream.rs`) and emits `AgentEvent::Speech { signal }`:
+`Chunk(text)` (one sanitized sentence), `Cancel` (drop this response's queued
+or playing speech), and `Commit` (the chunks so far are the whole accepted
+answer). Content sent with tool calls is an on-screen note and is never
+committed. Because tool-call deltas can arrive after content, the first
+sentence is held until the stream has run `DEFAULT_RELEASE_GRACE` (900 ms) past
+a sentence boundary with no tool call, or until the response ends; a tool call
+after release sends `Cancel`. Text that may be `[silent]`, tool markup, JSON,
+or code is never released early. On acceptance the loop calls `finish`, which
+sends the unspoken rest plus `Commit`, or `Cancel` if the accepted reply no
+longer starts with what was streamed (the host then speaks the reply itself).
+Rejected rounds (markup re-prompt, todo gate) cancel at the next request.
+
 ## Staying silent
 
 A model reply of exactly `[silent]` (`SILENCE_TOKEN`) becomes

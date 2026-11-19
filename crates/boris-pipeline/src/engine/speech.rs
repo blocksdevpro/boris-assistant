@@ -16,6 +16,7 @@ use boris_core::{ArcAudioBuffer, AudioBuffer, TurnId};
 use crate::status::{EngineState, Phase};
 
 use super::barge::{drain_mic, BargeWatch};
+use super::early_speech::SpeechFeed;
 use super::models::{lost_tts, TtsBox};
 use super::picture::Picture;
 use super::playback::{drain_output_events, poll_running, PlaybackWait};
@@ -67,6 +68,22 @@ pub(super) struct StreamedSpeech {
     pub queued_samples: usize,
     /// Units not yet appended when playback was paused for barge-in.
     pub remaining_units: Vec<String>,
+    /// A feed job stopped because the agent cancelled its speech (a late
+    /// tool call, or the turn ended without committing the answer).
+    pub feed_cancelled: bool,
+}
+
+/// Where a speech job's sentences come from.
+pub(super) enum SpeechUnits<'f> {
+    /// The complete reply, known up front.
+    Fixed(Vec<String>),
+    /// Sentences streamed by the agent while it is still running. The job
+    /// ends once the feed is committed and drained, and is cancelled if the
+    /// feed cancels or the agent finishes without committing.
+    Feed {
+        feed: &'f mut SpeechFeed,
+        agent_done: &'f AtomicBool,
+    },
 }
 
 fn send_synth_event(
@@ -87,6 +104,16 @@ fn send_synth_event(
 }
 
 fn spawn_synth(tts: TtsBox, units: Vec<String>) -> SpawnedSynth {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for unit in units {
+        let _ = tx.send(unit);
+    }
+    drop(tx);
+    spawn_synth_from(tts, rx)
+}
+
+/// Synthesize units as they arrive until `units` disconnects.
+fn spawn_synth_from(tts: TtsBox, units: crossbeam_channel::Receiver<String>) -> SpawnedSynth {
     // Hand the model over only after spawn succeeds. If the OS rejects the
     // thread, the engine retains the original model instead of dropping it.
     let (model_tx, model_rx) = mpsc::sync_channel::<TtsBox>(1);
@@ -98,10 +125,19 @@ fn spawn_synth(tts: TtsBox, units: Vec<String>) -> SpawnedSynth {
         .name("boris-tts-stream".into())
         .spawn(move || {
             let mut tts = model_rx.recv().ok()?;
-            for (index, unit) in units.into_iter().enumerate() {
+            let mut index = 0usize;
+            loop {
                 if worker_cancel.load(Ordering::Acquire) {
                     break;
                 }
+                let unit = match units.recv_timeout(EVENT_POLL) {
+                    Ok(unit) => unit,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                };
+                let current = index;
+                index += 1;
+                let index = current;
                 match tts.synthesize(&unit) {
                     Ok(pcm) => {
                         if !send_synth_event(
@@ -190,7 +226,7 @@ fn wait_for_synth_exit<T>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn stream_reply(
     tts: TtsBox,
-    units: Vec<String>,
+    units: SpeechUnits<'_>,
     gap_samples: usize,
     turn: TurnId,
     already_audible: bool,
@@ -204,42 +240,56 @@ pub(super) fn stream_reply(
 ) -> StreamedSpeech {
     let started_at = Instant::now();
     let source_rate = audio.source_rate();
-    let all_units = units;
+    let (mut all_units, mut feed, agent_done) = match units {
+        SpeechUnits::Fixed(units) => (units, None, None),
+        SpeechUnits::Feed { feed, agent_done } => (Vec::new(), Some(feed), Some(agent_done)),
+    };
     if already_audible {
         picture.set_phase(Phase::Talking);
     }
+    // Feed jobs hand units to the worker as they arrive; dropping this
+    // sender after the commit lets the worker finish.
+    let mut unit_tx: Option<crossbeam_channel::Sender<String>> = None;
+    let mut feed_cancelled = false;
 
-    let (join, cancel, synth_events, mut synthesis_done, mut held_tts) = if all_units.is_empty() {
-        if !already_audible {
-            return StreamedSpeech {
-                tts,
-                wait: PlaybackWait::Aborted,
-                error: Some("TTS produced no playable audio".into()),
-                played: already_audible,
-                tts_first_ms: 0,
-                audio_started_ms: None,
-                audio_drained_ms: None,
-                tts_ms: started_at.elapsed().as_millis() as u64,
-                play_ms: 0,
-                speech_ms: started_at.elapsed().as_millis() as u64,
-                queued_samples: 0,
-                remaining_units: Vec::new(),
-            };
-        }
-        // Resume after barge-in with only leftover PCM — no more sentences.
-        (None, None, None, true, Some(tts))
-    } else {
-        match spawn_synth(tts, all_units.clone()) {
-            SpawnedSynth::Running {
-                join,
-                cancel,
-                events,
-            } => (Some(join), Some(cancel), Some(events), false, None),
-            SpawnedSynth::Failed { tts, message } => {
+    let (join, cancel, synth_events, mut synthesis_done, mut held_tts) =
+        if let Some(feed) = feed.as_deref_mut() {
+            // A cancel from before this job concerned speech that never started.
+            feed.take_cancelled();
+            let (tx, rx) = crossbeam_channel::unbounded();
+            match spawn_synth_from(tts, rx) {
+                SpawnedSynth::Running {
+                    join,
+                    cancel,
+                    events,
+                } => {
+                    unit_tx = Some(tx);
+                    (Some(join), Some(cancel), Some(events), false, None)
+                }
+                SpawnedSynth::Failed { tts, message } => {
+                    return StreamedSpeech {
+                        tts,
+                        wait: PlaybackWait::Aborted,
+                        error: Some(message),
+                        played: already_audible,
+                        tts_first_ms: 0,
+                        audio_started_ms: None,
+                        audio_drained_ms: None,
+                        tts_ms: started_at.elapsed().as_millis() as u64,
+                        play_ms: 0,
+                        speech_ms: started_at.elapsed().as_millis() as u64,
+                        queued_samples: 0,
+                        remaining_units: Vec::new(),
+                        feed_cancelled: false,
+                    };
+                }
+            }
+        } else if all_units.is_empty() {
+            if !already_audible {
                 return StreamedSpeech {
                     tts,
                     wait: PlaybackWait::Aborted,
-                    error: Some(message),
+                    error: Some("TTS produced no playable audio".into()),
                     played: already_audible,
                     tts_first_ms: 0,
                     audio_started_ms: None,
@@ -248,11 +298,38 @@ pub(super) fn stream_reply(
                     play_ms: 0,
                     speech_ms: started_at.elapsed().as_millis() as u64,
                     queued_samples: 0,
-                    remaining_units: all_units,
+                    remaining_units: Vec::new(),
+                    feed_cancelled: false,
                 };
             }
-        }
-    };
+            // Resume after barge-in with only leftover PCM — no more sentences.
+            (None, None, None, true, Some(tts))
+        } else {
+            match spawn_synth(tts, all_units.clone()) {
+                SpawnedSynth::Running {
+                    join,
+                    cancel,
+                    events,
+                } => (Some(join), Some(cancel), Some(events), false, None),
+                SpawnedSynth::Failed { tts, message } => {
+                    return StreamedSpeech {
+                        tts,
+                        wait: PlaybackWait::Aborted,
+                        error: Some(message),
+                        played: already_audible,
+                        tts_first_ms: 0,
+                        audio_started_ms: None,
+                        audio_drained_ms: None,
+                        tts_ms: started_at.elapsed().as_millis() as u64,
+                        play_ms: 0,
+                        speech_ms: started_at.elapsed().as_millis() as u64,
+                        queued_samples: 0,
+                        remaining_units: all_units,
+                        feed_cancelled: false,
+                    };
+                }
+            }
+        };
 
     if !already_audible {
         // Pre-play drain: a dead event channel here means `play` below fails
@@ -339,6 +416,37 @@ pub(super) fn stream_reply(
                     wait = PlaybackWait::Aborted;
                     break;
                 }
+            }
+        }
+
+        if let Some(feed) = feed.as_deref_mut() {
+            // Read `agent_done` before draining: the agent emits its last
+            // signals before it finishes, so this drain sees all of them.
+            let agent_finished = agent_done.is_some_and(|done| done.load(Ordering::Acquire));
+            if feed.drain() {
+                picture.said = Some(feed.said().to_string());
+                picture.publish();
+            }
+            if feed.take_cancelled() || (agent_finished && !feed.committed()) {
+                tracing::info!(%turn, queued_units, "streamed speech cancelled by the agent");
+                if let Some(cancel) = cancel.as_ref() {
+                    cancel.store(true, Ordering::Release);
+                }
+                audio.stop();
+                feed_cancelled = true;
+                wait = PlaybackWait::Aborted;
+                break;
+            }
+            if let Some(tx) = unit_tx.as_ref() {
+                while let Some(unit) = feed.next_unit() {
+                    all_units.push(unit.clone());
+                    if tx.send(unit).is_err() {
+                        break;
+                    }
+                }
+            }
+            if feed.committed() && !feed.has_units() {
+                unit_tx = None;
             }
         }
 
@@ -583,11 +691,16 @@ pub(super) fn stream_reply(
         held_tts.take().unwrap_or_else(lost_tts)
     };
 
-    let remaining_units = if wait == PlaybackWait::BargedIn {
+    drop(unit_tx);
+    let mut remaining_units = if wait == PlaybackWait::BargedIn {
         all_units.into_iter().skip(queued_units).collect()
     } else {
         Vec::new()
     };
+    if let Some(feed) = feed {
+        // Feed leftovers go back to the feed, ahead of anything newer.
+        feed.requeue(std::mem::take(&mut remaining_units));
+    }
 
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     StreamedSpeech {
@@ -609,6 +722,7 @@ pub(super) fn stream_reply(
         speech_ms: elapsed_ms,
         queued_samples,
         remaining_units,
+        feed_cancelled,
     }
 }
 
@@ -668,6 +782,33 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(join.is_finished(), "cancelled producer must wind down");
+        assert!(join.join().unwrap().is_some(), "model must be returned");
+    }
+
+    #[test]
+    fn feed_worker_synthesizes_units_as_they_arrive_and_ends_on_disconnect() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let SpawnedSynth::Running { join, events, .. } = spawn_synth_from(Box::new(FakeTts), rx)
+        else {
+            panic!("test worker must spawn");
+        };
+        // Nothing queued yet: the worker waits instead of finishing.
+        assert!(events.recv_timeout(Duration::from_millis(60)).is_err());
+        tx.send("first".to_string()).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(SynthEvent::Unit { index: 0, .. })
+        ));
+        tx.send("second".to_string()).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(SynthEvent::Unit { index: 1, .. })
+        ));
+        drop(tx);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(SynthEvent::Done)
+        ));
         assert!(join.join().unwrap().is_some(), "model must be returned");
     }
 

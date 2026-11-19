@@ -60,6 +60,9 @@ pub struct AgentLoopConfig {
     pub debug: Option<std::sync::Arc<crate::debug::DebugCapture>>,
     /// Wall-clock budget for this loop invocation (`None` = rounds only).
     pub time_budget: Option<std::time::Duration>,
+    /// Stream the final answer's sentences as [`AgentEvent::Speech`] while it
+    /// generates (voice hosts). Off by default.
+    pub stream_speech: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -73,6 +76,7 @@ impl Default for AgentLoopConfig {
             task: None,
             debug: None,
             time_budget: Some(DEFAULT_TURN_TIME_BUDGET),
+            stream_speech: false,
         }
     }
 }
@@ -261,6 +265,11 @@ pub enum AgentEvent {
     /// Live model reasoning preview (throttled; not spoken, not stored in context).
     Reasoning {
         preview: String,
+    },
+    /// Streamed speech for the final answer (see [`crate::speech_stream`]).
+    /// Content alongside tool calls is never sent; a late tool call cancels.
+    Speech {
+        signal: crate::speech_stream::SpeechSignal,
     },
     NeedsConfirmation {
         pending: PendingToolCall,

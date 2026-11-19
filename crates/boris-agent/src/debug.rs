@@ -266,6 +266,7 @@ impl DebugCapture {
                 json!({ "call_id": call_id, "tool_name": tool_name, "ok": ok, "duration_ms": duration_ms }),
             ),
             AgentEvent::ToolProgress { .. } | AgentEvent::Reasoning { .. } => return,
+            AgentEvent::Speech { signal } => ("speech", json!({ "signal": format!("{signal:?}") })),
             AgentEvent::NeedsConfirmation { pending } => {
                 ("confirmation", json!({ "tool": pending.name }))
             }

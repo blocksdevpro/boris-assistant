@@ -117,10 +117,17 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 
 Two helpers sit beside the engine thread without breaking the single-pipeline rule: `engine/device_watch` (owned by the engine loop) polls `AudioHealth` once a second and recovers from unplug/re-plug by sending the ordinary `SwitchInput`/`SwitchOutput` commands; `EngineHandle::send` records host switches as the user's pick. `RunSelfCheck` runs the on-device voice-chain check on the engine thread only while idle or Armed — mid-turn hear helpers drop it, and it must never cancel a turn or a pending confirmation.
 
-TTS loading overlaps agent work. Reply synthesis begins only after final-answer
-acceptance and speech sanitization; later sentence synthesis overlaps playback.
-The agent loop does not forward `ContentDelta` events to TTS. Speculative
-first-unit synthesis remains unimplemented.
+TTS loading overlaps agent work. The final answer streams into TTS sentence by
+sentence while it generates: the agent's `SpeechSegmenter` (`speech_stream.rs`)
+turns `ContentDelta`s into sanitized `AgentEvent::Speech` chunks, holding the
+first sentence until the stream has gone 900 ms past a sentence boundary with
+no tool call (or the response ends); a tool call that starts later sends
+`Cancel`, and acceptance sends the rest plus `Commit`. Content beside tool
+calls is never committed, and `[silent]`/markup/code is never streamed early.
+The engine plays chunks from a channel inside `run_thinking` (feed-mode
+`stream_reply`, same Talking barge watch); a committed, fully played answer
+skips the normal speech path. Confirm/input resumes do not stream (their reply
+is spoken after acceptance). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
 
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 
@@ -162,6 +169,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
+| `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |

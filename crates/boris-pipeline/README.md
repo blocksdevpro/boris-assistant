@@ -31,10 +31,20 @@ not a Session FSM.
 
 Wake scoring, VAD capture, and STT run inline on the engine thread. The agent
 turn runs on a scoped thread during Thinking so the engine can still service
-Stop and barge-in. TTS loading overlaps agent work, but reply synthesis starts
-only after the complete final answer is accepted and tool markup is removed.
-Streamed model content does not start synthesis or playback. Speculative
-first-unit synthesis during answer generation is not implemented.
+Stop and barge-in. TTS loading overlaps agent work (`TtsSlot`, polled without
+blocking), and the final answer streams into TTS while it generates: the agent
+emits sanitized sentence chunks (`AgentEvent::Speech`), the event subscriber
+forwards them into a channel, and `run_thinking` plays them through a
+feed-mode `stream_reply` once the model is loaded. The first sentence is held
+until no tool call has started for 900 ms past a boundary; a late tool call
+cancels that response's speech (playback stops, Thinking resumes), and
+acceptance commits the rest. A committed answer that played to the end skips
+the normal speech path; anything else (cancelled, device loss, barge-in that
+discards) falls back to speaking the accepted reply. Early speech uses the
+Talking barge watch, so a barge-in pauses it at once, and the mic tail is
+drained before Thinking's wake watch resumes. Only the first Thinking pass of a
+turn streams; confirm and typed-input resumes speak after acceptance.
+`BORIS_STREAM_SPEECH=0` turns streaming off.
 
 Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
 helper thread fed by one turn-scoped producer;
@@ -311,6 +321,7 @@ still match the catalog hash.
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
+| `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
 | `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |

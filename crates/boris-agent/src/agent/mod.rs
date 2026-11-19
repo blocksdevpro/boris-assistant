@@ -105,6 +105,7 @@ pub struct Agent {
     session_id: Option<String>,
     turn_id: Option<String>,
     max_tool_rounds: u32,
+    stream_speech: bool,
     /// Event bus: `(listener_id, callback)` — unsubscribe removes by id.
     listeners: Arc<Mutex<Vec<(u64, EventListener)>>>,
     next_listener_id: AtomicU64,
@@ -343,6 +344,7 @@ impl Agent {
             session_id: opts.session_id,
             turn_id: None,
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
+            stream_speech: false,
             listeners: Arc::new(Mutex::new(Vec::new())),
             next_listener_id: AtomicU64::new(1),
             debug: None,
@@ -731,6 +733,12 @@ impl Agent {
 
     pub fn set_max_tool_rounds(&mut self, n: u32) {
         self.max_tool_rounds = n;
+    }
+
+    /// Emit [`crate::AgentEvent::Speech`] for the final answer while it
+    /// generates, so a voice host can start speaking early. Off by default.
+    pub fn set_stream_speech(&mut self, on: bool) {
+        self.stream_speech = on;
     }
 
     /// True when a confirmation is outstanding (host must resume or abort).

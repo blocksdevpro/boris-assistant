@@ -60,6 +60,10 @@ pub(super) async fn complete_round(
     cancel: &Option<CancellationToken>,
     accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
+    // Images tools attached since the last request follow the resolved batch.
+    for image in state.runtime.take_images() {
+        state.context.push_tool_image(&image);
+    }
     // The listing stays identical for the whole turn (and session) so the
     // provider prompt-cache prefix stays warm. Tools that become unusable
     // mid-turn (e.g. `present_artifact` after its delivery budget is spent)
@@ -272,6 +276,18 @@ pub(super) async fn complete_round(
         });
     }
     Ok(msg)
+}
+
+/// Provider refused image input (model without vision, or a route that
+/// cannot take images). The loop then retries once with images omitted.
+pub(super) fn is_image_rejection(error: &AgentError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("image")
+        && (text.contains("support")
+            || text.contains("modalit")
+            || text.contains("vision")
+            || text.contains("invalid content")
+            || text.contains("not allowed"))
 }
 
 /// Non-empty tool_calls array when tools are allowed this round.

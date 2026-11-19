@@ -151,6 +151,7 @@ impl DebugCapture {
                     MessageOrigin::TaskState => "task state",
                     MessageOrigin::RetrievedMemory => "retrieved memory",
                     MessageOrigin::DerivedContext => "derived context",
+                    MessageOrigin::ToolImage => "tool images",
                 };
                 let wire = message.dump();
                 let message_tokens = estimate_serialized_tokens(&wire.to_string());

@@ -188,9 +188,25 @@ file at 256K characters and removes files older than seven days on a best-effort
 basis.
 
 File tools offer close sibling-name suggestions when a path is not found. They
-do not choose a suggested path automatically. `file_read` recognizes common
-image and PDF formats, but it does not inspect image pixels or extract PDF
-text; the host can open the file on screen. `web_fetch` retries a likely
+do not choose a suggested path automatically. `file_read` attaches PNG (decoded
+and downscaled to 1568 px), JPEG, GIF, and WebP images (passed through up to
+~3.7 MB) so the model can see them; BMP and PDF get a text envelope (no PDF text
+extraction), and the host can open the file on screen.
+
+## Images and screen capture
+
+`screen_capture` (Windows, GDI) captures the primary monitor or the active
+window, downscales to 1568 px on the long side, and is privacy-gated: it is
+`Dangerous` with `requires_confirmation`, so every capture needs the user's
+yes, and `VoiceSafe` does not register it. Tools attach images through
+`ToolCallContext::attach_image`; the runtime queues them and the loop delivers
+them before the next request as a user-role message (text label plus an
+`image_url` data-URL part), because tool messages are text-only on many
+providers. The tool result says the image follows. Images are ephemeral
+(`MessageOrigin::ToolImage`): never persisted, replaced by `[image omitted]`
+text at the next human turn, skipped by compaction digests, and counted at a
+fixed ~1,600 tokens each instead of their base64 length. If the provider
+rejects image input, the loop omits the images and retries the round once. `web_fetch` retries a likely
 Cloudflare or bot-protection response once.
 
 Optional `list_dir` / `glob` / `grep` roots accept omission, null, or blank as

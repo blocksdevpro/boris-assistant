@@ -25,6 +25,10 @@ pub enum MessageOrigin {
     TaskState,
     /// Search result injected proactively from durable memory.
     RetrievedMemory,
+    /// Image a tool attached (screen capture, image file), delivered as a
+    /// user-role message after the tool batch. Ephemeral: never persisted and
+    /// replaced by `[image omitted]` text at the next human turn.
+    ToolImage,
     /// Merged host-derived reference block (personal + skills + memory + task).
     ///
     /// Single `Role::User` message inserted after the system prompt. Wire role

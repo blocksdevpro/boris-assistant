@@ -100,7 +100,16 @@ impl Context {
 
     /// Conservative token estimate over the actual serialized wire messages.
     pub fn estimate_tokens(&self) -> usize {
-        estimate_serialized_tokens(&self.as_json_for_estimate().to_string())
+        self.message_tokens_estimate()
+    }
+
+    /// Message tokens with images counted at a fixed cost each (their
+    /// base64 data URLs are not text the model reads).
+    fn message_tokens_estimate(&self) -> usize {
+        let mut json = self.as_json_for_estimate();
+        let images = super::images::redact_image_data(&mut json);
+        estimate_serialized_tokens(&json.to_string())
+            .saturating_add(images.saturating_mul(super::IMAGE_TOKEN_ESTIMATE))
     }
 
     /// Wire messages with opaque encrypted reasoning payloads blanked.
@@ -137,7 +146,7 @@ impl Context {
     }
 
     pub fn estimate_request_tokens(&self, tools: &Value) -> usize {
-        let messages = estimate_serialized_tokens(&self.as_json_for_estimate().to_string());
+        let messages = self.message_tokens_estimate();
         let tools = (!tools.is_null())
             .then(|| estimate_serialized_tokens(&tools.to_string()))
             .unwrap_or_default();
@@ -360,7 +369,8 @@ impl Context {
             let chunk_end = turn_starts[turn_index + 1];
             let mut chunk = String::new();
             for message in &self.messages[chunk_start..chunk_end] {
-                if matches!(message.role, Role::System) {
+                if matches!(message.role, Role::System) || message.origin == MessageOrigin::ToolImage
+                {
                     continue;
                 }
                 // Reasoning blocks are provider-private and never summarized.

@@ -5,11 +5,31 @@
 //! logs — without closing over host state in the tool constructor.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::{NullProgressSink, ProgressEvent, ProgressSink};
+
+/// An image a tool hands to the model.
+///
+/// Chat-completions tool messages are text-only on many providers, so the
+/// loop delivers attachments as a following user-role message with an
+/// `image_url` data-URL part. They are ephemeral: replaced by
+/// `[image omitted]` at the next human turn and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub call_id: String,
+    pub tool_name: String,
+    /// MIME type, e.g. `image/png`.
+    pub mime: String,
+    pub data_base64: String,
+    /// Short provenance line shown next to the image.
+    pub caption: String,
+}
+
+/// Shared queue of attachments produced during a turn (owned by the runtime).
+pub type ImageInbox = Arc<Mutex<Vec<ImageAttachment>>>;
 
 /// Context stamped onto every tool invocation by the runtime / loop.
 #[derive(Clone, Default)]
@@ -31,6 +51,8 @@ pub struct ToolCallContext {
     pub cancel: Option<CancellationToken>,
     /// Optional host progress sink (rate-limited UI events).
     progress: Option<Arc<dyn ProgressSink>>,
+    /// Image delivery to the model (set by the runtime; absent in bare tests).
+    images: Option<ImageInbox>,
 }
 
 impl std::fmt::Debug for ToolCallContext {
@@ -73,6 +95,41 @@ impl ToolCallContext {
     pub fn with_progress(mut self, progress: Option<Arc<dyn ProgressSink>>) -> Self {
         self.progress = progress;
         self
+    }
+
+    pub fn with_images(mut self, images: Option<ImageInbox>) -> Self {
+        self.images = images;
+        self
+    }
+
+    /// True when this host can deliver images to the model.
+    pub fn can_attach_images(&self) -> bool {
+        self.images.is_some()
+    }
+
+    /// Queue an image for the model. Returns `false` when the host has no
+    /// image delivery (the tool should then answer with text only).
+    pub fn attach_image(
+        &self,
+        tool_name: &str,
+        mime: &str,
+        data_base64: String,
+        caption: impl Into<String>,
+    ) -> bool {
+        let Some(images) = &self.images else {
+            return false;
+        };
+        let Ok(mut queue) = images.lock() else {
+            return false;
+        };
+        queue.push(ImageAttachment {
+            call_id: self.call_id.clone(),
+            tool_name: tool_name.to_string(),
+            mime: mime.to_string(),
+            data_base64,
+            caption: caption.into(),
+        });
+        true
     }
 
     /// True when the host has requested cancellation.

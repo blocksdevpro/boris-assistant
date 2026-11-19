@@ -7,7 +7,7 @@
 //! | [`time`] | get_time, get_date |
 //! | [`notes`] | remember / recall notes |
 //! | [`profile`] | user profile / facts |
-//! | [`system`] / [`open_tool`] / [`clipboard`] / [`todo`] / [`artifacts`] | OS + session cards |
+//! | [`system`] / [`open_tool`] / [`clipboard`] / [`screen`] / [`todo`] / [`artifacts`] | OS + session cards |
 //! | [`files`] / [`glob`] / [`grep`] | filesystem |
 //! | [`web`] | web_search, web_fetch |
 //! | [`bash`] | shell |
@@ -33,6 +33,7 @@ pub mod open_tool;
 pub mod parallel;
 pub mod path_pattern;
 pub mod profile;
+pub mod screen;
 pub mod skills_tools;
 pub mod subagent;
 pub mod system;
@@ -144,7 +145,7 @@ pub fn output_tools_at(dir: &Path) -> Vec<Box<dyn Tool>> {
     tool_output::output_tools_at(dir)
 }
 
-/// OS surface: system info, open, clipboard (power-tool wave).
+/// OS surface: system info, open, clipboard, screen capture (power-tool wave).
 pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(system::GetSystemInfoTool::new(
@@ -154,6 +155,7 @@ pub fn os_tools(paths: &BuiltinToolPaths) -> Vec<Box<dyn Tool>> {
         Box::new(open_tool::OpenPathTool::new(paths.read_roots_flat())),
         Box::new(clipboard::ClipboardGetTool),
         Box::new(clipboard::ClipboardSetTool),
+        Box::new(screen::ScreenCaptureTool),
     ]
 }
 

@@ -47,6 +47,9 @@ pub struct ToolRuntime {
     output_store_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     gate: super::ConcurrencyGate,
     artifact_failures_this_turn: AtomicU64,
+    /// Images attached by tools this turn, drained by the loop before the
+    /// next model request.
+    images: crate::tool_context::ImageInbox,
 }
 
 impl ToolRuntime {
@@ -63,7 +66,16 @@ impl ToolRuntime {
             output_store_dir: std::sync::Mutex::new(None),
             gate: super::ConcurrencyGate::new(16),
             artifact_failures_this_turn: AtomicU64::new(0),
+            images: Default::default(),
         }
+    }
+
+    /// Take every image tools attached since the last call (loop-only).
+    pub fn take_images(&self) -> Vec<crate::tool_context::ImageAttachment> {
+        self.images
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
     }
 
     /// Default in-memory policy + null audit (tests / early init).
@@ -97,6 +109,10 @@ impl ToolRuntime {
         self.shell_granted_this_turn.store(false, Ordering::Relaxed);
         self.shell_grant_turn.store(0, Ordering::Relaxed);
         self.artifact_failures_this_turn.store(0, Ordering::Relaxed);
+        // Undelivered images from an aborted turn never leak into the next.
+        if let Ok(mut images) = self.images.lock() {
+            images.clear();
+        }
     }
 
     /// Stop presentation repair after the initial failure and one corrected retry.
@@ -452,7 +468,9 @@ impl ToolRuntime {
         } else {
             "allow"
         };
-        let ctx = inv.call_context();
+        let ctx = inv
+            .call_context()
+            .with_images(Some(std::sync::Arc::clone(&self.images)));
         let _permits = self
             .gate
             .acquire(tool.name(), meta.effective_max_concurrency())
@@ -705,6 +723,13 @@ fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
                 }
                 return format!("Edit {base}?");
             }
+        }
+        "screen_capture" => {
+            return if short_arg("target").as_deref() == Some("window") {
+                "Take a screenshot of the active window?".into()
+            } else {
+                "Take a screenshot of your screen?".into()
+            };
         }
         "file_write" => {
             if let Some(path) = short_arg("path") {

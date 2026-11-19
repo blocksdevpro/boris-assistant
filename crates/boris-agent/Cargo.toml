@@ -28,6 +28,13 @@ open        = "5"
 arboard     = "3"
 htmd        = "0.1"
 rusqlite    = { version = "0.32", features = ["bundled"] }
+# Already in the tree via arboard (png only); used to downscale/encode images.
+image       = { version = "0.25", default-features = false, features = ["png"] }
+base64      = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+# GDI screen capture for screen_capture (bindings only; already in the tree).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util", "fs"] }

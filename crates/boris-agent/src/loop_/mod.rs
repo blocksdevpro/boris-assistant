@@ -17,6 +17,8 @@
 
 #[cfg(test)]
 mod batch_tests;
+#[cfg(test)]
+mod image_tests;
 mod finish;
 mod helpers;
 mod message_parse;
@@ -47,8 +49,8 @@ use message_parse::{
     extract_reply_text, extract_tool_note, normalize_tool_calls, parse_raw_tool_calls,
 };
 use round::{
-    cancelled, complete_round, ensure_spoken_reply_at_cap, should_reenter_finish_gate,
-    tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
+    cancelled, complete_round, ensure_spoken_reply_at_cap, is_image_rejection,
+    should_reenter_finish_gate, tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
 };
 use tool_batch::{process_tool_calls, ToolBatchResult};
 
@@ -177,7 +179,7 @@ pub async fn agent_loop_with_budget(
 
         // On the final allowed round, withhold tools so the model must speak.
         let at_cap = round >= max_rounds;
-        let response = complete_round(
+        let response = match complete_round(
             &mut state,
             user_text,
             config,
@@ -186,7 +188,27 @@ pub async fn agent_loop_with_budget(
             &cancel,
             &mut token_accounting,
         )
-        .await?;
+        .await
+        {
+            // A model or route without image input: keep going text-only.
+            Err(error) if is_image_rejection(&error) && state.context.has_tool_images() => {
+                tracing::warn!(%error, "model rejected image input; retrying without images");
+                state
+                    .context
+                    .omit_tool_images("this model does not accept images");
+                complete_round(
+                    &mut state,
+                    user_text,
+                    config,
+                    at_cap,
+                    &emit,
+                    &cancel,
+                    &mut token_accounting,
+                )
+                .await?
+            }
+            other => other?,
+        };
 
         // Normalize only actual runnable API calls, never content or calls at cap.
         let response = if tool_calls_if_runnable(&response, at_cap).is_some() {

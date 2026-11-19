@@ -22,6 +22,7 @@
 //! - Prefer pure helpers in submodules with unit tests over growing `Context` methods.
 
 mod compact;
+mod images;
 mod interrupt;
 mod message;
 #[cfg(test)]
@@ -35,6 +36,7 @@ use serde_json::{json, Value};
 
 pub(crate) use compact::estimate_serialized_tokens;
 pub use compact::ContextBudget;
+pub(crate) use images::IMAGE_TOKEN_ESTIMATE;
 pub(crate) use interrupt::TurnEnd;
 pub use message::{Message, MessageOrigin};
 pub(crate) use message::REASONING_DETAILS_KEY;
@@ -95,7 +97,7 @@ impl Context {
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
         let message = Message::new(role, content);
         if message.origin.is_human() {
-            self.strip_reasoning_details();
+            self.drop_turn_scoped_payloads();
         }
         if message.origin.is_history_event() {
             self.history.push(message.clone());
@@ -124,7 +126,7 @@ impl Context {
         control: impl Into<Value>,
         human: impl Into<Value>,
     ) {
-        self.strip_reasoning_details();
+        self.drop_turn_scoped_payloads();
         let human = Message::new(Role::User, human);
         self.history.push(human.clone());
         self.messages.push(human);
@@ -142,15 +144,17 @@ impl Context {
         }
     }
 
-    /// Drop raw reasoning blocks from every stored assistant message.
+    /// Drop payloads scoped to one human turn: raw reasoning blocks on
+    /// assistant messages and tool images (replaced by `[image omitted]`).
     ///
-    /// Reasoning is preserved only across the tool rounds of the current
-    /// human turn; a new human turn (or a reload) ends that scope and frees
-    /// the potentially large encrypted blobs.
-    fn strip_reasoning_details(&mut self) {
+    /// Both are preserved only across the tool rounds of the current human
+    /// turn; a new human turn (or a reload) ends that scope and frees the
+    /// potentially large blobs.
+    fn drop_turn_scoped_payloads(&mut self) {
         for message in self.messages.iter_mut().chain(self.history.iter_mut()) {
             message.strip_reasoning_details();
         }
+        self.omit_tool_images("shown in an earlier turn");
     }
 
     /// Remove one exact ephemeral host instruction from the model view.
@@ -399,7 +403,7 @@ impl Context {
                 self.messages.push(msg.clone());
             }
         }
-        self.strip_reasoning_details();
+        self.drop_turn_scoped_payloads();
         self.task_state.rebuild_from_history(&self.history);
         self.retrieved_memory.clear();
         self.personal_context = None;

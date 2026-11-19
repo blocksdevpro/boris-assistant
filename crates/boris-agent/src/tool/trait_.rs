@@ -110,6 +110,19 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Cheap state check that runs after schema validation and **before**
+    /// policy and HITL, so a call that `execute` would refuse anyway (e.g.
+    /// `file_edit` on a file not read this session) fails without asking the
+    /// user to approve it first. Default: `Ok`. Must not have side effects;
+    /// `execute` repeats any check it relies on.
+    fn precheck(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: &Value,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     /// Run the tool with the JSON args the LLM supplied.
     ///
     /// The returned string is sent back to the LLM as the tool result only —

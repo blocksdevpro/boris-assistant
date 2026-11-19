@@ -1,15 +1,20 @@
-//! `file_edit` — exact (or trim-end fuzzy) single-occurrence string replace.
+//! `file_edit` — exact (or trim-end fuzzy) string replace: one unique
+//! occurrence, or every occurrence with `replace_all`. Refuses files not read
+//! this session or changed since (see [`super::tracker`]).
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tool::{
-    require_object, require_string, truncate_tool_result, Permission, Tool, ToolError, ToolKind,
-    ToolMeta, ToolRisk,
+    optional_bool, require_object, require_string, truncate_tool_result, Permission, Tool,
+    ToolError, ToolKind, ToolMeta, ToolRisk,
 };
-use crate::tools::fs_common::resolve_under_roots;
 use crate::tools::fs_common::did_you_mean_suffix;
+use crate::tools::fs_common::resolve_under_roots;
 
+use super::tracker::FileReadTracker;
 use super::FsRoots;
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
@@ -20,6 +25,8 @@ pub(crate) struct AppliedEdit {
     pub new_content: String,
     /// Match strategy label (`exact` or `trim_end`).
     pub strategy: &'static str,
+    /// Occurrences replaced (1 unless `replace_all`).
+    pub replacements: usize,
     pub old_bytes: usize,
     pub new_bytes: usize,
     pub old_lines: usize,
@@ -47,7 +54,7 @@ impl EditError {
             )),
             EditError::Ambiguous { count } => ToolError::failed(format!(
                 "Found {count} occurrences of old_string; must be exactly 1. \
-                 Make old_string more specific."
+                 Make old_string more specific, or set replace_all: true to change every occurrence."
             )),
         }
     }
@@ -116,16 +123,18 @@ pub(crate) fn content_preview(content: &str, max_lines: usize) -> String {
         .join("\n")
 }
 
-/// Apply a single unique replacement in memory.
+/// Apply a replacement in memory.
 ///
 /// Strategy:
 /// 1. Exact match of `old_string` once → replace.
-/// 2. Zero exact matches → try trim-end fuzzy unique match.
-/// 3. Multiple exact matches → ambiguous error.
+/// 2. `replace_all` and several exact matches → replace every one.
+/// 3. Zero exact matches → try trim-end fuzzy unique match.
+/// 4. Several exact matches without `replace_all` → ambiguous error.
 pub(crate) fn apply_edit(
     content: &str,
     old_string: &str,
     new_string: &str,
+    replace_all: bool,
 ) -> Result<AppliedEdit, EditError> {
     if old_string.is_empty() {
         return Err(EditError::EmptyOldString);
@@ -135,6 +144,18 @@ pub(crate) fn apply_edit(
     }
 
     let count = content.matches(old_string).count();
+    if replace_all && count > 1 {
+        let new_content = content.replace(old_string, new_string);
+        return Ok(AppliedEdit {
+            new_bytes: new_content.len(),
+            new_content,
+            strategy: "exact",
+            replacements: count,
+            old_bytes: content.len(),
+            old_lines: old_string.lines().count() * count,
+            new_lines: new_string.lines().count() * count,
+        });
+    }
     let (matched, strategy) = if count == 1 {
         (old_string.to_string(), "exact")
     } else if count == 0 {
@@ -156,6 +177,7 @@ pub(crate) fn apply_edit(
     Ok(AppliedEdit {
         new_content,
         strategy,
+        replacements: 1,
         old_bytes,
         new_bytes,
         old_lines: old_string.lines().count(),
@@ -171,13 +193,14 @@ pub(crate) fn format_edit_result(
     old_bytes: usize,
     new_bytes: usize,
 ) -> String {
-    format_edit_result_full(path_display, strategy, old_bytes, new_bytes, 1, 1)
+    format_edit_result_full(path_display, strategy, 1, old_bytes, new_bytes, 1, 1)
 }
 
 /// Success observation with line deltas (speakable for voice confirm UX).
 pub(crate) fn format_edit_result_full(
     path_display: &str,
     strategy: &str,
+    replacements: usize,
     old_bytes: usize,
     new_bytes: usize,
     old_lines: usize,
@@ -189,23 +212,34 @@ pub(crate) fn format_edit_result_full(
     } else {
         (0, old_lines - new_lines)
     };
+    let noun = if replacements == 1 {
+        "occurrence"
+    } else {
+        "occurrences"
+    };
     format!(
-        "Replaced 1 occurrence in {path_display} (match={strategy}). \
+        "Replaced {replacements} {noun} in {path_display} (match={strategy}). \
          {old_bytes} → {new_bytes} bytes (+{added} -{removed} lines)"
     )
 }
 
 // ── Tool ─────────────────────────────────────────────────────────────────────
 
-/// Edit a file by replacing an exact (or trim-end fuzzy) unique string.
+/// Edit a file by replacing an exact (or trim-end fuzzy) string.
 #[derive(Debug, Clone)]
 pub struct EditFileTool {
     roots: FsRoots,
+    tracker: Arc<FileReadTracker>,
 }
 
 impl EditFileTool {
     pub fn new(roots: FsRoots) -> Self {
-        Self { roots }
+        Self::with_tracker(roots, FileReadTracker::global())
+    }
+
+    /// Check reads recorded in `tracker` (shared with `file_read`).
+    pub fn with_tracker(roots: FsRoots, tracker: Arc<FileReadTracker>) -> Self {
+        Self { roots, tracker }
     }
 }
 
@@ -217,8 +251,10 @@ impl Tool for EditFileTool {
 
     fn description(&self) -> &str {
         "Replace an exact string in a file (old_string → new_string). \
-         Prefer this over bash sed/awk. Read the file first. \
-         old_string must match exactly once (including whitespace). Requires confirmation."
+         Prefer this over bash sed/awk. Call file_read on the file first in this session: \
+         edits to unread files, or files changed on disk since your read, are refused. \
+         old_string must match exactly once (including whitespace) unless replace_all is true. \
+         Requires confirmation."
     }
 
     fn parameters(&self) -> Value {
@@ -236,6 +272,10 @@ impl Tool for EditFileTool {
                 "new_string": {
                     "type": "string",
                     "description": "Replacement text (may be empty to delete)"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of old_string instead of requiring exactly one (default false)"
                 }
             },
             "required": ["path", "old_string", "new_string"]
@@ -251,15 +291,34 @@ impl Tool for EditFileTool {
             .max_concurrency(1)
     }
 
+    fn precheck(
+        &self,
+        ctx: &crate::tool_context::ToolCallContext,
+        args: &Value,
+    ) -> Result<(), ToolError> {
+        let Some(raw) = args.get("path").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        // Path errors belong to policy / execute; only staleness is checked here.
+        match resolve_under_roots(raw, &self.roots.writers()) {
+            Ok(path) => self
+                .tracker
+                .require_fresh(ctx.session_id.as_deref(), &path, "edit"),
+            Err(_) => Ok(()),
+        }
+    }
+
     async fn execute(
         &self,
-        _ctx: &crate::tool_context::ToolCallContext,
+        ctx: &crate::tool_context::ToolCallContext,
         args: Value,
     ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
         let raw = require_string(obj, "path")?;
         let old_string = require_string(obj, "old_string")?;
         let new_string = require_string(obj, "new_string")?;
+        let replace_all = optional_bool(obj, "replace_all").unwrap_or(false);
+        let session = ctx.session_id.as_deref();
 
         let path = resolve_under_roots(&raw, &self.roots.writers())?;
         if !path.exists() {
@@ -270,20 +329,26 @@ impl Tool for EditFileTool {
             )));
         }
 
+        self.tracker.require_fresh(session, &path, "edit")?;
+
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| ToolError::failed(format!("read {}: {e}", path.display())))?;
 
-        let applied = apply_edit(&content, &old_string, &new_string)
+        let applied = apply_edit(&content, &old_string, &new_string, replace_all)
             .map_err(|e| e.into_tool_error(&path.display().to_string()))?;
 
         tokio::fs::write(&path, applied.new_content.as_bytes())
             .await
             .map_err(|e| ToolError::failed(format!("write {}: {e}", path.display())))?;
+        // Boris's own write keeps the file fresh for the next edit.
+        self.tracker
+            .record_written(session, &path, applied.new_content.as_bytes());
 
         Ok(truncate_tool_result(format_edit_result_full(
             &path.display().to_string(),
             applied.strategy,
+            applied.replacements,
             applied.old_bytes,
             applied.new_bytes,
             applied.old_lines,
@@ -301,7 +366,7 @@ mod tests {
 
     #[test]
     fn apply_edit_exact_once() {
-        let r = apply_edit("hello world\n", "world", "boris").unwrap();
+        let r = apply_edit("hello world\n", "world", "boris", false).unwrap();
         assert_eq!(r.new_content, "hello boris\n");
         assert_eq!(r.strategy, "exact");
         assert_eq!(r.old_bytes, "hello world\n".len());
@@ -311,7 +376,7 @@ mod tests {
     #[test]
     fn apply_edit_rejects_empty_old() {
         assert_eq!(
-            apply_edit("abc", "", "x").unwrap_err(),
+            apply_edit("abc", "", "x", false).unwrap_err(),
             EditError::EmptyOldString
         );
     }
@@ -319,14 +384,14 @@ mod tests {
     #[test]
     fn apply_edit_rejects_identical() {
         assert_eq!(
-            apply_edit("abc", "ab", "ab").unwrap_err(),
+            apply_edit("abc", "ab", "ab", false).unwrap_err(),
             EditError::IdenticalStrings
         );
     }
 
     #[test]
     fn apply_edit_not_found() {
-        match apply_edit("line1\nline2\n", "missing", "x") {
+        match apply_edit("line1\nline2\n", "missing", "x", false) {
             Err(EditError::NotFound { preview }) => {
                 assert!(preview.contains("line1"));
             }
@@ -336,7 +401,7 @@ mod tests {
 
     #[test]
     fn apply_edit_ambiguous() {
-        match apply_edit("aa aa aa", "aa", "b") {
+        match apply_edit("aa aa aa", "aa", "b", false) {
             Err(EditError::Ambiguous { count }) => assert_eq!(count, 3),
             other => panic!("expected Ambiguous, got {other:?}"),
         }
@@ -344,7 +409,7 @@ mod tests {
 
     #[test]
     fn apply_edit_delete_with_empty_new() {
-        let r = apply_edit("keep REMOVE me", "REMOVE ", "").unwrap();
+        let r = apply_edit("keep REMOVE me", "REMOVE ", "", false).unwrap();
         assert_eq!(r.new_content, "keep me");
         assert_eq!(r.strategy, "exact");
     }
@@ -358,7 +423,13 @@ mod tests {
         assert_eq!(strategy, "trim_end");
         assert!(matched.contains("fn main() {"));
 
-        let r = apply_edit(content, old, "fn main() {\n    println!(\"bye\");\n}").unwrap();
+        let r = apply_edit(
+            content,
+            old,
+            "fn main() {\n    println!(\"bye\");\n}",
+            false,
+        )
+        .unwrap();
         assert_eq!(r.strategy, "trim_end");
         assert!(r.new_content.contains("bye"));
         assert!(!r.new_content.contains("hi"));
@@ -404,12 +475,93 @@ mod tests {
         assert!(e.message.contains("prev"));
     }
 
+    #[test]
+    fn apply_edit_replace_all() {
+        let r = apply_edit("a.b a.b a.b", "a.b", "c", true).unwrap();
+        assert_eq!(r.new_content, "c c c");
+        assert_eq!(r.replacements, 3);
+        // A single match behaves like the default.
+        let r = apply_edit("x a.b y", "a.b", "c", true).unwrap();
+        assert_eq!((r.new_content.as_str(), r.replacements), ("x c y", 1));
+        let s = format_edit_result_full("/f", "exact", 3, 11, 5, 3, 3);
+        assert!(s.contains("Replaced 3 occurrences"), "{s}");
+    }
+
+    fn session_ctx(session: &str) -> crate::tool_context::ToolCallContext {
+        crate::tool_context::ToolCallContext::new("t").with_session(Some(session.into()), None)
+    }
+
+    #[tokio::test]
+    async fn edit_requires_a_fresh_read_this_session() {
+        let (roots, dir) = crate::tools::files::test_util::temp_roots();
+        std::fs::write(dir.join("f.txt"), "alpha\nbeta\n").unwrap();
+        let tracker = Arc::new(FileReadTracker::default());
+        let read = crate::tools::files::ReadFileTool::with_tracker(roots.clone(), tracker.clone());
+        let edit = EditFileTool::with_tracker(roots, tracker);
+        let args = json!({ "path": "f.txt", "old_string": "alpha", "new_string": "gamma" });
+
+        // Never read: refused (precheck and execute agree), file untouched.
+        let ctx = session_ctx("s1");
+        let err = edit.precheck(&ctx, &args).unwrap_err();
+        assert!(err.message.contains("file_read"), "{}", err.message);
+        let err = edit.execute(&ctx, args.clone()).await.unwrap_err();
+        assert!(err.message.contains("not been read"), "{}", err.message);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+
+        // Read, then edit twice: Boris's own write keeps it fresh.
+        read.execute(&ctx, json!({ "path": "f.txt" }))
+            .await
+            .unwrap();
+        edit.precheck(&ctx, &args).expect("fresh after read");
+        edit.execute(&ctx, args).await.expect("edit");
+        edit.execute(
+            &ctx,
+            json!({ "path": "f.txt", "old_string": "beta", "new_string": "delta" }),
+        )
+        .await
+        .expect("second edit after own write");
+
+        // Another session never read it.
+        let other = session_ctx("s2");
+        assert!(edit
+            .execute(
+                &other,
+                json!({ "path": "f.txt", "old_string": "gamma", "new_string": "x" })
+            )
+            .await
+            .is_err());
+
+        // External change since the read: refused until reread.
+        std::fs::write(dir.join("f.txt"), "changed elsewhere, longer\n").unwrap();
+        let err = edit
+            .execute(
+                &ctx,
+                json!({ "path": "f.txt", "old_string": "changed", "new_string": "x" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("changed on disk"), "{}", err.message);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[tokio::test]
     async fn edit_file_tool_roundtrip() {
         let (roots, dir) = crate::tools::files::test_util::temp_roots();
         std::fs::write(dir.join("hello.txt"), "hi boris\nline2\n").unwrap();
 
-        let edit = EditFileTool::new(roots);
+        let tracker = Arc::new(FileReadTracker::default());
+        crate::tools::files::ReadFileTool::with_tracker(roots.clone(), tracker.clone())
+            .execute(
+                &crate::tool_context::ToolCallContext::new("t"),
+                json!({ "path": "hello.txt" }),
+            )
+            .await
+            .unwrap();
+        let edit = EditFileTool::with_tracker(roots, tracker);
         let msg = edit
             .execute(
                 &crate::tool_context::ToolCallContext::new("t"),

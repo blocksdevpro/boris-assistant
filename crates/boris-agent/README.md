@@ -193,6 +193,14 @@ path and character offset instead of running the tool again. The store caps each
 file at 256K characters and removes files older than seven days on a best-effort
 basis.
 
+`file_edit`, and `file_write` over an existing file, require a `file_read` of
+that file in the same session and refuse when it changed on disk since (length
+and mtime, with a content-hash fallback so a touch does not count). The error
+tells the model to read it first. New files need no read, Boris's own writes
+refresh the record, and the check runs before HITL (`Tool::precheck`) so the
+user is never asked to approve a doomed edit. Path policy and HITL are
+unchanged. `file_edit` takes `replace_all: true` to change every occurrence.
+
 File tools offer close sibling-name suggestions when a path is not found. They
 do not choose a suggested path automatically. `file_read` attaches PNG (decoded
 and downscaled to 1568 px), JPEG, GIF, and WebP images (passed through up to

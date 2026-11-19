@@ -395,6 +395,26 @@ impl ToolRuntime {
             }
             return InvokeResult::Observation(obs);
         }
+        // State checks a tool would fail anyway (read-before-edit) run before
+        // policy, so the user is never asked to approve a doomed call.
+        if let Err(e) = tool.precheck(&inv.call_context(), &inv.args) {
+            let kind = e.kind().as_str();
+            self.audit_event_full(
+                &inv,
+                &meta,
+                "rejected",
+                None,
+                Some(false),
+                Some(kind),
+                false,
+                0,
+            );
+            let bounded = bound_error_message(&e.message, MAX_ERROR_MESSAGE_CHARS);
+            return InvokeResult::Observation(ToolObservation::err(
+                crate::tool::ObservationError::new(kind, true, bounded),
+                0,
+            ));
+        }
         let args = inv.args.clone();
 
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.

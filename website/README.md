@@ -21,7 +21,7 @@ Pass a different server URL as its first argument when needed.
 2. Update `src/lib/releases.ts` with stable and beta versions, publication dates, exact asset URLs, and release highlights.
 3. Update version-specific copy in the home, download, and release pages and their descriptions. Keep pre-release claims labeled as beta.
 4. Review memory migration and privacy notes against the tagged release.
-5. Run `python scripts/check-seo.py --stable-version 1.2.0 --beta-version 1.3.0-beta.1`
+5. Run `python scripts/check-seo.py --stable-version 1.2.0 --beta-version 1.3.0-beta.2`
    against the running site to verify displayed versions, installers, and release links.
 
 The website intentionally does not read the working-tree `Unreleased` changelog.

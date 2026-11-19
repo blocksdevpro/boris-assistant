@@ -384,6 +384,7 @@ async fn run_tool_batch_sequential_inner(
                 let max_confirms = state.runtime.policy().max_confirms_per_turn;
                 let (batch_with, remaining) = collect_confirm_batch(
                     state,
+                    config,
                     pending.risk,
                     first_is_shell,
                     rest,
@@ -452,6 +453,7 @@ async fn run_tool_batch_sequential_inner(
 /// `confirms_used` (pending already counted).
 fn collect_confirm_batch(
     state: &LoopState<'_>,
+    config: &AgentLoopConfig,
     first_risk: ToolRisk,
     first_is_shell: bool,
     remaining: Vec<RawToolCall>,
@@ -479,6 +481,25 @@ fn collect_confirm_batch(
 
         // Same risk only (e.g. all Dangerous file writes / bash).
         if meta.risk != first_risk {
+            let mut rest = vec![call];
+            rest.extend(iter);
+            return Ok((batch_with, rest));
+        }
+
+        // A sibling its own precheck would refuse (e.g. an edit of a file not
+        // read this session) never joins the yes/no. It stays in `remaining`
+        // and fails before any prompt when it runs on its own.
+        let precheck_inv = build_tool_invocation(&call, config, None, &super::finish::noop_emit());
+        if let Err(error) =
+            state
+                .runtime
+                .precheck_only(tool, &precheck_inv.call_context(), &call.args)
+        {
+            tracing::debug!(
+                tool = %call.name,
+                error = %error.message(),
+                "HITL batch stops at a call its precheck refuses"
+            );
             let mut rest = vec![call];
             rest.extend(iter);
             return Ok((batch_with, rest));
@@ -909,6 +930,136 @@ mod tests {
             }
             ToolBatchResult::Continue => panic!("collect_input batch must pause"),
         }
+    }
+
+    /// A dangerous write whose precheck refuses (like an unread `file_edit`).
+    struct StaleEdit;
+
+    #[async_trait]
+    impl Tool for StaleEdit {
+        fn name(&self) -> &str {
+            "file_edit"
+        }
+        fn description(&self) -> &str {
+            "stale edit"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{},"required":[]})
+        }
+        fn meta(&self) -> ToolMeta {
+            ToolMeta::with_risk(ToolRisk::Dangerous)
+                .permissions(&[Permission::FsWrite])
+                .confirm(true)
+                .read_only(false)
+        }
+        fn precheck(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: &serde_json::Value,
+        ) -> Result<(), ToolError> {
+            Err(ToolError::failed(
+                "read the file with file_read before editing it",
+            ))
+        }
+        async fn execute(
+            &self,
+            _ctx: &crate::tool_context::ToolCallContext,
+            _args: serde_json::Value,
+        ) -> Result<String, ToolError> {
+            panic!("a refused precheck must never execute");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_confirm_runs_precheck_before_adding_siblings() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DangerWrite { name: "file_write" }),
+            Arc::new(StaleEdit),
+            Arc::new(DangerWrite {
+                name: "notes_write",
+            }),
+        ];
+        let runtime = ToolRuntime::null();
+        let mut context = Context::new(20);
+        let client = NoopClient;
+        let config = AgentLoopConfig::default();
+        let emit: EmitFn = Arc::new(|_| {});
+        let mut tools_used = Vec::new();
+        let mut confirms_used = 0u32;
+        let calls = ["file_write", "file_edit", "notes_write"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| RawToolCall {
+                call_id: format!("c{i}"),
+                name: (*name).into(),
+                args: json!({}),
+            })
+            .collect();
+        let mut state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+
+        let result = process_tool_calls(
+            &mut state,
+            calls,
+            &mut tools_used,
+            1,
+            &mut confirms_used,
+            "write then edit",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let ToolBatchResult::Paused {
+            pending_turn,
+            outcome,
+        } = result
+        else {
+            panic!("expected HITL pause");
+        };
+        assert_eq!(pending_turn.pending.name, "file_write");
+        assert!(
+            pending_turn.batch_with.is_empty(),
+            "the unread edit must not share the yes/no"
+        );
+        let remaining: Vec<&str> = pending_turn
+            .remaining_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect();
+        assert_eq!(remaining, vec!["file_edit", "notes_write"]);
+        match outcome {
+            AgentOutcome::NeedsConfirmation { text, .. } => {
+                assert!(!text.contains("2 actions"), "single prompt, got: {text}")
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+
+        // On its own turn in the queue the edit is refused before any prompt.
+        let mut confirms_after = confirms_used;
+        let rest = pending_turn.remaining_calls[..1].to_vec();
+        let result = process_tool_calls(
+            &mut state,
+            rest,
+            &mut tools_used,
+            1,
+            &mut confirms_after,
+            "write then edit",
+            &config,
+            &emit,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ToolBatchResult::Continue));
+        assert_eq!(confirms_after, confirms_used, "no yes/no was asked");
     }
 
     #[tokio::test]

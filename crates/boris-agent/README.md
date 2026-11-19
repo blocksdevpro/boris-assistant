@@ -209,7 +209,9 @@ that file in the same session and refuse when it changed on disk since (length
 and mtime, with a content-hash fallback so a touch does not count). The error
 tells the model to read it first. New files need no read, Boris's own writes
 refresh the record, and the check runs before HITL (`Tool::precheck`) so the
-user is never asked to approve a doomed edit. Path policy and HITL are
+user is never asked to approve a doomed edit. Batch approval planning runs it
+too (`ToolRuntime::precheck_only`): a sibling its precheck refuses never joins
+a batched yes/no and fails on its own, before any prompt. Path policy and HITL are
 unchanged. `file_edit` takes `replace_all: true` to change every occurrence.
 
 File tools offer close sibling-name suggestions when a path is not found. They

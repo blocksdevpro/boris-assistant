@@ -355,6 +355,23 @@ impl ToolRuntime {
         apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip)
     }
 
+    /// The tool's [`Tool::precheck`] alone (aliases canonicalized), with no
+    /// policy or execute. Batch approval planning uses it so a sibling that
+    /// would be refused anyway never joins a yes/no.
+    pub fn precheck_only(
+        &self,
+        tool: &dyn Tool,
+        ctx: &crate::tool_context::ToolCallContext,
+        args: &Value,
+    ) -> Result<(), crate::tool::ToolError> {
+        if !args.is_object() {
+            return Ok(());
+        }
+        let mut args = args.clone();
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        tool.precheck(ctx, &args)
+    }
+
     /// Run policy + optional execute for one tool (async).
     pub async fn invoke(
         &self,

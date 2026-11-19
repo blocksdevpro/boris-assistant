@@ -22,6 +22,7 @@
 //! - Prefer pure helpers in submodules with unit tests over growing `Context` methods.
 
 mod compact;
+pub mod followup;
 mod images;
 mod interrupt;
 mod message;
@@ -214,9 +215,77 @@ impl Context {
     }
 
     /// Start a new derived task capsule from the current human request.
+    ///
+    /// A follow-up ("continue", "Tss keep going", "did you finish the
+    /// task?") keeps the earlier objective instead of replacing it with the
+    /// follow-up text, and a turn-scoped host control restates that
+    /// objective, its status, open todos, and any interruption note.
     pub fn begin_task(&mut self, user_text: &str) {
-        self.task_state.begin_turn(user_text);
         self.retrieved_memory.clear();
+        let kind = followup::followup_kind(user_text);
+        if matches!(
+            kind,
+            Some(followup::FollowupKind::Resume | followup::FollowupKind::Status)
+        ) {
+            if let Some(control) = self.followup_control() {
+                if self.task_state.begin_followup() {
+                    self.push_control(control);
+                    return;
+                }
+            }
+        }
+        self.task_state.begin_turn(user_text);
+    }
+
+    /// Host control for a follow-up, built from host task state before the
+    /// new turn changes it. `None` when there is no real earlier objective.
+    fn followup_control(&self) -> Option<String> {
+        let state = &self.task_state;
+        let objective = state.objective.as_ref()?.text.clone();
+        if crate::task::classify_task(&objective).greeting {
+            return None;
+        }
+        let status = match state.status {
+            TaskStatus::Active => "unfinished: the last turn ended before the work was done",
+            TaskStatus::Failed => "interrupted or failed before finishing",
+            TaskStatus::WaitingForConfirmation => "waiting for the user's confirmation",
+            TaskStatus::WaitingForInput => "waiting for input from the user",
+            TaskStatus::Completed => "reported complete in the last reply",
+            TaskStatus::Idle => "not started",
+        };
+        let todos = state.open_todos();
+        let todos = if todos.is_empty() {
+            "none recorded".to_string()
+        } else {
+            todos
+                .iter()
+                .map(|t| format!("- {}", escape_envelope(t)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // The newest interruption note since the previous human turn.
+        let note = self
+            .history
+            .iter()
+            .rev()
+            .skip_while(|m| m.origin.is_human())
+            .take_while(|m| !m.origin.is_human())
+            .filter_map(|m| m.content.as_str())
+            .find(|text| text.starts_with(interrupt::TURN_NOTE_PREFIX))
+            .map(|text| format!("\nLast turn note: {}", escape_envelope(text)))
+            .unwrap_or_default();
+        Some(format!(
+            "<system-reminder>\n\
+             The user's message is a follow-up to the earlier task, not a new request.\n\
+             Earlier objective (verbatim): \"{}\"\n\
+             Status: {status}.\n\
+             Open todos:\n{todos}{note}\n\
+             If they want it continued, resume from where it stopped: check the current state \
+             with tools rather than redoing finished steps. If they ask whether it is done, \
+             answer from this state and the transcript.\n\
+             </system-reminder>",
+            escape_envelope(&objective)
+        ))
     }
 
     pub fn record_tool_result(&mut self, name: &str, call_id: &str, ok: bool, output: &str) {
@@ -575,6 +644,64 @@ fn infer_transcript_origin(role: Role, content: &Value) -> MessageOrigin {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn followup_keeps_objective_and_restates_it_from_task_state() {
+        let mut ctx = Context::new(50);
+        ctx.push(Role::System, "sys");
+        let task = "refactor the parser in src/lib.rs and run the tests";
+        ctx.push(Role::User, task);
+        ctx.begin_task(task);
+        ctx.record_tool_result(
+            "todo_write",
+            "c1",
+            true,
+            "[x] read parser\n[ ] run cargo test",
+        );
+        ctx.push(
+            Role::Assistant,
+            "[Host note: turn interrupted after file_edit ran; cargo test did not run]",
+        );
+        ctx.finish_task(TaskStatus::Failed, "");
+
+        ctx.push(Role::User, "Tss continue");
+        ctx.begin_task("Tss continue");
+
+        let state = ctx.task_state();
+        assert_eq!(state.objective.as_ref().unwrap().text, task);
+        assert_eq!(state.status, TaskStatus::Active);
+        let control = ctx.messages().last().unwrap();
+        assert_eq!(control.origin, MessageOrigin::HostControl);
+        let text = control.content.as_str().unwrap();
+        assert!(text.contains(task), "{text}");
+        assert!(text.contains("interrupted or failed"), "{text}");
+        assert!(text.contains("- run cargo test"), "{text}");
+        assert!(text.contains("[Host note: turn interrupted"), "{text}");
+
+        // A status question also keeps the thread.
+        ctx.record_tool_result(
+            "todo_write",
+            "c2",
+            true,
+            "[x] read parser\n[x] run cargo test",
+        );
+        ctx.finish_task(TaskStatus::Completed, "Done: tests pass.");
+        ctx.push(Role::User, "did you finish the task?");
+        ctx.begin_task("did you finish the task?");
+        assert_eq!(ctx.task_state().objective.as_ref().unwrap().text, task);
+        let text = ctx.messages().last().unwrap().content.as_str().unwrap();
+        assert!(text.contains("reported complete"), "{text}");
+
+        // A new request with substance starts a new objective, no control.
+        let before = ctx.messages().len();
+        ctx.push(Role::User, "continue by searching for Rust news");
+        ctx.begin_task("continue by searching for Rust news");
+        assert_eq!(
+            ctx.task_state().objective.as_ref().unwrap().text,
+            "continue by searching for Rust news"
+        );
+        assert_eq!(ctx.messages().len(), before + 1);
+    }
 
     fn roles_of(ctx: &Context) -> Vec<&'static str> {
         ctx.messages

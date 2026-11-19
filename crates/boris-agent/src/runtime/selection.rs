@@ -7,40 +7,7 @@
 
 /// Short follow-ups inherit the preceding objective's traits, not old greetings.
 pub(crate) fn is_task_followup(text: &str) -> bool {
-    let words = text
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let phrase = words
-        .iter()
-        .filter(|word| {
-            !matches!(
-                word.as_str(),
-                "uh" | "um" | "please" | "boris" | "just" | "okay" | "ok"
-            )
-        })
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(" ");
-    matches!(
-        phrase.as_str(),
-        "continue"
-            | "go on"
-            | "keep going"
-            | "carry on"
-            | "resume"
-            | "try again"
-            | "retry"
-            | "do it"
-            | "yes"
-            | "yeah"
-            | "yep"
-            | "proceed"
-            | "finish it"
-            | "continue with it"
-    )
+    crate::context::followup::followup_kind(text).is_some()
 }
 
 #[cfg(test)]

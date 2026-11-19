@@ -109,6 +109,31 @@ impl TaskStateCapsule {
         cap(&mut self.evidence);
     }
 
+    /// Start a follow-up turn ("continue", "did you finish?") without
+    /// replacing the objective it refers to. Constraints, steps, and evidence
+    /// are kept. Returns `false` when there is no earlier objective.
+    pub fn begin_followup(&mut self) -> bool {
+        let Some(objective) = self.objective.clone() else {
+            return false;
+        };
+        let was_completed = self.status == TaskStatus::Completed;
+        self.turn = self.turn.saturating_add(1);
+        self.status = TaskStatus::Active;
+        if !was_completed {
+            push_unique(&mut self.open_steps, objective);
+        }
+        true
+    }
+
+    /// Open todo texts recorded from todo_read / todo_write results.
+    pub fn open_todos(&self) -> Vec<&str> {
+        self.open_steps
+            .iter()
+            .filter(|step| step.provenance.starts_with("tool:todo_"))
+            .map(|step| step.text.as_str())
+            .collect()
+    }
+
     pub fn record_tool_result(&mut self, name: &str, call_id: &str, ok: bool, output: &str) {
         let provenance = format!("tool:{name}:{call_id}");
         let state = if ok { "succeeded" } else { "failed" };

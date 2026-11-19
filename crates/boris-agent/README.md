@@ -287,6 +287,21 @@ is restored to its pre-turn snapshot exactly. Hosts handling a barge-in call
 `Agent::abandon_turn(checkpoint)`, which applies the same rule against a
 checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
 
+## Follow-ups ("continue")
+
+`context::followup` classifies short follow-ups without an LLM call. Fillers
+and STT noise ("uh", "okay so", "Tss", "boris") are dropped; a message whose
+remaining words all belong to a small follow-up vocabulary and that contains
+continue / resume / keep going / go ahead / finish (it) / try again is a
+resume, and a question such as "did you finish the task?" is a status check.
+Anything with other substance ("continue by searching for Rust news") is a new
+request. On a resume or status follow-up, the task state keeps the earlier
+objective instead of replacing it with "continue", and a turn-scoped host
+control restates that objective verbatim, its status (unfinished,
+interrupted, waiting, or reported complete), open todos, and the last
+`[Host note: …]` if the previous turn was interrupted. Routing uses the same
+classifier.
+
 ## Staying silent
 
 A model reply of exactly `[silent]` (`SILENCE_TOKEN`) becomes

@@ -53,6 +53,13 @@ default-model constants, which stay `boris_ai`-only.
 - Tool-planning and complex stages send `reasoning.exclude = false` so thinking
   tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
   them. Reasoning is never assembled into `content`.
+- The raw `reasoning_details` array (streamed fragments and full snapshots,
+  or the blocking JSON body) is attached to the returned assistant message
+  unmodified and in order, so the caller can send it back on the next tool
+  round (OpenRouter "preserving reasoning blocks"). Consecutive
+  `reasoning.text` fragments are joined into one block; encrypted blocks are
+  kept whole. Display-only `reasoning` / `reasoning_content` strings are not
+  kept on the message.
 - Assistant `content` is normalized to a **string** for the agent loop.
 - `CompleteOptions::tool_error` carries host-known current-turn tool failure
   evidence for internal routing. `Some(false)` prevents successful output

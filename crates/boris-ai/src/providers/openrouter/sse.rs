@@ -1,6 +1,9 @@
 //! SSE stream assembly for chat completions.
 //!
 //! Accumulates content + tool-call argument fragments into one assistant message.
+//! Raw `reasoning_details` are accumulated too and attached to the message so
+//! the agent can send them back unmodified on the next tool round (OpenRouter
+//! "preserving reasoning blocks"). The display-only reasoning text is separate.
 //!
 //! # Multi-line SSE limitation
 //!
@@ -171,6 +174,8 @@ pub(super) struct StreamAssembler {
     /// normal delta (e.g. a mid-stream provider error). Callers should check
     /// this after each ingested chunk and abort the stream if set.
     error: Option<Value>,
+    /// Raw provider `reasoning_details`, in order (see [`merge_reasoning_detail`]).
+    reasoning_details: Vec<Value>,
 }
 
 impl StreamAssembler {
@@ -288,6 +293,11 @@ impl StreamAssembler {
         if !delta.reasoning.is_empty() {
             self.emitted_reasoning = true;
         }
+        if let Some(details) = piece.get("reasoning_details").and_then(Value::as_array) {
+            for detail in details {
+                merge_reasoning_detail(&mut self.reasoning_details, detail);
+            }
+        }
 
         if let Some(c) = piece.get("content") {
             let before = self.content.len();
@@ -325,6 +335,14 @@ impl StreamAssembler {
         if !self.emitted_reasoning && !reasoning.is_empty() {
             delta.reasoning = reasoning;
             self.emitted_reasoning = true;
+        }
+        // A snapshot's `reasoning_details` is the canonical complete array.
+        if let Some(details) = message
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .filter(|details| !details.is_empty())
+        {
+            self.reasoning_details = details.clone();
         }
 
         // `message.content` is the provider's complete canonical value. It
@@ -402,13 +420,26 @@ impl StreamAssembler {
     }
 
     /// Finish assembly into a single assistant message object.
+    ///
+    /// Non-empty `reasoning_details` ride on the message unmodified so the
+    /// caller can return them with the next request. They are never part of
+    /// `content`.
     pub(super) fn finish(self) -> Value {
         let tool_calls: Vec<Value> = self
             .tools
             .into_iter()
             .map(|(idx, acc)| acc.into_json(idx))
             .collect();
-        assistant_message_from_stream(&self.role, self.content, tool_calls)
+        let mut message = assistant_message_from_stream(&self.role, self.content, tool_calls);
+        if !self.reasoning_details.is_empty() {
+            if let Some(obj) = message.as_object_mut() {
+                obj.insert(
+                    "reasoning_details".into(),
+                    Value::Array(self.reasoning_details),
+                );
+            }
+        }
+        message
     }
 }
 
@@ -445,6 +476,58 @@ pub(super) fn flush_sse_buffer(buffer: &mut Vec<u8>, mut on_data: impl FnMut(&st
     if !line.is_empty() {
         dispatch_sse_line(line, &mut on_data);
     }
+}
+
+/// Append one streamed `reasoning_details` entry to the raw accumulator.
+///
+/// Streaming splits one reasoning block into many fragments. Consecutive
+/// `reasoning.text` fragments (same `index` when both carry one) are joined
+/// into one block: text is concatenated and the first non-empty `signature`,
+/// `format`, and `id` are kept, as OpenRouter's own client does.
+/// Consecutive `reasoning.summary` fragments with the same `index` are joined
+/// the same way. Encrypted blocks and anything else are kept whole, in order.
+pub(super) fn merge_reasoning_detail(acc: &mut Vec<Value>, detail: &Value) {
+    let Some(incoming) = detail.as_object() else {
+        return;
+    };
+    let kind = incoming.get("type").and_then(Value::as_str).unwrap_or("");
+    let text_field = match kind {
+        "reasoning.text" => Some("text"),
+        "reasoning.summary" => Some("summary"),
+        _ => None,
+    };
+    if let (Some(field), Some(last)) = (text_field, acc.last_mut().and_then(Value::as_object_mut)) {
+        let same_type = last.get("type").and_then(Value::as_str) == Some(kind);
+        let same_block = match (last.get("index"), incoming.get("index")) {
+            (Some(a), Some(b)) => a == b,
+            // Summaries need a matching index; text follows the reference client.
+            _ => kind == "reasoning.text",
+        };
+        if same_type && same_block {
+            for (key, value) in incoming {
+                if key == field {
+                    if let Some(fragment) = value.as_str() {
+                        let joined = format!(
+                            "{}{fragment}",
+                            last.get(field).and_then(Value::as_str).unwrap_or("")
+                        );
+                        last.insert(field.to_string(), Value::String(joined));
+                    }
+                    continue;
+                }
+                let empty = match last.get(key) {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(existing)) => existing.is_empty(),
+                    Some(_) => false,
+                };
+                if empty && !value.is_null() {
+                    last.insert(key.clone(), value.clone());
+                }
+            }
+            return;
+        }
+    }
+    acc.push(detail.clone());
 }
 
 /// Pull incremental thinking text from OpenRouter / OpenAI-compatible deltas.
@@ -906,6 +989,80 @@ mod tests {
         }));
         assert_eq!(delta.reasoning, "Step one. Step two.");
         assert!(delta.content.is_empty());
+    }
+
+    #[test]
+    fn streamed_reasoning_details_are_preserved_in_order_on_the_message() {
+        let mut a = StreamAssembler::new();
+        for event in [
+            json!({"choices":[{"delta":{"reasoning_details":[
+                {"type":"reasoning.text","text":"Plan: ","index":0,"format":"anthropic-claude-v1"}
+            ]}}]}),
+            json!({"choices":[{"delta":{"reasoning_details":[
+                {"type":"reasoning.text","text":"read the file.","index":0}
+            ]}}]}),
+            json!({"choices":[{"delta":{"reasoning_details":[
+                {"type":"reasoning.text","text":"","signature":"sig-abc","index":0}
+            ]}}]}),
+            json!({"choices":[{"delta":{"reasoning_details":[
+                {"type":"reasoning.encrypted","data":"ENCRYPTED==","id":"rs_1","index":1}
+            ]}}]}),
+            json!({"choices":[{"delta":{"content":"","tool_calls":[{"index":0,"id":"c1",
+                "function":{"name":"file_read","arguments":"{}"}}]}}]}),
+        ] {
+            a.ingest_event(&event);
+        }
+        let msg = a.finish();
+        assert_eq!(
+            msg["reasoning_details"],
+            json!([
+                {"type":"reasoning.text","text":"Plan: read the file.","index":0,
+                 "format":"anthropic-claude-v1","signature":"sig-abc"},
+                {"type":"reasoning.encrypted","data":"ENCRYPTED==","id":"rs_1","index":1}
+            ])
+        );
+        assert_eq!(msg["content"], "", "reasoning never leaks into content");
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "file_read");
+    }
+
+    #[test]
+    fn summary_fragments_merge_by_index_and_snapshot_replaces() {
+        let mut acc = Vec::new();
+        merge_reasoning_detail(
+            &mut acc,
+            &json!({"type":"reasoning.summary","summary":"Look","index":0}),
+        );
+        merge_reasoning_detail(
+            &mut acc,
+            &json!({"type":"reasoning.summary","summary":" closer","index":0}),
+        );
+        merge_reasoning_detail(
+            &mut acc,
+            &json!({"type":"reasoning.summary","summary":"Next","index":1}),
+        );
+        assert_eq!(acc.len(), 2);
+        assert_eq!(acc[0]["summary"], "Look closer");
+
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({"choices":[{"delta":{"reasoning_details":[
+            {"type":"reasoning.text","text":"draft"}
+        ]}}]}));
+        a.ingest_event(&json!({"choices":[{"message":{"role":"assistant","content":"Done.",
+            "reasoning_details":[{"type":"reasoning.encrypted","data":"FULL"}]}}]}));
+        let msg = a.finish();
+        assert_eq!(
+            msg["reasoning_details"],
+            json!([{"type":"reasoning.encrypted","data":"FULL"}])
+        );
+    }
+
+    #[test]
+    fn message_without_reasoning_details_has_no_field() {
+        let mut a = StreamAssembler::new();
+        a.ingest_event(&json!({"choices":[{"delta":{"reasoning":"thinking","content":"Hi"}}]}));
+        let msg = a.finish();
+        assert!(msg.get("reasoning_details").is_none());
+        assert!(msg.get("reasoning").is_none());
     }
 
     #[test]

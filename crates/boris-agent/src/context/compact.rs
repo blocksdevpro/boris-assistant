@@ -100,7 +100,31 @@ impl Context {
 
     /// Conservative token estimate over the actual serialized wire messages.
     pub fn estimate_tokens(&self) -> usize {
-        estimate_serialized_tokens(&self.as_json().to_string())
+        estimate_serialized_tokens(&self.as_json_for_estimate().to_string())
+    }
+
+    /// Wire messages with opaque encrypted reasoning payloads blanked.
+    ///
+    /// Encrypted `reasoning_details[].data` is returned to the provider
+    /// unmodified but is not prompt text; counting kilobytes of base64 at four
+    /// characters per token would trigger needless compaction or a false
+    /// input-too-large failure. Reasoning text and signatures still count.
+    pub(crate) fn as_json_for_estimate(&self) -> Value {
+        let mut json = self.as_json();
+        for message in json.as_array_mut().into_iter().flatten() {
+            let Some(details) = message
+                .get_mut(super::REASONING_DETAILS_KEY)
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for detail in details {
+                if let Some(data) = detail.get_mut("data").filter(|data| data.is_string()) {
+                    *data = Value::String(String::new());
+                }
+            }
+        }
+        json
     }
 
     /// Serialized request bytes including message framing and tool schemas.
@@ -113,7 +137,7 @@ impl Context {
     }
 
     pub fn estimate_request_tokens(&self, tools: &Value) -> usize {
-        let messages = estimate_serialized_tokens(&self.as_json().to_string());
+        let messages = estimate_serialized_tokens(&self.as_json_for_estimate().to_string());
         let tools = (!tools.is_null())
             .then(|| estimate_serialized_tokens(&tools.to_string()))
             .unwrap_or_default();
@@ -339,6 +363,8 @@ impl Context {
                 if matches!(message.role, Role::System) {
                     continue;
                 }
+                // Reasoning blocks are provider-private and never summarized.
+                let message = message.without_reasoning_details();
                 let row = serde_json::json!({
                     "role": message.role.to_string(),
                     "content": &message.content,

@@ -90,6 +90,30 @@ impl Message {
     }
 }
 
+/// Raw provider reasoning blocks on an assistant message (OpenRouter
+/// "preserving reasoning blocks"). They are returned unmodified on later
+/// requests of the same human turn, then dropped: never persisted, digested,
+/// or spoken.
+pub(crate) const REASONING_DETAILS_KEY: &str = "reasoning_details";
+
+impl Message {
+    /// Remove raw reasoning blocks; returns true when any were present.
+    pub(crate) fn strip_reasoning_details(&mut self) -> bool {
+        matches!(self.role, Role::Assistant)
+            && self
+                .content
+                .as_object_mut()
+                .is_some_and(|obj| obj.remove(REASONING_DETAILS_KEY).is_some())
+    }
+
+    /// Copy without raw reasoning blocks (persistence, summaries).
+    pub(crate) fn without_reasoning_details(&self) -> Message {
+        let mut message = self.clone();
+        message.strip_reasoning_details();
+        message
+    }
+}
+
 impl Message {
     /// Serialize to an OpenAI / OpenRouter chat-completions message object.
     ///

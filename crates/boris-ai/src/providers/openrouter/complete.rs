@@ -273,40 +273,7 @@ impl OpenRouterClient {
             ))
         })?;
 
-        // Some gateways return HTTP 200 with a top-level error object.
-        if let Some(err) = json.get("error") {
-            return Err(LlmError::from_provider_error_value(err));
-        }
-
-        let usage = json.get("usage").map(TokenUsage::from_usage_value);
-
-        let message = json
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .cloned()
-            .ok_or_else(|| {
-                LlmError::parse(format!(
-                    "chat completion response missing choices[0].message: {}",
-                    truncate_error_body(&json.to_string())
-                ))
-            })?;
-
-        // Keep parity with the stream-assembled path (`assistant_message_from_stream`
-        // omits empty `tool_calls`): strip `"tool_calls": []` so both paths
-        // return the same shape for tool-less answers.
-        let mut message = normalize_assistant_message(message);
-        if message
-            .get("tool_calls")
-            .and_then(|t| t.as_array())
-            .is_some_and(|a| a.is_empty())
-        {
-            message
-                .as_object_mut()
-                .and_then(|obj| obj.remove("tool_calls"));
-        }
-        warn_if_truncated_tool_arguments(&message);
-        Ok((message, usage))
+        message_from_completion_json(&json)
     }
 
     /// SSE chat completions — assemble full assistant message from deltas.
@@ -388,6 +355,55 @@ impl OpenRouterClient {
         warn_if_truncated_tool_arguments(&message);
         Ok((message, usage))
     }
+}
+
+/// Assistant message + usage from a non-streaming chat-completion body.
+///
+/// Shape parity with the stream-assembled path: `content` is a string, an
+/// empty `tool_calls` array is omitted, raw `reasoning_details` are kept
+/// unmodified for the next tool round, and display-only `reasoning` /
+/// `reasoning_content` text is dropped (it never belongs in history).
+fn message_from_completion_json(json: &Value) -> Result<(Value, Option<TokenUsage>), LlmError> {
+    // Some gateways return HTTP 200 with a top-level error object.
+    if let Some(err) = json.get("error") {
+        return Err(LlmError::from_provider_error_value(err));
+    }
+
+    let usage = json.get("usage").map(TokenUsage::from_usage_value);
+
+    let message = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .cloned()
+        .ok_or_else(|| {
+            LlmError::parse(format!(
+                "chat completion response missing choices[0].message: {}",
+                truncate_error_body(&json.to_string())
+            ))
+        })?;
+
+    let mut message = normalize_assistant_message(message);
+    if let Some(obj) = message.as_object_mut() {
+        if obj
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| a.is_empty())
+        {
+            obj.remove("tool_calls");
+        }
+        obj.remove("reasoning");
+        obj.remove("reasoning_content");
+        if !obj
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .is_some_and(|details| !details.is_empty())
+        {
+            obj.remove("reasoning_details");
+        }
+    }
+    warn_if_truncated_tool_arguments(&message);
+    Ok((message, usage))
 }
 
 /// Whether a stream failure may fall back to the blocking path.
@@ -885,6 +901,39 @@ mod tests {
             7,
         );
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn blocking_message_keeps_reasoning_details_and_drops_display_reasoning() {
+        let body = serde_json::json!({
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": null,
+                "reasoning": "I should read the file first.",
+                "reasoning_details": [
+                    {"type": "reasoning.summary", "summary": "Read file", "index": 0},
+                    {"type": "reasoning.encrypted", "data": "BLOB==", "index": 1}
+                ],
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"}}]
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        });
+        let (message, usage) = message_from_completion_json(&body).unwrap();
+        assert_eq!(message["content"], "");
+        assert!(message.get("reasoning").is_none());
+        assert_eq!(
+            message["reasoning_details"],
+            body["choices"][0]["message"]["reasoning_details"]
+        );
+        assert_eq!(usage.unwrap().total_tokens, 12);
+
+        let plain = serde_json::json!({"choices": [{"message": {
+            "role": "assistant", "content": "Hi", "tool_calls": [], "reasoning_details": []
+        }}]});
+        let (message, _) = message_from_completion_json(&plain).unwrap();
+        assert!(message.get("tool_calls").is_none());
+        assert!(message.get("reasoning_details").is_none());
     }
 
     #[test]

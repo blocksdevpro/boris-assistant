@@ -910,12 +910,14 @@ impl Agent {
         self.context.retrieved_memory()
     }
 
-    /// Same as [`Self::export_messages`] with secret collect_input values stripped.
+    /// Same as [`Self::export_messages`] with secret collect_input values and
+    /// raw provider reasoning blocks stripped.
     pub fn export_messages_for_persist(&self) -> Vec<Message> {
         self.export_messages()
             .into_iter()
             .filter(|m| m.origin.should_persist())
             .map(|mut m| {
+                m.strip_reasoning_details();
                 if matches!(m.role, Role::Tool) {
                     m.content = crate::tools::collect_input::redact_secret_tool_content(&m.content);
                 }

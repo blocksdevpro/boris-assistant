@@ -251,6 +251,11 @@ kept separately as clarification candidates, not settled constraints.
 Tool observations arrive as raw text with
 pending `<system-reminder>` controls flushed as their own message only once
 the batch resolves. Token estimates run over serialized message JSON.
+Provider `reasoning_details` on assistant tool-call messages are sent back
+unmodified and in order across the tool rounds of the current human turn, so
+a reasoning model does not re-plan from scratch each round. A new human turn
+(or a history reload) strips them; they are never persisted, summarized, or
+spoken, and encrypted payloads are excluded from token estimates.
 Summary compaction is lossless — only complete oldest turns fold into a
 single `Summary` message and the unsummarized tail is never deleted — with
 hysteresis before LLM compaction and smaller mechanical fallbacks. Requests

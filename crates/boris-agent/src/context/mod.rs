@@ -23,6 +23,8 @@
 
 mod compact;
 mod message;
+#[cfg(test)]
+mod reasoning_tests;
 mod retrieval;
 mod role;
 mod task_state;
@@ -33,6 +35,7 @@ use serde_json::{json, Value};
 pub(crate) use compact::estimate_serialized_tokens;
 pub use compact::ContextBudget;
 pub use message::{Message, MessageOrigin};
+pub(crate) use message::REASONING_DETAILS_KEY;
 pub use retrieval::RetrievedMemory;
 pub use role::Role;
 pub use task_state::{TaskStateCapsule, TaskStateEntry, TaskStatus};
@@ -89,6 +92,9 @@ impl Context {
 
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
         let message = Message::new(role, content);
+        if message.origin.is_human() {
+            self.strip_reasoning_details();
+        }
         if message.origin.is_history_event() {
             self.history.push(message.clone());
         }
@@ -116,6 +122,7 @@ impl Context {
         control: impl Into<Value>,
         human: impl Into<Value>,
     ) {
+        self.strip_reasoning_details();
         let human = Message::new(Role::User, human);
         self.history.push(human.clone());
         self.messages.push(human);
@@ -130,6 +137,17 @@ impl Context {
                 human_index,
                 Message::with_origin(Role::User, MessageOrigin::HostControl, control),
             );
+        }
+    }
+
+    /// Drop raw reasoning blocks from every stored assistant message.
+    ///
+    /// Reasoning is preserved only across the tool rounds of the current
+    /// human turn; a new human turn (or a reload) ends that scope and frees
+    /// the potentially large encrypted blobs.
+    fn strip_reasoning_details(&mut self) {
+        for message in self.messages.iter_mut().chain(self.history.iter_mut()) {
+            message.strip_reasoning_details();
         }
     }
 
@@ -379,6 +397,7 @@ impl Context {
                 self.messages.push(msg.clone());
             }
         }
+        self.strip_reasoning_details();
         self.task_state.rebuild_from_history(&self.history);
         self.retrieved_memory.clear();
         self.personal_context = None;

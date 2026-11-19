@@ -1125,6 +1125,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reasoning_details_return_on_the_next_tool_round_and_never_speak() {
+        use crate::tool::{ToolError, ToolMeta};
+
+        struct Probe;
+        #[async_trait]
+        impl Tool for Probe {
+            fn name(&self) -> &str {
+                "probe"
+            }
+            fn description(&self) -> &str {
+                "probe"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{}})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().read_only(true)
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _args: serde_json::Value,
+            ) -> Result<String, ToolError> {
+                Ok("probed".into())
+            }
+        }
+
+        struct Capturing {
+            requests: Mutex<Vec<Value>>,
+            responses: Mutex<Vec<Value>>,
+        }
+        #[async_trait]
+        impl LlmClient for Capturing {
+            async fn complete(&self, messages: Value, _: Value) -> Result<Value, LlmError> {
+                self.requests.lock().unwrap().push(messages);
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let details = json!([
+            {"type":"reasoning.text","text":"Probe first.","signature":"sig","index":0},
+            {"type":"reasoning.encrypted","data":"SECRET-BLOB","index":1}
+        ]);
+        let client = Capturing {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                json!({"role":"assistant","content":"","reasoning_details":details,
+                    "tool_calls":[{"id":"c1","type":"function",
+                        "function":{"name":"probe","arguments":"{}"}}]}),
+                json!({"role":"assistant","content":"All probed."}),
+            ]),
+        };
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "probe it");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Probe)];
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = agent_loop(
+            state,
+            "probe it",
+            &AgentLoopConfig::default(),
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        let requests = client.requests.lock().unwrap();
+        let replayed: Vec<&Value> = requests[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("reasoning_details"))
+            .collect();
+        assert_eq!(replayed, vec![&details], "sent back unmodified, in order");
+        match result.outcome {
+            AgentOutcome::Speak { text, .. } => {
+                assert_eq!(text, "All probed.");
+                assert!(!text.contains("Probe first") && !text.contains("SECRET"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn unlisted_registered_extension_executes_with_schema_validation() {
         use crate::tool::{ToolError, ToolMeta};
 

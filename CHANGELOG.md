@@ -5,6 +5,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0-beta.2] - 2026-11-19
+
+Second beta of the 1.3 line for Windows x64, with an NSIS installer.
+
 ### Added
 
 - First-run welcome flow: connect an OpenRouter key, choose fast replies or a
@@ -737,6 +741,7 @@ for the day-by-day 1.1 history.
 
 - Windows MSI and NSIS installer targets for the Boris Desktop host.
 
+[1.3.0-beta.2]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.2
 [1.3.0-beta.1]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.1
 [1.2.0]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0
 [beta.3]: https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0-beta.3

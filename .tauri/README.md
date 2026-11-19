@@ -59,11 +59,11 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/boris.key)"
 Tauri writes updater artifacts next to the normal installers (e.g.
 `Boris_*_x64-setup.exe` + `.sig` under `target/release/bundle/nsis/`).
 
-### Release build: 1.3.0-beta.1
+### Release build: 1.3.0-beta.2
 
-Product manifests and lockfiles use `1.3.0-beta.1` with NSIS-only bundling.
-The [release notes](releases/v1.3.0-beta.1.md) and dated changelog entry describe
-the first 1.3 beta. Stable [1.2.0](releases/v1.2.0.md) remains the public stable
+Product manifests and lockfiles use `1.3.0-beta.2` with NSIS-only bundling.
+The [release notes](releases/v1.3.0-beta.2.md) and dated changelog entry describe
+the second 1.3 beta. Stable [1.2.0](releases/v1.2.0.md) remains the public stable
 release.
 
 Run `bun run verify:release` from `desktop/` before signing. The verifier checks
@@ -71,7 +71,7 @@ product versions, locked Cargo metadata, installer targets, the updater public
 key, and release documentation. It does not read the private key or create a
 signed installer.
 
-Merge the release candidate into `next` before tagging `v1.3.0-beta.1`.
+Merge the release candidate into `next` before tagging `v1.3.0-beta.2`.
 Publish that tag as a pre-release, then update the rolling `beta` installer feed
 with the same signed installer and `latest.json`. See the beta procedure below.
 

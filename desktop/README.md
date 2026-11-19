@@ -26,10 +26,10 @@ Windows stable **1.2.0** ships **NSIS and MSI** (`Boris_*_x64-setup.exe` and
 `Boris_*_x64_en-US.msi`). Betas stay NSIS-only because MSI/WiX cannot encode
 labels such as `1.3.0-beta.1`. The updater uses the NSIS installer either way.
 
-This tree uses the published **`1.3.0-beta.1`** version with an NSIS installer.
-Beta release notes are in
-[`.tauri/releases/v1.3.0-beta.1.md`](../.tauri/releases/v1.3.0-beta.1.md).
-Download its signed installer from
+This tree uses the **`1.3.0-beta.2`** release-candidate version with an NSIS
+installer. Beta release notes are in
+[`.tauri/releases/v1.3.0-beta.2.md`](../.tauri/releases/v1.3.0-beta.2.md).
+The previous beta's signed installer is on
 [the 1.3.0-beta.1 release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.3.0-beta.1).
 Download the current stable signed installers from
 [the stable 1.2.0 release](https://github.com/blocksdevpro/boris-assistant/releases/tag/v1.2.0).

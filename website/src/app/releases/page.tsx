@@ -5,7 +5,7 @@ import { pageMetadata, repo } from "@/lib/site";
 
 export const metadata = pageMetadata({
   title: "Boris Assistant release notes | Stable and beta updates",
-  description: `See what's new in Boris Assistant stable ${stableRelease.version}, including live transcription, tool progress, local memory, and Windows downloads. Earlier beta ${betaRelease.version} notes are also available.`,
+  description: `See what's new in Boris Assistant stable ${stableRelease.version}, including live transcription, tool progress, local memory, and Windows downloads. Preview beta ${betaRelease.version} adds task-aware tool selection and parallel tool calls.`,
   path: "/releases",
 });
 
@@ -14,7 +14,7 @@ export default function ReleasesPage() {
     <main id="main-content" className="content-page section-shell">
       <p className="story-label"><span /> Published updates</p>
       <h1>Boris Assistant release notes</h1>
-      <p className="page-intro">Boris {stableRelease.version} is the latest stable release. Beta {betaRelease.version} is the earlier preview of this version.</p>
+      <p className="page-intro">Boris {stableRelease.version} is the latest stable release. Beta {betaRelease.version} previews the next version.</p>
 
       {[stableRelease, betaRelease].map((release) => (
         <article key={release.version} id={release.channel.toLowerCase()} className="release-entry">
@@ -35,9 +35,9 @@ export default function ReleasesPage() {
             )}
             {release.channel === "Beta" && (
               <aside className="migration-note">
-                <h3>Memory migration and privacy</h3>
-                <p>Beta.3 retains the local memory store introduced in beta.2. When upgrading from beta.1 or earlier, the one-time migration sends historical memory to the LLM provider already configured for Boris. Old files are retired only after refinement and verification succeed. Failed imports leave the original files intact for a later retry.</p>
-                <p>To disable canonical memory and skip migration, set <code>BORIS_MEMORY=0</code> before your first launch of beta.2 or later.</p>
+                <h3>Upgrading and your data</h3>
+                <p>Upgrades from {stableRelease.version} keep the existing local SQLite memory store. Upgrades from 1.2.0-beta.1 or earlier still run the verified one-time migration described in the stable notes, which uses the LLM provider you configured.</p>
+                <p>Your <code>%USERPROFILE%\.boris</code> data stays outside the installation directory, so installing the beta over stable keeps sessions, memory, and settings.</p>
               </aside>
             )}
             <div className="release-links">

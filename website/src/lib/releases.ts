@@ -21,19 +21,19 @@ export const stableRelease = {
 };
 
 export const betaRelease = {
-  version: "1.2.0-beta.3",
-  date: "2026-09-27",
-  dateLabel: "September 27, 2026",
+  version: "1.3.0-beta.1",
+  date: "2026-10-08",
+  dateLabel: "October 8, 2026",
   channel: "Beta",
-  url: `${repo}/releases/tag/v1.2.0-beta.3`,
-  download: `${repo}/releases/download/v1.2.0-beta.3/Boris_1.2.0-beta.3_x64-setup.exe`,
-  summary: "Live transcription, visible tool progress, and more reliable voice confirmations.",
+  url: `${repo}/releases/tag/v1.3.0-beta.1`,
+  download: `${repo}/releases/download/v1.3.0-beta.1/Boris_1.3.0-beta.1_x64-setup.exe`,
+  summary: "Faster first replies through task-aware tool selection, explicit parallel tool calls, and a developer monitor.",
   highlights: [
-    "A presence orb shows listening, thinking, tool work, speaking, and input states. Reduced-motion settings keep it static.",
-    "Live transcription previews appear during voice capture on supported speech models. Tool progress and streamed captions stay visible in a more stable overlay.",
-    "Wake-word interruption works during confirmation prompts. Device changes restart the prompt, and a bare 'please' no longer approves an action.",
-    "Typed input supports numbered choices, file tools suggest nearby names, and long tool results can be reread without repeating the operation.",
-    "More reliable context compaction and streaming, clearer separation of trusted instructions from retrieved data, and bundled task playbooks.",
-    "Retains beta.2's evidence-backed local memory, with search, retrieval, forgetting, and verified migration from older versions.",
+    "Boris picks the tools a task needs before the first model request. Research gets web and recall tools; workspace work gets file and shell tools. Follow-ups such as \"continue\" keep the same set.",
+    "Independent tool calls can run in parallel, with the batch shown in the activity chip. Writes, confirmations, and typed input keep their order.",
+    "A developer monitor in the desktop app shows model requests, tool calls, routing, context, and provider usage, with export for debugging.",
+    "Tool results keep their success or failure status separately from their text, so reading a log that mentions \"error\" no longer fails a successful call.",
+    "Shell exits, missing paths, and MCP errors report failure with useful diagnostics. Failed report cards keep their full content on screen.",
+    "Upgrades from 1.2.0 keep the existing local memory store. EXE installer only; stable installations stay on 1.2.0 unless you choose the Beta channel.",
   ],
 };

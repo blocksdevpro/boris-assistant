@@ -737,3 +737,18 @@ footer{border-top:1px solid rgba(255,255,255,.065);background:#0c0d0f;color:rgba
   .process-detail { grid-template-columns:1fr; gap:17px; padding:26px 22px; }
   .process-context { grid-column:1; }
 }
+
+/* Guide pages: definition lists and plain bullet lists */
+.fact-list { margin:8px 0 28px; border-top:1px solid var(--line-default); }
+.fact-list > div { display:grid; grid-template-columns:200px minmax(0,1fr); gap:24px; padding:20px 0; border-bottom:1px solid var(--line-default); }
+.fact-list dt { color:#f4f4f5; font-weight:600; }
+.fact-list dd { color:#b5b8be; line-height:1.7; }
+.plain-list { list-style:disc; padding-left:20px; margin:8px 0 24px; }
+.plain-list li { padding-left:4px; margin:12px 0; color:#b5b8be; line-height:1.7; }
+.plain-list strong { color:#e3e4e7; }
+.content-page code { overflow-wrap:anywhere; color:#e3e4e7; }
+.content-page li a, .content-page dd a { color:#d9ff75; text-decoration:underline; text-underline-offset:4px; }
+@media (max-width: 620px) {
+  .fact-list > div { grid-template-columns:1fr; gap:6px; }
+}
+.inline-link { color:#d9ff75; text-decoration:underline; text-underline-offset:4px; }

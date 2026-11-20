@@ -27,7 +27,7 @@ use super::device_switch::{apply_input_switch, apply_output_switch};
 use super::early_speech::{SpeechFeed, SpokenLedger};
 use super::models::{lost_tts, SttBox, TtsBox, TtsSlot};
 use super::picture::Picture;
-use super::playback::{poll_running, PlaybackWait};
+use super::playback::{poll_running, stop_and_settle, PlaybackWait};
 use super::speech::{stream_reply, SpeechUnits, StreamedSpeech};
 use super::util::speakable_reply_units;
 use super::EngineCommand;
@@ -278,7 +278,7 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
             // progress line on long tool work.
             if let Some(sp) = speech.as_mut() {
                 let agent_finished = agent_done.load(Ordering::Acquire);
-                sp.feed.drain();
+                sp.feed.drain_all();
                 let kind = if sp.feed.has_units() && sp.report.delivered.is_none() {
                     Some(SpeakKind::Answer)
                 } else if sp.progress_line
@@ -397,6 +397,15 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
             thread::sleep(THINK_POLL);
         }
     });
+    if let Some(sp) = speech.as_mut() {
+        // Sentences of the latest streamed round the user heard in full
+        // (repeats of an earlier round included); the normal speech path
+        // skips them when the final reply starts with the same text.
+        sp.feed.drain_all();
+        if sp.report.delivered.is_none() && !sp.feed.heard().is_empty() {
+            sp.report.spoken = sp.feed.heard().to_vec();
+        }
+    }
     let pass = ThinkTiming {
         agent_ms: agent_work_ms(
             think_started.elapsed().as_millis() as u64,
@@ -540,8 +549,18 @@ fn speak_while_thinking(
                 tracing::info!(%turn, "barge-in during early speech");
                 match listen_after_pause(mic, vad, stt, picture, cmd_rx, running, false) {
                     Ok(BargeDecision::Resume) if kind == SpeakKind::Answer => {
+                        // A late tool call during the listen cancelled this
+                        // answer: drop its paused audio instead of resuming it.
+                        sp.feed.drain();
+                        if sp.feed.take_cancelled() {
+                            tracing::info!(%turn, "streamed answer cancelled during barge-in listen");
+                            stop_and_settle(audio, output_events);
+                            picture.said = None;
+                            picture.publish();
+                            break SpeakStep::Continue;
+                        }
                         if audio.resume().is_err() {
-                            audio.stop();
+                            stop_and_settle(audio, output_events);
                             sp.feed.disable();
                             break SpeakStep::Continue;
                         }
@@ -550,8 +569,9 @@ fn speak_while_thinking(
                         continue;
                     }
                     Ok(BargeDecision::Resume) => {
-                        // The progress line is filler: drop its rest.
-                        audio.stop();
+                        // The progress line is filler: drop its rest. The
+                        // answer job may start next, so let the flush land.
+                        stop_and_settle(audio, output_events);
                         break SpeakStep::Continue;
                     }
                     Ok(BargeDecision::StopTalking) => {
@@ -563,7 +583,7 @@ fn speak_while_thinking(
                         break SpeakStep::Resolve(ThinkResolve::TakeTurn(next));
                     }
                     Err(error) => {
-                        audio.stop();
+                        stop_and_settle(audio, output_events);
                         sp.feed.disable();
                         match error {
                             HearBreak::Stopped if !*running => {
@@ -592,10 +612,12 @@ fn speak_while_thinking(
     };
     sp.tts.give_back(tts);
     if kind == SpeakKind::Answer && sp.report.delivered.is_none() {
+        // Reported before the feed reads past the Cancel (`drain` stops
+        // there), so the next round skips what this job already said.
         let spoken = ledger.spoken();
         if !spoken.is_empty() {
             tracing::info!(%turn, sentences = spoken.len(), "streamed sentences heard before cancel");
-            sp.report.spoken = spoken;
+            sp.feed.note_spoken(spoken);
         }
     }
     // Our own playback tail must not be scored as a wake once Thinking resumes.

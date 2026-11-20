@@ -83,9 +83,7 @@ use models::{
     release_voice_models,
 };
 use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve, ResolveDone};
-use playback::{
-    drain_output_events, poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait,
-};
+use playback::{poll_running, PlaybackWait};
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
@@ -320,92 +318,279 @@ struct SessionRefs<'a> {
     transcript_len: &'a mut usize,
 }
 
-/// Speak one short host-authored line (no agent, no barge watch): recovery
-/// lines and host-intent acknowledgements. A wake word during it is caught
-/// by the next Armed wait.
+/// How often host-line TTS loading polls host commands.
+const HOST_LINE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// After a reminder line that was not heard, wait this long before retrying.
+const REMINDER_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the turn loop does after a host line.
+#[derive(Debug)]
+enum AfterHostLine {
+    /// Carry on.
+    Proceed,
+    /// Barge-in "stop": re-arm.
+    Dismissed,
+    /// Barge-in with a new request: start a turn with it.
+    TakeTurn(String),
+    /// A hear break during the barge-in listen (stop, device switch, …).
+    Break(HearBreak),
+}
+
+struct HostLine {
+    /// The line became audible and did not fail part-way (a barge-in or a
+    /// Stop after it started still counts).
+    heard: bool,
+    next: AfterHostLine,
+}
+
+/// Speak one short host-authored line: due reminders, host-intent
+/// acknowledgements, recovery lines. The TTS load (loader thread) and the
+/// synthesis (stream helper) run off the engine thread while host commands
+/// are polled. Playback has the Talking barge watch, and a barge-in is
+/// handled like one during a reply. The engine is idle (Armed) afterwards,
+/// so TTS residency follows the idle rule of a turn that ends without a
+/// follow-up.
 fn speak_host_line(
     rt: &mut EngineRuntime,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
     line: &str,
-) {
+    turn: TurnId,
+) -> HostLine {
+    let mut out = HostLine {
+        heard: false,
+        next: AfterHostLine::Proceed,
+    };
     rt.picture.said = Some(line.into());
     rt.picture.publish();
-    if rt.tts.load().is_ok() {
-        if let Ok(pcm) = rt.tts.synthesize(line) {
-            drain_output_events(&rt.output_events);
-            if let Err(e) = rt.audio.play(pcm) {
-                tracing::error!(error = %e, "host line play failed");
-            }
-            let _ = wait_playback_started(
-                &mut rt.output_events,
-                cmd_rx,
-                running,
-                &mut rt.audio,
-                &mut rt.picture,
-                None,
-            );
-            wait_playback_or_stop(
-                &mut rt.output_events,
-                cmd_rx,
-                running,
-                &mut rt.audio,
-                &mut rt.picture,
-                None,
-            );
+
+    let mut slot = models::TtsSlot::Loading(
+        rt.tts_loader
+            .load(std::mem::replace(&mut rt.tts, lost_tts())),
+    );
+    let mut stopped = false;
+    while slot.is_loading() {
+        if !poll_running(
+            cmd_rx,
+            running,
+            &mut rt.audio,
+            &mut rt.output_events,
+            &mut rt.picture,
+        )
+        .still_running()
+        {
+            stopped = true;
+            break;
         }
-        let _ = rt.tts.unload();
+        thread::sleep(HOST_LINE_POLL);
+    }
+    let loaded = if stopped { None } else { slot.take_loaded() };
+    let Some(mut tts) = loaded else {
+        // Stop during the load still has to wait for the model to return.
+        let (tts, result) = slot.join();
+        rt.tts = tts;
+        if let (false, Err(e)) = (stopped, result) {
+            tracing::error!(error = %e, %line, "host line: tts load failed");
+            let _ = rt.tts.unload();
+        }
+        rt.picture.said = None;
+        rt.picture.publish();
+        return out;
+    };
+
+    let gap_samples = tts.inter_unit_silence_samples();
+    let mut units = speakable_reply_units(line);
+    let mut already_audible = false;
+    loop {
+        let mut watch = if rt.barge_in {
+            Some(BargeWatch::new(&rt.mic, &mut rt.wake))
+        } else {
+            None
+        };
+        let mut speech = stream_reply(
+            tts,
+            speech::SpeechUnits::Fixed(units),
+            gap_samples,
+            turn,
+            already_audible,
+            &mut rt.audio,
+            &mut rt.output_events,
+            cmd_rx,
+            running,
+            &mut rt.picture,
+            &rt.mic,
+            watch.as_mut(),
+        );
+        tts = std::mem::replace(&mut speech.tts, lost_tts());
+        match speech.wait {
+            PlaybackWait::Finished => {
+                out.heard = speech.error.is_none();
+                if let Some(e) = speech.error {
+                    tracing::error!(error = %e, %line, "host line cut short");
+                }
+                break;
+            }
+            PlaybackWait::Stopped => {
+                out.heard = already_audible || speech.played;
+                break;
+            }
+            PlaybackWait::Aborted => {
+                tracing::error!(error = ?speech.error, %line, "host line not played");
+                break;
+            }
+            PlaybackWait::BargedIn => {
+                out.heard = true;
+                match listen_after_barge(rt, cmd_rx, running, false) {
+                    Ok(BargeDecision::Resume) => {
+                        if rt.audio.resume().is_err() {
+                            rt.audio.stop();
+                            break;
+                        }
+                        units = speech.remaining_units;
+                        already_audible = true;
+                        rt.picture.set_phase(Phase::Talking);
+                    }
+                    Ok(BargeDecision::StopTalking) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::Dismissed;
+                        break;
+                    }
+                    Ok(BargeDecision::TakeTurn(text)) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::TakeTurn(text);
+                        break;
+                    }
+                    Err(e) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::Break(e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    rt.tts = tts;
+    if rt.residency.should_evict_idle() {
+        models::unload_tts(rt.tts.as_mut(), turn);
+    }
+    if !out.heard {
+        rt.picture.said = None;
+        rt.picture.publish();
+    }
+    out
+}
+
+/// Apply how a host line ended to the turn loop; the caller then
+/// `continue`s (or exits on [`LoopReact::Exit`]).
+fn after_host_line(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    next: AfterHostLine,
+    running: bool,
+    pending_barge_turn: &mut Option<PendingBargeTurn>,
+    await_reply: &mut bool,
+    follow_up_depth: &mut u32,
+) -> LoopReact {
+    match next {
+        AfterHostLine::Break(e) => on_hear_break(rt, sess, e, running, || {
+            *await_reply = false;
+            *follow_up_depth = 0;
+        }),
+        _ if !running => {
+            go_off_session(rt, sess);
+            LoopReact::Continue
+        }
+        AfterHostLine::Proceed => LoopReact::Continue,
+        AfterHostLine::Dismissed => {
+            *await_reply = false;
+            *follow_up_depth = 0;
+            LoopReact::Continue
+        }
+        AfterHostLine::TakeTurn(user_text) => {
+            *pending_barge_turn = Some(PendingBargeTurn {
+                user_text,
+                interrupted_text: None,
+            });
+            *await_reply = false;
+            *follow_up_depth = 0;
+            LoopReact::Continue
+        }
     }
 }
 
 /// True when the engine loop is in a gap between turns where a due reminder
-/// may be spoken: Armed, or the follow-up window right after Talking
-/// (AwaitingReply) before the mic opens for the reply. Never mid-turn
-/// (Hearing / Reading / Thinking / Talking), during an approval prompt
+/// may be spoken: Armed only. Never mid-turn (Hearing / Reading / Thinking /
+/// Talking), in the follow-up window (AwaitingReply: the user may already be
+/// answering, and the line would talk over them), during an approval prompt
 /// (AwaitingConfirm, or any confirmation still pending in the agent), while
 /// typed input is awaited (AwaitingInput), or when a barge-in turn is queued.
+/// A follow-up window that ends without a reply re-arms, so a reminder due
+/// during a turn is spoken right after it.
 fn reminder_gap_open(phase: Phase, confirmation_pending: bool, barge_turn_queued: bool) -> bool {
-    matches!(phase, Phase::Armed | Phase::AwaitingReply)
-        && !confirmation_pending
-        && !barge_turn_queued
+    phase == Phase::Armed && !confirmation_pending && !barge_turn_queued
 }
 
-/// Take every item due at `now_ms` when the gap is open; otherwise take
-/// nothing, so the items stay due for the next gap.
-fn take_due_at_gap(
+/// The items due at `now_ms` when the gap is open, without removing them:
+/// they are taken from the store only once their line was heard.
+fn due_at_gap(
     reminders: &boris_agent::ReminderStore,
     gap_open: bool,
     now_ms: i64,
 ) -> Vec<boris_agent::Reminder> {
-    if gap_open {
+    if !gap_open {
+        return Vec::new();
+    }
+    reminders
+        .list()
+        .into_iter()
+        .filter(|item| item.due_unix_ms <= now_ms)
+        .collect()
+}
+
+/// After the reminder line: a heard line removes exactly the spoken items
+/// (`take_due` at the same `now_ms`; new items are always due later) and
+/// clears the retry backoff. A line that was not heard keeps them due and
+/// backs off, so a broken speaker cannot spin the Armed wait. Returns the
+/// removed items.
+fn settle_reminders(
+    reminders: &boris_agent::ReminderStore,
+    heard: bool,
+    now_ms: i64,
+    retry_at: &mut Option<std::time::Instant>,
+) -> Vec<boris_agent::Reminder> {
+    if heard {
+        *retry_at = None;
         reminders.take_due(now_ms)
     } else {
+        *retry_at = Some(std::time::Instant::now() + REMINDER_RETRY_AFTER);
         Vec::new()
     }
 }
 
+/// Whether the Armed wait should yield for due reminders now: the same gap
+/// rule as [`deliver_reminders`] and no pending retry backoff.
+fn reminders_ready(gap_open: bool, retry_at: Option<std::time::Instant>, has_due: bool) -> bool {
+    gap_open && retry_at.is_none_or(|at| std::time::Instant::now() >= at) && has_due
+}
+
 /// Speak every due timer and reminder (earliest first) as one host line, at
 /// a gap between turns only ([`reminder_gap_open`]); a due item otherwise
-/// waits for the current turn to end. Playback follows the Armed rules of
-/// [`speak_host_line`] (no barge watch; Stop still ends it). The spoken line
-/// is then recorded in the conversation as a host event and synced to the
-/// transcript, so a follow-up "what was that reminder?" has the answer.
+/// waits for the current turn to end. Playback follows [`speak_host_line`]
+/// (Talking barge watch, Stop polled). A heard line is then recorded in the
+/// conversation as a host event and synced to the transcript, so a
+/// follow-up "what was that reminder?" has the answer; a line that was not
+/// heard stays due and is retried after [`REMINDER_RETRY_AFTER`].
 fn deliver_reminders(
     rt: &mut EngineRuntime,
     sess: &mut SessionRefs<'_>,
     cmd_rx: &Receiver<EngineCommand>,
     running: &mut bool,
-    barge_turn_queued: bool,
-) {
+) -> AfterHostLine {
     let now = boris_agent::now_unix_ms();
-    let gap = reminder_gap_open(
-        rt.picture.phase,
-        rt.agent.has_pending_confirmation(),
-        barge_turn_queued,
-    );
-    let due = take_due_at_gap(&rt.reminders, gap, now);
+    let gap = reminder_gap_open(rt.picture.phase, rt.agent.has_pending_confirmation(), false);
+    let due = due_at_gap(&rt.reminders, gap, now);
     if due.is_empty() {
-        return;
+        return AfterHostLine::Proceed;
     }
     let line = due
         .iter()
@@ -418,8 +603,15 @@ fn deliver_reminders(
     } else {
         format!("{} reminders", due.len())
     });
-    speak_host_line(rt, cmd_rx, running, &line);
-    if rt
+    let spoken = speak_host_line(rt, cmd_rx, running, &line, TurnId::new(0));
+    let taken = settle_reminders(&rt.reminders, spoken.heard, now, &mut rt.reminder_retry_at);
+    if taken.is_empty() {
+        tracing::error!(
+            %line,
+            retry_secs = REMINDER_RETRY_AFTER.as_secs(),
+            "reminder line not heard; kept due for a retry"
+        );
+    } else if rt
         .agent
         .record_host_event(&boris_agent::spoken_reminders_note(&line, now))
     {
@@ -429,6 +621,7 @@ fn deliver_reminders(
     }
     rt.picture.clear_activity();
     rt.picture.publish();
+    spoken.next
 }
 
 fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
@@ -693,20 +886,8 @@ fn run(
             rt.picture.turn = None;
             rt.picture.clear_activity();
             rt.picture.set_phase(Phase::AwaitingReply);
-            // A gap between turns: Talking has ended and the reply mic is not
-            // open yet. Speak anything that fell due during the turn now
-            // rather than after the follow-up window; the settle below then
-            // drains its echo before the reply capture starts.
-            deliver_reminders(
-                &mut rt,
-                &mut sess,
-                &cmd_rx,
-                &mut running,
-                barge_turn.is_some(),
-            );
-            if go_off_if_not_running(&mut rt, &mut sess, running) {
-                continue;
-            }
+            // Due reminders wait for the next Armed wait: the user may
+            // already be answering, and a reminder here would talk over them.
             tracing::info!(
                 depth = follow_up_depth,
                 "awaiting freeform user reply (no wake)"
@@ -751,6 +932,11 @@ fn run(
 
             let mic_known_silent =
                 rt.picture.listen_hint == Some(crate::status::ListenHint::MicSilent);
+            // Same gap rule and retry backoff as `deliver_reminders`, so a
+            // due item it would not take can never make this wait spin.
+            let reminder_gap =
+                reminder_gap_open(Phase::Armed, rt.agent.has_pending_confirmation(), false);
+            let reminder_retry_at = rt.reminder_retry_at;
             let picture = &mut rt.picture;
             let reminders = &rt.reminders;
             let wake_window = match hear::wait_for_wake(
@@ -765,7 +951,13 @@ fn run(
                     }
                     hear::MicSignal::Live => picture.set_listen_hint(None),
                 },
-                || reminders.has_due(boris_agent::now_unix_ms()),
+                || {
+                    reminders_ready(
+                        reminder_gap,
+                        reminder_retry_at,
+                        reminders.has_due(boris_agent::now_unix_ms()),
+                    )
+                },
             ) {
                 Ok(w) => w,
                 Err(HearBreak::StartWakeEnroll { takes }) => {
@@ -783,14 +975,19 @@ fn run(
                     continue;
                 }
                 Err(HearBreak::RemindersDue) => {
-                    deliver_reminders(
+                    let next = deliver_reminders(&mut rt, &mut sess, &cmd_rx, &mut running);
+                    match after_host_line(
                         &mut rt,
                         &mut sess,
-                        &cmd_rx,
-                        &mut running,
-                        barge_turn.is_some(),
-                    );
-                    continue;
+                        next,
+                        running,
+                        &mut pending_barge_turn,
+                        &mut await_reply,
+                        &mut follow_up_depth,
+                    ) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    }
                 }
                 Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                     LoopReact::Continue => continue,
@@ -1130,11 +1327,23 @@ fn run(
                         &rt.system_prompt,
                     );
                     rt.picture.clear_artifacts();
-                    speak_host_line(&mut rt, &cmd_rx, &mut running, "Okay, fresh start.");
+                    let spoken =
+                        speak_host_line(&mut rt, &cmd_rx, &mut running, "Okay, fresh start.", turn);
                     follow_up_depth = 0;
                     await_reply = false;
                     rt.picture.set_phase(Phase::Armed);
-                    continue;
+                    match after_host_line(
+                        &mut rt,
+                        &mut sess,
+                        spoken.next,
+                        running,
+                        &mut pending_barge_turn,
+                        &mut await_reply,
+                        &mut follow_up_depth,
+                    ) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    }
                 }
                 None => {}
             }
@@ -1469,15 +1678,27 @@ fn run(
                 rt.picture.detail = None;
                 rt.picture.clear_activity();
                 // Recoverable spoken line instead of silent Ready.
-                speak_host_line(
+                let spoken = speak_host_line(
                     &mut rt,
                     &cmd_rx,
                     &mut running,
                     "I glitched mid-task. Wake me and say continue if you want me to finish.",
+                    turn,
                 );
                 follow_up_depth = 0;
                 rt.picture.set_phase(Phase::Armed);
-                continue;
+                match after_host_line(
+                    &mut rt,
+                    &mut sess,
+                    spoken.next,
+                    running,
+                    &mut pending_barge_turn,
+                    &mut await_reply,
+                    &mut follow_up_depth,
+                ) {
+                    LoopReact::Continue => continue,
+                    LoopReact::Exit => return Ok(()),
+                }
             }
         };
         // Live tool labels already mirrored; keep a soft chip until speech/confirm.
@@ -2012,20 +2233,20 @@ mod tests {
 
     #[test]
     fn reminders_are_spoken_only_in_a_gap_between_turns() {
-        for phase in [Phase::Armed, Phase::AwaitingReply] {
-            assert!(reminder_gap_open(phase, false, false), "{phase:?}");
-            assert!(
-                !reminder_gap_open(phase, true, false),
-                "{phase:?} + pending confirm"
-            );
-            assert!(
-                !reminder_gap_open(phase, false, true),
-                "{phase:?} + queued barge turn"
-            );
-        }
+        assert!(reminder_gap_open(Phase::Armed, false, false));
+        assert!(
+            !reminder_gap_open(Phase::Armed, true, false),
+            "pending confirm"
+        );
+        assert!(
+            !reminder_gap_open(Phase::Armed, false, true),
+            "queued barge turn"
+        );
         for phase in [
             Phase::Off,
             Phase::Quiet,
+            // The user may already be answering: never talk over them.
+            Phase::AwaitingReply,
             Phase::Hearing,
             Phase::Reading,
             Phase::Thinking,
@@ -2059,6 +2280,7 @@ mod tests {
         let store = boris_agent::ReminderStore::open(&path);
 
         for phase in [
+            Phase::AwaitingReply,
             Phase::Hearing,
             Phase::Reading,
             Phase::Thinking,
@@ -2067,20 +2289,38 @@ mod tests {
             Phase::AwaitingInput,
         ] {
             let gap = reminder_gap_open(phase, false, false);
-            assert!(take_due_at_gap(&store, gap, now).is_empty(), "{phase:?}");
+            assert!(due_at_gap(&store, gap, now).is_empty(), "{phase:?}");
             assert!(store.has_due(now), "still due after {phase:?}");
         }
-        // Follow-up window with an approval still pending: not yet.
-        let gap = reminder_gap_open(Phase::AwaitingReply, true, false);
-        assert!(take_due_at_gap(&store, gap, now).is_empty());
+        // Armed with an approval still pending: not yet, and the Armed wait
+        // does not yield for it (no busy loop).
+        let gap = reminder_gap_open(Phase::Armed, true, false);
+        assert!(due_at_gap(&store, gap, now).is_empty());
+        assert!(!reminders_ready(gap, None, store.has_due(now)));
 
-        // Talking ended, follow-up window open: delivered once.
-        let gap = reminder_gap_open(Phase::AwaitingReply, false, false);
-        let due = take_due_at_gap(&store, gap, now);
+        // Armed: offered, but only removed once the line was heard.
+        let gap = reminder_gap_open(Phase::Armed, false, false);
+        assert!(reminders_ready(gap, None, store.has_due(now)));
+        let due = due_at_gap(&store, gap, now);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].spoken(now), "Reminder: call mum.");
+        assert!(store.has_due(now), "peeking does not remove");
+
+        // Not heard (TTS/playback failed): kept, and the wait backs off.
+        let mut retry_at = None;
+        assert!(settle_reminders(&store, false, now, &mut retry_at).is_empty());
+        assert!(store.has_due(now));
+        assert!(retry_at.is_some());
+        assert!(!reminders_ready(gap, retry_at, store.has_due(now)));
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(reminders_ready(gap, Some(past), store.has_due(now)));
+
+        // Heard: removed exactly once and the backoff clears.
+        let taken = settle_reminders(&store, true, now, &mut retry_at);
+        assert_eq!(taken, due);
+        assert!(retry_at.is_none());
         assert!(!store.has_due(now));
-        assert!(take_due_at_gap(&store, gap, now).is_empty());
+        assert!(due_at_gap(&store, gap, now).is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

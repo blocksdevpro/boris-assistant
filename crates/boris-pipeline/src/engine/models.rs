@@ -231,6 +231,12 @@ impl TtsSlot {
         *self = Self::Ready(tts, result);
     }
 
+    /// The load is still running. Never blocks.
+    pub fn is_loading(&mut self) -> bool {
+        self.poll();
+        matches!(self, Self::Loading(_))
+    }
+
     /// Take the model if it finished loading successfully. Never blocks.
     pub fn take_loaded(&mut self) -> Option<TtsBox> {
         self.poll();
@@ -243,8 +249,16 @@ impl TtsSlot {
         }
     }
 
+    /// Return a lent model. A job that lost it (detached stuck inference or a
+    /// worker panic) hands back the placeholder, which records a load error
+    /// so the reply path reports it as one instead of a synthesis failure.
     pub fn give_back(&mut self, tts: TtsBox) {
-        *self = Self::Ready(tts, Ok(()));
+        let result = if is_lost_tts(tts.as_ref()) {
+            Err("TTS model lost (stream worker detached or panicked)".into())
+        } else {
+            Ok(())
+        };
+        *self = Self::Ready(tts, result);
     }
 
     /// Wait for the load and return the model with its load result.
@@ -348,6 +362,13 @@ impl SpeechToText for LostStt {
 }
 
 struct LostTts;
+const LOST_TTS_ID: &str = "lost";
+
+/// True for the [`lost_tts`] placeholder.
+pub(super) fn is_lost_tts(tts: &dyn TextToSpeech) -> bool {
+    tts.backend_id() == LOST_TTS_ID
+}
+
 impl TextToSpeech for LostTts {
     fn load(&mut self) -> boris_core::Result<()> {
         Err(boris_core::Error::other(
@@ -356,7 +377,7 @@ impl TextToSpeech for LostTts {
     }
 
     fn backend_id(&self) -> &str {
-        "lost"
+        LOST_TTS_ID
     }
 
     fn synthesize(&mut self, _: &str) -> boris_core::Result<boris_core::AudioBuffer> {
@@ -443,6 +464,16 @@ mod tests {
         let (tts, result) = warm.join();
         assert!(result.is_ok());
         assert_eq!(tts.backend_id(), "loaded");
+
+        // A job that lost the model hands back the placeholder: a load
+        // error, never lent again.
+        let mut lost = TtsSlot::resident(Box::new(Fake(true)));
+        let _lent = lost.take_loaded().expect("loaded model is lent");
+        lost.give_back(super::lost_tts());
+        assert!(lost.take_loaded().is_none());
+        let (tts, result) = lost.join();
+        assert!(result.is_err());
+        assert!(super::is_lost_tts(tts.as_ref()));
     }
 
     #[test]

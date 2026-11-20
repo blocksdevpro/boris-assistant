@@ -19,7 +19,7 @@ use super::barge::{drain_mic, BargeWatch};
 use super::early_speech::SpeechFeed;
 use super::models::{lost_tts, TtsBox};
 use super::picture::Picture;
-use super::playback::{drain_output_events, poll_running, PlaybackWait};
+use super::playback::{drain_output_events, poll_running, stop_and_settle, PlaybackWait};
 use super::EngineCommand;
 
 const EVENT_POLL: Duration = Duration::from_millis(20);
@@ -303,6 +303,11 @@ pub(super) fn stream_reply(
         if let Some(feed) = feed.as_deref_mut() {
             // A cancel from before this job concerned speech that never started.
             feed.take_cancelled();
+            // The units this job starts with were drained before it began.
+            if !feed.said().is_empty() {
+                picture.said = Some(feed.said().to_string());
+                picture.publish();
+            }
             let (tx, rx) = crossbeam_channel::unbounded();
             match spawn_synth_from(tts, rx) {
                 SpawnedSynth::Running {
@@ -489,7 +494,11 @@ pub(super) fn stream_reply(
                 if let Some(cancel) = cancel.as_ref() {
                     cancel.store(true, Ordering::Release);
                 }
-                audio.stop();
+                // The next round may stream right after this job: its flush
+                // must land first, and the overlay drops the cancelled text.
+                stop_and_settle(audio, output_events);
+                picture.said = None;
+                picture.publish();
                 feed_cancelled = true;
                 wait = PlaybackWait::Aborted;
                 break;

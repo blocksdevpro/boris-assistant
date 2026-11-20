@@ -101,9 +101,9 @@ pub enum HearBreak {
     /// Run the on-device self-check. Only [`wait_for_wake`] returns this;
     /// mid-turn helpers drop the request.
     RunSelfCheck,
-    /// A timer or reminder is due. Only [`wait_for_wake`] returns this, so
-    /// due items never interrupt a turn; the engine also speaks them in the
-    /// follow-up window right after Talking.
+    /// A timer or reminder is due and the engine may speak it now. Only
+    /// [`wait_for_wake`] returns this, so due items never interrupt a turn
+    /// or a follow-up window.
     RemindersDue,
 }
 
@@ -264,6 +264,8 @@ impl MicSilenceWatch {
 /// on the same samples. `on_mic` hears when the input goes digitally silent
 /// and when it comes back, so the UI can say why "Hey Boris" does nothing.
 /// Pass `mic_known_silent` when the last wait ended with the mic silent.
+/// `reminders_due` (checked once a second) must be true only when the engine
+/// will actually take the due items, or this wait returns in a loop.
 pub fn wait_for_wake(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     wake: &mut impl WakeWord,

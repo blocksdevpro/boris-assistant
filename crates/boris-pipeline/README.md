@@ -37,8 +37,17 @@ emits sanitized sentence chunks (`AgentEvent::Speech`), the event subscriber
 forwards them into a channel, and `run_thinking` plays them through a
 feed-mode `stream_reply` once the model is loaded. The first sentence is held
 until no tool call has started for 900 ms past a boundary; a late tool call
-cancels that response's speech (playback stops, Thinking resumes), and
-acceptance commits the rest. A committed answer that played to the end skips
+cancels that response's speech (playback stops and the overlay `said` clears,
+Thinking resumes), and acceptance commits the rest. Sentences the user already
+heard in full before a cancel are not said twice: `SpeechFeed::drain` stops at
+each Cancel so the engine first reports what the cancelled job played to the
+end (`note_spoken`), and the next round's leading sentences that repeat them
+(whole sentences, case-insensitive words) are skipped, across several cancels
+too; a sentence cut off part-way is spoken again. A Cancel that arrives during
+a barge-in listen stops the paused audio instead of resuming it, and every
+stop that can be followed by another speech job waits (≤ 300 ms) for the
+output worker's `Cleared` (`stop_and_settle`), so a late flush cannot abort
+the next job. A committed answer that played to the end skips
 the normal speech path; anything else (cancelled, device loss, barge-in that
 discards) falls back to speaking the accepted reply. Early speech uses the
 Talking barge watch, so a barge-in pauses it at once, and the mic tail is
@@ -176,17 +185,31 @@ schedule in `~/.boris/state/reminders.json`, which survives restarts. The
 engine shares the same in-process `ReminderStore`. While Armed,
 `wait_for_wake` checks it once a second on the engine thread and returns
 `HearBreak::RemindersDue`; the engine speaks every due item (earliest first)
-as one host line, shows it as `said` with a `reminder` activity chip, removes
-it, and re-arms. Items that come due during a turn are spoken at the next gap:
-right after Talking when the follow-up window (AwaitingReply) opens, before the
-reply mic starts, or otherwise at Armed. `reminder_gap_open` is the gate: never
+as one host line, shows it as `said` with a `reminder` activity chip, and
+re-arms. Items that come due during a turn wait for the next Armed wait;
+`reminder_gap_open` is the gate (Armed only: never
 Hearing/Reading/Thinking/Talking, AwaitingConfirm, AwaitingInput, a pending
-agent confirmation, or a queued barge-in turn. Playback is `speak_host_line`
-in both places (no barge watch; Stop ends it). The spoken line is then added to
-the conversation with `Agent::record_host_event` (a persisted `[Host event:
+agent confirmation, or a queued barge-in turn). The follow-up window
+(AwaitingReply) is skipped on purpose: the user may already be answering and
+the line would talk over them; a window that ends without a reply re-arms, so
+the reminder follows within its 12 s start timeout. `wait_for_wake` yields
+only under the same gate, so a due item that cannot be taken never makes it
+spin.
+
+Playback is `speak_host_line`, shared with "Okay, fresh start." and the
+recovery lines: the TTS load runs on the loader thread and synthesis on the
+stream helper while host commands (Stop, device switches) are polled;
+playback has the Talking barge watch, and a barge-in resumes, stops, or
+starts a new turn exactly as during a reply. TTS residency follows the idle
+rule (`low_latency` keeps it loaded). Due items are only peeked; they leave
+the store (`take_due`) once the line was heard (finished, or barged/stopped
+after it became audible), and only then is the line added to the
+conversation with `Agent::record_host_event` (a persisted `[Host event:
 ...]` note, not a human turn) and synced to the transcript, so "what was that
-reminder?" works. While Boris is off items wait for the next Start. An item
-more than two minutes late says when it was due ("Reminder from 3:15 PM: …").
+reminder?" works. A line that failed (TTS load, synthesis, playback) stays
+due, is logged with its text, and is retried after 30 s. While Boris is off
+items wait for the next Start. An item more than two minutes late says when
+it was due ("Reminder from 3:15 PM: …").
 
 ## Devices
 

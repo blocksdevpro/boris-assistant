@@ -54,6 +54,8 @@ pub(super) struct EngineRuntime {
     pub progress_line: bool,
     /// Timers and reminders set by the agent tools (same shared store).
     pub reminders: boris_agent::ReminderStore,
+    /// After a reminder line that was not heard: no retry before this.
+    pub reminder_retry_at: Option<std::time::Instant>,
     /// Voice HITL budget mirrored from agent policy (pipeline loop must not
     /// cap below what the policy allows — see `outcome::resolve_agent_outcome`).
     pub max_confirms_per_turn: u32,
@@ -224,6 +226,7 @@ pub(super) fn init_runtime(
             .then(|| super::chime::wake_chime(play_rate)),
         progress_line: config.progress_line,
         reminders: boris_agent::ReminderStore::for_home(&paths::boris_home()),
+        reminder_retry_at: None,
         max_confirms_per_turn: config.max_confirms_per_turn.max(1),
         maintenance,
     })

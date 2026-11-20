@@ -38,6 +38,15 @@ pub(super) struct SpeechFeed {
     /// later is ignored and the reply goes through the normal speech path.
     disabled: bool,
     said: String,
+    /// Units of the current round the user heard in full: leading units
+    /// skipped because an earlier round already said them, then the units
+    /// the engine reports via [`SpeechFeed::note_spoken`].
+    heard: Vec<String>,
+    /// Words heard before the last Cancel that the new round has not
+    /// matched yet; its leading units that repeat them are not spoken again.
+    skip_words: Vec<String>,
+    /// A Cancel ended the round; the next chunk starts a new one.
+    round_over: bool,
     tool_started: Option<Instant>,
     note: Option<String>,
     approval: bool,
@@ -55,6 +64,9 @@ impl SpeechFeed {
                 cancelled: false,
                 disabled: false,
                 said: String::new(),
+                heard: Vec::new(),
+                skip_words: Vec::new(),
+                round_over: false,
                 tool_started: None,
                 note: None,
                 approval: false,
@@ -72,12 +84,18 @@ impl SpeechFeed {
         self.cancelled = false;
         self.disabled = false;
         self.said.clear();
+        self.heard.clear();
+        self.skip_words.clear();
+        self.round_over = false;
         self.tool_started = None;
         self.note = None;
         self.approval = false;
     }
 
-    /// Apply every queued message. Returns true when new speech arrived.
+    /// Apply queued messages up to and including the first Cancel, so the
+    /// engine can report what the cancelled job played
+    /// ([`SpeechFeed::note_spoken`]) before the next round is read. Returns
+    /// true when new speech text arrived.
     pub fn drain(&mut self) -> bool {
         let mut added = false;
         while let Ok(msg) = self.rx.try_recv() {
@@ -86,18 +104,32 @@ impl SpeechFeed {
                     if self.disabled {
                         continue;
                     }
+                    if std::mem::take(&mut self.round_over) {
+                        self.skip_words = self.heard.iter().flat_map(|u| words(u)).collect();
+                        self.heard.clear();
+                    }
                     if !self.said.is_empty() {
                         self.said.push(' ');
                     }
                     self.said.push_str(&text);
-                    self.pending.extend(speakable_reply_units(&text));
+                    for unit in speakable_reply_units(&text) {
+                        if self.take_heard_unit(&unit) {
+                            self.heard.push(unit);
+                        } else {
+                            self.skip_words.clear();
+                            self.pending.push_back(unit);
+                        }
+                    }
                     added = true;
                 }
                 FeedMsg::Speech(SpeechSignal::Cancel) => {
                     self.pending.clear();
                     self.said.clear();
+                    self.skip_words.clear();
                     self.committed = false;
                     self.cancelled = true;
+                    self.round_over = true;
+                    break;
                 }
                 FeedMsg::Speech(SpeechSignal::Commit) => {
                     if !self.disabled {
@@ -112,6 +144,38 @@ impl SpeechFeed {
             }
         }
         added
+    }
+
+    /// [`SpeechFeed::drain`] until the channel is empty. Only for callers
+    /// with no speech job running (nothing to report between rounds).
+    pub fn drain_all(&mut self) -> bool {
+        let mut added = false;
+        while !self.rx.is_empty() {
+            added |= self.drain();
+        }
+        added
+    }
+
+    /// True when `unit` repeats the next words heard before the last Cancel
+    /// (whole unit, case-insensitive words, punctuation kept); consumes them.
+    fn take_heard_unit(&mut self, unit: &str) -> bool {
+        let unit_words = words(unit);
+        let n = unit_words.len();
+        if n == 0 || self.skip_words.len() < n || self.skip_words[..n] != unit_words[..] {
+            return false;
+        }
+        self.skip_words.drain(..n);
+        true
+    }
+
+    /// The engine played these units of the current round to the end.
+    pub fn note_spoken(&mut self, units: Vec<String>) {
+        self.heard.extend(units);
+    }
+
+    /// Leading units of the latest round the user heard in full.
+    pub fn heard(&self) -> &[String] {
+        &self.heard
     }
 
     pub fn has_units(&self) -> bool {
@@ -233,14 +297,11 @@ impl SpokenLedger {
 /// and only skips whole units of the reply; a reply that does not start with
 /// the same text skips nothing.
 pub(super) fn skip_spoken_prefix(units: &[String], spoken: &[String]) -> usize {
-    fn words(text: &str) -> impl Iterator<Item = String> + '_ {
-        text.split_whitespace().map(str::to_lowercase)
-    }
     let heard: Vec<String> = spoken.iter().flat_map(|unit| words(unit)).collect();
     let mut matched = 0usize;
     let mut skip = 0usize;
     for (i, unit) in units.iter().enumerate() {
-        let unit_words: Vec<String> = words(unit).collect();
+        let unit_words = words(unit);
         let end = matched + unit_words.len();
         if end > heard.len() || heard[matched..end] != unit_words[..] {
             break;
@@ -251,6 +312,11 @@ pub(super) fn skip_spoken_prefix(units: &[String], spoken: &[String]) -> usize {
         }
     }
     skip
+}
+
+/// Lowercased whitespace-separated words, punctuation kept.
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_lowercase).collect()
 }
 
 /// First sentence of a progress note, without tool markup, capped at a word
@@ -313,8 +379,12 @@ mod tests {
         ] {
             tx.send(msg).unwrap();
         }
-        feed.drain();
+        // The first drain stops at the Cancel so the engine can report what
+        // the cancelled job played; the next one reads the new answer.
+        assert!(feed.drain());
         assert!(feed.take_cancelled());
+        assert!(feed.said().is_empty());
+        feed.drain();
         assert!(feed.committed());
         assert_eq!(feed.said(), "The answer is four.");
         assert_eq!(feed.next_unit().as_deref(), Some("The answer is four."));
@@ -498,6 +568,100 @@ mod tests {
         #[cfg(feature = "tts-supertone")]
         assert_eq!(skip, 1);
         assert!(!reply[skip..].is_empty());
+    }
+
+    fn chunk(tx: &crossbeam_channel::Sender<FeedMsg>, text: &str) {
+        tx.send(FeedMsg::Speech(SpeechSignal::Chunk(text.into())))
+            .unwrap();
+    }
+
+    fn take_all(feed: &mut SpeechFeed) -> Vec<String> {
+        std::iter::from_fn(|| feed.next_unit()).collect()
+    }
+
+    #[test]
+    fn next_round_skips_sentences_heard_before_a_late_cancel() {
+        let (tx, mut feed) = feed();
+        chunk(&tx, "Sure thing.");
+        feed.drain();
+        assert_eq!(take_all(&mut feed), strings(&["Sure thing."]));
+        // Late tool call, then round 2 repeats the opener, all queued
+        // before the engine looks again.
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        chunk(&tx, "sure THING.");
+        chunk(&tx, "The build passed.");
+        tx.send(FeedMsg::Speech(SpeechSignal::Commit)).unwrap();
+        feed.drain();
+        assert!(feed.take_cancelled());
+        // The cancelled job played its sentence to the end.
+        feed.note_spoken(strings(&["Sure thing."]));
+        feed.drain();
+        assert!(feed.committed());
+        assert_eq!(take_all(&mut feed), strings(&["The build passed."]));
+        // The overlay shows the whole answer, opener included.
+        assert_eq!(feed.said(), "sure THING. The build passed.");
+        assert_eq!(feed.heard(), strings(&["sure THING."]));
+    }
+
+    #[test]
+    fn a_partly_heard_or_rewritten_opener_is_spoken_again() {
+        // Cut off mid-sentence: the ledger reports nothing heard.
+        let (tx, mut feed) = feed();
+        chunk(&tx, "Sure thing.");
+        feed.drain();
+        take_all(&mut feed);
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.drain();
+        feed.note_spoken(Vec::new());
+        chunk(&tx, "Sure thing.");
+        chunk(&tx, "Done.");
+        feed.drain();
+        assert_eq!(take_all(&mut feed), strings(&["Sure thing.", "Done."]));
+
+        // Heard, but round 2 opens differently: nothing after it is skipped
+        // either, even when it matches.
+        let (tx, mut feed) = SpeechFeed::channel();
+        chunk(&tx, "Sure thing.");
+        feed.drain();
+        take_all(&mut feed);
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.drain();
+        feed.note_spoken(strings(&["Sure thing."]));
+        chunk(&tx, "Okay.");
+        chunk(&tx, "Sure thing.");
+        feed.drain();
+        assert_eq!(take_all(&mut feed), strings(&["Okay.", "Sure thing."]));
+        assert!(feed.heard().is_empty());
+    }
+
+    #[test]
+    fn heard_sentences_carry_over_several_cancels() {
+        let (tx, mut feed) = feed();
+        chunk(&tx, "Sure thing.");
+        feed.drain();
+        take_all(&mut feed);
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.drain();
+        feed.note_spoken(strings(&["Sure thing."]));
+        // Round 2: opener skipped, one new sentence played, cancelled again.
+        chunk(&tx, "Sure thing.");
+        chunk(&tx, "Checking now.");
+        feed.drain();
+        assert_eq!(take_all(&mut feed), strings(&["Checking now."]));
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.drain();
+        feed.note_spoken(strings(&["Checking now."]));
+        // A cancel with no new speech in between keeps what was heard.
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.drain_all();
+        chunk(&tx, "Sure thing.");
+        chunk(&tx, "Checking now.");
+        chunk(&tx, "All green.");
+        feed.drain();
+        assert_eq!(take_all(&mut feed), strings(&["All green."]));
+        assert_eq!(feed.heard(), strings(&["Sure thing.", "Checking now."]));
+        feed.restart();
+        assert!(feed.heard().is_empty());
     }
 
     #[test]

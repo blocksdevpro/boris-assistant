@@ -150,7 +150,7 @@ is spoken after acceptance). `BORIS_STREAM_SPEECH=0` restores speak-after-accept
   speaker/       # live.json — wake liveness enroll (acoustic takes)
   state/workspace/ # sandboxed agent workspace
   state/projects.json # daily cache of discovered git repos (known projects)
-  state/reminders.json # timers + reminders (agent tools; spoken by the engine while Armed)
+  state/reminders.json # timers + reminders (agent tools; spoken by the engine between turns: Armed or right after Talking, never mid-turn or during approvals; recorded as a `[Host event: ...]` note)
 ```
 
 Optional hand-edited `[workspace]` in `config.toml` (`projects = [...]`, `discover_projects`) lists known projects; they become read roots only and are rendered into the system prompt with the sandbox, real shell, and roots.

@@ -45,6 +45,9 @@ use personal::PersonalMemory;
 /// Max characters of user text included in turn-start logs.
 const LOG_PREVIEW_CHARS: usize = 80;
 
+/// Prefix of a persisted host-event note ([`Agent::record_host_event`]).
+pub const HOST_EVENT_PREFIX: &str = "[Host event:";
+
 /// Host handle to cancel an in-flight [`Agent::prompt`]. Cheap to clone; the
 /// engine thread keeps one copy while the turn runs on the agent runtime.
 #[derive(Clone, Debug)]
@@ -177,6 +180,70 @@ mod tests {
         assert!(!exported
             .iter()
             .any(|m| m.origin == crate::MessageOrigin::HostControl));
+    }
+
+    #[test]
+    fn spoken_reminder_lands_as_a_persisted_host_event_not_a_human_turn() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent
+            .context
+            .push_human("remind me at 9 to call mum", 1_000);
+        agent.context.push(super::Role::Assistant, "Okay, 9 PM.");
+
+        let note = crate::spoken_reminders_note("Reminder: call mum.", crate::now_unix_ms());
+        assert!(agent.record_host_event(&note));
+
+        let last = agent.context.messages().last().unwrap().clone();
+        assert!(matches!(last.role, super::Role::Assistant));
+        assert_ne!(last.origin, crate::MessageOrigin::Human);
+        assert_eq!(last.sent_at_ms, None);
+        let text = last.content.as_str().unwrap();
+        assert!(text.starts_with(super::HOST_EVENT_PREFIX), "{text}");
+        assert!(text.contains("Reminder: call mum."), "{text}");
+        // Never quoted as a turn interruption, never stamped on the wire.
+        assert!(!text.starts_with("[Host note:"));
+        assert!(!last.dump().to_string().contains("<sent_at>"));
+
+        // Survives transcript persistence like other host notes.
+        let persisted = agent.export_messages_for_persist();
+        assert!(persisted.iter().any(|m| m.content.as_str() == Some(text)));
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|m| m.origin == crate::MessageOrigin::Human)
+                .count(),
+            1
+        );
+        assert!(!agent.record_host_event("   "));
+    }
+
+    #[test]
+    fn host_event_waits_while_a_confirmation_is_pending() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push_human("delete it", 1_000);
+        agent.pending_turn = Some(crate::runtime::PendingTurn {
+            pending: crate::runtime::PendingToolCall::new(
+                "pending-1",
+                "file_delete",
+                serde_json::json!({}),
+                "delete",
+                crate::ToolRisk::Dangerous,
+                "call-1",
+            ),
+            batch_with: Vec::new(),
+            remaining_calls: Vec::new(),
+            tools_used: Vec::new(),
+            tool_rounds: 1,
+            confirms_used: 1,
+            user_text: "delete it".into(),
+            todos_file: None,
+            markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+            gate_left: 0,
+            token_accounting: crate::types::TokenAccounting::default(),
+        });
+        let before = agent.context.messages().len();
+        assert!(!agent.record_host_event("at 9:00 PM Boris spoke a due reminder aloud"));
+        assert_eq!(agent.context.messages().len(), before);
     }
 
     #[test]
@@ -785,6 +852,27 @@ impl Agent {
     /// True when a confirmation is outstanding (host must resume or abort).
     pub fn has_pending_confirmation(&self) -> bool {
         self.pending_turn.is_some()
+    }
+
+    /// Record something the host did on its own between turns (for example
+    /// a reminder it spoke) as a persisted `[Host event: ...]` note, so a
+    /// later "what was that?" can be answered from the conversation.
+    ///
+    /// The note is an assistant-role history message like the interrupted-turn
+    /// host note: it survives transcript persistence, is never a human turn,
+    /// and carries no `<sent_at>`. It uses its own prefix so follow-up task
+    /// reminders, which quote the last `[Host note: ...]`, never mistake it
+    /// for a turn interruption. Returns `false` (and records nothing) while a
+    /// confirmation is pending: a message there would split the open
+    /// tool-call batch from its results.
+    pub fn record_host_event(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || self.pending_turn.is_some() {
+            return false;
+        }
+        self.context
+            .push(Role::Assistant, format!("{HOST_EVENT_PREFIX} {text}]"));
+        true
     }
 
     /// Install a cancel token for the next [`Self::prompt`]. The host clones

@@ -167,10 +167,16 @@ engine shares the same in-process `ReminderStore`. While Armed,
 `wait_for_wake` checks it once a second on the engine thread and returns
 `HearBreak::RemindersDue`; the engine speaks every due item (earliest first)
 as one host line, shows it as `said` with a `reminder` activity chip, removes
-it, and re-arms. Items that come due during a turn, a follow-up window, or a
-confirm wait stay queued until Boris is Armed again; while Boris is off they
-wait for the next Start. An item more than two minutes late says when it was
-due ("Reminder from 3:15 PM: …").
+it, and re-arms. Items that come due during a turn are spoken at the next gap:
+right after Talking when the follow-up window (AwaitingReply) opens, before the
+reply mic starts, or otherwise at Armed. `reminder_gap_open` is the gate: never
+Hearing/Reading/Thinking/Talking, AwaitingConfirm, AwaitingInput, a pending
+agent confirmation, or a queued barge-in turn. Playback is `speak_host_line`
+in both places (no barge watch; Stop ends it). The spoken line is then added to
+the conversation with `Agent::record_host_event` (a persisted `[Host event:
+...]` note, not a human turn) and synced to the transcript, so "what was that
+reminder?" works. While Boris is off items wait for the next Start. An item
+more than two minutes late says when it was due ("Reminder from 3:15 PM: …").
 
 ## Devices
 

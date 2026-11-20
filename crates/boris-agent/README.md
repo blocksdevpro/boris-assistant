@@ -333,9 +333,17 @@ registration adds `timer_set` (`duration`: "10m", "1h30m", "90s"),
 `reminder_set` (`when`: "in 20 minutes", "5pm", "tomorrow 9am",
 "2026-11-20 09:00", RFC 3339; a passed time of day means the next one),
 `reminders_list`, and `reminder_cancel` (`id` or `match`). They are `Safe`,
-`Plan` kind, never confirm, and stay in `VoiceSafe`. The host speaks due items
-via `take_due` (see the pipeline README); `parse_duration` / `parse_when`
-are public for hosts.
+`Plan` kind, never confirm, and stay in `VoiceSafe`. A bare clock time ("9",
+"at 9:30") means the sooner of h:MM and (h+12):MM (always within 12 hours);
+if that is under two minutes away, or the time follows "today"/"tomorrow",
+`parse_when` returns `WhenError::Ambiguous` and `reminder_set` fails telling
+the model to ask the user ("tonight 9" is 9 PM; "9pm", "21:30", "09:00" are
+never ambiguous). The host speaks due items via `take_due` between turns (see
+the pipeline README) and records each spoken line with
+`Agent::record_host_event(spoken_reminders_note(..))`: an assistant-role
+`[Host event: ...]` history message that persists in transcripts, is never a
+human turn (no `<sent_at>`), and is skipped while a confirmation is pending.
+`parse_duration` / `parse_when` are public for hosts.
 
 ## Streamed speech
 

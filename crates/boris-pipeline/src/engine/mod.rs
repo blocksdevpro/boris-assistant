@@ -356,11 +356,52 @@ fn speak_host_line(
     }
 }
 
-/// Speak every due timer and reminder (earliest first) as one host line.
-/// Runs only from Armed, so a due item waits for the current turn to end.
-fn deliver_reminders(rt: &mut EngineRuntime, cmd_rx: &Receiver<EngineCommand>, running: &mut bool) {
+/// True when the engine loop is in a gap between turns where a due reminder
+/// may be spoken: Armed, or the follow-up window right after Talking
+/// (AwaitingReply) before the mic opens for the reply. Never mid-turn
+/// (Hearing / Reading / Thinking / Talking), during an approval prompt
+/// (AwaitingConfirm, or any confirmation still pending in the agent), while
+/// typed input is awaited (AwaitingInput), or when a barge-in turn is queued.
+fn reminder_gap_open(phase: Phase, confirmation_pending: bool, barge_turn_queued: bool) -> bool {
+    matches!(phase, Phase::Armed | Phase::AwaitingReply)
+        && !confirmation_pending
+        && !barge_turn_queued
+}
+
+/// Take every item due at `now_ms` when the gap is open; otherwise take
+/// nothing, so the items stay due for the next gap.
+fn take_due_at_gap(
+    reminders: &boris_agent::ReminderStore,
+    gap_open: bool,
+    now_ms: i64,
+) -> Vec<boris_agent::Reminder> {
+    if gap_open {
+        reminders.take_due(now_ms)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Speak every due timer and reminder (earliest first) as one host line, at
+/// a gap between turns only ([`reminder_gap_open`]); a due item otherwise
+/// waits for the current turn to end. Playback follows the Armed rules of
+/// [`speak_host_line`] (no barge watch; Stop still ends it). The spoken line
+/// is then recorded in the conversation as a host event and synced to the
+/// transcript, so a follow-up "what was that reminder?" has the answer.
+fn deliver_reminders(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    barge_turn_queued: bool,
+) {
     let now = boris_agent::now_unix_ms();
-    let due = rt.reminders.take_due(now);
+    let gap = reminder_gap_open(
+        rt.picture.phase,
+        rt.agent.has_pending_confirmation(),
+        barge_turn_queued,
+    );
+    let due = take_due_at_gap(&rt.reminders, gap, now);
     if due.is_empty() {
         return;
     }
@@ -376,6 +417,14 @@ fn deliver_reminders(rt: &mut EngineRuntime, cmd_rx: &Receiver<EngineCommand>, r
         format!("{} reminders", due.len())
     });
     speak_host_line(rt, cmd_rx, running, &line);
+    if rt
+        .agent
+        .record_host_event(&boris_agent::spoken_reminders_note(&line, now))
+    {
+        if let Some(ref sid) = *sess.active_session {
+            enqueue_transcript_sync(&rt.store, sid, sess.transcript_len, &rt.agent);
+        }
+    }
     rt.picture.clear_activity();
     rt.picture.publish();
 }
@@ -621,6 +670,20 @@ fn run(
             rt.picture.turn = None;
             rt.picture.clear_activity();
             rt.picture.set_phase(Phase::AwaitingReply);
+            // A gap between turns: Talking has ended and the reply mic is not
+            // open yet. Speak anything that fell due during the turn now
+            // rather than after the follow-up window; the settle below then
+            // drains its echo before the reply capture starts.
+            deliver_reminders(
+                &mut rt,
+                &mut sess,
+                &cmd_rx,
+                &mut running,
+                barge_turn.is_some(),
+            );
+            if go_off_if_not_running(&mut rt, &mut sess, running) {
+                continue;
+            }
             tracing::info!(
                 depth = follow_up_depth,
                 "awaiting freeform user reply (no wake)"
@@ -697,7 +760,13 @@ fn run(
                     continue;
                 }
                 Err(HearBreak::RemindersDue) => {
-                    deliver_reminders(&mut rt, &cmd_rx, &mut running);
+                    deliver_reminders(
+                        &mut rt,
+                        &mut sess,
+                        &cmd_rx,
+                        &mut running,
+                        barge_turn.is_some(),
+                    );
                     continue;
                 }
                 Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
@@ -1900,6 +1969,80 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<EngineCommand>();
         assert_send::<EngineHandle>();
+    }
+
+    #[test]
+    fn reminders_are_spoken_only_in_a_gap_between_turns() {
+        for phase in [Phase::Armed, Phase::AwaitingReply] {
+            assert!(reminder_gap_open(phase, false, false), "{phase:?}");
+            assert!(
+                !reminder_gap_open(phase, true, false),
+                "{phase:?} + pending confirm"
+            );
+            assert!(
+                !reminder_gap_open(phase, false, true),
+                "{phase:?} + queued barge turn"
+            );
+        }
+        for phase in [
+            Phase::Off,
+            Phase::Quiet,
+            Phase::Hearing,
+            Phase::Reading,
+            Phase::Thinking,
+            Phase::Talking,
+            Phase::AwaitingConfirm,
+            Phase::AwaitingInput,
+        ] {
+            assert!(!reminder_gap_open(phase, false, false), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn a_due_reminder_waits_out_the_turn_and_is_taken_at_the_next_gap() {
+        let now = boris_agent::now_unix_ms();
+        let path = std::env::temp_dir().join(format!(
+            "boris-engine-reminder-gap-{}-{now}.json",
+            std::process::id()
+        ));
+        // Written before the store opens, so the item is already due.
+        let file = serde_json::json!({
+            "next_id": 2,
+            "items": [{
+                "id": 1,
+                "kind": "reminder",
+                "message": "call mum",
+                "due_unix_ms": now - 1_000,
+                "created_unix_ms": now - 60_000,
+            }],
+        });
+        std::fs::write(&path, file.to_string()).unwrap();
+        let store = boris_agent::ReminderStore::open(&path);
+
+        for phase in [
+            Phase::Hearing,
+            Phase::Reading,
+            Phase::Thinking,
+            Phase::Talking,
+            Phase::AwaitingConfirm,
+            Phase::AwaitingInput,
+        ] {
+            let gap = reminder_gap_open(phase, false, false);
+            assert!(take_due_at_gap(&store, gap, now).is_empty(), "{phase:?}");
+            assert!(store.has_due(now), "still due after {phase:?}");
+        }
+        // Follow-up window with an approval still pending: not yet.
+        let gap = reminder_gap_open(Phase::AwaitingReply, true, false);
+        assert!(take_due_at_gap(&store, gap, now).is_empty());
+
+        // Talking ended, follow-up window open: delivered once.
+        let gap = reminder_gap_open(Phase::AwaitingReply, false, false);
+        let due = take_due_at_gap(&store, gap, now);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].spoken(now), "Reminder: call mum.");
+        assert!(!store.has_due(now));
+        assert!(take_due_at_gap(&store, gap, now).is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

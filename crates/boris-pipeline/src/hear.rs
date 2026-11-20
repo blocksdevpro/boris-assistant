@@ -102,7 +102,8 @@ pub enum HearBreak {
     /// mid-turn helpers drop the request.
     RunSelfCheck,
     /// A timer or reminder is due. Only [`wait_for_wake`] returns this, so
-    /// due items wait for Armed instead of interrupting a turn.
+    /// due items never interrupt a turn; the engine also speaks them in the
+    /// follow-up window right after Talking.
     RemindersDue,
 }
 

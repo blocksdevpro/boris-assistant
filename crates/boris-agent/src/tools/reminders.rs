@@ -8,7 +8,7 @@ use chrono::Local;
 use serde_json::{json, Value};
 
 use crate::reminders::{
-    describe_duration, parse_duration, parse_when, Reminder, ReminderKind, ReminderStore,
+    describe_duration, parse_duration, parse_when, Reminder, ReminderKind, ReminderStore, WhenError,
 };
 use crate::tool::{
     optional_string, require_object, require_string, Permission, Tool, ToolError, ToolKind,
@@ -126,14 +126,14 @@ impl Tool for ReminderSetTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule a spoken reminder at a time (\"5pm\", \"tomorrow 9am\", \"2026-11-20 09:00\") or after a delay (\"in 20 minutes\"). Times are the user's local time."
+        "Schedule a spoken reminder at a time (\"5pm\", \"21:30\", \"tomorrow 9am\", \"2026-11-20 09:00\") or after a delay (\"in 20 minutes\"). Times are the user's local time. Pass the user's words for a bare hour as is (\"9\", \"at 9:30\"): it means the next 9:00 or 21:00, whichever comes first; if that is ambiguous the tool fails and you must ask the user which time they meant."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "when": {"type": "string", "description": "Local time or delay: \"in 20 minutes\", \"5:30pm\", \"tomorrow 9am\", \"2026-11-20 09:00\", or RFC 3339"},
+                "when": {"type": "string", "description": "Local time or delay: \"in 20 minutes\", \"5:30pm\", \"9pm\", \"21:30\", a bare hour like \"9\" or \"9:30\" (next occurrence within 12 hours), \"tomorrow 9am\", \"2026-11-20 09:00\", or RFC 3339"},
                 "message": {"type": "string", "description": "What to remind the user about, phrased to be spoken"}
             },
             "required": ["when", "message"],
@@ -153,7 +153,12 @@ impl Tool for ReminderSetTool {
         let obj = require_object(&args)?;
         let when = require_string(obj, "when")?;
         let message = require_string(obj, "message")?;
-        let due = parse_when(&when, Local::now()).map_err(ToolError::invalid_args)?;
+        // An ambiguous bare hour is a failed call telling the model to ask
+        // the user; unreadable input is an argument error.
+        let due = parse_when(&when, Local::now()).map_err(|error| match error {
+            WhenError::Ambiguous(message) => ToolError::failed(message),
+            WhenError::Invalid(message) => ToolError::invalid_args(message),
+        })?;
         let item = self
             .store
             .add(ReminderKind::Reminder, &message, due)

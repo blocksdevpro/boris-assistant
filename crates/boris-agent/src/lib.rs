@@ -85,7 +85,7 @@ pub use activity::{
     describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
     Tense, VerbKind,
 };
-pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel};
+pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel, HOST_EVENT_PREFIX};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{
     Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
@@ -126,7 +126,8 @@ pub use speech_sanitize::{
 };
 pub use speech_stream::{SpeechSegmenter, SpeechSignal};
 pub use reminders::{
-    now_unix_ms, parse_duration, parse_when, Reminder, ReminderKind, ReminderStore,
+    now_unix_ms, parse_duration, parse_when, spoken_reminders_note, Reminder, ReminderKind,
+    ReminderStore, WhenError,
 };
 pub use hooks::{HookEvent, HookSpec, Hooks};
 pub use stats::AgentStats;

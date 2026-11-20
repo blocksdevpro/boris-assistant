@@ -69,6 +69,20 @@ impl Reminder {
     }
 }
 
+/// Host-event text recording that the voice host spoke `line` (one or more
+/// due items) at `now_ms`, for [`crate::Agent::record_host_event`].
+pub fn spoken_reminders_note(line: &str, now_ms: i64) -> String {
+    let at = Local
+        .timestamp_millis_opt(now_ms)
+        .single()
+        .unwrap_or_else(Local::now);
+    format!(
+        "at {} Boris spoke a due reminder aloud: \"{}\"",
+        at.format("%-I:%M %p"),
+        line.trim()
+    )
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ReminderFile {
     #[serde(default)]
@@ -307,7 +321,7 @@ pub fn describe_duration(d: Duration) -> String {
 }
 
 const DURATION_HELP: &str = "use a duration like 10m, 90s, 1h30m, or \"2 hours\"";
-const WHEN_HELP: &str = "use a duration (\"in 20 minutes\", \"1h\"), a time of day (\"5pm\", \"17:30\", \"tomorrow 9am\"), or a date and time (\"2026-11-20 09:00\")";
+const WHEN_HELP: &str = "use a duration (\"in 20 minutes\", \"1h\"), a time of day (\"5pm\", \"9\", \"21:30\", \"tomorrow 9am\"), or a date and time (\"2026-11-20 09:00\")";
 
 /// Parse a duration: `90s`, `10m`, `1h30m`, `1.5h`, `2 hours 5 minutes`,
 /// optionally after "in" / "for". A bare number means minutes.
@@ -388,14 +402,57 @@ fn checked_secs(secs: f64) -> Result<Duration, String> {
     Ok(Duration::milliseconds((secs * 1000.0).round() as i64))
 }
 
+//// Why [`parse_when`] gave no due time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhenError {
+    /// Not a time Boris can read, or one that has already passed.
+    Invalid(String),
+    /// A bare clock time ("9", "9:30") that could mean two times: the user
+    /// has to say which. The message tells the model to ask, not guess.
+    Ambiguous(String),
+}
+
+impl WhenError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Invalid(message) | Self::Ambiguous(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for WhenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for WhenError {}
+
+impl From<String> for WhenError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+/// A bare clock time whose soonest reading is closer than this is ambiguous.
+const BARE_CLOCK_MIN_LEAD_SECS: i64 = 2 * 60;
+
 /// Parse when a reminder is due, relative to `now`: a duration ("in 20
 /// minutes"), a time of day ("5pm", "17:30", "noon"; the next one if it
-/// already passed today), "today"/"tonight"/"tomorrow" plus a time, a date
-/// and time ("2026-11-20 09:00"), or RFC 3339.
-pub fn parse_when(input: &str, now: DateTime<Local>) -> Result<DateTime<Local>, String> {
+/// already passed today), a bare clock time ("9", "at 9:30"; see below),
+/// "today"/"tonight"/"tomorrow" plus a time, a date and time ("2026-11-20
+/// 09:00"), or RFC 3339.
+///
+/// A bare clock time (hour 1-12, no am/pm, no leading zero) means the next
+/// occurrence of h:MM or (h+12):MM, whichever comes first, so always within
+/// 12 hours. If that soonest reading is under two minutes away the user may
+/// well mean the other one, so it is [`WhenError::Ambiguous`]; so is a bare
+/// time after "today"/"tomorrow" ("tonight 9" means 9 PM). Explicit am/pm and
+/// 24-hour times ("9pm", "21:00", "09:30") are never ambiguous.
+pub fn parse_when(input: &str, now: DateTime<Local>) -> Result<DateTime<Local>, WhenError> {
     let raw = input.trim();
     if raw.is_empty() {
-        return Err(format!("missing time; {WHEN_HELP}"));
+        return Err(format!("missing time; {WHEN_HELP}").into());
     }
     if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
         return Ok(at.with_timezone(&Local));
@@ -407,33 +464,35 @@ pub fn parse_when(input: &str, now: DateTime<Local>) -> Result<DateTime<Local>, 
         "%Y-%m-%dT%H:%M:%S",
     ] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(raw, fmt) {
-            return local(naive);
+            return Ok(local(naive)?);
         }
     }
     let lower = raw.to_lowercase();
     let at_prefix = lower.starts_with("at ");
     let text = lower.strip_prefix("at ").unwrap_or(&lower).trim();
-    // "at 9" is a time, never nine minutes; a bare number is ambiguous here.
+    // "at 9" and a bare "9" are clock times, never nine minutes.
     let bare_number = text.parse::<f64>().is_ok();
     if !at_prefix && (text.starts_with("in ") || (!bare_number && parse_duration(text).is_ok())) {
         return Ok(now + parse_duration(text)?);
     }
 
-    let (day, rest, default_time) = if let Some(rest) = text.strip_prefix("tomorrow") {
+    let (day, day_word, rest, default_time) = if let Some(rest) = text.strip_prefix("tomorrow") {
         (
             Some(now.date_naive() + Duration::days(1)),
+            "tomorrow",
             rest,
             Some((9, 0)),
         )
     } else if let Some(rest) = text.strip_prefix("tonight") {
-        (Some(now.date_naive()), rest, Some((20, 0)))
+        (Some(now.date_naive()), "tonight", rest, Some((20, 0)))
     } else if let Some(rest) = text.strip_prefix("today") {
-        (Some(now.date_naive()), rest, None)
+        (Some(now.date_naive()), "today", rest, None)
     } else {
-        (None, text, None)
+        (None, "", text, None)
     };
     let rest = rest.trim();
     let rest = rest.strip_prefix("at ").unwrap_or(rest).trim();
+    let unreadable = || format!("could not read \"{input}\"; {WHEN_HELP}");
     let time = if rest.is_empty() {
         match default_time {
             Some((h, m)) => NaiveTime::from_hms_opt(h, m, 0),
@@ -441,7 +500,28 @@ pub fn parse_when(input: &str, now: DateTime<Local>) -> Result<DateTime<Local>, 
         }
         .ok_or_else(|| format!("missing time of day in \"{input}\"; {WHEN_HELP}"))?
     } else {
-        parse_time_of_day(rest).ok_or_else(|| format!("could not read \"{input}\"; {WHEN_HELP}"))?
+        match (parse_clock(rest), day) {
+            (Some(Clock::Exact(time)), _) => time,
+            (Some(Clock::Bare { hour, minute }), None) => {
+                return resolve_bare_clock(input, hour, minute, now);
+            }
+            (Some(Clock::Bare { hour, minute }), Some(_)) if day_word == "tonight" => {
+                NaiveTime::from_hms_opt(hour % 12 + 12, minute, 0).ok_or_else(unreadable)?
+            }
+            (Some(Clock::Bare { hour, minute }), Some(date)) => {
+                let [first, second] = [hour % 12, hour % 12 + 12].map(|h| {
+                    date.and_hms_opt(h, minute, 0)
+                        .map(|t| t.format("%-I:%M %p").to_string())
+                        .unwrap_or_default()
+                });
+                return Err(ambiguous(
+                    input,
+                    &format!("{first} {day_word}"),
+                    &format!("{second} {day_word}"),
+                ));
+            }
+            (None, _) => return Err(unreadable().into()),
+        }
     };
     let date = day.unwrap_or_else(|| now.date_naive());
     let mut at = local(date.and_time(time))?;
@@ -449,9 +529,58 @@ pub fn parse_when(input: &str, now: DateTime<Local>) -> Result<DateTime<Local>, 
         at = local((date + Duration::days(1)).and_time(time))?;
     }
     if at <= now {
-        return Err(format!("\"{input}\" has already passed"));
+        return Err(format!("\"{input}\" has already passed").into());
     }
     Ok(at)
+}
+
+fn ambiguous(input: &str, first: &str, second: &str) -> WhenError {
+    WhenError::Ambiguous(format!(
+        "\"{}\" is ambiguous: it could mean {first} or {second}. Ask the user which time they \
+         meant (do not guess), then call reminder_set again with am/pm or a 24-hour time.",
+        input.trim()
+    ))
+}
+
+/// Next occurrence of `time` strictly after `now` (today, else tomorrow).
+fn next_occurrence(time: NaiveTime, now: DateTime<Local>) -> Result<DateTime<Local>, String> {
+    let today = now.date_naive();
+    let at = local(today.and_time(time))?;
+    if at > now {
+        return Ok(at);
+    }
+    local((today + Duration::days(1)).and_time(time))
+}
+
+/// Resolve a bare clock time (`hour` 1-12, no am/pm) against `now`: the
+/// sooner of the next h:MM and the next (h+12):MM, which is always within 12
+/// hours. Ambiguous when that sooner reading is under two minutes away.
+fn resolve_bare_clock(
+    input: &str,
+    hour: u32,
+    minute: u32,
+    now: DateTime<Local>,
+) -> Result<DateTime<Local>, WhenError> {
+    let read = |h: u32| -> Result<DateTime<Local>, WhenError> {
+        let time = NaiveTime::from_hms_opt(h, minute, 0)
+            .ok_or_else(|| format!("could not read \"{input}\"; {WHEN_HELP}"))?;
+        Ok(next_occurrence(time, now)?)
+    };
+    let mut options = [read(hour % 12)?, read(hour % 12 + 12)?];
+    options.sort();
+    let [soonest, later] = options;
+    if (soonest - now).num_seconds() < BARE_CLOCK_MIN_LEAD_SECS {
+        let label = |at: DateTime<Local>| {
+            let day = if at.date_naive() == now.date_naive() {
+                "today"
+            } else {
+                "tomorrow"
+            };
+            format!("{} {day}", at.format("%-I:%M %p"))
+        };
+        return Err(ambiguous(input, &label(soonest), &label(later)));
+    }
+    Ok(soonest)
 }
 
 fn local(naive: NaiveDateTime) -> Result<DateTime<Local>, String> {
@@ -461,12 +590,31 @@ fn local(naive: NaiveDateTime) -> Result<DateTime<Local>, String> {
         .ok_or_else(|| "that local time does not exist (clock change)".into())
 }
 
-/// "5pm", "5 pm", "5:30pm", "5:30 p.m.", "17:30", "noon", "midnight".
-fn parse_time_of_day(text: &str) -> Option<NaiveTime> {
+/// A parsed time of day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clock {
+    /// Unambiguous: am/pm, 24-hour ("17:30", "09:30"), noon, midnight.
+    Exact(NaiveTime),
+    /// Hour 1-12 with no am/pm ("9", "9:30"): morning or evening.
+    Bare { hour: u32, minute: u32 },
+}
+
+fn all_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// "5pm", "5 pm", "5:30pm", "5:30 p.m.", "17:30", "09:30", "noon",
+/// "midnight" (exact); "9", "9:30", "9 o'clock" (bare).
+fn parse_clock(text: &str) -> Option<Clock> {
     let text = text.trim().replace('.', "");
-    match text.as_str() {
-        "noon" | "midday" => return NaiveTime::from_hms_opt(12, 0, 0),
-        "midnight" => return NaiveTime::from_hms_opt(0, 0, 0),
+    let text = text
+        .strip_suffix("o'clock")
+        .or_else(|| text.strip_suffix("oclock"))
+        .unwrap_or(&text)
+        .trim();
+    match text {
+        "noon" | "midday" => return NaiveTime::from_hms_opt(12, 0, 0).map(Clock::Exact),
+        "midnight" => return NaiveTime::from_hms_opt(0, 0, 0).map(Clock::Exact),
         _ => {}
     }
     let (body, meridiem) = if let Some(b) = text.strip_suffix("am") {
@@ -474,24 +622,41 @@ fn parse_time_of_day(text: &str) -> Option<NaiveTime> {
     } else if let Some(b) = text.strip_suffix("pm") {
         (b.trim(), Some(true))
     } else {
-        (text.as_str(), None)
+        (text, None)
     };
-    let (h, m) = match body.split_once(':') {
-        Some((h, m)) => (h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?),
-        // A bare hour needs am/pm ("at 9" is ambiguous).
-        None if meridiem.is_some() => (body.parse::<u32>().ok()?, 0),
-        None => return None,
+    let (hour_text, minute_text) = match body.split_once(':') {
+        Some((h, m)) => (h.trim(), Some(m.trim())),
+        None => (body, None),
     };
-    let h = match meridiem {
+    if !all_digits(hour_text) || minute_text.is_some_and(|m| !all_digits(m)) {
+        return None;
+    }
+    let h = hour_text.parse::<u32>().ok()?;
+    let m = match minute_text {
+        Some(m) => m.parse::<u32>().ok()?,
+        None => 0,
+    };
+    if m > 59 {
+        return None;
+    }
+    match meridiem {
         Some(pm) => {
             if !(1..=12).contains(&h) {
                 return None;
             }
-            (h % 12) + if pm { 12 } else { 0 }
+            NaiveTime::from_hms_opt((h % 12) + if pm { 12 } else { 0 }, m, 0).map(Clock::Exact)
         }
-        None => h,
-    };
-    NaiveTime::from_hms_opt(h, m, 0)
+        None => {
+            let zero_padded = hour_text.len() > 1 && hour_text.starts_with('0');
+            if (1..=12).contains(&h) && !zero_padded {
+                Some(Clock::Bare { hour: h, minute: m })
+            } else if minute_text.is_some() || h >= 13 {
+                NaiveTime::from_hms_opt(h, m, 0).map(Clock::Exact)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -569,10 +734,125 @@ mod tests {
             parse_when("today 9am", now).is_err(),
             "explicit today in the past"
         );
-        assert!(parse_when("at 9", now).is_err(), "bare hour is ambiguous");
-        assert!(parse_when("9", now).is_err(), "bare number is ambiguous");
         assert!(parse_when("13pm", now).is_err());
         assert!(parse_when("whenever", now).is_err());
+    }
+
+    fn invalid(input: &str, now: DateTime<Local>) -> bool {
+        matches!(parse_when(input, now), Err(WhenError::Invalid(_)))
+    }
+
+    fn ambiguous_err(input: &str, now: DateTime<Local>) -> String {
+        match parse_when(input, now) {
+            Err(WhenError::Ambiguous(message)) => message,
+            other => panic!("{input}: expected ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_clock_reminder_times_take_the_next_reading_within_twelve_hours() {
+        // Morning: "at 9" at 7:00 is 9 AM today.
+        let morning = at(2026, 11, 19, 7, 0);
+        assert_eq!(parse_when("at 9", morning).unwrap(), at(2026, 11, 19, 9, 0));
+        assert_eq!(parse_when("9", morning).unwrap(), at(2026, 11, 19, 9, 0));
+        // Evening: at 14:00 it is 9 PM today, not 9 AM tomorrow.
+        let afternoon = at(2026, 11, 19, 14, 0);
+        assert_eq!(
+            parse_when("at 9", afternoon).unwrap(),
+            at(2026, 11, 19, 21, 0)
+        );
+        assert_eq!(
+            parse_when("9 o'clock", afternoon).unwrap(),
+            at(2026, 11, 19, 21, 0)
+        );
+        // Late night: at 23:00, "at 9" is 9 AM tomorrow.
+        let late = at(2026, 11, 19, 23, 0);
+        assert_eq!(parse_when("at 9", late).unwrap(), at(2026, 11, 20, 9, 0));
+        // Minutes.
+        assert_eq!(
+            parse_when("9:30", afternoon).unwrap(),
+            at(2026, 11, 19, 21, 30)
+        );
+        assert_eq!(
+            parse_when("at 9:30", morning).unwrap(),
+            at(2026, 11, 19, 9, 30)
+        );
+        // 12 reads as noon or midnight.
+        assert_eq!(
+            parse_when("at 12", morning).unwrap(),
+            at(2026, 11, 19, 12, 0)
+        );
+        assert_eq!(
+            parse_when("at 12:15", afternoon).unwrap(),
+            at(2026, 11, 20, 0, 15)
+        );
+        // Exactly two minutes ahead is fine.
+        assert_eq!(
+            parse_when("at 9", at(2026, 11, 19, 8, 58)).unwrap(),
+            at(2026, 11, 19, 9, 0)
+        );
+        // "tonight 9" means 9 PM.
+        assert_eq!(
+            parse_when("tonight 9", morning).unwrap(),
+            at(2026, 11, 19, 21, 0)
+        );
+    }
+
+    #[test]
+    fn explicit_am_pm_and_24_hour_times_are_never_ambiguous() {
+        let now = at(2026, 11, 19, 8, 59);
+        assert_eq!(parse_when("9am", now).unwrap(), at(2026, 11, 19, 9, 0));
+        assert_eq!(parse_when("at 9pm", now).unwrap(), at(2026, 11, 19, 21, 0));
+        assert_eq!(
+            parse_when("9:30 p.m.", now).unwrap(),
+            at(2026, 11, 19, 21, 30)
+        );
+        assert_eq!(parse_when("21:00", now).unwrap(), at(2026, 11, 19, 21, 0));
+        assert_eq!(
+            parse_when("at 21:30", now).unwrap(),
+            at(2026, 11, 19, 21, 30)
+        );
+        assert_eq!(parse_when("09:00", now).unwrap(), at(2026, 11, 19, 9, 0));
+        assert_eq!(parse_when("at 17", now).unwrap(), at(2026, 11, 19, 17, 0));
+        assert_eq!(parse_when("00:30", now).unwrap(), at(2026, 11, 20, 0, 30));
+    }
+
+    #[test]
+    fn bare_clock_under_two_minutes_away_asks_instead_of_guessing() {
+        let message = ambiguous_err("at 9", at(2026, 11, 19, 8, 59));
+        assert!(message.contains("9:00 AM today"), "{message}");
+        assert!(message.contains("9:00 PM today"), "{message}");
+        assert!(message.contains("Ask the user"), "{message}");
+        // Also around the evening reading.
+        let message = ambiguous_err("9:30", at(2026, 11, 19, 21, 29));
+        assert!(message.contains("9:30 PM today"), "{message}");
+        assert!(message.contains("9:30 AM tomorrow"), "{message}");
+        // A bare time on a named day has no "next reading" to pick.
+        let message = ambiguous_err("tomorrow 9", at(2026, 11, 19, 14, 0));
+        assert!(message.contains("9:00 AM tomorrow"), "{message}");
+        assert!(message.contains("9:00 PM tomorrow"), "{message}");
+    }
+
+    #[test]
+    fn garbage_clock_times_are_rejected() {
+        let now = at(2026, 11, 19, 14, 0);
+        for input in [
+            "at",
+            "at nine-ish",
+            "9:75",
+            "25:00",
+            "13pm",
+            "0pm",
+            "+9",
+            "9:+5",
+            "at 0",
+            "9.5",
+            "99",
+            "at 9 or 10",
+            "9::30",
+        ] {
+            assert!(invalid(input, now), "{input} should be invalid");
+        }
     }
 
     #[test]

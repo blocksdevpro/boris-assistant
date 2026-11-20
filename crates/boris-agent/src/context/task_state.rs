@@ -76,6 +76,13 @@ impl Default for TaskStateCapsule {
 
 impl TaskStateCapsule {
     pub fn begin_turn(&mut self, user_text: &str) {
+        self.begin_turn_as(user_text, user_text);
+    }
+
+    /// Like [`Self::begin_turn`] with an objective that differs from the
+    /// human text (an accepted offer names what was offered). Constraints
+    /// still come from the human text only.
+    pub(super) fn begin_turn_as(&mut self, user_text: &str, objective: &str) {
         if matches!(
             self.status,
             TaskStatus::Idle | TaskStatus::Completed | TaskStatus::Failed
@@ -89,7 +96,7 @@ impl TaskStateCapsule {
         self.turn = self.turn.saturating_add(1);
         self.status = TaskStatus::Active;
         let source = format!("human:turn-{}", self.turn);
-        let objective = TaskStateEntry::new(user_text, &source);
+        let objective = TaskStateEntry::new(objective, &source);
         self.objective = Some(objective.clone());
         push_unique(&mut self.open_steps, objective);
 
@@ -197,22 +204,45 @@ impl TaskStateCapsule {
         }
     }
 
+    /// Rebuild the capsule after a reload.
+    ///
+    /// The objective is the newest human request that is not a follow-up
+    /// ("continue", "did you finish?"), so a resumed task keeps its real
+    /// objective. A latest turn that ends in a salvaged-turn host note was
+    /// interrupted, not answered, and stays unfinished.
     pub(super) fn rebuild_from_history(&mut self, history: &[Message]) {
         *self = Self::default();
-        let Some(last_human) = history
-            .iter()
-            .rposition(|message| message.origin == MessageOrigin::Human)
-        else {
+        let is_human = |message: &Message| message.origin == MessageOrigin::Human;
+        let Some(last_human) = history.iter().rposition(is_human) else {
             return;
         };
-        let user_text = value_text(&history[last_human].content);
-        self.begin_turn(&user_text);
+        let mut objective = last_human;
+        loop {
+            let text = value_text(&history[objective].content);
+            let kind = super::followup::followup_kind_after(
+                &text,
+                last_assistant_text(&history[..objective]),
+            );
+            let resumes = matches!(
+                kind,
+                Some(super::followup::FollowupKind::Resume | super::followup::FollowupKind::Status)
+            );
+            match history[..objective].iter().rposition(is_human) {
+                Some(earlier) if resumes => objective = earlier,
+                _ => break,
+            }
+        }
+        self.begin_turn(&value_text(&history[objective].content));
         if let Some(answer) = history[last_human + 1..]
             .iter()
             .rev()
             .find(|message| message.origin == MessageOrigin::Assistant)
         {
-            self.finish(TaskStatus::Completed, &value_text(&answer.content));
+            if super::interrupt::is_turn_note(answer) {
+                self.finish(TaskStatus::Failed, "");
+            } else {
+                self.finish(TaskStatus::Completed, &value_text(&answer.content));
+            }
         }
     }
 
@@ -267,6 +297,24 @@ fn constraint_ambiguity(sentence: &str) -> Option<bool> {
         || lower.starts_with("were you ");
     let not_only = normalized.windows(2).any(|pair| pair == ["not", "only"]);
     Some(double_negative || retrospective || not_only)
+}
+
+/// Text of the newest assistant reply in the latest turn of `history`
+/// (trailing human messages skipped), if any.
+pub(super) fn last_assistant_text(history: &[Message]) -> Option<&str> {
+    history
+        .iter()
+        .rev()
+        .skip_while(|message| message.origin.is_human())
+        .take_while(|message| !message.origin.is_human())
+        .filter(|message| message.origin == MessageOrigin::Assistant)
+        .filter_map(|message| {
+            message
+                .content
+                .as_str()
+                .or_else(|| message.content.get("content").and_then(Value::as_str))
+        })
+        .find(|text| !text.trim().is_empty())
 }
 
 fn value_text(value: &Value) -> String {
@@ -421,6 +469,42 @@ mod tests {
         assert!(evidence.ends_with("FINAL ERROR: src/parser.rs:41 type mismatch"));
         assert!(evidence.chars().count() <= MAX_ENTRY_CHARS);
         assert!(!evidence.contains("MIDDLE_SENTINEL"));
+    }
+
+    fn row(role: Role, text: &str) -> Message {
+        Message::new(role, text)
+    }
+
+    #[test]
+    fn reload_keeps_interrupted_turn_unfinished_and_the_real_objective() {
+        let history = vec![
+            row(Role::User, "refactor the parser"),
+            row(Role::Assistant, "Working on it."),
+            row(Role::User, "continue"),
+            row(
+                Role::Assistant,
+                "[Host note: the user interrupted this turn after these tools ran: file_edit. \
+                 Their effects already happened; no final reply was given.]",
+            ),
+        ];
+        let mut capsule = TaskStateCapsule::default();
+        capsule.rebuild_from_history(&history);
+        assert_eq!(
+            capsule.objective.as_ref().unwrap().text,
+            "refactor the parser"
+        );
+        assert_eq!(capsule.status, TaskStatus::Failed);
+
+        // A real answer still completes the task.
+        let mut history = history;
+        history.push(row(Role::User, "keep going"));
+        history.push(row(Role::Assistant, "Done: parser refactored."));
+        capsule.rebuild_from_history(&history);
+        assert_eq!(
+            capsule.objective.as_ref().unwrap().text,
+            "refactor the parser"
+        );
+        assert_eq!(capsule.status, TaskStatus::Completed);
     }
 
     #[test]

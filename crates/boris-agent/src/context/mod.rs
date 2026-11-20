@@ -109,6 +109,7 @@ impl Context {
 
     /// Start a real human turn stamped with its wall-clock send time.
     pub(crate) fn push_human(&mut self, content: impl Into<Value>, sent_at_ms: u64) {
+        self.drop_turn_scoped_payloads();
         let message = Message::human_at(content, sent_at_ms);
         self.history.push(message.clone());
         self.messages.push(message);
@@ -231,9 +232,24 @@ impl Context {
     /// task?") keeps the earlier objective instead of replacing it with the
     /// follow-up text, and a turn-scoped host control restates that
     /// objective, its status, open todos, and any interruption note.
+    ///
+    /// An acceptance ("yes do it", "go ahead") replying to an assistant
+    /// offer or question starts a new objective that names the offer, rather
+    /// than resuming the earlier one.
     pub fn begin_task(&mut self, user_text: &str) {
         self.retrieved_memory.clear();
-        let kind = followup::followup_kind(user_text);
+        let last_assistant = task_state::last_assistant_text(&self.history);
+        let kind = followup::followup_kind_after(user_text, last_assistant);
+        if kind == Some(followup::FollowupKind::Affirm) {
+            if let Some(offer) = last_assistant.filter(|text| followup::ends_with_offer(text)) {
+                let objective = format!(
+                    "{user_text} (accepting the offer: \"{}\")",
+                    followup::last_sentence(offer)
+                );
+                self.task_state.begin_turn_as(user_text, &objective);
+                return;
+            }
+        }
         if matches!(
             kind,
             Some(followup::FollowupKind::Resume | followup::FollowupKind::Status)
@@ -721,6 +737,38 @@ mod tests {
             "continue by searching for Rust news"
         );
         assert_eq!(ctx.messages().len(), before + 1);
+    }
+
+    #[test]
+    fn accepting_an_offer_starts_a_new_objective() {
+        let mut ctx = Context::new(50);
+        ctx.push(Role::System, "sys");
+        ctx.push_human("check my disk space", 1);
+        ctx.begin_task("check my disk space");
+        ctx.push(Role::Assistant, "C: is 95% full. Want me to clear temp?");
+        ctx.finish_task(
+            TaskStatus::Completed,
+            "C: is 95% full. Want me to clear temp?",
+        );
+
+        ctx.push_human("yes do it", 2);
+        let before = ctx.messages().len();
+        ctx.begin_task("yes do it");
+        let objective = ctx.task_state().objective.as_ref().unwrap().text.clone();
+        assert!(objective.starts_with("yes do it"), "{objective}");
+        assert!(objective.contains("Want me to clear temp?"), "{objective}");
+        assert_eq!(ctx.messages().len(), before, "no follow-up control");
+
+        // Without an offer, "go ahead" still resumes the earlier objective.
+        ctx.push(Role::Assistant, "Clearing temp files now.");
+        ctx.finish_task(TaskStatus::Active, "");
+        ctx.push_human("go ahead", 3);
+        ctx.begin_task("go ahead");
+        assert_eq!(ctx.task_state().objective.as_ref().unwrap().text, objective);
+        assert_eq!(
+            ctx.messages().last().unwrap().origin,
+            MessageOrigin::HostControl
+        );
     }
 
     fn roles_of(ctx: &Context) -> Vec<&'static str> {

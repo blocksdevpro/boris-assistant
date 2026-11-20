@@ -117,7 +117,7 @@ impl Message {
     }
 
     /// Send time to render on the wire: human turns only.
-    fn wire_sent_at(&self) -> Option<u64> {
+    pub(super) fn wire_sent_at(&self) -> Option<u64> {
         if self.origin == MessageOrigin::Human && matches!(self.role, Role::User) {
             self.sent_at_ms
         } else {
@@ -152,7 +152,7 @@ pub fn split_sent_at(content: &Value) -> (Value, Option<u64>) {
 }
 
 /// Local wall-clock label for a send time, e.g. `Thu 2026-11-19 10:58`.
-fn sent_at_label(ms: u64) -> Option<String> {
+pub(super) fn sent_at_label(ms: u64) -> Option<String> {
     use chrono::TimeZone;
     match chrono::Local.timestamp_millis_opt(i64::try_from(ms).ok()?) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {

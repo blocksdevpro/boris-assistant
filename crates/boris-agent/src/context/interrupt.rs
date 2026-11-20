@@ -119,7 +119,8 @@ impl Context {
     }
 }
 
-fn is_turn_note(message: &Message) -> bool {
+/// Whether `message` is the persisted host note of a salvaged turn.
+pub(super) fn is_turn_note(message: &Message) -> bool {
     matches!(message.role, Role::Assistant)
         && message
             .content
@@ -140,8 +141,38 @@ fn tool_calls(message: &Message) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-/// Names of tools whose results in `turn` are real executions (not synthetic
-/// not-run rows), deduplicated in first-seen order.
+/// Error codes of failed observations whose tool did execute (it ran, then
+/// failed or timed out). Every other code (`denied`, `hook_blocked`,
+/// `unknown_tool`, argument-validation codes) is refused before execute.
+const EXECUTED_ERROR_CODES: &[&str] = &["failed", "timeout", "truncated", "other"];
+
+/// Whether a tool row records a call that actually executed.
+///
+/// Host status first: `_tool_ok: true` always ran. A failed row ran only when
+/// it is a structured tool error (`Error [code]: …`) with an execution code.
+/// Bracket-less `Error: …` rows are host refusals: declined approval, policy
+/// denial, cancelled input, not-run, or cancelled-on-abort. A `Tool::precheck`
+/// refusal (read-before-edit staleness) carries `precheck_refused`, so it is
+/// not executed work either.
+fn tool_row_executed(content: &Value) -> bool {
+    if content.get("_tool_ok").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    let text = content
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match text
+        .strip_prefix("Error [")
+        .and_then(|rest| rest.split_once(']'))
+    {
+        Some((code, _)) => EXECUTED_ERROR_CODES.contains(&code),
+        None => !text.starts_with("Error: "),
+    }
+}
+
+/// Names of tools whose results in `turn` are real executions (not refused,
+/// declined, or synthetic not-run rows), deduplicated in first-seen order.
 fn executed_tool_names(turn: &[Message]) -> Vec<String> {
     let names = turn
         .iter()
@@ -161,7 +192,10 @@ fn executed_tool_names(turn: &[Message]) -> Vec<String> {
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if content.starts_with(NOT_RUN_INTERRUPTED) || content.starts_with(CANCELLED_ON_ABORT) {
+        if content.starts_with(NOT_RUN_INTERRUPTED)
+            || content.starts_with(CANCELLED_ON_ABORT)
+            || !tool_row_executed(&message.content)
+        {
             continue;
         }
         let name = message
@@ -271,6 +305,68 @@ mod tests {
         assert!(!wire(&ctx)
             .iter()
             .any(|m| m["content"] == "Saved it for you."));
+    }
+
+    #[test]
+    fn refused_calls_are_not_executed_work() {
+        let mut ctx = Context::new(u32::MAX);
+        let start = turn_with_batch(
+            &mut ctx,
+            vec![
+                call("c1", "bash"),
+                call("c2", "file_write"),
+                call("c3", "web_fetch"),
+                call("c4", "file_edit"),
+                call("c5", "file_edit"),
+            ],
+        );
+        ctx.push_tool_result(
+            "bash",
+            "c1",
+            "Error: user declined this action".into(),
+            false,
+        );
+        ctx.push_tool_result(
+            "file_write",
+            "c2",
+            "Error [hook_blocked]: pre_tool hook exited 1".into(),
+            false,
+        );
+        ctx.push_tool_result(
+            "web_fetch",
+            "c3",
+            "Error [denied]: host blocked".into(),
+            false,
+        );
+        ctx.push_tool_result(
+            "file_edit",
+            "c4",
+            "Error [missing_required]: path is required (at $.path)".into(),
+            false,
+        );
+        ctx.push_tool_result(
+            "file_edit",
+            "c5",
+            "Error [precheck_refused]: read the file with file_read first".into(),
+            false,
+        );
+        assert!(!ctx.salvage_interrupted_turn(start, TurnEnd::Interrupted));
+
+        // A tool that ran and then failed is executed work.
+        let mut ctx = Context::new(u32::MAX);
+        let start = turn_with_batch(&mut ctx, vec![call("c1", "bash"), call("c2", "bash")]);
+        ctx.push_tool_result(
+            "bash",
+            "c1",
+            "Error: user declined this action".into(),
+            false,
+        );
+        ctx.push_tool_result("bash", "c2", "Error [timeout]: exceeded 30s".into(), false);
+        assert!(ctx.salvage_interrupted_turn(start, TurnEnd::Interrupted));
+        // Status beats error-looking text.
+        assert!(tool_row_executed(
+            &json!({"content": "Error: quoted file contents", "_tool_ok": true})
+        ));
     }
 
     #[test]

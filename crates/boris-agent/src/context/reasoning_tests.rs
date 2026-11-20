@@ -126,3 +126,34 @@ fn encrypted_blobs_do_not_inflate_token_estimates_or_digests() {
     assert!(digest.contains("file_read"));
     assert!(!digest.contains("reasoning_details"));
 }
+
+#[test]
+fn push_human_strips_previous_turn_reasoning_and_images() {
+    let mut ctx = Context::new(20);
+    ctx.push(Role::System, "sys");
+    ctx.push_human("look at my screen", 1);
+    tool_call_turn(
+        &mut ctx,
+        "c1",
+        json!([{"type": "reasoning.encrypted", "data": "BLOB"}]),
+    );
+    ctx.push_tool_image(&crate::tool_context::ImageAttachment {
+        call_id: "c1".into(),
+        tool_name: "file_read".into(),
+        mime: "image/png".into(),
+        data_base64: "QUJD".into(),
+        caption: "shot".into(),
+    });
+    ctx.push(Role::Assistant, "Done.");
+    assert!(!wire_details(&ctx).is_empty() && ctx.has_tool_images());
+
+    ctx.push_human("thanks", 2);
+    assert!(wire_details(&ctx).is_empty());
+    assert!(ctx
+        .history()
+        .iter()
+        .all(|m| m.content.get("reasoning_details").is_none()));
+    assert!(!ctx.has_tool_images());
+    let wire = ctx.as_json().to_string();
+    assert!(!wire.contains("base64") && wire.contains("[image omitted"));
+}

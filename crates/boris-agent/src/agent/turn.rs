@@ -16,7 +16,11 @@ use crate::types::{AgentEvent, AgentLoopConfig, LoopResult, TokenAccounting};
 use super::{log_preview, Agent, LOG_PREVIEW_CHARS};
 
 /// Output cap for summary compaction: a 2-4k token summary plus reasoning.
-pub(crate) const SUMMARY_MAX_TOKENS: u32 = 6_144;
+pub(crate) const SUMMARY_MAX_TOKENS: u32 = 8_192;
+
+/// Final section heading of the summary format. A summary without it was cut
+/// off (output cap) or ignored the format, and must not replace history.
+const SUMMARY_FINAL_HEADING: &str = "## Interruptions";
 
 /// Trusted instructions for the summary-compaction maintenance request.
 const SUMMARY_MAINTENANCE_PROMPT: &str = "<maintenance_task kind=\"conversation_summary\">
@@ -45,6 +49,14 @@ Any [Host note: ...] about interrupted or failed turns, and which tools had alre
 Keep exact identifiers (paths, URLs, ids, numbers) verbatim. Prefer facts over narrative. \
 Aim for 400-2500 words; never pad.
 </maintenance_task>";
+
+/// True when the summary reached its final section, i.e. was not truncated.
+fn summary_is_complete(summary: &str) -> bool {
+    let heading = SUMMARY_FINAL_HEADING.to_ascii_lowercase();
+    summary
+        .lines()
+        .any(|line| line.trim().to_ascii_lowercase().starts_with(&heading))
+}
 
 /// User-role payload: the transcript digest plus current todos as data.
 fn summary_payload(digest: &str, open_todos: &[String]) -> String {
@@ -370,6 +382,15 @@ impl Agent {
             .trim()
             .to_string();
         if summary.is_empty() {
+            return Ok(accounting);
+        }
+        if !summary_is_complete(&summary) {
+            // Truncated or off-format: keep history rather than replacing
+            // real turns with a partial summary.
+            warn!(
+                chars = summary.len(),
+                "llm compact skipped: summary incomplete (missing {SUMMARY_FINAL_HEADING})"
+            );
             return Ok(accounting);
         }
         self.context
@@ -1076,12 +1097,25 @@ mod retrieval_tests {
     #[derive(Clone, Default)]
     struct CompactionClient {
         options: Arc<Mutex<Vec<boris_ai::CompleteOptions>>>,
+        /// Reply cut off before the final section (output cap hit).
+        truncated: bool,
+    }
+
+    impl CompactionClient {
+        fn reply(&self) -> Value {
+            let content = if self.truncated {
+                "## User requests\n- retained fact\n## Decisions\n- half"
+            } else {
+                "## User requests\n- retained fact\n## Interruptions\nnone"
+            };
+            serde_json::json!({"role": "assistant", "content": content})
+        }
     }
 
     #[async_trait]
     impl LlmClient for CompactionClient {
         async fn complete(&self, _messages: Value, _tools: Value) -> Result<Value, LlmError> {
-            Ok(serde_json::json!({"role": "assistant", "content": "- retained fact"}))
+            Ok(self.reply())
         }
 
         async fn complete_stream(
@@ -1098,7 +1132,7 @@ mod retrieval_tests {
                 total_tokens: 840,
                 ..Default::default()
             }));
-            Ok(serde_json::json!({"role": "assistant", "content": "- retained fact"}))
+            Ok(self.reply())
         }
     }
 
@@ -1639,6 +1673,35 @@ mod retrieval_tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), crate::AgentErrorKind::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn truncated_summary_leaves_history_untouched() {
+        assert!(super::summary_is_complete(
+            "## Findings\n- x\n## interruptions\nnone"
+        ));
+        let client = CompactionClient {
+            truncated: true,
+            ..Default::default()
+        };
+        let mut agent = super::Agent::new(Box::new(client), "sys");
+        for i in 0..6 {
+            agent.context.push(super::Role::User, format!("user-{i}"));
+            agent
+                .context
+                .push(super::Role::Assistant, format!("assistant-{i}"));
+        }
+        let before = agent.context.messages().len();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        agent.maybe_llm_compact(&cancel).await.unwrap();
+
+        assert_eq!(agent.context.messages().len(), before);
+        assert!(!agent
+            .context
+            .messages()
+            .iter()
+            .any(|message| message.origin == crate::MessageOrigin::Summary));
     }
 
     #[tokio::test]

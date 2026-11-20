@@ -127,6 +127,11 @@ const QUESTION_WORDS: &[&str] = &[
 
 const AFFIRMATIONS: &[&str] = &["yes", "yeah", "yep", "yup", "sure"];
 
+/// Resume phrases that are also how a user accepts an offer ("want me to
+/// clear temp?" → "yes, do it"). After an offer they start the offered
+/// action instead of resuming the earlier objective.
+const ACCEPT_PHRASES: &[&str] = &["go ahead", "do it"];
+
 fn normalized_words(text: &str) -> Vec<String> {
     text.to_lowercase()
         .replace(['\u{2019}', '\''], "")
@@ -165,6 +170,42 @@ pub fn followup_kind(text: &str) -> Option<FollowupKind> {
         return Some(FollowupKind::Affirm);
     }
     None
+}
+
+/// Like [`followup_kind`], but an acceptance ("go ahead", "yes do it")
+/// replying to an assistant offer or question is [`FollowupKind::Affirm`]:
+/// it accepts a new action rather than resuming the earlier objective.
+/// "continue" / "keep going" / "resume" stay [`FollowupKind::Resume`].
+pub fn followup_kind_after(text: &str, last_assistant: Option<&str>) -> Option<FollowupKind> {
+    let kind = followup_kind(text)?;
+    if kind != FollowupKind::Resume || !last_assistant.is_some_and(ends_with_offer) {
+        return Some(kind);
+    }
+    let padded = format!(" {} ", normalized_words(text).join(" "));
+    let core = RESUME_PHRASES
+        .iter()
+        .filter(|phrase| !ACCEPT_PHRASES.contains(phrase))
+        .any(|phrase| padded.contains(&format!(" {phrase} ")));
+    Some(if core { kind } else { FollowupKind::Affirm })
+}
+
+/// True when an assistant reply ends with a question or offer.
+pub fn ends_with_offer(text: &str) -> bool {
+    text.trim_end()
+        .trim_end_matches(['"', '\'', ')', '*', '_', '\u{201D}'])
+        .ends_with('?')
+}
+
+/// The final sentence of an assistant reply (the offer it ended with).
+pub fn last_sentence(text: &str) -> &str {
+    let text = text.trim();
+    let body = text.trim_end_matches(['?', '!', '.']);
+    let start = [". ", "! ", "? ", "\n"]
+        .iter()
+        .filter_map(|sep| body.rfind(sep).map(|i| i + sep.len()))
+        .max()
+        .unwrap_or(0);
+    text[start..].trim()
 }
 
 #[cfg(test)]
@@ -220,6 +261,33 @@ mod tests {
         ] {
             assert_eq!(followup_kind(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn acceptance_after_an_offer_is_not_a_resume() {
+        let offer = "C: is 95% full. Want me to clear temp?";
+        for text in ["yes do it", "sure, go ahead", "go ahead"] {
+            assert_eq!(
+                followup_kind_after(text, Some(offer)),
+                Some(FollowupKind::Affirm),
+                "{text}"
+            );
+            // Without an offer it still resumes the earlier task.
+            assert_eq!(
+                followup_kind_after(text, Some("Cleared 3 GB of temp files.")),
+                Some(FollowupKind::Resume),
+                "{text}"
+            );
+        }
+        for text in ["continue", "keep going", "resume"] {
+            assert_eq!(
+                followup_kind_after(text, Some(offer)),
+                Some(FollowupKind::Resume),
+                "{text}"
+            );
+        }
+        assert_eq!(last_sentence(offer), "Want me to clear temp?");
+        assert!(ends_with_offer("Shall I run it?\""));
     }
 
     #[test]

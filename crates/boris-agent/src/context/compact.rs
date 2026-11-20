@@ -8,8 +8,10 @@
 //! - **Cache-stable prefix**: a tool observation is capped once, at a fixed
 //!   size, when it enters context ([`cap_tool_text`] is idempotent). Under the
 //!   hard budget nothing earlier is ever rewritten, so consecutive requests
-//!   share a byte-identical serialized prefix and the provider prompt cache
-//!   stays warm.
+//!   within a human turn share a byte-identical serialized prefix and the
+//!   provider prompt cache stays warm. A new human turn rewrites the previous
+//!   turn once (turn-scoped reasoning blocks and images are dropped, one-turn
+//!   host controls removed).
 //! - **Rare, large restructuring**: only over the hard budget are old tool
 //!   chains collapsed, and then deep enough to land back under the soft
 //!   budget so the next rounds do not collapse again. Summary compaction (the
@@ -427,10 +429,17 @@ impl Context {
                 }
                 // Reasoning blocks are provider-private and never summarized.
                 let message = message.without_reasoning_details();
-                let row = serde_json::json!({
+                let mut row = serde_json::json!({
                     "role": message.role.to_string(),
                     "content": &message.content,
                 });
+                // Keep human send times so the summary can still place them.
+                if let Some(label) = message
+                    .wire_sent_at()
+                    .and_then(super::message::sent_at_label)
+                {
+                    row["sent_at"] = Value::String(label);
+                }
                 chunk.push_str(&row.to_string());
                 chunk.push('\n');
             }
@@ -845,6 +854,19 @@ mod tests {
     }
 
     #[test]
+    fn older_turns_digest_keeps_human_send_times() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+        ctx.push_human("old-user", 1_700_000_000_000);
+        ctx.push(Role::Assistant, "old-asst");
+        ctx.push_human("new-user", 1_700_000_100_000);
+        let dig = ctx.older_turns_digest(1);
+        let label = super::super::message::sent_at_label(1_700_000_000_000).unwrap();
+        assert!(dig.contains(&format!("\"sent_at\":\"{label}\"")), "{dig}");
+        assert_eq!(dig.matches("sent_at").count(), 1, "{dig}");
+    }
+
+    #[test]
     fn older_turns_digest_empty_when_nothing_to_drop() {
         let mut ctx = Context::new(20);
         ctx.push(Role::User, "only");
@@ -1222,9 +1244,11 @@ mod tests {
         assert_eq!(cap_tool_text("short", 10_000), "short");
     }
 
-    /// Consecutive requests must share a byte-identical serialized prefix,
-    /// including when the request grows past the soft budget (the old tiered
-    /// caps rewrote every older tool result at that point).
+    /// Consecutive requests must share a byte-identical serialized prefix
+    /// (across human turns too here, as there are no turn-scoped reasoning
+    /// blocks, images, or host controls to drop), including when the request
+    /// grows past the soft budget (the old tiered caps rewrote every older
+    /// tool result at that point).
     #[test]
     fn consecutive_requests_share_an_identical_serialized_prefix() {
         let mut ctx = Context::new(1_000);

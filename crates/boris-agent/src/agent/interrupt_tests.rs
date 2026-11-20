@@ -214,3 +214,24 @@ async fn abandon_during_confirmation_keeps_ran_calls_and_closes_the_paused_one()
     let note = persisted_texts(&agent).last().unwrap().clone();
     assert!(note.contains("tools ran: note_save") && !note.contains("shell_run"));
 }
+
+#[tokio::test]
+async fn abandon_after_a_declined_approval_restores_the_checkpoint() {
+    let script = Script::new(vec![
+        Ok(calls(&[("c1", "shell_run")])),
+        Ok(json!({"role":"assistant","content":"Okay, I won't run it."})),
+    ]);
+    let mut agent = agent_with(&script);
+    let checkpoint = agent.checkpoint();
+    let outcome = agent.prompt("run the cleanup").await.unwrap();
+    let AgentOutcome::NeedsConfirmation { pending, .. } = outcome else {
+        panic!("expected a confirmation");
+    };
+    agent.resume_confirmation(&pending.id, false).await.unwrap();
+
+    agent.abandon_turn(checkpoint);
+
+    let texts = persisted_texts(&agent);
+    assert!(!texts.iter().any(|t| t == "run the cleanup"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("tools ran")), "{texts:?}");
+}

@@ -45,6 +45,14 @@ pub struct TurnTrace {
     /// running, `"after_accept"` when it was synthesized after acceptance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_speech: Option<String>,
+    /// Model + tool time of the agent across every Thinking pass of the turn
+    /// (first pass and confirm/input resumes), excluding audio the host played
+    /// while it waited. Set on every turn that ran the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ms: Option<u64>,
+    /// Audio played during Thinking: the streamed answer and progress line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_playback_ms: Option<u64>,
 }
 
 /// Events that mean Boris became audible, for `speech_end_to_first_audio_ms`.
@@ -66,6 +74,8 @@ impl TurnTrace {
             speech_end_to_first_audio_ms: None,
             speech_end_to_answer_audio_ms: None,
             answer_speech: None,
+            agent_ms: None,
+            thinking_playback_ms: None,
         }
     }
 
@@ -284,6 +294,28 @@ mod tests {
         assert_eq!(t.response_generation_ms, Some(400));
         assert_eq!(t.playback_ms, Some(2000));
         let _ = clock;
+    }
+
+    #[test]
+    fn agent_timing_fields_round_trip_and_stay_optional() {
+        let mut t = TurnTrace::new("t1", None);
+        let bare = t.to_jsonl().unwrap();
+        assert!(!bare.contains("agent_ms") && !bare.contains("thinking_playback_ms"));
+
+        t.agent_ms = Some(4_200);
+        t.thinking_playback_ms = Some(0);
+        let line = t.to_jsonl().unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["agent_ms"], json!(4_200));
+        assert_eq!(value["thinking_playback_ms"], json!(0));
+        let back: TurnTrace = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.agent_ms, Some(4_200));
+        assert_eq!(back.thinking_playback_ms, Some(0));
+
+        let old: TurnTrace =
+            serde_json::from_str(r#"{"turn_id":"x","started_unix_ms":1,"events":[]}"#).unwrap();
+        assert_eq!(old.agent_ms, None);
+        assert_eq!(old.thinking_playback_ms, None);
     }
 
     #[test]

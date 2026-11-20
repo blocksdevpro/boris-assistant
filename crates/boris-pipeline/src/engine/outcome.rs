@@ -29,7 +29,9 @@ use super::playback::{
     drain_output_events, wait_playback_or_stop, wait_playback_started, PlaybackWait,
 };
 use super::session::{end_session, go_off};
-use super::think::{run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech};
+use super::think::{
+    run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech, ThinkTiming,
+};
 use super::EngineCommand;
 
 pub(super) enum OutcomeResolve {
@@ -94,6 +96,8 @@ pub(super) struct ConfirmCtx<'a> {
     /// What early speech did in each resume, in order. The caller traces
     /// them and uses the last one for the final reply.
     pub resume_speech: Vec<EarlySpeech>,
+    /// Agent and Thinking-playback time of the resumes, summed.
+    pub timing: ThinkTiming,
 }
 
 impl ConfirmCtx<'_> {
@@ -866,6 +870,7 @@ fn resume_thinking(ctx: &mut ConfirmCtx<'_>, work: AgentWork<'_>) -> ThinkResolv
             progress_line: ctx.progress_line,
             report: &mut report,
         }),
+        timing: &mut ctx.timing,
     });
     *ctx.tts = tts_slot.join().0;
     ctx.resume_speech.push(report);

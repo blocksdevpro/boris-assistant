@@ -135,6 +135,13 @@ Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
 maintenance lane. Generation latency excludes audible playback. Read the JSONL
 directly for local p50/p95 summaries.
 
+Every turn that ran the agent also carries top-level `agent_ms` (model + tools
+across the first Thinking pass and any confirm/input resumes: each pass counts
+until the agent itself finished, so audio played while the engine waited and
+the confirm dialog are excluded) and `thinking_playback_ms` (streamed answer
+and progress-line audio played during Thinking). The `agent` span uses the same
+`agent_ms`, next to a `thinking_playback` span.
+
 ### Reading first-audio latency
 
 Each trace line carries three top-level fields for speech-end → first audio:

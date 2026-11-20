@@ -89,7 +89,9 @@ use playback::{
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
-use think::{run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech};
+use think::{
+    run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech, ThinkTiming,
+};
 use turn_trace::TurnTraceGuard;
 use util::{speakable_reply_units, transcript_usable};
 
@@ -1374,6 +1376,9 @@ fn run(
         // nothing executed is restored to this checkpoint exactly.
         let turn_checkpoint = rt.agent.checkpoint();
         let mut think_trace_ms = turn_trace.elapsed_ms();
+        // Agent time (model + tools) and audio played during Thinking, over
+        // the first pass and any confirm/input resumes.
+        let mut think_timing = ThinkTiming::default();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -1397,10 +1402,12 @@ fn run(
                 progress_line: rt.progress_line,
                 report: &mut early,
             }),
+            timing: &mut think_timing,
         });
         let (tts_owned, tts_load) = tts_slot.join();
         rt.tts = tts_owned;
         trace_early_audio(&mut turn_trace, &early, think_trace_ms);
+        turn_trace.set_agent_timing(think_timing.agent_ms, think_timing.playback_ms);
 
         let (outcome, report) = match think {
             ThinkResolve::Stopped => {
@@ -1531,8 +1538,11 @@ fn run(
             feed: &mut speech_feed,
             progress_line: rt.progress_line,
             resume_speech: Vec::new(),
+            timing: ThinkTiming::default(),
         };
         let resolved = resolve_agent_outcome(outcome, &mut confirm);
+        think_timing.add(confirm.timing);
+        turn_trace.set_agent_timing(think_timing.agent_ms, think_timing.playback_ms);
         // Resumes stream like the first pass. The last one produced the final
         // reply, so its early speech replaces the first pass's.
         for pass in std::mem::take(&mut confirm.resume_speech) {
@@ -1617,7 +1627,9 @@ fn run(
         };
         unsub(); // full turn finished (or speech path next)
 
-        let agent_ms = agent_t.elapsed().as_millis() as u64;
+        // Model + tools only: audio played during Thinking and the confirm
+        // dialog are not agent latency.
+        let agent_ms = think_timing.agent_ms;
         turn_trace.span(
             "agent",
             agent_ms,
@@ -1626,7 +1638,14 @@ fn run(
                 "tools": report.tools_used,
             })),
         );
-        tracing::info!(%turn, agent_ms, "agent done");
+        turn_trace.span("thinking_playback", think_timing.playback_ms, None);
+        tracing::info!(
+            %turn,
+            agent_ms,
+            thinking_playback_ms = think_timing.playback_ms,
+            wall_ms = agent_t.elapsed().as_millis() as u64,
+            "agent done"
+        );
 
         // The model chose silence (speech not meant for Boris). Tool work
         // never reaches here as Silent: the agent always reports it.

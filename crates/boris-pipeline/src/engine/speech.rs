@@ -91,6 +91,12 @@ pub(super) struct AppendedUnit {
 }
 
 impl StreamedSpeech {
+    /// How long this job's audio played (until it finished or stopped).
+    pub fn played_ms(&self) -> u64 {
+        self.play_origin_ms
+            .map_or(0, |origin| self.stop_ms.saturating_sub(origin))
+    }
+
     /// A job that played nothing because nothing was left to say.
     pub fn nothing_left(tts: TtsBox) -> Self {
         Self {

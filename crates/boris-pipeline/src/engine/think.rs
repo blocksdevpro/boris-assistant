@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -108,6 +108,34 @@ pub(super) struct EarlySpeech {
     pub spoken: Vec<String>,
 }
 
+/// Where the time of Thinking passes went, summed over passes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ThinkTiming {
+    /// Model + tools: the agent's own run time, without audio the engine
+    /// played after the agent was done.
+    pub agent_ms: u64,
+    /// Audio played during Thinking (streamed answer and progress line).
+    pub playback_ms: u64,
+}
+
+impl ThinkTiming {
+    pub fn add(&mut self, other: ThinkTiming) {
+        self.agent_ms = self.agent_ms.saturating_add(other.agent_ms);
+        self.playback_ms = self.playback_ms.saturating_add(other.playback_ms);
+    }
+}
+
+/// Agent time of one Thinking pass. Audio played while the agent kept
+/// working does not make it slower, so when the agent's finish time is known
+/// (`finished_ms`, from the pass start) that is the answer; otherwise the
+/// wall time minus the audio played while waiting.
+pub(super) fn agent_work_ms(wall_ms: u64, playback_ms: u64, finished_ms: Option<u64>) -> u64 {
+    match finished_ms {
+        Some(finished) => finished.min(wall_ms),
+        None => wall_ms.saturating_sub(playback_ms),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SpeakKind {
     Answer,
@@ -139,6 +167,8 @@ pub(super) struct ThinkCtx<'a> {
     pub work: AgentWork<'a>,
     pub turn: TurnId,
     pub speech: Option<ThinkSpeech<'a>>,
+    /// This pass's agent and playback time is added here.
+    pub timing: &'a mut ThinkTiming,
 }
 
 pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
@@ -160,8 +190,11 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
         work,
         turn,
         mut speech,
+        timing,
     } = ctx;
     let think_started = Instant::now();
+    let agent_finished: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
+    let mut playback_ms = 0u64;
     if let Some(sp) = speech.as_mut() {
         sp.report.started_at = Some(think_started);
     }
@@ -192,8 +225,9 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let agent_done = std::sync::Arc::new(AtomicBool::new(false));
 
-    thread::scope(|s| {
+    let resolve = thread::scope(|s| {
         let agent_done_w = agent_done.clone();
+        let agent_finished_w = agent_finished.clone();
         s.spawn(move || {
             let result = handle.block_on(async move {
                 match job {
@@ -219,6 +253,7 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                     }
                 }
             });
+            let _ = agent_finished_w.set(Instant::now());
             agent_done_w.store(true, Ordering::Release);
             let _ = done_tx.send(result);
         });
@@ -275,6 +310,7 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                                 stt: &mut *stt,
                                 watch: watch.as_mut(),
                                 turn,
+                                playback_ms: &mut playback_ms,
                             },
                         );
                         match step {
@@ -360,7 +396,20 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
 
             thread::sleep(THINK_POLL);
         }
-    })
+    });
+    let pass = ThinkTiming {
+        agent_ms: agent_work_ms(
+            think_started.elapsed().as_millis() as u64,
+            playback_ms,
+            agent_finished
+                .get()
+                .map(|at| at.saturating_duration_since(think_started).as_millis() as u64),
+        ),
+        playback_ms,
+    };
+    tracing::debug!(%turn, agent_ms = pass.agent_ms, playback_ms, "thinking pass timing");
+    timing.add(pass);
+    resolve
 }
 
 struct SpeakEnv<'e, 'w> {
@@ -374,6 +423,8 @@ struct SpeakEnv<'e, 'w> {
     stt: &'e mut SttBox,
     watch: Option<&'e mut BargeWatch<'w>>,
     turn: TurnId,
+    /// Audio played by this job is added here.
+    playback_ms: &'e mut u64,
 }
 
 /// Play the streamed answer or the progress line while the agent keeps
@@ -400,6 +451,7 @@ fn speak_while_thinking(
         stt,
         mut watch,
         turn,
+        playback_ms,
     } = env;
     let gap_samples = tts.inter_unit_silence_samples();
     let started_after_ms = think_started.elapsed().as_millis() as u64;
@@ -443,6 +495,7 @@ fn speak_while_thinking(
         );
         tts = std::mem::replace(&mut speech.tts, lost_tts());
         sp.report.audible |= speech.played;
+        *playback_ms = playback_ms.saturating_add(speech.played_ms());
         ledger.record(
             &speech.appended,
             speech.play_origin_ms,
@@ -666,5 +719,44 @@ fn transcribe_or_empty(stt: &mut SttBox, pcm: &[f32], turn: TurnId) -> String {
             tracing::warn!(error = %e, %turn, "thinking barge-in stt failed — resume");
             String::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_time_excludes_audio_played_after_the_agent_finished() {
+        // Agent done at 3 s; the engine kept playing the streamed answer
+        // until 9 s.
+        assert_eq!(agent_work_ms(9_000, 6_500, Some(3_000)), 3_000);
+        // A progress line played while tools kept running is not subtracted.
+        assert_eq!(agent_work_ms(20_000, 2_000, Some(19_990)), 19_990);
+        // Unknown finish: wall time minus playback, never below zero.
+        assert_eq!(agent_work_ms(9_000, 6_500, None), 2_500);
+        assert_eq!(agent_work_ms(1_000, 6_500, None), 0);
+        // A finish stamp can never exceed the pass itself.
+        assert_eq!(agent_work_ms(1_000, 0, Some(1_200)), 1_000);
+    }
+
+    #[test]
+    fn timing_sums_passes() {
+        let mut total = ThinkTiming::default();
+        total.add(ThinkTiming {
+            agent_ms: 1_000,
+            playback_ms: 300,
+        });
+        total.add(ThinkTiming {
+            agent_ms: 2_500,
+            playback_ms: 0,
+        });
+        assert_eq!(
+            total,
+            ThinkTiming {
+                agent_ms: 3_500,
+                playback_ms: 300,
+            }
+        );
     }
 }

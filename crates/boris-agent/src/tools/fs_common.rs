@@ -57,7 +57,8 @@ pub fn resolve_under_roots(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, Tool
     }
 
     Err(ToolError::failed(format!(
-        "path `{raw}` is outside allowed roots"
+        "path `{raw}` is outside allowed roots. Allowed roots: {}",
+        crate::runtime::policy::describe_roots(roots)
     )))
 }
 
@@ -78,8 +79,9 @@ fn accept_if_within_roots(normalized: PathBuf, roots: &[PathBuf]) -> Result<Path
         }
     }
     Err(ToolError::failed(format!(
-        "path `{}` is outside allowed roots",
-        real.display()
+        "path `{}` is outside allowed roots. Allowed roots: {}",
+        real.display(),
+        crate::runtime::policy::describe_roots(roots)
     )))
 }
 

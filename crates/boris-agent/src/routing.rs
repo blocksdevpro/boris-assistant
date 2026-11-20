@@ -56,11 +56,13 @@ pub fn route_from_traits(task: TaskTraits, round: RoundTraits) -> RouteMode {
 
 /// Stage-aware reasoning / token budget for this request.
 ///
-/// Once tool results are in context the reply must synthesize them, so any
-/// prior tool output escalates to at least `ToolPlanning` (whose 4_096-token
-/// budget fits synthesis). The only exception is an explicitly simple-voice
-/// turn with short (< [`SIMPLE_VOICE_TOOL_CHARS`]) clean results and no error
-/// evidence, which stays on the 768-token `SimpleVoice` budget.
+/// Keyword classification can be wrong (mishearings, Hinglish, paraphrase),
+/// so a misjudged turn must never be starved: `ToolPlanning` (Medium
+/// reasoning, 8_192 tokens) is the default. The cheap `SimpleVoice` stage
+/// (Low reasoning, 2_048 tokens) is used only for high-confidence chit-chat
+/// ([`TaskTraits::is_simple_voice`]: greeting or time/date) with no tool
+/// output yet, or with only short (< [`SIMPLE_VOICE_TOOL_CHARS`]) clean
+/// results. Complex, deep-research, or error-recovering turns get `Complex`.
 pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
     if task.complexity == crate::task::TaskComplexity::Complex
         || task.research_depth >= crate::task::ResearchDepth::Deep
@@ -68,17 +70,17 @@ pub fn request_stage_for(task: TaskTraits, round: RoundTraits) -> RequestStage {
         || (round.tool_rounds > 0 && task.needs_strong())
     {
         RequestStage::Complex
-    } else if task.needs_strong()
-        || (round.has_tool_results && !short_clean_simple_voice(task, round))
+    } else if task.is_simple_voice()
+        && (!round.has_tool_results || short_clean_simple_voice(task, round))
     {
-        RequestStage::ToolPlanning
-    } else {
         RequestStage::SimpleVoice
+    } else {
+        RequestStage::ToolPlanning
     }
 }
 
-/// Tool results longer than this force synthesis budget even on simple-voice
-/// turns (the 768-token `SimpleVoice` budget may truncate the reply).
+/// Tool results longer than this force the synthesis budget even on
+/// chit-chat turns.
 pub const SIMPLE_VOICE_TOOL_CHARS: usize = 200;
 
 /// True when a simple-voice turn may keep the cheap stage despite prior tool
@@ -191,6 +193,10 @@ pub struct RoutingClient {
     /// Last selected route, retained only for the legacy `route()` / `model()`
     /// inspection surface. Request dispatch never reads this value.
     last_route: AtomicU8,
+    /// Model id of the previous completion; reasoning blocks from a different
+    /// model are stripped from outgoing messages (signed/encrypted blocks are
+    /// model-specific and can be rejected by another model).
+    last_model: std::sync::Mutex<Option<String>>,
 }
 
 impl RoutingClient {
@@ -205,6 +211,7 @@ impl RoutingClient {
             strong,
             model_label,
             last_route: AtomicU8::new(RouteMode::Strong as u8),
+            last_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -224,6 +231,21 @@ impl RoutingClient {
         }
     }
 
+    /// Messages for a call on `client`: when its model differs from the
+    /// previous call's, drop `reasoning_details` / `reasoning` from assistant
+    /// messages. Same model leaves them untouched.
+    fn messages_for(&self, client: &dyn LlmClient, mut messages: Value) -> Value {
+        let model = client.model().to_string();
+        let prev = match self.last_model.lock() {
+            Ok(mut g) => g.replace(model.clone()),
+            Err(_) => None,
+        };
+        if prev.is_some_and(|p| p != model) {
+            strip_reasoning(&mut messages);
+        }
+        messages
+    }
+
     fn client_for(&self, mode: RouteMode) -> &dyn LlmClient {
         match mode {
             RouteMode::Fast => self.fast.as_ref(),
@@ -239,14 +261,15 @@ impl RoutingClient {
         tool_error: Option<bool>,
     ) -> (RouteMode, CompleteOptions) {
         if is_summary_maintenance(messages) {
+            // The summary replaces real history: strong route, planning stage.
             tracing::debug!(
-                route = RouteMode::Fast.as_str(),
-                stage = ?RequestStage::SimpleVoice,
+                route = RouteMode::Strong.as_str(),
+                stage = ?RequestStage::ToolPlanning,
                 "llm route for summary maintenance"
             );
             return (
-                RouteMode::Fast,
-                CompleteOptions::for_stage(RequestStage::SimpleVoice),
+                RouteMode::Strong,
+                CompleteOptions::for_stage(RequestStage::ToolPlanning),
             );
         }
         let text = last_user_text(messages).unwrap_or_default();
@@ -294,7 +317,22 @@ impl RoutingClient {
         tools: Value,
         opts: CompleteOptions,
     ) -> Result<Value, LlmError> {
+        let messages = self.messages_for(client, messages);
         client.complete_with_options(messages, tools, opts).await
+    }
+}
+
+fn strip_reasoning(messages: &mut Value) {
+    let Some(arr) = messages.as_array_mut() else {
+        return;
+    };
+    for m in arr {
+        if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+            if let Some(o) = m.as_object_mut() {
+                o.remove("reasoning_details");
+                o.remove("reasoning");
+            }
+        }
     }
 }
 
@@ -401,8 +439,9 @@ impl LlmClient for RoutingClient {
         let routed = Self::merge_options(inferred, opts);
         self.set_route(mode);
         let primary = self.client_for(mode);
+        let sent = self.messages_for(primary, messages.clone());
         match primary
-            .complete_stream(messages.clone(), tools.clone(), routed.clone(), on_event)
+            .complete_stream(sent, tools.clone(), routed.clone(), on_event)
             .await
         {
             Ok(v) => Ok(v),
@@ -414,6 +453,7 @@ impl LlmClient for RoutingClient {
                 if fallback.model() == primary.model() {
                     return Err(e);
                 }
+                let messages = self.messages_for(fallback, messages);
                 fallback
                     .complete_stream(messages, tools, routed, on_event)
                     .await
@@ -791,7 +831,7 @@ mod tests {
         assert!(round.has_tool_results);
         assert!(!round.has_error_evidence);
         assert!(round.max_tool_result_chars >= SIMPLE_VOICE_TOOL_CHARS);
-        // Long results must be synthesized: never the 768-token stage.
+        // Long results must be synthesized: never the cheap stage.
         assert_eq!(
             request_stage_for(round.task, round),
             RequestStage::ToolPlanning
@@ -803,7 +843,7 @@ mod tests {
     #[test]
     fn non_simple_tool_results_escalate_to_planning() {
         // Research turn with tool results but no completed tool round yet:
-        // ToolPlanning synthesis budget (not the 768-token stage).
+        // ToolPlanning synthesis budget (not the cheap stage).
         let messages = json!([
             { "role": "user", "content": "research the latest Rust async runtimes" },
             { "role": "tool", "content": "short hit" },
@@ -815,6 +855,33 @@ mod tests {
             request_stage_for(round.task, round),
             RequestStage::ToolPlanning
         );
+    }
+
+    #[test]
+    fn unclear_or_misheard_requests_default_to_medium_planning() {
+        // Local-only "simple" requests, mishearings, and Hinglish are not
+        // high-confidence chit-chat: they may need tools and synthesis.
+        for text in [
+            "check my screen",
+            "mujhe screen dikhao",
+            "summarize this file",
+            "stop",
+        ] {
+            let task = classify_task(text);
+            assert_eq!(
+                request_stage_for(task, RoundTraits::first(task)),
+                RequestStage::ToolPlanning,
+                "{text}"
+            );
+        }
+        for text in ["hi", "thanks", "what time is it"] {
+            let task = classify_task(text);
+            assert_eq!(
+                request_stage_for(task, RoundTraits::first(task)),
+                RequestStage::SimpleVoice,
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -870,6 +937,32 @@ mod tests {
     struct RecordingClient {
         model: &'static str,
         calls: std::sync::Mutex<u32>,
+    }
+
+    #[test]
+    fn reasoning_stripped_only_when_model_changes() {
+        let mk = |m| RecordingClient {
+            model: m,
+            calls: std::sync::Mutex::new(0),
+        };
+        let client = RoutingClient::new(Box::new(mk("fast-model")), Box::new(mk("strong-model")));
+        let msgs = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "x", "reasoning_details": [{"type": "reasoning.encrypted"}], "reasoning": "t"}
+        ]);
+        let fast = client.client_for(RouteMode::Fast);
+        let strong = client.client_for(RouteMode::Strong);
+        // first call: no previous model, untouched
+        assert_eq!(client.messages_for(fast, msgs.clone()), msgs);
+        // same model again: untouched
+        assert_eq!(client.messages_for(fast, msgs.clone()), msgs);
+        // switch: stripped
+        let out = client.messages_for(strong, msgs.clone());
+        assert!(out[1].get("reasoning_details").is_none());
+        assert!(out[1].get("reasoning").is_none());
+        assert_eq!(out[1]["content"], "x");
+        // now on strong again: untouched
+        assert_eq!(client.messages_for(strong, msgs.clone()), msgs);
     }
 
     #[test]
@@ -1095,7 +1188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_maintenance_uses_fast_route_and_explicit_output_cap() {
+    async fn summary_maintenance_uses_strong_route_and_explicit_output_cap() {
         let fast_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let strong_options = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let client = RoutingClient::new(
@@ -1108,8 +1201,8 @@ mod tests {
                 options: std::sync::Arc::clone(&strong_options),
             }),
         );
-        let mut options = CompleteOptions::for_stage(RequestStage::SimpleVoice);
-        options.max_tokens = Some(512);
+        let mut options = CompleteOptions::for_stage(RequestStage::ToolPlanning);
+        options.max_tokens = Some(6_144);
         client
             .complete_stream(
                 json!([
@@ -1126,8 +1219,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(client.route(), RouteMode::Fast);
-        assert_eq!(fast_options.lock().unwrap().as_slice(), &[options]);
-        assert!(strong_options.lock().unwrap().is_empty());
+        assert_eq!(client.route(), RouteMode::Strong);
+        assert_eq!(strong_options.lock().unwrap().as_slice(), &[options]);
+        assert!(fast_options.lock().unwrap().is_empty());
     }
 }

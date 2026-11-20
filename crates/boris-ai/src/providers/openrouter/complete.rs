@@ -273,40 +273,7 @@ impl OpenRouterClient {
             ))
         })?;
 
-        // Some gateways return HTTP 200 with a top-level error object.
-        if let Some(err) = json.get("error") {
-            return Err(LlmError::from_provider_error_value(err));
-        }
-
-        let usage = json.get("usage").map(TokenUsage::from_usage_value);
-
-        let message = json
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .cloned()
-            .ok_or_else(|| {
-                LlmError::parse(format!(
-                    "chat completion response missing choices[0].message: {}",
-                    truncate_error_body(&json.to_string())
-                ))
-            })?;
-
-        // Keep parity with the stream-assembled path (`assistant_message_from_stream`
-        // omits empty `tool_calls`): strip `"tool_calls": []` so both paths
-        // return the same shape for tool-less answers.
-        let mut message = normalize_assistant_message(message);
-        if message
-            .get("tool_calls")
-            .and_then(|t| t.as_array())
-            .is_some_and(|a| a.is_empty())
-        {
-            message
-                .as_object_mut()
-                .and_then(|obj| obj.remove("tool_calls"));
-        }
-        warn_if_truncated_tool_arguments(&message);
-        Ok((message, usage))
+        message_from_completion_json(&json)
     }
 
     /// SSE chat completions — assemble full assistant message from deltas.
@@ -323,7 +290,38 @@ impl OpenRouterClient {
             .await
     }
 
+    /// Stream with stall detection: a stall before any delta reached the
+    /// caller is retried once; a stall after deltas fails (no replay).
     async fn complete_streaming_with<F>(
+        &self,
+        messages: &Value,
+        tools: &Value,
+        opts: &CompleteOptions,
+        mut on_delta: F,
+    ) -> Result<(Value, Option<TokenUsage>), LlmError>
+    where
+        F: FnMut(StreamDelta) + Send,
+    {
+        let mut emitted = false;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let result = self
+                .stream_once(messages, tools, opts, &mut |delta: StreamDelta| {
+                    emitted = true;
+                    on_delta(delta);
+                })
+                .await;
+            match result {
+                Err(error) if is_stream_stall(&error) && !emitted && attempt == 1 => {
+                    tracing::warn!(%error, "LLM stream stalled before any delta; retrying once");
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn stream_once<F>(
         &self,
         messages: &Value,
         tools: &Value,
@@ -343,7 +341,18 @@ impl OpenRouterClient {
             .json(&body);
         let req = self.apply_common_headers(req);
 
-        let response = req.send().await.map_err(LlmError::from)?;
+        // First-byte budget spans the headers and the first body chunk.
+        let first_deadline = self
+            .first_byte_timeout
+            .map(|budget| scaled_first_byte(budget, &body["reasoning"]))
+            .map(|budget| (tokio::time::Instant::now() + budget, budget));
+        let response = match first_deadline {
+            Some((deadline, budget)) => tokio::time::timeout_at(deadline, req.send())
+                .await
+                .map_err(|_| stall_error("first-byte", budget))?,
+            None => req.send().await,
+        }
+        .map_err(LlmError::from)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -358,7 +367,23 @@ impl OpenRouterClient {
         let mut stream = response.bytes_stream();
         let mut stream_error: Option<Value> = None;
 
-        while let Some(chunk) = stream.next().await {
+        let mut got_bytes = false;
+        loop {
+            let next = match (got_bytes, first_deadline, self.idle_timeout) {
+                (false, Some((deadline, budget)), _) => {
+                    tokio::time::timeout_at(deadline, stream.next())
+                        .await
+                        .map_err(|_| stall_error("first-byte", budget))?
+                }
+                (true, _, Some(idle)) => tokio::time::timeout(idle, stream.next())
+                    .await
+                    .map_err(|_| stall_error("idle", idle))?,
+                _ => stream.next().await,
+            };
+            let Some(chunk) = next else {
+                break;
+            };
+            got_bytes = true;
             // `From<reqwest::Error>` preserves the Timeout kind (connect /
             // deadline) instead of collapsing everything into `Http`, so
             // callers and fallback guards can distinguish a stall mid-stream.
@@ -390,6 +415,55 @@ impl OpenRouterClient {
     }
 }
 
+/// Assistant message + usage from a non-streaming chat-completion body.
+///
+/// Shape parity with the stream-assembled path: `content` is a string, an
+/// empty `tool_calls` array is omitted, raw `reasoning_details` are kept
+/// unmodified for the next tool round, and display-only `reasoning` /
+/// `reasoning_content` text is dropped (it never belongs in history).
+fn message_from_completion_json(json: &Value) -> Result<(Value, Option<TokenUsage>), LlmError> {
+    // Some gateways return HTTP 200 with a top-level error object.
+    if let Some(err) = json.get("error") {
+        return Err(LlmError::from_provider_error_value(err));
+    }
+
+    let usage = json.get("usage").map(TokenUsage::from_usage_value);
+
+    let message = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .cloned()
+        .ok_or_else(|| {
+            LlmError::parse(format!(
+                "chat completion response missing choices[0].message: {}",
+                truncate_error_body(&json.to_string())
+            ))
+        })?;
+
+    let mut message = normalize_assistant_message(message);
+    if let Some(obj) = message.as_object_mut() {
+        if obj
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| a.is_empty())
+        {
+            obj.remove("tool_calls");
+        }
+        obj.remove("reasoning");
+        obj.remove("reasoning_content");
+        if !obj
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .is_some_and(|details| !details.is_empty())
+        {
+            obj.remove("reasoning_details");
+        }
+    }
+    warn_if_truncated_tool_arguments(&message);
+    Ok((message, usage))
+}
+
 /// Whether a stream failure may fall back to the blocking path.
 ///
 /// Provider errors (auth, rate limit, bad model — HTTP 4xx/5xx surfaced as
@@ -398,7 +472,37 @@ impl OpenRouterClient {
 /// budget. Transport / timeout / parse / unknown failures fall back, as does
 /// an empty payload with no provider error (handled by the `Ok` arms above).
 fn should_fallback_for_error(err: &LlmError) -> bool {
-    !matches!(err.kind(), LlmErrorKind::Provider)
+    // A stalled stream was already retried; the blocking path would hang on
+    // the same request for up to the full 180 s deadline.
+    !matches!(err.kind(), LlmErrorKind::Provider) && !is_stream_stall(err)
+}
+
+/// Hidden or high-effort reasoning can legitimately produce no bytes for a
+/// long time on hosts that send no keepalives, so the first-byte budget is
+/// tripled (capped by the 180 s total deadline) in those cases.
+fn scaled_first_byte(budget: std::time::Duration, reasoning: &Value) -> std::time::Duration {
+    let on = reasoning["enabled"].as_bool().unwrap_or(false);
+    let hidden = reasoning["exclude"].as_bool().unwrap_or(false);
+    let high = matches!(reasoning["effort"].as_str(), Some("high" | "xhigh"));
+    if on && (hidden || high) {
+        budget * 3
+    } else {
+        budget
+    }
+}
+
+const STREAM_STALL: &str = "LLM stream stalled";
+
+fn stall_error(kind: &str, budget: std::time::Duration) -> LlmError {
+    LlmError::timeout(format!(
+        "{STREAM_STALL}: no response bytes within {}s ({kind} timeout)",
+        budget.as_secs_f32()
+    ))
+}
+
+/// Timeout from the first-byte / idle stall detector (not the total deadline).
+pub(crate) fn is_stream_stall(err: &LlmError) -> bool {
+    err.kind() == LlmErrorKind::Timeout && err.message().starts_with(STREAM_STALL)
 }
 
 /// Best-effort truncated-arguments detector (`finish_reason == "length"`).
@@ -546,6 +650,19 @@ fn ingest_sse_data(assembler: &mut StreamAssembler, data: &str) -> StreamDelta {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_byte_budget_scales_for_hidden_or_high_reasoning() {
+        use serde_json::json;
+        use std::time::Duration;
+        let b = Duration::from_secs(20);
+        let f = super::scaled_first_byte;
+        assert_eq!(f(b, &json!({"effort":"low","exclude":true,"enabled":true})), b * 3);
+        assert_eq!(f(b, &json!({"effort":"high","exclude":false,"enabled":true})), b * 3);
+        assert_eq!(f(b, &json!({"effort":"low","exclude":false,"enabled":true})), b);
+        assert_eq!(f(b, &json!({"effort":"none","exclude":true,"enabled":false})), b);
+        assert_eq!(f(b, &serde_json::Value::Null), b);
+    }
+
     use super::*;
     use crate::providers::openrouter::sse::ToolDelta;
     use serde_json::json;
@@ -658,6 +775,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Each connection gets headers; `stall[i]` keeps it silent, otherwise a
+    /// one-event SSE body follows. Returns the number of requests served.
+    fn stalling_server(stall: Vec<bool>) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let mut served = 0;
+            let mut open = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while served < stall.len() && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
+                        let mut buf = [0u8; 65536];
+                        let _ = socket.read(&mut buf);
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+                        if !stall[served] {
+                            write!(socket, "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\ndata: [DONE]\n\n").unwrap();
+                        } else {
+                            open.push(socket);
+                        }
+                        served += 1;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(600));
+            drop(open);
+            served
+        });
+        (base, worker)
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_is_retried_once_then_fails_fast_without_blocking_fallback() {
+        let (base, worker) = stalling_server(vec![true, false]);
+        let client = OpenRouterClient::new("k".into(), Some("m".into()))
+            .with_base_url(base)
+            .with_first_byte_timeout(Some(Duration::from_millis(200)));
+        let message = client
+            .complete_stream(json!([]), Value::Null, CompleteOptions::default(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(message["content"], "ok");
+        assert_eq!(worker.join().unwrap(), 2, "one retry after the stall");
+
+        let (base, worker) = stalling_server(vec![true, true, false]);
+        let client = OpenRouterClient::new("k".into(), Some("m".into()))
+            .with_base_url(base)
+            .with_first_byte_timeout(Some(Duration::from_millis(200)));
+        let started = Instant::now();
+        let error = client
+            .complete_stream(json!([]), Value::Null, CompleteOptions::default(), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(is_stream_stall(&error), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(worker.join().unwrap(), 2, "no blocking fallback after the retry");
     }
 
     #[tokio::test]
@@ -885,6 +1063,39 @@ mod tests {
             7,
         );
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn blocking_message_keeps_reasoning_details_and_drops_display_reasoning() {
+        let body = serde_json::json!({
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": null,
+                "reasoning": "I should read the file first.",
+                "reasoning_details": [
+                    {"type": "reasoning.summary", "summary": "Read file", "index": 0},
+                    {"type": "reasoning.encrypted", "data": "BLOB==", "index": 1}
+                ],
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"}}]
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        });
+        let (message, usage) = message_from_completion_json(&body).unwrap();
+        assert_eq!(message["content"], "");
+        assert!(message.get("reasoning").is_none());
+        assert_eq!(
+            message["reasoning_details"],
+            body["choices"][0]["message"]["reasoning_details"]
+        );
+        assert_eq!(usage.unwrap().total_tokens, 12);
+
+        let plain = serde_json::json!({"choices": [{"message": {
+            "role": "assistant", "content": "Hi", "tool_calls": [], "reasoning_details": []
+        }}]});
+        let (message, _) = message_from_completion_json(&plain).unwrap();
+        assert!(message.get("tool_calls").is_none());
+        assert!(message.get("reasoning_details").is_none());
     }
 
     #[test]

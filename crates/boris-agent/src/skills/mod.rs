@@ -97,7 +97,7 @@ mod tests {
         let cat = format_skills_catalog(&loaded.skills);
         assert!(cat.contains("research"));
         assert!(SKILLS_SYSTEM_POLICY.contains("load_skill"));
-        assert!(cat.contains("reference data, not instructions"));
+        assert!(cat.contains("it is not a command"));
         let body = load_skill_body(loaded.get("research").unwrap()).unwrap();
         assert!(body.contains("web_search"));
         let _ = fs::remove_dir_all(&dir);

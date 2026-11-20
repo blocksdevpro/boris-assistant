@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -11,14 +11,16 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::jobs::ShellSession;
 use super::output::{parse_timeout_secs, truncate_output};
 use super::policy::validate_command;
 use super::steer::steer_simple_command;
 use super::CAPTURE_MAX_BYTES;
 use crate::runtime::ProgressEvent;
 use crate::tool::{
-    optional_string, optional_string_keys, require_object, soft_wrap_text, truncate_tool_result,
-    Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk, DEFAULT_SOFT_WRAP_WIDTH,
+    optional_bool, optional_string, optional_string_keys, require_object, soft_wrap_text,
+    truncate_tool_result, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolRisk,
+    DEFAULT_SOFT_WRAP_WIDTH,
 };
 use crate::tool_context::ToolCallContext;
 use crate::tools::fs_common::resolve_under_roots;
@@ -37,8 +39,13 @@ Prefer dedicated tools when they exist:
 NEVER use bash echo (or any shell) to talk to the user — speak after tools.
 
 Git Bash is invoked as `bash -c` (not a login shell). Sequential commands may use `&&`. \
-If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept). \
-Relative cwd defaults to the Boris sandbox. Always requires user confirmation.";
+If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept).
+
+Working directory: set `cwd` once; later calls in this session reuse the last cwd until you \
+set another (default: the Boris sandbox). A `cd` inside a command does not carry over.
+Long-running work (dev servers, watchers, long builds): pass `run_in_background: true` to get \
+a job id at once, then read new output with bash_output and stop it with bash_kill. Background \
+jobs end with the session. Always requires user confirmation.";
 
 #[cfg(windows)]
 const POWERSHELL_DESCRIPTION: &str = "Run a shell command and return its output.
@@ -52,8 +59,13 @@ This session's fallback shell is PowerShell. The Unix utilities `grep`, `head`, 
 NEVER use echo/Write-Output to talk to the user — speak after tools.
 
 Use this only for real system commands (git, cargo, npm, python, builds, tests). \
-If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept). \
-Relative cwd defaults to the Boris sandbox. Always requires user confirmation.";
+If output exceeds 30KB / 2000 lines the middle is truncated (head and tail are kept).
+
+Working directory: set `cwd` once; later calls in this session reuse the last cwd until you \
+set another (default: the Boris sandbox). A `cd`/Set-Location inside a command does not carry over.
+Long-running work (dev servers, watchers, long builds): pass `run_in_background: true` to get \
+a job id at once, then read new output with bash_output and stop it with bash_kill. Background \
+jobs end with the session. Always requires user confirmation.";
 
 /// Run a bash/shell command with timeout and output caps.
 #[derive(Debug, Clone)]
@@ -61,63 +73,140 @@ pub struct BashTool {
     /// Allowed cwd roots (sandbox + read roots).
     cwd_roots: Vec<PathBuf>,
     default_cwd: PathBuf,
+    /// Session cwd + background jobs, shared with `bash_output` / `bash_kill`.
+    shell: Arc<ShellSession>,
 }
 
 impl BashTool {
+    /// Standalone tool with its own [`ShellSession`].
     pub fn new(cwd_roots: Vec<PathBuf>, default_cwd: PathBuf) -> Self {
+        Self::with_session(cwd_roots, default_cwd, ShellSession::new())
+    }
+
+    /// Tool bound to a shared [`ShellSession`] (the agent's).
+    pub fn with_session(
+        cwd_roots: Vec<PathBuf>,
+        default_cwd: PathBuf,
+        shell: Arc<ShellSession>,
+    ) -> Self {
         Self {
             cwd_roots,
             default_cwd,
+            shell,
         }
     }
 
     fn build_command(command: &str, cwd: &Path) -> Command {
-        match resolved_shell() {
-            ResolvedShell::Bash(path) => build_bash(path, command, cwd),
-            #[cfg(windows)]
-            ResolvedShell::PowerShell => Self::build_fallback(command, cwd),
-            #[cfg(not(windows))]
-            ResolvedShell::Sh => Self::build_fallback(command, cwd),
-        }
+        piped(shell_command(command, cwd))
     }
 
-    #[cfg(windows)]
     fn build_fallback(command: &str, cwd: &Path) -> Command {
-        // PowerShell when Git Bash is missing. `-ExecutionPolicy Bypass` is
-        // intentional for desktop usability — not a security boundary. HITL
-        // confirmation + ShellPolicy remain authoritative (see bash/policy.rs).
-        let mut cmd = Command::new("powershell.exe");
-        cmd.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ])
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
+        piped(fallback_command(command, cwd))
+    }
+
+    /// Explicit `cwd` arg, else the session's last cwd, else the host cwd,
+    /// else the sandbox — each only while it is a directory under the roots.
+    fn pick_cwd(
+        &self,
+        ctx: &ToolCallContext,
+        obj: &serde_json::Map<String, Value>,
+    ) -> Result<PathBuf, ToolError> {
+        // With a context the answer is always known.
+        self.pick_cwd_from(Some(ctx), obj)
+            .unwrap_or_else(|| Ok(self.default_cwd.clone()))
+    }
+
+    /// [`Self::pick_cwd`] when `ctx` may be missing (policy planning): `None`
+    /// when the answer would depend on the context's cwd.
+    fn pick_cwd_from(
+        &self,
+        ctx: Option<&ToolCallContext>,
+        obj: &serde_json::Map<String, Value>,
+    ) -> Option<Result<PathBuf, ToolError>> {
+        if let Some(raw) = optional_string(obj, "cwd") {
+            return Some(resolve_under_roots(&raw, &self.cwd_roots));
+        }
+        let under_roots = |p: &PathBuf| self.cwd_roots.iter().any(|r| p.starts_with(r));
+        if let Some(last) = self.shell.cwd().filter(|p| p.is_dir() && under_roots(p)) {
+            return Some(Ok(last));
+        }
+        if let Some(session_cwd) = ctx?.cwd.as_ref().filter(|p| under_roots(p)) {
+            return Some(Ok(session_cwd.clone()));
+        }
+        Some(Ok(self.default_cwd.clone()))
+    }
+}
+
+/// The resolved shell running a user hook command (stdio not configured).
+pub(crate) fn hook_command(command: &str, cwd: &Path) -> std::process::Command {
+    shell_command(command, cwd)
+}
+
+/// `std` command for the resolved shell (stdio not configured yet).
+fn shell_command(command: &str, cwd: &Path) -> std::process::Command {
+    match resolved_shell() {
+        ResolvedShell::Bash(path) => bash_command(path, command, cwd),
+        #[cfg(windows)]
+        ResolvedShell::PowerShell => fallback_command(command, cwd),
+        #[cfg(not(windows))]
+        ResolvedShell::Sh => fallback_command(command, cwd),
+    }
+}
+
+#[cfg(windows)]
+fn fallback_command(command: &str, cwd: &Path) -> std::process::Command {
+    // PowerShell when Git Bash is missing. `-ExecutionPolicy Bypass` is
+    // intentional for desktop usability — not a security boundary. HITL
+    // confirmation + ShellPolicy remain authoritative (see bash/policy.rs).
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ])
+    .current_dir(cwd);
+    harden(&mut cmd);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn fallback_command(command: &str, cwd: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(command).current_dir(cwd);
+    harden(&mut cmd);
+    cmd
+}
+
+/// Foreground form: piped output, null stdin, killed when dropped.
+fn piped(cmd: std::process::Command) -> Command {
+    let mut cmd = Command::from(cmd);
+    cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .kill_on_drop(true);
-        apply_no_window(&mut cmd);
-        scrub_child_env(&mut cmd);
-        cmd
-    }
+    cmd
+}
 
-    #[cfg(not(windows))]
-    fn build_fallback(command: &str, cwd: &Path) -> Command {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        scrub_child_env(&mut cmd);
-        cmd
+fn harden(cmd: &mut std::process::Command) {
+    apply_no_window(cmd);
+    scrub_child_env(cmd);
+}
+
+/// Human-readable name of the shell the `bash` tool actually runs, for the
+/// system prompt (the process `COMSPEC` is never used by this tool).
+pub fn shell_label() -> String {
+    match resolved_shell() {
+        ResolvedShell::Bash(path) => format!("bash (bash -c via {})", path.display()),
+        #[cfg(windows)]
+        ResolvedShell::PowerShell => {
+            "Windows PowerShell (no Git Bash found; commands run with powershell -Command)".into()
+        }
+        #[cfg(not(windows))]
+        ResolvedShell::Sh => "sh (sh -c)".into(),
     }
 }
 
@@ -221,25 +310,19 @@ pub(super) fn is_wsl_or_store_bash(path: &Path) -> bool {
         || lower.ends_with(r"\system32\bash.exe")
 }
 
-fn build_bash(bash: &Path, command: &str, cwd: &Path) -> Command {
+fn bash_command(bash: &Path, command: &str, cwd: &Path) -> std::process::Command {
     // `-c` not `-lc`: a login shell sources profile and was ~10× slower
     // (measured ~230ms vs ~24ms for Git Bash `echo` on Windows).
-    let mut cmd = Command::new(bash);
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    apply_no_window(&mut cmd);
-    scrub_child_env(&mut cmd);
+    let mut cmd = std::process::Command::new(bash);
+    cmd.arg("-c").arg(command).current_dir(cwd);
+    harden(&mut cmd);
     cmd
 }
 
-fn apply_no_window(cmd: &mut Command) {
+fn apply_no_window(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
@@ -250,7 +333,7 @@ fn apply_no_window(cmd: &mut Command) {
 ///
 /// Does not clear PATH / system vars (would break normal tools). Best-effort
 /// only — the model can still read secrets from disk if roots allow.
-fn scrub_child_env(cmd: &mut Command) {
+fn scrub_child_env(cmd: &mut std::process::Command) {
     const DROP: &[&str] = &[
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -363,15 +446,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo. Aliases: cmd, shell."
-                },
-                "cmd": {
-                    "type": "string",
-                    "description": "Alias of command (accepted for model compatibility)."
-                },
-                "shell": {
-                    "type": "string",
-                    "description": "Alias of command (accepted for model compatibility)."
+                    "description": "The command to execute. Real system commands only (git, cargo, npm, python, builds, tests). Never cat/grep/find/ls/echo."
                 },
                 "cwd": {
                     "type": "string",
@@ -379,15 +454,23 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline. Must be an integer; floats are rejected. Alias: timeout_secs."
+                    "description": "Timeout in seconds (default 120, max 300). Foreground commands are killed at the deadline. Must be an integer; floats are rejected."
                 },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": "Alias of timeout in seconds (default 120, max 300). Must be an integer; floats are rejected."
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Start the command as a background job and return its job id immediately (no timeout). Use for dev servers, watchers, and long builds; read output with bash_output, stop with bash_kill."
                 }
             },
-            "required": []
+            "required": ["command"]
         })
+    }
+
+    fn arg_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("cmd", "command"),
+            ("shell", "command"),
+            ("timeout_secs", "timeout"),
+        ]
     }
 
     fn meta(&self) -> ToolMeta {
@@ -400,36 +483,27 @@ impl Tool for BashTool {
             .max_concurrency(1)
     }
 
+    /// The cwd [`Self::execute`] would pick, so policy can refuse shell
+    /// auto-allow inside write roots.
+    fn shell_cwd(&self, ctx: Option<&ToolCallContext>, args: &Value) -> Option<PathBuf> {
+        self.pick_cwd_from(ctx, args.as_object()?)?.ok()
+    }
+
     async fn execute(&self, ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {
         if ctx.is_cancelled() {
             return Err(ToolError::failed("command cancelled before start"));
         }
 
         let obj = require_object(&args)?;
-        let command = optional_string_keys(obj, &["command", "cmd", "shell"]).ok_or_else(|| {
-            ToolError::invalid_args(
-                "missing required string argument `command` (aliases: cmd, shell)",
-            )
-        })?;
+        let command = optional_string_keys(obj, &["command", "cmd", "shell"])
+            .ok_or_else(|| ToolError::invalid_args("missing required string argument `command`"))?;
         let command = command.trim();
         validate_command(command)?;
         if let Some(steer) = steer_simple_command(command) {
             return Ok(steer);
         }
 
-        // Prefer explicit cwd arg, then session ToolCallContext cwd (if under roots),
-        // then sandbox default.
-        let cwd = if let Some(raw) = optional_string(obj, "cwd") {
-            resolve_under_roots(&raw, &self.cwd_roots)?
-        } else if let Some(ref session_cwd) = ctx.cwd {
-            if self.cwd_roots.iter().any(|r| session_cwd.starts_with(r)) {
-                session_cwd.clone()
-            } else {
-                self.default_cwd.clone()
-            }
-        } else {
-            self.default_cwd.clone()
-        };
+        let cwd = self.pick_cwd(ctx, obj)?;
 
         if !cwd.is_dir() {
             // Create default sandbox cwd if missing.
@@ -443,6 +517,21 @@ impl Tool for BashTool {
                     cwd.display()
                 )));
             }
+        }
+
+        // The next call in this session starts here unless it sets `cwd`.
+        self.shell.remember_cwd(&cwd);
+
+        if optional_bool(obj, "run_in_background").unwrap_or(false) {
+            let shell = Arc::clone(&self.shell);
+            let cmd = shell_command(command, &cwd);
+            let (command, cwd, fallback) =
+                (command.to_string(), cwd.clone(), self.default_cwd.clone());
+            return tokio::task::spawn_blocking(move || {
+                shell.spawn(cmd, &command, &cwd, &fallback)
+            })
+            .await
+            .map_err(|e| ToolError::failed(format!("spawn task failed: {e}")))?;
         }
 
         let timeout_secs = parse_timeout_secs(obj)?;
@@ -595,15 +684,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_exposes_aliases_and_integer_timeout() {
+    fn schema_advertises_one_canonical_name_per_arg() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new(vec![dir.clone()], dir);
         let schema = tool.parameters();
-        let props = &schema["properties"];
+        let props = schema["properties"].as_object().unwrap();
         assert_eq!(props["timeout"]["type"], "integer");
-        assert_eq!(props["timeout_secs"]["type"], "integer");
-        assert_eq!(props["cmd"]["type"], "string");
-        assert_eq!(props["shell"]["type"], "string");
+        assert_eq!(schema["required"], json!(["command"]));
+        for alias in ["cmd", "shell", "timeout_secs"] {
+            assert!(!props.contains_key(alias), "alias {alias} advertised");
+        }
+        let text = schema.to_string();
+        assert!(!text.contains("Alias"), "schema mentions aliases: {text}");
+    }
+
+    #[test]
+    fn aliases_canonicalize_before_validation() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(vec![dir.clone()], dir);
+        // Alias only: renamed to `command`, so `required` passes.
+        let mut args = json!({ "cmd": "git status", "timeout_secs": 30 });
+        crate::tool::canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        assert_eq!(args, json!({ "command": "git status", "timeout": 30 }));
+        crate::tool::validate_args(&tool.parameters(), &args, "").expect("valid");
+        // Both sent: the canonical value wins and the alias disappears.
+        let mut args = json!({ "cmd": "ls", "command": "git log" });
+        crate::tool::canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        assert_eq!(args, json!({ "command": "git log" }));
     }
 
     #[tokio::test]
@@ -703,6 +810,63 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), crate::tool::ToolErrorKind::InvalidArgs);
         assert!(err.message.contains("command"), "got: {}", err.message);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn cwd_persists_across_calls_in_a_session() {
+        let dir = std::env::temp_dir().join(format!("boris-bash-cwd-{}", std::process::id()));
+        let sub = dir.join("subproj");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        let tool = BashTool::new(vec![dir.clone()], dir.clone());
+        let ctx = crate::tool_context::ToolCallContext::new("t");
+        let first = tool
+            .execute(
+                &ctx,
+                json!({ "command": "pwd", "cwd": sub.display().to_string() }),
+            )
+            .await
+            .expect("explicit cwd");
+        assert!(first.contains("subproj"), "got: {first}");
+        // No cwd: the last one is reused, not the sandbox default.
+        let second = tool
+            .execute(&ctx, json!({ "command": "pwd" }))
+            .await
+            .expect("reused cwd");
+        let cwd_line = second.lines().find(|l| l.starts_with("cwd:")).unwrap();
+        assert!(cwd_line.contains("subproj"), "got: {second}");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn run_in_background_returns_a_job_and_kill_stops_it() {
+        let dir = std::env::temp_dir().join(format!("boris-bash-bg-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let shell = ShellSession::new();
+        let tool = BashTool::with_session(vec![dir.clone()], dir.clone(), Arc::clone(&shell));
+        let ctx = crate::tool_context::ToolCallContext::new("t");
+        // `sleep` exists in Git Bash and as a PowerShell alias.
+        let started = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(
+                &ctx,
+                json!({ "command": "sleep 30", "run_in_background": true }),
+            ),
+        )
+        .await
+        .expect("returns at once")
+        .expect("started");
+        assert!(
+            started.contains("job-1") && started.contains("bash_output"),
+            "got: {started}"
+        );
+        assert_eq!(shell.running_jobs(), 1);
+        let killed = super::super::BashKillTool::new(Arc::clone(&shell))
+            .execute(&ctx, json!({ "job_id": "job-1" }))
+            .await
+            .expect("kill");
+        assert!(killed.contains("Killed job job-1"), "got: {killed}");
+        assert_eq!(shell.running_jobs(), 0);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

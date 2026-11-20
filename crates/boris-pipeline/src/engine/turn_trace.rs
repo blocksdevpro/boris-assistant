@@ -37,6 +37,20 @@ impl TurnTraceGuard {
         self.clock.elapsed().as_millis() as u64
     }
 
+    /// Agent time (model + tools) and audio played during Thinking, summed
+    /// over the turn's Thinking passes so far.
+    pub(super) fn set_agent_timing(&mut self, agent_ms: u64, thinking_playback_ms: u64) {
+        if let Some(trace) = self.trace.as_mut() {
+            trace.agent_ms = Some(agent_ms);
+            trace.thinking_playback_ms = Some(thinking_playback_ms);
+        }
+    }
+
+    /// `at` as milliseconds since the turn started.
+    pub(super) fn ms_at(&self, at: Instant) -> u64 {
+        at.saturating_duration_since(self.clock).as_millis() as u64
+    }
+
     pub(super) fn mark(&mut self, name: impl Into<String>, meta: Option<Value>) {
         if let Some(trace) = self.trace.as_mut() {
             trace.mark(self.clock, name, meta);

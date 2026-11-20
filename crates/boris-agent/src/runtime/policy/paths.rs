@@ -142,10 +142,48 @@ pub(super) fn check_path_allowed(
         }
     }
 
+    let kind = match access {
+        PathAccess::Read => "readable",
+        PathAccess::Write => "writable",
+    };
     Err(format!(
-        "path `{}` is outside allowed roots",
-        resolved.display()
+        "path `{}` is outside the {kind} roots. Allowed {kind} roots: {}",
+        resolved.display(),
+        describe_roots(&roots)
     ))
+}
+
+/// True when `cwd` and any write root (sandbox, Boris data, `allow_write`)
+/// overlap: `cwd` is inside one, or one is inside `cwd`. Shell auto-allow is
+/// refused there because trusted file writes can plant code that a command
+/// run in `cwd` would execute (`.git/config`, hooks, build scripts).
+pub(super) fn overlaps_write_roots(config: &SandboxConfig, cwd: &Path) -> bool {
+    let cwd = resolve_path_for_policy(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    std::iter::once(&config.sandbox_root)
+        .chain(&config.boris_data_roots)
+        .chain(&config.allow_write)
+        .any(|root| {
+            let root = resolve_path_for_policy(root).unwrap_or_else(|_| root.clone());
+            path_is_within(&cwd, &root) || path_is_within(&root, &cwd)
+        })
+}
+
+/// Bounded, model-readable list of roots for a denial, so the model can pick
+/// an allowed location instead of guessing again.
+pub fn describe_roots(roots: &[PathBuf]) -> String {
+    const MAX_LISTED: usize = 12;
+    if roots.is_empty() {
+        return "(none)".into();
+    }
+    let mut listed = roots
+        .iter()
+        .take(MAX_LISTED)
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>();
+    if roots.len() > MAX_LISTED {
+        listed.push(format!("…and {} more", roots.len() - MAX_LISTED));
+    }
+    listed.join("; ")
 }
 
 /// Build the absolute path policy should check for `raw`.
@@ -401,6 +439,7 @@ mod tests {
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -413,6 +452,22 @@ mod tests {
             result.is_ok(),
             "relative write under sandbox should be allowed: {result:?}"
         );
+    }
+
+    #[test]
+    fn denial_lists_the_allowed_roots_for_recovery() {
+        let sandbox = PathBuf::from(r"C:\Users\me\.boris\state\workspace");
+        let mut cfg = test_sandbox_cfg(sandbox);
+        cfg.allow_read = vec![PathBuf::from(r"C:\Users\me\Desktop")];
+        let read = check_path_allowed(&cfg, r"C:\Users\me\AppData\Local\Boris", PathAccess::Read)
+            .unwrap_err();
+        assert!(read.contains("Allowed readable roots"), "{read}");
+        assert!(read.contains(r"C:\Users\me\Desktop") && read.contains("workspace"), "{read}");
+        let write = check_path_allowed(&cfg, r"C:\Users\me\Desktop\x.txt", PathAccess::Write)
+            .unwrap_err();
+        let allowed = write.split("Allowed writable roots:").nth(1).unwrap();
+        assert!(!allowed.contains("Desktop"), "read-only roots are not offered for writes");
+        assert_eq!(describe_roots(&[]), "(none)");
     }
 
     #[test]
@@ -534,6 +589,7 @@ mod tests {
             force_confirm_at_or_above: crate::tool::ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         };
         // If link is a dir symlink to outside, path under link is outside root after canon.
         let probe = if link.is_dir() {

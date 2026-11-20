@@ -18,6 +18,15 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// than 60s for a single tool-planning step; 180s avoids mid-think timeouts.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Default budget for the first streamed bytes (response headers plus the
+/// first body chunk; OpenRouter keepalive comments count). A stalled request
+/// is retried once instead of hanging until [`DEFAULT_TIMEOUT`].
+pub const DEFAULT_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Default longest gap between streamed body chunks before the stream is
+/// treated as stalled.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Default OpenRouter API base URL (`…/api/v1`). Chat completions is
 /// `{base}/chat/completions`.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -76,11 +85,10 @@ pub struct OpenRouterClient {
     /// total. Lets future `CompleteOptions` stage budgets shrink/extend the
     /// deadline without rebuilding the client.
     pub(super) request_timeout: Option<Duration>,
-    /// Optional stall detector budget (accepted but **not yet enforced** —
-    /// TODO: wrap SSE chunk reads in `complete.rs` with this idle deadline
-    /// and surface `LlmErrorKind::Timeout`). Stored now so hosts can already
-    /// configure the intended policy.
+    /// Longest gap between SSE body chunks (`None` disables the check).
     pub(super) idle_timeout: Option<Duration>,
+    /// Budget for headers + first SSE body chunk (`None` disables).
+    pub(super) first_byte_timeout: Option<Duration>,
     /// Optional `HTTP-Referer` header (OpenRouter app attribution).
     pub(super) referer: Option<String>,
     /// Optional `X-Title` header (OpenRouter app attribution).
@@ -124,13 +132,17 @@ impl OpenRouterClient {
         self
     }
 
-    /// Accept (but not yet enforce) an SSE idle/stall budget (builder-style).
-    ///
-    /// Stub: stored for future `complete.rs` enforcement (currently the 180s
-    /// [`Self::timeout`] total is the only deadline, so a stalled stream
-    /// waits until then). Pass `None` to clear.
+    /// Longest gap between streamed chunks before a stall (builder-style).
+    /// Default [`DEFAULT_IDLE_TIMEOUT`]; `None` disables.
     pub fn with_idle_timeout(mut self, idle: Option<Duration>) -> Self {
         self.idle_timeout = idle;
+        self
+    }
+
+    /// Budget for headers plus the first streamed chunk (builder-style).
+    /// Default [`DEFAULT_FIRST_BYTE_TIMEOUT`]; `None` disables.
+    pub fn with_first_byte_timeout(mut self, first_byte: Option<Duration>) -> Self {
+        self.first_byte_timeout = first_byte;
         self
     }
 
@@ -294,9 +306,14 @@ impl OpenRouterClient {
         self.request_timeout
     }
 
-    /// Accepted-but-not-yet-enforced SSE idle budget, if any.
+    /// SSE idle (chunk-gap) budget, if enabled.
     pub fn idle_timeout(&self) -> Option<Duration> {
         self.idle_timeout
+    }
+
+    /// First-byte budget, if enabled.
+    pub fn first_byte_timeout(&self) -> Option<Duration> {
+        self.first_byte_timeout
     }
 
     /// Configured `HTTP-Referer` header value, if any.
@@ -347,7 +364,8 @@ impl OpenRouterClient {
             connect_timeout,
             timeout,
             request_timeout: None,
-            idle_timeout: None,
+            idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
+            first_byte_timeout: Some(DEFAULT_FIRST_BYTE_TIMEOUT),
             referer: None,
             title: None,
             http: http_client_or_default(connect_timeout, timeout),
@@ -564,7 +582,8 @@ mod tests {
         assert_eq!(c.timeout(), DEFAULT_TIMEOUT);
         assert_eq!(c.effective_timeout(), DEFAULT_TIMEOUT);
         assert_eq!(c.request_timeout(), None);
-        assert_eq!(c.idle_timeout(), None);
+        assert_eq!(c.idle_timeout(), Some(DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(c.first_byte_timeout(), Some(DEFAULT_FIRST_BYTE_TIMEOUT));
 
         let c = c
             .with_timeouts(Duration::from_secs(3), Duration::from_secs(30))

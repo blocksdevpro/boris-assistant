@@ -331,11 +331,11 @@ description: >
         "remember-this",
         r#"---
 name: remember-this
-version: 2
+version: 3
 description: >
-  Persist something the user wants remembered into notes or profile. Use when
-  they say remember, save this, don't forget, note that, my name is, I prefer,
-  or share lasting personal facts/preferences.
+  Sort several things the user wants remembered between the profile and notes
+  (names, lasting preferences, projects vs one-off notes). A single "remember
+  X" needs no skill: call remember_note or save_user_fact directly.
 ---
 
 # Remember This

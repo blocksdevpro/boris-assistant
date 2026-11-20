@@ -188,6 +188,10 @@ impl Tool for McpTool {
         }
     }
 
+    fn is_extension(&self) -> bool {
+        true
+    }
+
     fn meta(&self) -> ToolMeta {
         // Web kind + Network perm: VoiceSafe/LocalPower filter these out;
         // Full still confirms every call. Read-only is intentionally NOT set

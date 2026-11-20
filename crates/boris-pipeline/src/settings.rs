@@ -71,6 +71,18 @@ fn normalize_model_residency(raw: String) -> String {
 }
 
 /// Default HITL confirm budget per user turn (multi-tool friendly).
+/// Trim, collapse whitespace, and drop blank or duplicate prefixes.
+fn normalize_shell_auto_allow(prefixes: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for prefix in prefixes {
+        let prefix = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !prefix.is_empty() && !out.contains(&prefix) {
+            out.push(prefix);
+        }
+    }
+    out
+}
+
 fn default_max_confirms_per_turn() -> u32 {
     12
 }
@@ -159,6 +171,9 @@ pub struct AppSettings {
     /// Play a short chime when a wake is accepted.
     #[serde(default = "default_true")]
     pub wake_chime: bool,
+    /// Speak one short progress line when tool work runs long.
+    #[serde(default = "default_true")]
+    pub progress_line: bool,
     /// Canonical evidence-backed memory (legacy config key retained for compatibility).
     #[serde(default = "default_true")]
     pub long_term_memory: bool,
@@ -169,6 +184,11 @@ pub struct AppSettings {
     /// Max HITL confirmations per user turn before remaining calls are denied.
     #[serde(default = "default_max_confirms_per_turn")]
     pub max_confirms_per_turn: u32,
+    /// Shell command prefixes that run without a yes/no (e.g. `git status`).
+    /// Only single plain commands match; chaining, pipes, substitution, and
+    /// redirection always ask. `[agent] shell_auto_allow` in config.toml.
+    #[serde(default)]
+    pub shell_auto_allow: Vec<String>,
     /// Show floating island when wake fires (host may honor later).
     #[serde(default = "default_show_overlay_on_wake")]
     pub show_overlay_on_wake: bool,
@@ -222,9 +242,11 @@ impl Default for AppSettings {
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
             wake_chime: true,
+            progress_line: true,
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
+            shell_auto_allow: Vec::new(),
             show_overlay_on_wake: default_show_overlay_on_wake(),
             overlay_caption_mode: default_overlay_caption_mode(),
             overlay_position: default_overlay_position(),
@@ -272,6 +294,7 @@ impl std::fmt::Debug for AppSettings {
             .field("trusted_auto_moderate", &self.trusted_auto_moderate)
             .field("max_confirms_per_turn", &self.max_confirms_per_turn)
             .field("wake_chime", &self.wake_chime)
+            .field("progress_line", &self.progress_line)
             .field("show_overlay_on_wake", &self.show_overlay_on_wake)
             .field("overlay_caption_mode", &self.overlay_caption_mode)
             .field("overlay_position", &self.overlay_position)
@@ -348,6 +371,8 @@ struct SpeechSection {
     ignore_speaker_playback: bool,
     #[serde(default = "default_true")]
     wake_chime: bool,
+    #[serde(default = "default_true")]
+    progress_line: bool,
 }
 
 impl Default for SpeechSection {
@@ -358,6 +383,7 @@ impl Default for SpeechSection {
             voice_barge_in: default_barge_in(),
             ignore_speaker_playback: true,
             wake_chime: true,
+            progress_line: true,
         }
     }
 }
@@ -370,6 +396,8 @@ struct AgentSection {
     trusted_auto_moderate: bool,
     #[serde(default = "default_max_confirms_per_turn")]
     max_confirms_per_turn: u32,
+    #[serde(default)]
+    shell_auto_allow: Vec<String>,
 }
 
 impl Default for AgentSection {
@@ -378,6 +406,7 @@ impl Default for AgentSection {
             long_term_memory: true,
             trusted_auto_moderate: true,
             max_confirms_per_turn: default_max_confirms_per_turn(),
+            shell_auto_allow: Vec::new(),
         }
     }
 }
@@ -448,9 +477,11 @@ fn apply_config_file(out: &mut AppSettings, cfg: ConfigFile) {
     out.voice_barge_in = cfg.speech.voice_barge_in;
     out.ignore_speaker_playback = cfg.speech.ignore_speaker_playback;
     out.wake_chime = cfg.speech.wake_chime;
+    out.progress_line = cfg.speech.progress_line;
     out.long_term_memory = cfg.agent.long_term_memory;
     out.trusted_auto_moderate = cfg.agent.trusted_auto_moderate;
     out.max_confirms_per_turn = cfg.agent.max_confirms_per_turn.max(1);
+    out.shell_auto_allow = normalize_shell_auto_allow(cfg.agent.shell_auto_allow);
     out.show_overlay_on_wake = cfg.ui.show_overlay_on_wake;
     out.overlay_caption_mode = normalize_overlay_caption_mode(cfg.ui.overlay_caption_mode);
     out.overlay_position = normalize_overlay_position(cfg.ui.overlay_position);
@@ -551,11 +582,118 @@ pub fn load_settings() -> Result<AppSettings> {
     Ok(out)
 }
 
+/// Optional `[workspace]` table in `config.toml`.
+///
+/// Not a managed section: [`save_settings`] preserves it as an unknown table,
+/// so hand edits survive settings saves.
+///
+/// ```toml
+/// [workspace]
+/// projects = ['C:\Users\me\code\app']  # known project roots (read access only)
+/// discover_projects = true                # bounded, cached git-repo scan of read roots
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSettings {
+    pub projects: Vec<PathBuf>,
+    pub discover_projects: bool,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            projects: Vec::new(),
+            discover_projects: true,
+        }
+    }
+}
+
+/// Read `[workspace]` from `config.toml`; missing or invalid → defaults.
+/// `BORIS_DISCOVER_PROJECTS=0` disables discovery.
+pub fn load_workspace_settings() -> WorkspaceSettings {
+    let mut settings = fs::read_to_string(config_path())
+        .map(|raw| parse_workspace_settings(&raw))
+        .unwrap_or_default();
+    if std::env::var("BORIS_DISCOVER_PROJECTS").is_ok_and(|v| v.trim() == "0") {
+        settings.discover_projects = false;
+    }
+    settings
+}
+
+fn parse_workspace_settings(raw: &str) -> WorkspaceSettings {
+    let mut out = WorkspaceSettings::default();
+    let Ok(value) = raw.parse::<toml::Value>() else {
+        return out;
+    };
+    let Some(table) = value.get("workspace").and_then(toml::Value::as_table) else {
+        return out;
+    };
+    if let Some(projects) = table.get("projects").and_then(toml::Value::as_array) {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from);
+        out.projects = projects
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| match (path.strip_prefix("~/").or(path.strip_prefix("~\\")), &home) {
+                (Some(rest), Some(home)) => home.join(rest),
+                _ => PathBuf::from(path),
+            })
+            .collect();
+    }
+    if let Some(discover) = table.get("discover_projects").and_then(toml::Value::as_bool) {
+        out.discover_projects = discover;
+    }
+    out
+}
+
+/// Read the hand-edited `[[hooks]]` array from `config.toml`. Off by default:
+/// missing, empty, or unreadable → no hooks. Invalid entries are skipped
+/// with a warning. Hooks run arbitrary user commands (see `boris_agent::hooks`).
+///
+/// ```toml
+/// [[hooks]]
+/// event = "pre_tool"          # pre_tool | post_tool | turn_end
+/// tool = "bash"               # glob, optional (all tools)
+/// command = "python ~/hooks/check.py"
+/// timeout_secs = 10           # optional, 1–120
+/// ```
+pub fn load_hook_settings() -> Vec<boris_agent::HookSpec> {
+    fs::read_to_string(config_path())
+        .map(|raw| parse_hook_settings(&raw))
+        .unwrap_or_default()
+}
+
+fn parse_hook_settings(raw: &str) -> Vec<boris_agent::HookSpec> {
+    let Ok(value) = raw.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(entries) = value.get("hooks").and_then(toml::Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry.clone().try_into() {
+            Ok(spec) => Some(spec),
+            Err(error) => {
+                tracing::warn!(index, %error, "skipping invalid [[hooks]] entry");
+                None
+            }
+        })
+        .collect()
+}
+
 /// Persist prefs to `config.toml` and secrets to `auth.json`.
 ///
 /// **Merge policy:** managed sections (`models`, `capability`, `audio`,
-/// `speech`, `agent`, `ui`, `logging`) are rewritten from [`AppSettings`].
-/// Unknown root tables and unknown keys *outside* those sections are preserved.
+/// `speech`, `agent`, `ui`, `logging`) are merged key by key: every key the
+/// section struct knows is set from [`AppSettings`] (or removed if the struct
+/// serializes none, so stale values never persist), while unknown keys inside
+/// a managed section and unknown root tables (`[[hooks]]`, `[workspace]`, ...)
+/// are preserved. The file is re-serialized, so hand-written comments and
+/// formatting are NOT preserved.
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
     paths::migrate_home_if_needed();
     let home = boris_home();
@@ -591,11 +729,13 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         voice_barge_in: settings.voice_barge_in,
         ignore_speaker_playback: settings.ignore_speaker_playback,
         wake_chime: settings.wake_chime,
+        progress_line: settings.progress_line,
     };
     let agent = AgentSection {
         long_term_memory: settings.long_term_memory,
         trusted_auto_moderate: settings.trusted_auto_moderate,
         max_confirms_per_turn: settings.max_confirms_per_turn.max(1),
+        shell_auto_allow: normalize_shell_auto_allow(settings.shell_auto_allow.clone()),
     };
     let ui = UiSection {
         show_overlay_on_wake: settings.show_overlay_on_wake,
@@ -631,15 +771,15 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     let table = root
         .as_table_mut()
         .ok_or_else(|| PipelineError::settings("config.toml root is not a table"))?;
-    table.insert("models".into(), models_val);
-    table.insert("capability".into(), capability_val);
-    table.insert("audio".into(), audio_val);
-    table.insert("speech".into(), speech_val);
-    table.insert("agent".into(), agent_val);
-    table.insert("ui".into(), ui_val);
+    merge_section(table, "models", MODELS_KEYS, models_val);
+    merge_section(table, "capability", CAPABILITY_KEYS, capability_val);
+    merge_section(table, "audio", AUDIO_KEYS, audio_val);
+    merge_section(table, "speech", SPEECH_KEYS, speech_val);
+    merge_section(table, "agent", AGENT_KEYS, agent_val);
+    merge_section(table, "ui", UI_KEYS, ui_val);
     // Only write [logging] when the user set a filter (avoid noise on fresh installs).
     if !settings.logging_filter.trim().is_empty() {
-        table.insert("logging".into(), logging_val);
+        merge_section(table, "logging", LOGGING_KEYS, logging_val);
     }
 
     let toml_body = toml::to_string_pretty(&root)
@@ -670,6 +810,60 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         "settings saved (config.toml + auth.json)"
     );
     Ok(())
+}
+
+// Keys each managed section's struct owns. A save sets or removes exactly these
+// (a test checks they match the serialized structs); other keys are preserved.
+const MODELS_KEYS: &[&str] = &["strong", "fast", "provider", "fast_provider", "pin_provider"];
+const CAPABILITY_KEYS: &[&str] = &["preset"];
+const AUDIO_KEYS: &[&str] = &["input_device", "output_device"];
+const SPEECH_KEYS: &[&str] = &[
+    "tts_voice_id",
+    "model_residency",
+    "voice_barge_in",
+    "ignore_speaker_playback",
+    "wake_chime",
+    "progress_line",
+];
+const AGENT_KEYS: &[&str] = &[
+    "long_term_memory",
+    "trusted_auto_moderate",
+    "max_confirms_per_turn",
+    "shell_auto_allow",
+];
+const UI_KEYS: &[&str] = &[
+    "show_overlay_on_wake",
+    "overlay_caption_mode",
+    "overlay_position",
+    "overlay_scale_percent",
+    "typed_input_submit",
+    "start_engine_on_launch",
+    "start_with_windows",
+    "update_channel",
+    "onboarding_complete",
+    "show_advanced_settings",
+];
+const LOGGING_KEYS: &[&str] = &["filter"];
+
+/// Key-level merge: start from the existing `name` table, drop every known key,
+/// then write the serialized struct's keys. Unknown keys survive.
+fn merge_section(
+    root: &mut toml::map::Map<String, toml::Value>,
+    name: &str,
+    known: &[&str],
+    new: toml::Value,
+) {
+    let mut merged = match root.remove(name) {
+        Some(toml::Value::Table(t)) => t,
+        _ => toml::map::Map::new(),
+    };
+    for k in known {
+        merged.remove(*k);
+    }
+    if let toml::Value::Table(n) = new {
+        merged.extend(n);
+    }
+    root.insert(name.to_string(), toml::Value::Table(merged));
 }
 
 /// Load existing config as a TOML value for merge, or an empty table.
@@ -1020,6 +1214,28 @@ fn restrict_to_current_user_windows(path: &std::path::Path) {
 }
 
 #[cfg(test)]
+mod workspace_settings_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_table_is_optional_and_parsed() {
+        assert_eq!(parse_workspace_settings(""), WorkspaceSettings::default());
+        assert_eq!(
+            parse_workspace_settings("[workspace]\nprojects = 3"),
+            WorkspaceSettings::default()
+        );
+        let parsed = parse_workspace_settings(
+            "[models]\nstrong = 'x'\n\n[workspace]\nprojects = ['C:/code/app', '  ', 'D:/other']\ndiscover_projects = false\n",
+        );
+        assert_eq!(
+            parsed.projects,
+            vec![PathBuf::from("C:/code/app"), PathBuf::from("D:/other")]
+        );
+        assert!(!parsed.discover_projects);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -1086,9 +1302,11 @@ mod tests {
             voice_barge_in: false,
             ignore_speaker_playback: true,
             wake_chime: false,
+            progress_line: false,
             long_term_memory: false,
             trusted_auto_moderate: false,
             max_confirms_per_turn: 8,
+            shell_auto_allow: vec!["git status".into(), " cargo  check ".into(), "".into()],
             show_overlay_on_wake: true,
             overlay_caption_mode: "assistant".into(),
             overlay_position: "top_right".into(),
@@ -1139,6 +1357,8 @@ mod tests {
         assert!(!loaded.long_term_memory);
         assert!(!loaded.trusted_auto_moderate);
         assert_eq!(loaded.max_confirms_per_turn, 8);
+        assert_eq!(loaded.shell_auto_allow, vec!["git status", "cargo check"]);
+        assert!(raw_cfg.contains("shell_auto_allow"));
         assert!(loaded.show_overlay_on_wake);
         assert_eq!(loaded.overlay_caption_mode, "assistant");
         assert_eq!(loaded.overlay_position, "top_right");
@@ -1148,6 +1368,7 @@ mod tests {
         assert!(loaded.start_with_windows);
         assert_eq!(loaded.update_channel, "beta");
         assert!(!loaded.wake_chime);
+        assert!(!loaded.progress_line);
         assert!(loaded.onboarding_complete);
         assert!(loaded.show_advanced_settings);
         assert_eq!(loaded.logging_filter, "info");
@@ -1163,6 +1384,46 @@ mod tests {
         assert!(after.contains("foo"), "unknown key wiped: {after}");
         assert!(after.contains("mic-1"), "managed audio lost: {after}");
 
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hooks_parse_and_skip_invalid_entries() {
+        assert!(parse_hook_settings("[models]\nstrong = 'x'\n").is_empty());
+        let hooks = parse_hook_settings(
+            "[[hooks]]\nevent = 'pre_tool'\ntool = 'bash'\ncommand = 'check.sh'\n\n\
+             [[hooks]]\nevent = 'whenever'\ncommand = 'x'\n\n\
+             [[hooks]]\nevent = 'turn_end'\ncommand = 'log.sh'\ntimeout_secs = 3\n",
+        );
+        assert_eq!(hooks.len(), 2, "the unknown event is skipped");
+        assert_eq!(hooks[0].event, boris_agent::HookEvent::PreTool);
+        assert_eq!(hooks[0].tool.as_deref(), Some("bash"));
+        assert_eq!(hooks[1].timeout_secs, 3);
+    }
+
+    #[test]
+    fn save_keeps_hand_edited_hooks() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-hooks-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+        fs::write(
+            config_path(),
+            "[[hooks]]\nevent = 'pre_tool'\ncommand = 'check.sh'\n",
+        )
+        .unwrap();
+        save_settings(&AppSettings::default()).expect("save");
+        let hooks = load_hook_settings();
+        assert_eq!(hooks.len(), 1, "UI save must not wipe [[hooks]]");
+        assert_eq!(hooks[0].command, "check.sh");
         std::env::remove_var(paths::BORIS_HOME_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1235,6 +1496,98 @@ mod tests {
         assert!(!legacy_settings_path().is_file());
         assert!(dir.join("settings.json.bak").is_file());
 
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn keys_of<T: Serialize>(v: &T) -> Vec<String> {
+        let mut k: Vec<String> = toml::Value::try_from(v)
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        k.sort();
+        k
+    }
+
+    fn sorted(k: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = k.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn managed_key_lists_match_section_structs() {
+        assert_eq!(keys_of(&ModelsSection::default()), sorted(MODELS_KEYS));
+        assert_eq!(keys_of(&CapabilitySection::default()), sorted(CAPABILITY_KEYS));
+        assert_eq!(keys_of(&AudioSection::default()), sorted(AUDIO_KEYS));
+        assert_eq!(keys_of(&SpeechSection::default()), sorted(SPEECH_KEYS));
+        assert_eq!(keys_of(&AgentSection::default()), sorted(AGENT_KEYS));
+        assert_eq!(keys_of(&UiSection::default()), sorted(UI_KEYS));
+        assert_eq!(keys_of(&LoggingSection::default()), sorted(LOGGING_KEYS));
+    }
+
+    #[test]
+    fn merge_section_keeps_unknown_and_removes_stale_known() {
+        let mut root = toml::map::Map::new();
+        root.insert(
+            "agent".into(),
+            toml::from_str::<toml::Value>("future = 7
+long_term_memory = false
+stale = 1
+")
+                .unwrap(),
+        );
+        let new = toml::from_str::<toml::Value>("trusted_auto_moderate = true").unwrap();
+        // `long_term_memory` is known but absent from `new` (like an Option None).
+        merge_section(&mut root, "agent", AGENT_KEYS, new);
+        let a = root["agent"].as_table().unwrap();
+        assert_eq!(a["future"].as_integer(), Some(7));
+        assert_eq!(a["stale"].as_integer(), Some(1));
+        assert!(!a.contains_key("long_term_memory"));
+        assert_eq!(a["trusted_auto_moderate"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn save_preserves_unknown_keys_workspace_and_roundtrips_agent() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-merge-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+        fs::write(
+            config_path(),
+            "[agent]
+future_key = \"keep\"
+
+[workspace]
+projects = ['C:/code/x']
+",
+        )
+        .unwrap();
+        let mut s = AppSettings::default();
+        s.shell_auto_allow = vec!["git status".into()];
+        s.progress_line = false;
+        save_settings(&s).expect("save");
+        let text = fs::read_to_string(config_path()).unwrap();
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(v["agent"]["future_key"].as_str(), Some("keep"));
+        assert_eq!(
+            v["workspace"]["projects"][0].as_str(),
+            Some("C:/code/x"),
+            "[workspace] must survive a save"
+        );
+        let loaded = load_settings().expect("load");
+        assert_eq!(loaded.shell_auto_allow, vec!["git status".to_string()]);
+        assert!(!loaded.progress_line);
         std::env::remove_var(paths::BORIS_HOME_ENV);
         let _ = fs::remove_dir_all(&dir);
     }

@@ -48,6 +48,7 @@ pub mod debug;
 pub mod error;
 pub mod eval;
 pub mod finish_gate;
+pub mod hooks;
 /// Pure ReAct loop (`loop` is a keyword → `loop_`).
 pub mod loop_;
 pub mod maintenance;
@@ -56,11 +57,13 @@ pub mod observe;
 pub mod outcome;
 pub mod prompt_profile;
 pub mod reminder;
+pub mod reminders;
 pub mod routing;
 pub mod runtime;
 pub mod session;
 pub mod skills;
 pub mod speech_sanitize;
+pub mod speech_stream;
 pub mod stats;
 pub mod task;
 pub mod tool;
@@ -68,6 +71,7 @@ pub mod tool_context;
 pub mod tools;
 pub mod trace;
 pub mod types;
+pub mod workspace;
 
 // Re-export AI plane so hosts keep `boris_agent::{LlmClient, OpenRouterClient}`.
 pub use boris_ai::{
@@ -81,7 +85,7 @@ pub use activity::{
     describe_batch, describe_thought, describe_tool, summarize_tools_used, verb_kind, ActivityWave,
     Tense, VerbKind,
 };
-pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel};
+pub use agent::{Agent, AgentCheckpoint, AgentOptions, TurnCancel, HOST_EVENT_PREFIX};
 pub use capability::{filter_tools_for_preset, CapabilityPreset};
 pub use context::{
     Context, ContextBudget, Message, MessageOrigin, RetrievedMemory, Role, TaskStateCapsule,
@@ -99,8 +103,9 @@ pub use memory::{
     PERSONAL_CONTEXT_MAX_CHARS,
 };
 pub use observe::{TurnOutcomeKind, TurnReport};
-pub use outcome::AgentOutcome;
+pub use outcome::{is_silence_reply, AgentOutcome, SILENCE_TOKEN};
 pub use prompt_profile::{PromptContext, UserInfo};
+pub use workspace::{KnownProject, WorkspaceProfile};
 pub use routing::{classify_route, request_stage_for, route_from_traits, RouteMode, RoutingClient};
 pub use runtime::{
     default_user_read_roots, ActivationSet, InputKind, JsonlAuditSink, ListToolsContext,
@@ -119,8 +124,14 @@ pub use skills::{
 pub use speech_sanitize::{
     contains_tool_markup, is_markup_only_speech, strip_tool_markup, TOOL_PROTOCOL_REMINDER,
 };
+pub use speech_stream::{SpeechSegmenter, SpeechSignal};
+pub use reminders::{
+    now_unix_ms, parse_duration, parse_when, spoken_reminders_note, Reminder, ReminderKind,
+    ReminderStore, WhenError,
+};
+pub use hooks::{HookEvent, HookSpec, Hooks};
 pub use stats::AgentStats;
-pub use task::{classify_task, EvidenceCoverage, ResearchDepth, TaskComplexity, TaskTraits};
+pub use task::{classify_task, ResearchDepth, TaskComplexity, TaskTraits};
 pub use tool::{
     InvalidArgs, Permission, Tool, ToolError, ToolKind, ToolMeta, ToolObservation, ToolOutputStore,
     ToolRisk, MAX_SKILL_RESULT_CHARS, MAX_STORED_CHARS, MAX_TOOL_RESULT_CHARS,

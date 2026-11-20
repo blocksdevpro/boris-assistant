@@ -1,4 +1,4 @@
-//! Per-round LLM completion, tool-call gating, and finish-gate checks.
+//! Per-round LLM completion, tool-call gating, and the open-todo finish check.
 
 use std::time::{Duration, Instant};
 
@@ -21,9 +21,10 @@ const REASONING_PREVIEW_CHARS: usize = 900;
 /// Injected when the next round will be the hard tool-round cap (tools still available this round).
 pub(super) const NUDGE_NEAR_TOOL_CAP: &str = "\
 <system-reminder>\n\
-Tool budget is nearly exhausted. Stop calling tools. \
-Give a short spoken status of what you finished and what \
-(if anything) is left. 1–2 sentences only.\n\
+This turn's work budget is used up, so tools are paused. Give a short spoken \
+progress check-in: what is done, what is left, and that the user can say \
+\"continue\" to pick it up. Do not say the task is finished unless it is. \
+1–2 sentences only.\n\
 </system-reminder>";
 
 /// Injected at cap when the model returned tool_calls/empty content and must speak.
@@ -60,7 +61,34 @@ pub(super) async fn complete_round(
     cancel: &Option<CancellationToken>,
     accounting: &mut TokenAccounting,
 ) -> Result<Value, AgentError> {
-    let mut tools_json = if at_cap {
+    complete_round_streaming(
+        state, user_text, config, at_cap, emit, cancel, accounting, None,
+    )
+    .await
+}
+
+/// [`complete_round`] that also feeds content deltas into a speech segmenter,
+/// emitting [`AgentEvent::Speech`] for the host's streamed TTS.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_round_streaming(
+    state: &mut LoopState<'_>,
+    user_text: &str,
+    config: &AgentLoopConfig,
+    at_cap: bool,
+    emit: &EmitFn,
+    cancel: &Option<CancellationToken>,
+    accounting: &mut TokenAccounting,
+    mut speech: Option<&mut crate::speech_stream::SpeechSegmenter>,
+) -> Result<Value, AgentError> {
+    // Images tools attached since the last request follow the resolved batch.
+    for image in state.runtime.take_images() {
+        state.context.push_tool_image(&image);
+    }
+    // The listing stays identical for the whole turn (and session) so the
+    // provider prompt-cache prefix stays warm. Tools that become unusable
+    // mid-turn (e.g. `present_artifact` after its delivery budget is spent)
+    // stay listed; the runtime refuses the call with a recovery hint.
+    let tools_json = if at_cap {
         Value::Null
     } else {
         let (payload, pruned) = listed_tools_json(state.tools, config, state.activated);
@@ -73,11 +101,6 @@ pub(super) async fn complete_round(
         }
         payload
     };
-    if state.runtime.artifact_delivery_exhausted() {
-        if let Some(tools) = tools_json.as_array_mut() {
-            tools.retain(|tool| tool["function"]["name"] != "present_artifact");
-        }
-    }
     let listed_names: Vec<String> = tools_json
         .as_array()
         .into_iter()
@@ -155,6 +178,18 @@ pub(super) async fn complete_round(
     let mut last_emit = Instant::now();
     let mut dirty = false;
     let mut on_event = |ev: LlmStreamEvent| {
+        if let Some(seg) = speech.as_deref_mut() {
+            let signals = match &ev {
+                LlmStreamEvent::ContentDelta { text } => seg.push_content(text, Instant::now()),
+                LlmStreamEvent::ToolCallDelta { .. } | LlmStreamEvent::ToolCallComplete { .. } => {
+                    seg.on_tool_call()
+                }
+                _ => seg.poll(Instant::now()),
+            };
+            for signal in signals {
+                emit(AgentEvent::Speech { signal });
+            }
+        }
         let text = match ev {
             LlmStreamEvent::Usage(usage) => {
                 accounting.record_provider_usage(&usage);
@@ -275,6 +310,18 @@ pub(super) async fn complete_round(
     Ok(msg)
 }
 
+/// Provider refused image input (model without vision, or a route that
+/// cannot take images). The loop then retries once with images omitted.
+pub(super) fn is_image_rejection(error: &AgentError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("image")
+        && (text.contains("support")
+            || text.contains("modalit")
+            || text.contains("vision")
+            || text.contains("invalid content")
+            || text.contains("not allowed"))
+}
+
 /// Non-empty tool_calls array when tools are allowed this round.
 pub(super) fn tool_calls_if_runnable(response: &Value, at_cap: bool) -> Option<&Vec<Value>> {
     if at_cap {
@@ -322,33 +369,19 @@ pub(super) async fn ensure_spoken_reply_at_cap(
     Ok(reply)
 }
 
+/// Open-todo reminder after a content-only reply. Only when this turn already
+/// used tools, so stale todos never force more work on a casual reply.
 pub(super) fn should_reenter_finish_gate(
     at_cap: bool,
     finish_gate_left: u32,
     reply: &str,
     tools_used: &[String],
-    useful_research_results: u32,
     todos_file: &std::path::Path,
-    user_text: &str,
 ) -> bool {
-    if at_cap || finish_gate_left == 0 || reply.is_empty() {
+    if at_cap || finish_gate_left == 0 || reply.is_empty() || tools_used.is_empty() {
         return false;
     }
-    // Research gate may fire with zero tools (freestyle LinkedIn/find-person).
-    if crate::finish_gate::should_research_gate_with(
-        user_text,
-        reply,
-        tools_used,
-        useful_research_results,
-    ) {
-        return true;
-    }
-    if crate::finish_gate::should_local_work_gate(user_text, tools_used) {
-        return true;
-    }
-    // Open todos only re-enter when this turn already used tools (avoid stale
-    // todos forcing silence on casual replies).
-    !tools_used.is_empty() && crate::finish_gate::pending_todo_count(todos_file) > 0
+    crate::finish_gate::pending_todo_count(todos_file) > 0
 }
 
 #[cfg(test)]

@@ -45,6 +45,9 @@ use personal::PersonalMemory;
 /// Max characters of user text included in turn-start logs.
 const LOG_PREVIEW_CHARS: usize = 80;
 
+/// Prefix of a persisted host-event note ([`Agent::record_host_event`]).
+pub const HOST_EVENT_PREFIX: &str = "[Host event:";
+
 /// Host handle to cancel an in-flight [`Agent::prompt`]. Cheap to clone; the
 /// engine thread keeps one copy while the turn runs on the agent runtime.
 #[derive(Clone, Debug)]
@@ -105,6 +108,8 @@ pub struct Agent {
     session_id: Option<String>,
     turn_id: Option<String>,
     max_tool_rounds: u32,
+    stream_speech: bool,
+    hooks: crate::hooks::Hooks,
     /// Event bus: `(listener_id, callback)` — unsubscribe removes by id.
     listeners: Arc<Mutex<Vec<(u64, EventListener)>>>,
     next_listener_id: AtomicU64,
@@ -127,9 +132,16 @@ pub struct Agent {
     artifacts_dir: Option<PathBuf>,
     /// Session root for subagent artifacts (shared so tools can observe rebinds).
     subagent_session_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Bash session cwd + background jobs (killed on unbind and drop).
+    shell: Arc<crate::tools::bash::ShellSession>,
     /// Background LTM / extract / index (owned by host or tests).
     maintenance: Option<crate::maintenance::MaintenanceHandle>,
+    /// Workspace facts for the system prompt (host-provided).
+    workspace: Option<crate::workspace::WorkspaceProfile>,
 }
+
+#[cfg(test)]
+mod interrupt_tests;
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +180,70 @@ mod tests {
         assert!(!exported
             .iter()
             .any(|m| m.origin == crate::MessageOrigin::HostControl));
+    }
+
+    #[test]
+    fn spoken_reminder_lands_as_a_persisted_host_event_not_a_human_turn() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent
+            .context
+            .push_human("remind me at 9 to call mum", 1_000);
+        agent.context.push(super::Role::Assistant, "Okay, 9 PM.");
+
+        let note = crate::spoken_reminders_note("Reminder: call mum.", crate::now_unix_ms());
+        assert!(agent.record_host_event(&note));
+
+        let last = agent.context.messages().last().unwrap().clone();
+        assert!(matches!(last.role, super::Role::Assistant));
+        assert_ne!(last.origin, crate::MessageOrigin::Human);
+        assert_eq!(last.sent_at_ms, None);
+        let text = last.content.as_str().unwrap();
+        assert!(text.starts_with(super::HOST_EVENT_PREFIX), "{text}");
+        assert!(text.contains("Reminder: call mum."), "{text}");
+        // Never quoted as a turn interruption, never stamped on the wire.
+        assert!(!text.starts_with("[Host note:"));
+        assert!(!last.dump().to_string().contains("<sent_at>"));
+
+        // Survives transcript persistence like other host notes.
+        let persisted = agent.export_messages_for_persist();
+        assert!(persisted.iter().any(|m| m.content.as_str() == Some(text)));
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|m| m.origin == crate::MessageOrigin::Human)
+                .count(),
+            1
+        );
+        assert!(!agent.record_host_event("   "));
+    }
+
+    #[test]
+    fn host_event_waits_while_a_confirmation_is_pending() {
+        let mut agent = super::Agent::new(Box::new(DummyClient), "sys");
+        agent.context.push_human("delete it", 1_000);
+        agent.pending_turn = Some(crate::runtime::PendingTurn {
+            pending: crate::runtime::PendingToolCall::new(
+                "pending-1",
+                "file_delete",
+                serde_json::json!({}),
+                "delete",
+                crate::ToolRisk::Dangerous,
+                "call-1",
+            ),
+            batch_with: Vec::new(),
+            remaining_calls: Vec::new(),
+            tools_used: Vec::new(),
+            tool_rounds: 1,
+            confirms_used: 1,
+            user_text: "delete it".into(),
+            todos_file: None,
+            markup_left: crate::finish_gate::FinishGateBudget::MARKUP_INIT,
+            gate_left: 0,
+            token_accounting: crate::types::TokenAccounting::default(),
+        });
+        let before = agent.context.messages().len();
+        assert!(!agent.record_host_event("at 9:00 PM Boris spoke a due reminder aloud"));
+        assert_eq!(agent.context.messages().len(), before);
     }
 
     #[test]
@@ -336,6 +412,8 @@ impl Agent {
             session_id: opts.session_id,
             turn_id: None,
             max_tool_rounds: opts.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
+            stream_speech: false,
+            hooks: crate::hooks::Hooks::default(),
             listeners: Arc::new(Mutex::new(Vec::new())),
             next_listener_id: AtomicU64::new(1),
             debug: None,
@@ -348,7 +426,9 @@ impl Agent {
             todos_path: None,
             artifacts_dir: None,
             subagent_session_root: Arc::new(Mutex::new(None)),
+            shell: crate::tools::bash::ShellSession::new(),
             maintenance: None,
+            workspace: None,
         }
     }
 
@@ -393,7 +473,7 @@ impl Agent {
             Arc::clone(&self.shared_tools),
             Arc::clone(&self.activated),
         );
-        self.insert_tool(Arc::new(tool));
+        self.insert_tool(Arc::new(tool), false);
         info!("tool_search registered");
     }
 
@@ -418,7 +498,7 @@ impl Agent {
             self.sandbox_snapshot.clone(),
             Arc::clone(&self.subagent_session_root),
         );
-        self.insert_tool(Arc::new(tool));
+        self.insert_tool(Arc::new(tool), false);
         info!("spawn_subagent tool enabled");
     }
 
@@ -588,6 +668,45 @@ impl Agent {
         } else {
             self.runtime = ToolRuntime::new(policy, Box::new(NullAuditSink));
         }
+        self.runtime.set_hooks(self.hooks.clone());
+    }
+
+    /// Install user `[[hooks]]` (they run arbitrary user commands; see
+    /// [`crate::hooks`]). Kept across `configure_runtime`.
+    pub fn set_hooks(&mut self, hooks: crate::hooks::Hooks) {
+        self.hooks = hooks.clone();
+        self.runtime.set_hooks(hooks);
+    }
+
+    /// Fire `turn_end` hooks in the background (never delays the reply).
+    pub(crate) fn fire_turn_end_hooks(
+        &self,
+        user_text: &str,
+        outcome: &crate::AgentOutcome,
+        tools: &[String],
+    ) {
+        if self.hooks.is_empty() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (kind, reply) = match outcome {
+            crate::AgentOutcome::Speak { text, .. } => ("speak", text.as_str()),
+            crate::AgentOutcome::Silent => ("silent", ""),
+            crate::AgentOutcome::NeedsConfirmation { .. } => ("needs_confirmation", ""),
+            crate::AgentOutcome::NeedsInput { .. } => ("needs_input", ""),
+        };
+        let payload = serde_json::json!({
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "user_text": user_text,
+            "outcome": kind,
+            "reply": reply,
+            "tools_used": tools,
+        });
+        let hooks = self.hooks.clone();
+        handle.spawn(async move { hooks.turn_end(payload).await });
     }
 
     pub fn set_session_id(&mut self, id: Option<String>) {
@@ -612,7 +731,7 @@ impl Agent {
     pub fn set_todos_path(&mut self, path: Option<PathBuf>) {
         self.todos_path = path.clone();
         if let Some(p) = path {
-            self.register_tools(crate::tools::plan_tools_at(&p));
+            self.rebind_tools(crate::tools::plan_tools_at(&p));
         }
     }
 
@@ -632,6 +751,17 @@ impl Agent {
         }
     }
 
+    /// Shell state shared by the bash tools: session cwd and background jobs.
+    pub fn shell_session(&self) -> Arc<crate::tools::bash::ShellSession> {
+        Arc::clone(&self.shell)
+    }
+
+    /// Kill every background bash job now (e.g. before app exit). Dropping
+    /// the agent does the same.
+    pub fn kill_background_jobs(&self) -> usize {
+        self.shell.kill_all()
+    }
+
     /// Shared handle to the subagent session root (live updates via rebind).
     pub fn subagent_session_root(&self) -> Arc<Mutex<Option<PathBuf>>> {
         Arc::clone(&self.subagent_session_root)
@@ -649,7 +779,7 @@ impl Agent {
     pub fn set_artifacts_dir(&mut self, dir: Option<PathBuf>) {
         self.artifacts_dir = dir.clone();
         if let Some(p) = dir {
-            self.register_tools(crate::tools::artifact_tools_at(&p));
+            self.rebind_tools(crate::tools::artifact_tools_at(&p));
         }
     }
 
@@ -665,7 +795,7 @@ impl Agent {
     pub fn set_output_store_dir(&mut self, dir: Option<PathBuf>) {
         self.runtime.set_output_store_dir(dir.clone());
         if let Some(p) = dir {
-            self.register_tools(crate::tools::output_tools_at(&p));
+            self.rebind_tools(crate::tools::output_tools_at(&p));
         }
     }
 
@@ -679,6 +809,8 @@ impl Agent {
         self.set_output_store_dir(Some(session_dir.join("tool_outputs")));
         self.set_audit_path(Some(session_dir.join("tool_calls.jsonl")));
         self.set_subagent_session_root(Some(session_dir.to_path_buf()));
+        // A different session kills the previous session's background jobs.
+        self.shell.bind(session_id, session_dir);
         if let Some(ltm) = &self.long_term {
             ltm.set_session_dir(Some(session_dir.to_path_buf()));
         }
@@ -696,6 +828,8 @@ impl Agent {
         self.set_artifacts_dir(None);
         self.set_audit_path(None);
         self.set_subagent_session_root(None);
+        // Session end: background jobs die and the bash cwd resets.
+        self.shell.unbind();
         if let Some(ltm) = &self.long_term {
             ltm.set_session_dir(None);
         }
@@ -709,9 +843,36 @@ impl Agent {
         self.max_tool_rounds = n;
     }
 
+    /// Emit [`crate::AgentEvent::Speech`] for the final answer while it
+    /// generates, so a voice host can start speaking early. Off by default.
+    pub fn set_stream_speech(&mut self, on: bool) {
+        self.stream_speech = on;
+    }
+
     /// True when a confirmation is outstanding (host must resume or abort).
     pub fn has_pending_confirmation(&self) -> bool {
         self.pending_turn.is_some()
+    }
+
+    /// Record something the host did on its own between turns (for example
+    /// a reminder it spoke) as a persisted `[Host event: ...]` note, so a
+    /// later "what was that?" can be answered from the conversation.
+    ///
+    /// The note is an assistant-role history message like the interrupted-turn
+    /// host note: it survives transcript persistence, is never a human turn,
+    /// and carries no `<sent_at>`. It uses its own prefix so follow-up task
+    /// reminders, which quote the last `[Host note: ...]`, never mistake it
+    /// for a turn interruption. Returns `false` (and records nothing) while a
+    /// confirmation is pending: a message there would split the open
+    /// tool-call batch from its results.
+    pub fn record_host_event(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || self.pending_turn.is_some() {
+            return false;
+        }
+        self.context
+            .push(Role::Assistant, format!("{HOST_EVENT_PREFIX} {text}]"));
+        true
     }
 
     /// Install a cancel token for the next [`Self::prompt`]. The host clones
@@ -734,9 +895,35 @@ impl Agent {
         }
     }
 
-    /// Abandon the current turn and restore a previously captured checkpoint.
+    /// Abandon the current turn and restore a previously captured checkpoint
+    /// exactly, discarding everything since (including executed tool calls).
+    /// Hosts handling an interruption should prefer [`Self::abandon_turn`].
     pub fn restore_checkpoint(&mut self, checkpoint: AgentCheckpoint) {
         self.abort();
+        self.context = checkpoint.context;
+        if let Ok(mut table) = self.activated.lock() {
+            *table = checkpoint.activations;
+        }
+    }
+
+    /// Abandon an interrupted turn (barge-in stop or replacement).
+    ///
+    /// Tool side effects since `checkpoint` are real, so when any tool
+    /// executed the human message, assistant tool calls, and results are
+    /// kept, unrun calls are closed with a synthetic failed result, an
+    /// undelivered final reply is dropped, and a persisted host note records
+    /// the interruption. When nothing executed, the checkpoint is restored
+    /// exactly, like [`Self::restore_checkpoint`].
+    pub fn abandon_turn(&mut self, checkpoint: AgentCheckpoint) {
+        self.abort();
+        let start = checkpoint.context.history().len();
+        if self
+            .context
+            .salvage_interrupted_turn(start, crate::context::TurnEnd::Interrupted)
+        {
+            info!("interrupted turn kept its executed tool work");
+            return;
+        }
         self.context = checkpoint.context;
         if let Ok(mut table) = self.activated.lock() {
             *table = checkpoint.activations;
@@ -801,21 +988,35 @@ impl Agent {
     /// Register a tool. If a tool with the same name already exists, it is
     /// **replaced** and a warning is logged (dedupe by name).
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
-        self.insert_tool(Arc::from(tool));
+        self.insert_tool(Arc::from(tool), false);
     }
 
     /// Register many tools (each name-deduped via [`Self::register_tool`]).
     pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         for tool in tools {
-            self.insert_tool(Arc::from(tool));
+            self.insert_tool(Arc::from(tool), false);
+        }
+    }
+
+    /// Swap session-bound tools (todos, artifacts, tool outputs) for copies
+    /// pointing at new paths. Same name, same position, so the listing order
+    /// stays stable; this is an expected rebind, not a duplicate, so it is
+    /// not logged as one.
+    fn rebind_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        for tool in tools {
+            self.insert_tool(Arc::from(tool), true);
         }
     }
 
     /// Single mutation path for `tools` + live `shared_tools` mirror.
-    fn insert_tool(&mut self, tool: Arc<dyn Tool>) {
+    fn insert_tool(&mut self, tool: Arc<dyn Tool>, rebind: bool) {
         let name = tool.name().to_string();
         if let Some(pos) = self.tools.iter().position(|t| t.name() == name) {
-            warn!(%name, "replacing existing tool registration (name dedupe)");
+            if rebind {
+                tracing::debug!(%name, "rebinding session tool");
+            } else {
+                warn!(%name, "replacing existing tool registration (name dedupe)");
+            }
             self.tools[pos] = tool;
         } else {
             self.tools.push(tool);
@@ -910,12 +1111,14 @@ impl Agent {
         self.context.retrieved_memory()
     }
 
-    /// Same as [`Self::export_messages`] with secret collect_input values stripped.
+    /// Same as [`Self::export_messages`] with secret collect_input values and
+    /// raw provider reasoning blocks stripped.
     pub fn export_messages_for_persist(&self) -> Vec<Message> {
         self.export_messages()
             .into_iter()
             .filter(|m| m.origin.should_persist())
             .map(|mut m| {
+                m.strip_reasoning_details();
                 if matches!(m.role, Role::Tool) {
                     m.content = crate::tools::collect_input::redact_secret_tool_content(&m.content);
                 }

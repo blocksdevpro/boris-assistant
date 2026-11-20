@@ -20,13 +20,18 @@ use crate::status::{InputPeek, Phase};
 use super::barge::BargeWatch;
 use super::confirm::interpret_yes_no;
 use super::device_switch::{apply_input_switch, apply_output_switch};
-use super::models::{maybe_unload_stt, release_voice_models, ModelResidency, SttBox, TtsBox};
+use super::early_speech::SpeechFeed;
+use super::models::{
+    lost_tts, maybe_unload_stt, release_voice_models, ModelResidency, SttBox, TtsBox, TtsSlot,
+};
 use super::picture::Picture;
 use super::playback::{
     drain_output_events, wait_playback_or_stop, wait_playback_started, PlaybackWait,
 };
 use super::session::{end_session, go_off};
-use super::think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
+use super::think::{
+    run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech, ThinkTiming,
+};
 use super::EngineCommand;
 
 pub(super) enum OutcomeResolve {
@@ -83,6 +88,16 @@ pub(super) struct ConfirmCtx<'a> {
     /// caller merges it into the context meter + turn trace — without this the
     /// post-confirm tool rounds are invisible to the UI meter.
     pub last_resume_report: Option<TurnReport>,
+    /// The turn's early-speech feed; resumes stream through it like the
+    /// first Thinking pass.
+    pub feed: &'a mut SpeechFeed,
+    /// `[speech] progress_line` / `BORIS_PROGRESS_LINE`.
+    pub progress_line: bool,
+    /// What early speech did in each resume, in order. The caller traces
+    /// them and uses the last one for the final reply.
+    pub resume_speech: Vec<EarlySpeech>,
+    /// Agent and Thinking-playback time of the resumes, summed.
+    pub timing: ThinkTiming,
 }
 
 impl ConfirmCtx<'_> {
@@ -309,7 +324,8 @@ pub(super) fn resolve_agent_outcome(
                 // (`RunSelfCheck` is only produced while Armed.)
                 HearBreak::StartWakeEnroll { .. }
                 | HearBreak::ClearWakeProfile
-                | HearBreak::RunSelfCheck => {
+                | HearBreak::RunSelfCheck
+                | HearBreak::RemindersDue => {
                     tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
                     ctx.agent.abort();
                     ctx.picture.set_phase(Phase::Armed);
@@ -366,7 +382,8 @@ pub(super) fn resolve_agent_outcome(
             Err(
                 HearBreak::StartWakeEnroll { .. }
                 | HearBreak::ClearWakeProfile
-                | HearBreak::RunSelfCheck,
+                | HearBreak::RunSelfCheck
+                | HearBreak::RemindersDue,
             ) => {
                 tracing::info!(turn = %ctx.turn, "wake profile change during confirm — yielding turn");
                 ctx.agent.abort();
@@ -432,27 +449,13 @@ pub(super) fn resolve_agent_outcome(
                         // Stop/wake barge-in and `TurnCancel` apply uniformly
                         // while the reject round runs.
                         let pending_id = pending.id.clone();
-                        match run_thinking(ThinkCtx {
-                            agent: ctx.agent,
-                            agent_rt: ctx.agent_rt,
-                            mic: ctx.mic,
-                            wake: ctx.wake,
-                            vad: ctx.vad,
-                            stt: ctx.stt,
-                            liveness: ctx.liveness,
-                            barge_in: ctx.barge_in,
-                            audio: ctx.audio,
-                            output_events: ctx.output_events,
-                            picture: ctx.picture,
-                            activity_events_enabled: ctx.activity_events_enabled.clone(),
-                            cmd_rx: ctx.cmd_rx,
-                            running: ctx.running,
-                            work: AgentWork::Resume {
+                        match resume_thinking(
+                            ctx,
+                            AgentWork::Resume {
                                 pending_id: &pending_id,
                                 approved: false,
                             },
-                            turn: ctx.turn,
-                        }) {
+                        ) {
                             ThinkResolve::Finished(Ok((o, report))) => {
                                 ctx.picture.update_context(
                                     report.context_used_tokens,
@@ -471,13 +474,13 @@ pub(super) fn resolve_agent_outcome(
                                 return OutcomeResolve::ReArm;
                             }
                             ThinkResolve::StopTurn => {
-                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
                                 ctx.picture.clear_activity();
                                 ctx.picture.set_phase(Phase::Armed);
                                 return OutcomeResolve::ReArm;
                             }
                             ThinkResolve::TakeTurn(text) => {
-                                ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+                                ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
                                 ctx.picture.clear_activity();
                                 return OutcomeResolve::TakeTurn {
                                     user_text: text,
@@ -662,27 +665,13 @@ fn collect_typed_input(
     ctx.picture.set_phase(Phase::Thinking);
 
     let pending_id = pending.id.clone();
-    match run_thinking(ThinkCtx {
-        agent: ctx.agent,
-        agent_rt: ctx.agent_rt,
-        mic: ctx.mic,
-        wake: ctx.wake,
-        vad: ctx.vad,
-        stt: ctx.stt,
-        liveness: ctx.liveness,
-        barge_in: ctx.barge_in,
-        audio: ctx.audio,
-        output_events: ctx.output_events,
-        picture: ctx.picture,
-        activity_events_enabled: ctx.activity_events_enabled.clone(),
-        cmd_rx: ctx.cmd_rx,
-        running: ctx.running,
-        work: AgentWork::ResumeInput {
+    match resume_thinking(
+        ctx,
+        AgentWork::ResumeInput {
             pending_id: &pending_id,
             value: submitted,
         },
-        turn: ctx.turn,
-    }) {
+    ) {
         ThinkResolve::Finished(Ok((outcome, report))) => {
             ctx.picture.update_context(
                 report.context_used_tokens,
@@ -706,13 +695,13 @@ fn collect_typed_input(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             Err(OutcomeResolve::TakeTurn {
                 user_text: text,
@@ -800,27 +789,13 @@ fn resume_after_confirm(
     pending_id: &str,
     approved: bool,
 ) -> Result<AgentOutcome, OutcomeResolve> {
-    match run_thinking(ThinkCtx {
-        agent: ctx.agent,
-        agent_rt: ctx.agent_rt,
-        mic: ctx.mic,
-        wake: ctx.wake,
-        vad: ctx.vad,
-        stt: ctx.stt,
-        liveness: ctx.liveness,
-        barge_in: ctx.barge_in,
-        audio: ctx.audio,
-        output_events: ctx.output_events,
-        picture: ctx.picture,
-        activity_events_enabled: ctx.activity_events_enabled.clone(),
-        cmd_rx: ctx.cmd_rx,
-        running: ctx.running,
-        work: AgentWork::Resume {
+    match resume_thinking(
+        ctx,
+        AgentWork::Resume {
             pending_id,
             approved,
         },
-        turn: ctx.turn,
-    }) {
+    ) {
         ThinkResolve::Finished(Ok((outcome, report))) => {
             ctx.picture.update_context(
                 report.context_used_tokens,
@@ -844,13 +819,13 @@ fn resume_after_confirm(
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::StopTurn => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             ctx.picture.set_phase(Phase::Armed);
             Err(OutcomeResolve::ReArm)
         }
         ThinkResolve::TakeTurn(text) => {
-            ctx.agent.restore_checkpoint(ctx.turn_checkpoint.clone());
+            ctx.agent.abandon_turn(ctx.turn_checkpoint.clone());
             ctx.picture.clear_activity();
             Err(OutcomeResolve::TakeTurn {
                 user_text: text,
@@ -863,6 +838,43 @@ fn resume_after_confirm(
             Err(OutcomeResolve::Stopped)
         }
     }
+}
+
+/// Run a confirm/input resume through the same barge-aware Thinking pass as
+/// the first one, with the same early speech: the streamed answer and the
+/// progress line. The resident TTS model is lent to the pass and returned.
+fn resume_thinking(ctx: &mut ConfirmCtx<'_>, work: AgentWork<'_>) -> ThinkResolve {
+    ctx.feed.restart();
+    let mut report = EarlySpeech::default();
+    let mut tts_slot = TtsSlot::resident(std::mem::replace(ctx.tts, lost_tts()));
+    let resolve = run_thinking(ThinkCtx {
+        agent: ctx.agent,
+        agent_rt: ctx.agent_rt,
+        mic: ctx.mic,
+        wake: ctx.wake,
+        vad: ctx.vad,
+        stt: ctx.stt,
+        liveness: ctx.liveness,
+        barge_in: ctx.barge_in,
+        audio: ctx.audio,
+        output_events: ctx.output_events,
+        picture: ctx.picture,
+        activity_events_enabled: ctx.activity_events_enabled.clone(),
+        cmd_rx: ctx.cmd_rx,
+        running: ctx.running,
+        work,
+        turn: ctx.turn,
+        speech: Some(ThinkSpeech {
+            feed: &mut *ctx.feed,
+            tts: &mut tts_slot,
+            progress_line: ctx.progress_line,
+            report: &mut report,
+        }),
+        timing: &mut ctx.timing,
+    });
+    *ctx.tts = tts_slot.join().0;
+    ctx.resume_speech.push(report);
+    resolve
 }
 
 fn confirm_activity(name: &str, args_summary: &str) -> String {

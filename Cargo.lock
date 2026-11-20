@@ -476,10 +476,12 @@ version = "1.0.0"
 dependencies = [
  "arboard",
  "async-trait",
+ "base64 0.22.1",
  "boris-ai",
  "chrono",
  "futures",
  "htmd",
+ "image",
  "open",
  "regex",
  "reqwest 0.13.4",
@@ -489,6 +491,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

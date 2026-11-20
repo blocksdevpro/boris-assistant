@@ -25,6 +25,10 @@ pub enum MessageOrigin {
     TaskState,
     /// Search result injected proactively from durable memory.
     RetrievedMemory,
+    /// Image a tool attached (screen capture, image file), delivered as a
+    /// user-role message after the tool batch. Ephemeral: never persisted and
+    /// replaced by `[image omitted]` text at the next human turn.
+    ToolImage,
     /// Merged host-derived reference block (personal + skills + memory + task).
     ///
     /// Single `Role::User` message inserted after the system prompt. Wire role
@@ -113,7 +117,7 @@ impl Message {
     }
 
     /// Send time to render on the wire: human turns only.
-    fn wire_sent_at(&self) -> Option<u64> {
+    pub(super) fn wire_sent_at(&self) -> Option<u64> {
         if self.origin == MessageOrigin::Human && matches!(self.role, Role::User) {
             self.sent_at_ms
         } else {
@@ -148,7 +152,7 @@ pub fn split_sent_at(content: &Value) -> (Value, Option<u64>) {
 }
 
 /// Local wall-clock label for a send time, e.g. `Thu 2026-11-19 10:58`.
-fn sent_at_label(ms: u64) -> Option<String> {
+pub(super) fn sent_at_label(ms: u64) -> Option<String> {
     use chrono::TimeZone;
     match chrono::Local.timestamp_millis_opt(i64::try_from(ms).ok()?) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
@@ -192,6 +196,30 @@ pub fn strip_sent_at_tags(text: &str) -> String {
     }
     out.push_str(rest);
     out.trim().to_string()
+}
+
+/// Raw provider reasoning blocks on an assistant message (OpenRouter
+/// "preserving reasoning blocks"). They are returned unmodified on later
+/// requests of the same human turn, then dropped: never persisted, digested,
+/// or spoken.
+pub(crate) const REASONING_DETAILS_KEY: &str = "reasoning_details";
+
+impl Message {
+    /// Remove raw reasoning blocks; returns true when any were present.
+    pub(crate) fn strip_reasoning_details(&mut self) -> bool {
+        matches!(self.role, Role::Assistant)
+            && self
+                .content
+                .as_object_mut()
+                .is_some_and(|obj| obj.remove(REASONING_DETAILS_KEY).is_some())
+    }
+
+    /// Copy without raw reasoning blocks (persistence, summaries).
+    pub(crate) fn without_reasoning_details(&self) -> Message {
+        let mut message = self.clone();
+        message.strip_reasoning_details();
+        message
+    }
 }
 
 impl Message {

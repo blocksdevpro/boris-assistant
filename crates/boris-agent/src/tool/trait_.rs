@@ -78,12 +78,62 @@ pub trait Tool: Send + Sync {
         ToolMeta::with_risk(ToolRisk::Moderate).confirm(true)
     }
 
-    /// Progressive listing opt-in. Default **`false`**.
+    /// Extension tool (MCP server or plugin) found through `tool_search`.
+    /// Default **`false`**.
     ///
-    /// When progressive listing is on, only core tools, activated tools, and
-    /// tools that return `true` here appear in the model tool list.
+    /// Builtin and host-registered tools are listed on every request in a
+    /// stable order. Extensions stay out of the default listing until
+    /// `tool_search` activates them, so a large plugin registry cannot crowd
+    /// the schema budget. A call to a registered extension still executes
+    /// (schema-validated) even before it is listed.
+    fn is_extension(&self) -> bool {
+        false
+    }
+
+    /// Listing opt-in for an [extension](Self::is_extension). Default **`false`**.
+    ///
+    /// Builtins are always listed; this only lets an extension appear without
+    /// a `tool_search` activation.
     fn should_list(&self, _ctx: &crate::runtime::ListToolsContext) -> bool {
         false
+    }
+
+    /// Argument names accepted silently but never advertised, as
+    /// `(alias, canonical)` pairs. Default: none.
+    ///
+    /// The schema advertises only the canonical name. Before validation and
+    /// policy, the runtime renames an alias to its canonical key when the
+    /// canonical key is absent, and drops the alias when both are present
+    /// (the canonical value wins). `execute` should still accept the aliases
+    /// for direct calls that bypass the runtime.
+    fn arg_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// Cheap state check that runs after schema validation and **before**
+    /// policy and HITL, so a call that `execute` would refuse anyway (e.g.
+    /// `file_edit` on a file not read this session) fails without asking the
+    /// user to approve it first. Default: `Ok`. Must not have side effects;
+    /// `execute` repeats any check it relies on.
+    fn precheck(
+        &self,
+        _ctx: &crate::tool_context::ToolCallContext,
+        _args: &Value,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Directory a shell tool would run this call in, resolved without side
+    /// effects. Policy applies user shell auto-allow only when this is known
+    /// and does not overlap a write root. `ctx` is `None` during batch
+    /// planning; return `None` when the answer would depend on it. Default:
+    /// `None` (auto-allow never applies).
+    fn shell_cwd(
+        &self,
+        _ctx: Option<&crate::tool_context::ToolCallContext>,
+        _args: &Value,
+    ) -> Option<std::path::PathBuf> {
+        None
     }
 
     /// Run the tool with the JSON args the LLM supplied.

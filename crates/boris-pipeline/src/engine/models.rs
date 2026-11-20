@@ -190,6 +190,87 @@ pub(super) fn join_tts_load(job: ModelLoadJob<TtsBox>) -> (TtsBox, Result<(), St
     }
 }
 
+/// The turn's TTS model while it loads beside agent work. The engine thread
+/// can borrow it as soon as the load finishes (streamed speech during
+/// Thinking) without ever blocking on the loader.
+pub(super) enum TtsSlot {
+    Loading(ModelLoadJob<TtsBox>),
+    Ready(TtsBox, Result<(), String>),
+    /// Lent to a speech job; `give_back` returns it.
+    Lent,
+}
+
+impl TtsSlot {
+    /// Lend an already-resident model (confirm/input resumes). Early speech
+    /// takes it only when it is loaded; nothing loads on the engine thread.
+    pub fn resident(tts: TtsBox) -> Self {
+        let result = if tts.is_loaded() {
+            Ok(())
+        } else {
+            Err("tts not loaded".into())
+        };
+        Self::Ready(tts, result)
+    }
+
+    fn poll(&mut self) {
+        let (tts, result) = match self {
+            Self::Loading(ModelLoadJob::Pending(rx)) => match rx.try_recv() {
+                Ok(pair) => pair,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!("tts loader disconnected before returning model");
+                    (lost_tts(), Err("tts loader disconnected".into()))
+                }
+            },
+            Self::Loading(ModelLoadJob::Ready(..)) => match std::mem::replace(self, Self::Lent) {
+                Self::Loading(ModelLoadJob::Ready(tts, result)) => (tts, result),
+                _ => return,
+            },
+            Self::Ready(..) | Self::Lent => return,
+        };
+        *self = Self::Ready(tts, result);
+    }
+
+    /// The load is still running. Never blocks.
+    pub fn is_loading(&mut self) -> bool {
+        self.poll();
+        matches!(self, Self::Loading(_))
+    }
+
+    /// Take the model if it finished loading successfully. Never blocks.
+    pub fn take_loaded(&mut self) -> Option<TtsBox> {
+        self.poll();
+        if !matches!(self, Self::Ready(_, Ok(()))) {
+            return None;
+        }
+        match std::mem::replace(self, Self::Lent) {
+            Self::Ready(tts, _) => Some(tts),
+            _ => None,
+        }
+    }
+
+    /// Return a lent model. A job that lost it (detached stuck inference or a
+    /// worker panic) hands back the placeholder, which records a load error
+    /// so the reply path reports it as one instead of a synthesis failure.
+    pub fn give_back(&mut self, tts: TtsBox) {
+        let result = if is_lost_tts(tts.as_ref()) {
+            Err("TTS model lost (stream worker detached or panicked)".into())
+        } else {
+            Ok(())
+        };
+        *self = Self::Ready(tts, result);
+    }
+
+    /// Wait for the load and return the model with its load result.
+    pub fn join(self) -> (TtsBox, Result<(), String>) {
+        match self {
+            Self::Loading(job) => join_tts_load(job),
+            Self::Ready(tts, result) => (tts, result),
+            Self::Lent => (lost_tts(), Err("tts model was not returned".into())),
+        }
+    }
+}
+
 pub(super) fn unload_stt(stt: &mut dyn SpeechToText, turn: TurnId) {
     if let Err(e) = stt.unload() {
         tracing::warn!(error = %e, %turn, "stt unload failed");
@@ -281,6 +362,13 @@ impl SpeechToText for LostStt {
 }
 
 struct LostTts;
+const LOST_TTS_ID: &str = "lost";
+
+/// True for the [`lost_tts`] placeholder.
+pub(super) fn is_lost_tts(tts: &dyn TextToSpeech) -> bool {
+    tts.backend_id() == LOST_TTS_ID
+}
+
 impl TextToSpeech for LostTts {
     fn load(&mut self) -> boris_core::Result<()> {
         Err(boris_core::Error::other(
@@ -289,7 +377,7 @@ impl TextToSpeech for LostTts {
     }
 
     fn backend_id(&self) -> &str {
-        "lost"
+        LOST_TTS_ID
     }
 
     fn synthesize(&mut self, _: &str) -> boris_core::Result<boris_core::AudioBuffer> {
@@ -331,7 +419,7 @@ impl TextToSpeech for NullTts {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelLoadJob, ModelLoader, ModelResidency};
+    use super::{ModelLoadJob, ModelLoader, ModelResidency, TtsSlot};
 
     #[test]
     fn residency_handoff_and_idle_policy_is_explicit() {
@@ -342,6 +430,50 @@ mod tests {
         assert!(ModelResidency::LowMemory.should_evict_idle());
         assert!(ModelResidency::Balanced.should_evict_idle());
         assert!(!ModelResidency::LowLatency.should_evict_idle());
+    }
+
+    #[test]
+    fn resident_slot_lends_only_a_loaded_model_and_returns_it() {
+        struct Fake(bool);
+        impl boris_inference::TextToSpeech for Fake {
+            fn synthesize(&mut self, _text: &str) -> boris_core::Result<boris_core::AudioBuffer> {
+                Ok(Vec::new())
+            }
+            fn is_loaded(&self) -> bool {
+                self.0
+            }
+            fn backend_id(&self) -> &str {
+                if self.0 {
+                    "loaded"
+                } else {
+                    "cold"
+                }
+            }
+        }
+
+        let mut cold = TtsSlot::resident(Box::new(Fake(false)));
+        assert!(
+            cold.take_loaded().is_none(),
+            "never loads on the engine thread"
+        );
+        assert_eq!(cold.join().0.backend_id(), "cold");
+
+        let mut warm = TtsSlot::resident(Box::new(Fake(true)));
+        let lent = warm.take_loaded().expect("loaded model is lent");
+        warm.give_back(lent);
+        let (tts, result) = warm.join();
+        assert!(result.is_ok());
+        assert_eq!(tts.backend_id(), "loaded");
+
+        // A job that lost the model hands back the placeholder: a load
+        // error, never lent again.
+        let mut lost = TtsSlot::resident(Box::new(Fake(true)));
+        let _lent = lost.take_loaded().expect("loaded model is lent");
+        lost.give_back(super::lost_tts());
+        assert!(lost.take_loaded().is_none());
+        let (tts, result) = lost.join();
+        assert!(result.is_err());
+        assert!(super::is_lost_tts(tts.as_ref()));
     }
 
     #[test]

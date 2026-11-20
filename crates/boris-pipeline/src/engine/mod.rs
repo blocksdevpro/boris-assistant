@@ -48,6 +48,7 @@ mod chime;
 mod confirm;
 mod device_switch;
 mod device_watch;
+mod early_speech;
 mod llm;
 mod models;
 mod outcome;
@@ -75,20 +76,20 @@ use crate::status::{EngineState, Phase, StatusPicture};
 
 use activity::{activity_label, is_tool_chip, note_tool_start};
 use artifact::peek_current;
-use barge::{decide_barge_listen, BargeDecision, BargeWatch};
+use barge::{BargeDecision, BargeWatch};
 use device_switch::{apply_input_switch, apply_output_switch};
 use models::{
-    join_stt_load, join_tts_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
+    join_stt_load, lost_tts, maybe_unload_idle, maybe_unload_stt, maybe_unload_tts,
     release_voice_models,
 };
 use outcome::{resolve_agent_outcome, ConfirmCtx, OutcomeResolve, ResolveDone};
-use playback::{
-    drain_output_events, poll_running, wait_playback_or_stop, wait_playback_started, PlaybackWait,
-};
+use playback::{poll_running, PlaybackWait};
 use session::{begin_session, end_session, enqueue_transcript_sync, go_off};
 use setup::{init_runtime, EngineRuntime};
 use speech::stream_reply;
-use think::{run_thinking, AgentWork, ThinkCtx, ThinkResolve};
+use think::{
+    run_thinking, AgentWork, EarlySpeech, ThinkCtx, ThinkResolve, ThinkSpeech, ThinkTiming,
+};
 use turn_trace::TurnTraceGuard;
 use util::{speakable_reply_units, transcript_usable};
 
@@ -317,6 +318,312 @@ struct SessionRefs<'a> {
     transcript_len: &'a mut usize,
 }
 
+/// How often host-line TTS loading polls host commands.
+const HOST_LINE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// After a reminder line that was not heard, wait this long before retrying.
+const REMINDER_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the turn loop does after a host line.
+#[derive(Debug)]
+enum AfterHostLine {
+    /// Carry on.
+    Proceed,
+    /// Barge-in "stop": re-arm.
+    Dismissed,
+    /// Barge-in with a new request: start a turn with it.
+    TakeTurn(String),
+    /// A hear break during the barge-in listen (stop, device switch, …).
+    Break(HearBreak),
+}
+
+struct HostLine {
+    /// The line became audible and did not fail part-way (a barge-in or a
+    /// Stop after it started still counts).
+    heard: bool,
+    next: AfterHostLine,
+}
+
+/// Speak one short host-authored line: due reminders, host-intent
+/// acknowledgements, recovery lines. The TTS load (loader thread) and the
+/// synthesis (stream helper) run off the engine thread while host commands
+/// are polled. Playback has the Talking barge watch, and a barge-in is
+/// handled like one during a reply. The engine is idle (Armed) afterwards,
+/// so TTS residency follows the idle rule of a turn that ends without a
+/// follow-up.
+fn speak_host_line(
+    rt: &mut EngineRuntime,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+    line: &str,
+    turn: TurnId,
+) -> HostLine {
+    let mut out = HostLine {
+        heard: false,
+        next: AfterHostLine::Proceed,
+    };
+    rt.picture.said = Some(line.into());
+    rt.picture.publish();
+
+    let mut slot = models::TtsSlot::Loading(
+        rt.tts_loader
+            .load(std::mem::replace(&mut rt.tts, lost_tts())),
+    );
+    let mut stopped = false;
+    while slot.is_loading() {
+        if !poll_running(
+            cmd_rx,
+            running,
+            &mut rt.audio,
+            &mut rt.output_events,
+            &mut rt.picture,
+        )
+        .still_running()
+        {
+            stopped = true;
+            break;
+        }
+        thread::sleep(HOST_LINE_POLL);
+    }
+    let loaded = if stopped { None } else { slot.take_loaded() };
+    let Some(mut tts) = loaded else {
+        // Stop during the load still has to wait for the model to return.
+        let (tts, result) = slot.join();
+        rt.tts = tts;
+        if let (false, Err(e)) = (stopped, result) {
+            tracing::error!(error = %e, %line, "host line: tts load failed");
+            let _ = rt.tts.unload();
+        }
+        rt.picture.said = None;
+        rt.picture.publish();
+        return out;
+    };
+
+    let gap_samples = tts.inter_unit_silence_samples();
+    let mut units = speakable_reply_units(line);
+    let mut already_audible = false;
+    loop {
+        let mut watch = if rt.barge_in {
+            Some(BargeWatch::new(&rt.mic, &mut rt.wake))
+        } else {
+            None
+        };
+        let mut speech = stream_reply(
+            tts,
+            speech::SpeechUnits::Fixed(units),
+            gap_samples,
+            turn,
+            already_audible,
+            &mut rt.audio,
+            &mut rt.output_events,
+            cmd_rx,
+            running,
+            &mut rt.picture,
+            &rt.mic,
+            watch.as_mut(),
+        );
+        tts = std::mem::replace(&mut speech.tts, lost_tts());
+        match speech.wait {
+            PlaybackWait::Finished => {
+                out.heard = speech.error.is_none();
+                if let Some(e) = speech.error {
+                    tracing::error!(error = %e, %line, "host line cut short");
+                }
+                break;
+            }
+            PlaybackWait::Stopped => {
+                out.heard = already_audible || speech.played;
+                break;
+            }
+            PlaybackWait::Aborted => {
+                tracing::error!(error = ?speech.error, %line, "host line not played");
+                break;
+            }
+            PlaybackWait::BargedIn => {
+                out.heard = true;
+                match listen_after_barge(rt, cmd_rx, running, false) {
+                    Ok(BargeDecision::Resume) => {
+                        if rt.audio.resume().is_err() {
+                            rt.audio.stop();
+                            break;
+                        }
+                        units = speech.remaining_units;
+                        already_audible = true;
+                        rt.picture.set_phase(Phase::Talking);
+                    }
+                    Ok(BargeDecision::StopTalking) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::Dismissed;
+                        break;
+                    }
+                    Ok(BargeDecision::TakeTurn(text)) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::TakeTurn(text);
+                        break;
+                    }
+                    Err(e) => {
+                        rt.audio.stop();
+                        out.next = AfterHostLine::Break(e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    rt.tts = tts;
+    if rt.residency.should_evict_idle() {
+        models::unload_tts(rt.tts.as_mut(), turn);
+    }
+    if !out.heard {
+        rt.picture.said = None;
+        rt.picture.publish();
+    }
+    out
+}
+
+/// Apply how a host line ended to the turn loop; the caller then
+/// `continue`s (or exits on [`LoopReact::Exit`]).
+fn after_host_line(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    next: AfterHostLine,
+    running: bool,
+    pending_barge_turn: &mut Option<PendingBargeTurn>,
+    await_reply: &mut bool,
+    follow_up_depth: &mut u32,
+) -> LoopReact {
+    match next {
+        AfterHostLine::Break(e) => on_hear_break(rt, sess, e, running, || {
+            *await_reply = false;
+            *follow_up_depth = 0;
+        }),
+        _ if !running => {
+            go_off_session(rt, sess);
+            LoopReact::Continue
+        }
+        AfterHostLine::Proceed => LoopReact::Continue,
+        AfterHostLine::Dismissed => {
+            *await_reply = false;
+            *follow_up_depth = 0;
+            LoopReact::Continue
+        }
+        AfterHostLine::TakeTurn(user_text) => {
+            *pending_barge_turn = Some(PendingBargeTurn {
+                user_text,
+                interrupted_text: None,
+            });
+            *await_reply = false;
+            *follow_up_depth = 0;
+            LoopReact::Continue
+        }
+    }
+}
+
+/// True when the engine loop is in a gap between turns where a due reminder
+/// may be spoken: Armed only. Never mid-turn (Hearing / Reading / Thinking /
+/// Talking), in the follow-up window (AwaitingReply: the user may already be
+/// answering, and the line would talk over them), during an approval prompt
+/// (AwaitingConfirm, or any confirmation still pending in the agent), while
+/// typed input is awaited (AwaitingInput), or when a barge-in turn is queued.
+/// A follow-up window that ends without a reply re-arms, so a reminder due
+/// during a turn is spoken right after it.
+fn reminder_gap_open(phase: Phase, confirmation_pending: bool, barge_turn_queued: bool) -> bool {
+    phase == Phase::Armed && !confirmation_pending && !barge_turn_queued
+}
+
+/// The items due at `now_ms` when the gap is open, without removing them:
+/// they are taken from the store only once their line was heard.
+fn due_at_gap(
+    reminders: &boris_agent::ReminderStore,
+    gap_open: bool,
+    now_ms: i64,
+) -> Vec<boris_agent::Reminder> {
+    if !gap_open {
+        return Vec::new();
+    }
+    reminders
+        .list()
+        .into_iter()
+        .filter(|item| item.due_unix_ms <= now_ms)
+        .collect()
+}
+
+/// After the reminder line: a heard line removes exactly the spoken items
+/// (`take_due` at the same `now_ms`; new items are always due later) and
+/// clears the retry backoff. A line that was not heard keeps them due and
+/// backs off, so a broken speaker cannot spin the Armed wait. Returns the
+/// removed items.
+fn settle_reminders(
+    reminders: &boris_agent::ReminderStore,
+    heard: bool,
+    now_ms: i64,
+    retry_at: &mut Option<std::time::Instant>,
+) -> Vec<boris_agent::Reminder> {
+    if heard {
+        *retry_at = None;
+        reminders.take_due(now_ms)
+    } else {
+        *retry_at = Some(std::time::Instant::now() + REMINDER_RETRY_AFTER);
+        Vec::new()
+    }
+}
+
+/// Whether the Armed wait should yield for due reminders now: the same gap
+/// rule as [`deliver_reminders`] and no pending retry backoff.
+fn reminders_ready(gap_open: bool, retry_at: Option<std::time::Instant>, has_due: bool) -> bool {
+    gap_open && retry_at.is_none_or(|at| std::time::Instant::now() >= at) && has_due
+}
+
+/// Speak every due timer and reminder (earliest first) as one host line, at
+/// a gap between turns only ([`reminder_gap_open`]); a due item otherwise
+/// waits for the current turn to end. Playback follows [`speak_host_line`]
+/// (Talking barge watch, Stop polled). A heard line is then recorded in the
+/// conversation as a host event and synced to the transcript, so a
+/// follow-up "what was that reminder?" has the answer; a line that was not
+/// heard stays due and is retried after [`REMINDER_RETRY_AFTER`].
+fn deliver_reminders(
+    rt: &mut EngineRuntime,
+    sess: &mut SessionRefs<'_>,
+    cmd_rx: &Receiver<EngineCommand>,
+    running: &mut bool,
+) -> AfterHostLine {
+    let now = boris_agent::now_unix_ms();
+    let gap = reminder_gap_open(rt.picture.phase, rt.agent.has_pending_confirmation(), false);
+    let due = due_at_gap(&rt.reminders, gap, now);
+    if due.is_empty() {
+        return AfterHostLine::Proceed;
+    }
+    let line = due
+        .iter()
+        .map(|item| item.spoken(now))
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::info!(count = due.len(), %line, "delivering due reminders");
+    rt.picture.activity = Some(if due.len() == 1 {
+        "reminder".into()
+    } else {
+        format!("{} reminders", due.len())
+    });
+    let spoken = speak_host_line(rt, cmd_rx, running, &line, TurnId::new(0));
+    let taken = settle_reminders(&rt.reminders, spoken.heard, now, &mut rt.reminder_retry_at);
+    if taken.is_empty() {
+        tracing::error!(
+            %line,
+            retry_secs = REMINDER_RETRY_AFTER.as_secs(),
+            "reminder line not heard; kept due for a retry"
+        );
+    } else if rt
+        .agent
+        .record_host_event(&boris_agent::spoken_reminders_note(&line, now))
+    {
+        if let Some(ref sid) = *sess.active_session {
+            enqueue_transcript_sync(&rt.store, sid, sess.transcript_len, &rt.agent);
+        }
+    }
+    rt.picture.clear_activity();
+    rt.picture.publish();
+    spoken.next
+}
+
 fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
     match cmd {
         EngineCommand::SwitchInput { device_id } => {
@@ -331,6 +638,27 @@ fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
             );
         }
         _ => {}
+    }
+}
+
+/// Trace when early speech of one Thinking pass became audible. `base_ms` is
+/// the pass start on the turn clock.
+fn trace_early_audio(turn_trace: &mut TurnTraceGuard, early: &EarlySpeech, base_ms: u64) {
+    if let Some(at) = early.progress_audio_ms {
+        turn_trace.mark_at(
+            "progress_audio_started",
+            base_ms.saturating_add(at),
+            None,
+            None,
+        );
+    }
+    if let Some(at) = early.cancelled_audio_ms {
+        turn_trace.mark_at(
+            "early_audio_started",
+            base_ms.saturating_add(at),
+            None,
+            None,
+        );
     }
 }
 
@@ -382,7 +710,8 @@ fn on_hear_break(
         }
         HearBreak::StartWakeEnroll { .. }
         | HearBreak::ClearWakeProfile
-        | HearBreak::RunSelfCheck => LoopReact::Continue,
+        | HearBreak::RunSelfCheck
+        | HearBreak::RemindersDue => LoopReact::Continue,
         HearBreak::Disconnected => {
             end_session(
                 &rt.store,
@@ -405,46 +734,15 @@ fn listen_after_barge(
     running: &mut bool,
     expect_reply: bool,
 ) -> std::result::Result<BargeDecision, HearBreak> {
-    rt.picture.set_phase(Phase::Hearing);
-    rt.picture.activity = Some("barge-in · listening".into());
-    rt.picture.publish();
-    hear::settle_after_barge(&rt.mic, cmd_rx, running)?;
-    let clip = hear::capture_utterance(
+    barge::listen_after_pause(
         &rt.mic,
         &mut rt.vad,
+        &mut rt.stt,
+        &mut rt.picture,
         cmd_rx,
         running,
-        CaptureKind::AfterWake,
-    )?;
-    let crop = hear::crop_speech(&mut rt.vad, &clip);
-    if crop.speech_hops < 10 {
-        tracing::info!(
-            hops = crop.speech_hops,
-            "barge-in listen was silence — resume"
-        );
-        rt.picture.clear_activity();
-        return Ok(BargeDecision::Resume);
-    }
-
-    if let Err(e) = rt.stt.load() {
-        tracing::warn!(error = %e, "barge-in stt load failed — resuming leftover");
-        rt.picture.clear_activity();
-        return Ok(BargeDecision::Resume);
-    }
-
-    rt.picture.set_phase(Phase::Reading);
-    match rt.stt.transcribe(&clip) {
-        Ok(text) => {
-            tracing::info!(%text, hops = crop.speech_hops, "barge-in heard");
-            rt.picture.clear_activity();
-            Ok(decide_barge_listen(crop.speech_hops, &text, expect_reply))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "barge-in stt failed — resuming leftover");
-            rt.picture.clear_activity();
-            Ok(BargeDecision::Resume)
-        }
-    }
+        expect_reply,
+    )
 }
 
 fn go_off_if_not_running(
@@ -588,6 +886,8 @@ fn run(
             rt.picture.turn = None;
             rt.picture.clear_activity();
             rt.picture.set_phase(Phase::AwaitingReply);
+            // Due reminders wait for the next Armed wait: the user may
+            // already be answering, and a reminder here would talk over them.
             tracing::info!(
                 depth = follow_up_depth,
                 "awaiting freeform user reply (no wake)"
@@ -632,7 +932,13 @@ fn run(
 
             let mic_known_silent =
                 rt.picture.listen_hint == Some(crate::status::ListenHint::MicSilent);
+            // Same gap rule and retry backoff as `deliver_reminders`, so a
+            // due item it would not take can never make this wait spin.
+            let reminder_gap =
+                reminder_gap_open(Phase::Armed, rt.agent.has_pending_confirmation(), false);
+            let reminder_retry_at = rt.reminder_retry_at;
             let picture = &mut rt.picture;
+            let reminders = &rt.reminders;
             let wake_window = match hear::wait_for_wake(
                 &rt.mic,
                 &mut rt.wake,
@@ -644,6 +950,13 @@ fn run(
                         picture.set_listen_hint(Some(crate::status::ListenHint::MicSilent))
                     }
                     hear::MicSignal::Live => picture.set_listen_hint(None),
+                },
+                || {
+                    reminders_ready(
+                        reminder_gap,
+                        reminder_retry_at,
+                        reminders.has_due(boris_agent::now_unix_ms()),
+                    )
                 },
             ) {
                 Ok(w) => w,
@@ -660,6 +973,21 @@ fn run(
                 Err(HearBreak::RunSelfCheck) => {
                     self_check::run_self_check(&mut rt);
                     continue;
+                }
+                Err(HearBreak::RemindersDue) => {
+                    let next = deliver_reminders(&mut rt, &mut sess, &cmd_rx, &mut running);
+                    match after_host_line(
+                        &mut rt,
+                        &mut sess,
+                        next,
+                        running,
+                        &mut pending_barge_turn,
+                        &mut await_reply,
+                        &mut follow_up_depth,
+                    ) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    }
                 }
                 Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {}) {
                     LoopReact::Continue => continue,
@@ -804,13 +1132,13 @@ fn run(
         // still keep the last card; a new utterance must not resurrect it.
         rt.picture.clear_artifacts();
 
-        let (text, stt_ms, interrupted_text) = if let Some(barge) = barge_turn {
+        let (text, stt_ms, interrupted_text, cut_by_cap) = if let Some(barge) = barge_turn {
             let text = barge.user_text;
             turn_trace.mark("barge_in_turn", None);
             tracing::info!(%turn, %text, "turn begin — barge-in transcript");
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
-            (text, 0u64, barge.interrupted_text)
+            (text, 0u64, barge.interrupted_text, false)
         } else {
             // Hearing only while the mic is actually recording (not during STT).
             rt.picture.set_phase(Phase::Hearing);
@@ -942,7 +1270,8 @@ fn run(
             rt.picture.heard = Some(text.clone());
             rt.picture.publish();
             tracing::info!(%turn, %text, "heard");
-            (text, stt_ms, None)
+            let cut_by_cap = crate::hear::clip_hit_cap(clip.len(), capture_kind);
+            (text, stt_ms, None, cut_by_cap)
         };
 
         // Host guard: skip agent on empty / whitespace / junk transcripts.
@@ -966,6 +1295,70 @@ fn run(
             }
             continue;
         }
+
+        // Host intents: a dismissal or a new-session request needs no model
+        // round (a ~5 s LLM call just to say "Stopped." otherwise).
+        if interrupted_text.is_none() {
+            let fresh = matches!(capture_kind, CaptureKind::AfterWake);
+            match barge::host_intent(&text, fresh) {
+                Some(barge::HostIntent::Dismiss) => {
+                    turn_trace.mark("host_dismiss", None);
+                    tracing::info!(%turn, %text, "host intent: dismiss — no agent call");
+                    rt.picture.activity = Some("okay — standing by".into());
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.set_phase(Phase::Armed);
+                    continue;
+                }
+                Some(barge::HostIntent::NewSession) => {
+                    turn_trace.mark("host_new_session", None);
+                    tracing::info!(%turn, %text, "host intent: new session — no agent call");
+                    end_session(
+                        &rt.store,
+                        sess.active_session,
+                        sess.transcript_len,
+                        &mut rt.agent,
+                    );
+                    begin_session(
+                        &rt.store,
+                        sess.active_session,
+                        sess.transcript_len,
+                        &mut rt.agent,
+                        &rt.system_prompt,
+                    );
+                    rt.picture.clear_artifacts();
+                    let spoken =
+                        speak_host_line(&mut rt, &cmd_rx, &mut running, "Okay, fresh start.", turn);
+                    follow_up_depth = 0;
+                    await_reply = false;
+                    rt.picture.set_phase(Phase::Armed);
+                    match after_host_line(
+                        &mut rt,
+                        &mut sess,
+                        spoken.next,
+                        running,
+                        &mut pending_barge_turn,
+                        &mut await_reply,
+                        &mut follow_up_depth,
+                    ) {
+                        LoopReact::Continue => continue,
+                        LoopReact::Exit => return Ok(()),
+                    }
+                }
+                None => {}
+            }
+        }
+        // The capture cap (not silence) ended this clip: say so, so the model
+        // does not act on a request that was cut off mid-sentence.
+        let text = if cut_by_cap {
+            turn_trace.mark("utterance_cut_by_cap", None);
+            format!(
+                "{text} [host note: the recording reached its {}-second limit while the user was still speaking; this request may be cut off mid-sentence]",
+                crate::hear::max_utterance_secs(capture_kind)
+            )
+        } else {
+            text
+        };
 
         if !poll_running(
             &cmd_rx,
@@ -992,7 +1385,11 @@ fn run(
         rt.picture.update_context_from_chars(approx_in + text.len());
 
         let agent_t = std::time::Instant::now();
-        let tts_job = rt.tts_loader.load(rt.tts);
+        let mut tts_slot = models::TtsSlot::Loading(rt.tts_loader.load(rt.tts));
+        // Streamed answer sentences and tool progress reach the engine thread
+        // through this channel; the subscriber only sends, never blocks.
+        let (feed_tx, mut speech_feed) = early_speech::SpeechFeed::channel();
+        let mut early = EarlySpeech::default();
         rt.agent.set_turn_id(Some(turn.to_string()));
         if let Some(ref sid) = *sess.active_session {
             rt.agent.set_session_id(Some(sid.to_string()));
@@ -1016,6 +1413,25 @@ fn run(
         // Keep the listener for the whole turn — including HITL resume —
         // so post-confirm tools / subagents still update the UI.
         let unsub = rt.agent.subscribe(move |ev| {
+            // Speech and progress signals bypass the UI gate below: a barge-in
+            // capture pauses UI repaint, not the speech queue.
+            let feed_msg = match ev {
+                AgentEvent::Speech { signal } => {
+                    let _ = feed_tx.send(early_speech::FeedMsg::Speech(signal.clone()));
+                    return;
+                }
+                AgentEvent::ToolExecutionStart { .. } => Some(early_speech::FeedMsg::ToolStarted),
+                AgentEvent::ToolNote { text } => {
+                    Some(early_speech::FeedMsg::ToolNote(text.clone()))
+                }
+                AgentEvent::NeedsConfirmation { .. } | AgentEvent::NeedsInput { .. } => {
+                    Some(early_speech::FeedMsg::Approval)
+                }
+                _ => None,
+            };
+            if let Some(msg) = feed_msg {
+                let _ = feed_tx.send(msg);
+            }
             if !activity_events_enabled_w.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
@@ -1161,10 +1577,17 @@ fn run(
             },
             None => AgentWork::Prompt(&text),
         };
-        // Cancellation is cooperative. If the old turn finishes while the user
-        // is still dictating an interruption, restore this pre-turn state so the
-        // discarded answer cannot leak into the next model request.
+        // Cancellation is cooperative. On a barge-in stop or replacement the
+        // agent abandons the turn against this pre-turn checkpoint: the
+        // undelivered answer never leaks into the next model request, while
+        // tools that already executed stay visible (with a host note) so
+        // their side effects are not redone or contradicted. A turn where
+        // nothing executed is restored to this checkpoint exactly.
         let turn_checkpoint = rt.agent.checkpoint();
+        let mut think_trace_ms = turn_trace.elapsed_ms();
+        // Agent time (model + tools) and audio played during Thinking, over
+        // the first pass and any confirm/input resumes.
+        let mut think_timing = ThinkTiming::default();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -1182,9 +1605,18 @@ fn run(
             running: &mut running,
             work,
             turn,
+            speech: Some(ThinkSpeech {
+                feed: &mut speech_feed,
+                tts: &mut tts_slot,
+                progress_line: rt.progress_line,
+                report: &mut early,
+            }),
+            timing: &mut think_timing,
         });
-        let (tts_owned, tts_load) = join_tts_load(tts_job);
+        let (tts_owned, tts_load) = tts_slot.join();
         rt.tts = tts_owned;
+        trace_early_audio(&mut turn_trace, &early, think_trace_ms);
+        turn_trace.set_agent_timing(think_timing.agent_ms, think_timing.playback_ms);
 
         let (outcome, report) = match think {
             ThinkResolve::Stopped => {
@@ -1197,7 +1629,7 @@ fn run(
             ThinkResolve::StopTurn => {
                 turn_trace.mark("thinking_barge_stop", None);
                 unsub();
-                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.agent.abandon_turn(turn_checkpoint.clone());
                 rt.picture.clear_activity();
                 maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
                 follow_up_depth = 0;
@@ -1212,7 +1644,7 @@ fn run(
                     Some(serde_json::json!({ "text": next })),
                 );
                 unsub();
-                rt.agent.restore_checkpoint(turn_checkpoint.clone());
+                rt.agent.abandon_turn(turn_checkpoint.clone());
                 rt.picture.clear_activity();
                 pending_barge_turn = Some(PendingBargeTurn {
                     user_text: next,
@@ -1246,41 +1678,27 @@ fn run(
                 rt.picture.detail = None;
                 rt.picture.clear_activity();
                 // Recoverable spoken line instead of silent Ready.
-                let recovery =
-                    "I glitched mid-task. Wake me and say continue if you want me to finish.";
-                rt.picture.said = Some(recovery.into());
-                rt.picture.publish();
-                if rt.tts.load().is_ok() {
-                    if let Ok(pcm) = rt.tts.synthesize(recovery) {
-                        drain_output_events(&rt.output_events);
-                        if let Err(e) = rt.audio.play(pcm) {
-                            tracing::error!(error = %e, "recovery play failed");
-                        }
-                        // No barge watch: this is a fire-and-forget error line
-                        // with no listener following — a wake word during it
-                        // is caught by the next Armed wait.
-                        let _ = wait_playback_started(
-                            &mut rt.output_events,
-                            &cmd_rx,
-                            &mut running,
-                            &mut rt.audio,
-                            &mut rt.picture,
-                            None,
-                        );
-                        wait_playback_or_stop(
-                            &mut rt.output_events,
-                            &cmd_rx,
-                            &mut running,
-                            &mut rt.audio,
-                            &mut rt.picture,
-                            None,
-                        );
-                    }
-                    let _ = rt.tts.unload();
-                }
+                let spoken = speak_host_line(
+                    &mut rt,
+                    &cmd_rx,
+                    &mut running,
+                    "I glitched mid-task. Wake me and say continue if you want me to finish.",
+                    turn,
+                );
                 follow_up_depth = 0;
                 rt.picture.set_phase(Phase::Armed);
-                continue;
+                match after_host_line(
+                    &mut rt,
+                    &mut sess,
+                    spoken.next,
+                    running,
+                    &mut pending_barge_turn,
+                    &mut await_reply,
+                    &mut follow_up_depth,
+                ) {
+                    LoopReact::Continue => continue,
+                    LoopReact::Exit => return Ok(()),
+                }
             }
         };
         // Live tool labels already mirrored; keep a soft chip until speech/confirm.
@@ -1338,8 +1756,25 @@ fn run(
             max_confirms,
             residency: rt.residency,
             last_resume_report: None,
+            feed: &mut speech_feed,
+            progress_line: rt.progress_line,
+            resume_speech: Vec::new(),
+            timing: ThinkTiming::default(),
         };
-        let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
+        let resolved = resolve_agent_outcome(outcome, &mut confirm);
+        think_timing.add(confirm.timing);
+        turn_trace.set_agent_timing(think_timing.agent_ms, think_timing.playback_ms);
+        // Resumes stream like the first pass. The last one produced the final
+        // reply, so its early speech replaces the first pass's.
+        for pass in std::mem::take(&mut confirm.resume_speech) {
+            let base_ms = pass
+                .started_at
+                .map_or(think_trace_ms, |at| turn_trace.ms_at(at));
+            trace_early_audio(&mut turn_trace, &pass, base_ms);
+            think_trace_ms = base_ms;
+            early = pass;
+        }
+        let outcome = match resolved {
             OutcomeResolve::Stopped => {
                 unsub();
                 continue;
@@ -1413,7 +1848,9 @@ fn run(
         };
         unsub(); // full turn finished (or speech path next)
 
-        let agent_ms = agent_t.elapsed().as_millis() as u64;
+        // Model + tools only: audio played during Thinking and the confirm
+        // dialog are not agent latency.
+        let agent_ms = think_timing.agent_ms;
         turn_trace.span(
             "agent",
             agent_ms,
@@ -1422,7 +1859,30 @@ fn run(
                 "tools": report.tools_used,
             })),
         );
-        tracing::info!(%turn, agent_ms, "agent done");
+        turn_trace.span("thinking_playback", think_timing.playback_ms, None);
+        tracing::info!(
+            %turn,
+            agent_ms,
+            thinking_playback_ms = think_timing.playback_ms,
+            wall_ms = agent_t.elapsed().as_millis() as u64,
+            "agent done"
+        );
+
+        // The model chose silence (speech not meant for Boris). Tool work
+        // never reaches here as Silent: the agent always reports it.
+        if matches!(outcome, AgentOutcome::Silent) && report.tools_used.is_empty() {
+            turn_trace.mark("agent_silent", None);
+            tracing::info!(%turn, "agent chose silence; nothing spoken");
+            if let Some(ref sid) = *sess.active_session {
+                enqueue_transcript_sync(&rt.store, sid, sess.transcript_len, &rt.agent);
+            }
+            rt.picture.clear_activity();
+            maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+            follow_up_depth = 0;
+            await_reply = false;
+            rt.picture.set_phase(Phase::Armed);
+            continue;
+        }
 
         let (reply, expect_reply) = match outcome {
             AgentOutcome::Speak { text, expect_reply } if !text.trim().is_empty() => {
@@ -1512,106 +1972,131 @@ fn run(
         // (tool-call turns already finished above).
         let mut units = speakable_reply_units(&reply);
         let gap_samples = rt.tts.inter_unit_silence_samples();
+        // Sentences a cancelled or aborted streamed answer already played to
+        // the end are not said twice when the reply starts with them.
+        let mut nothing_left = false;
+        if early.delivered.is_none() && !early.spoken.is_empty() {
+            let skip = early_speech::skip_spoken_prefix(&units, &early.spoken);
+            if skip > 0 {
+                tracing::info!(%turn, skip, total = units.len(), "skipping already spoken sentences");
+                turn_trace.mark(
+                    "answer_prefix_skipped",
+                    Some(serde_json::json!({ "units": skip, "of": units.len() })),
+                );
+                units.drain(..skip);
+                nothing_left = units.is_empty();
+            }
+        }
 
         // Decide follow-up before playback. Balanced and low-latency retain
         // both models across an active follow-up chain; low-memory reloads STT
         // while the next utterance is captured.
         let will_await = expect_reply && follow_up_depth < MAX_FOLLOW_UPS;
-        let speech_trace_start_ms = turn_trace.elapsed_ms();
+        let mut speech_trace_start_ms = turn_trace.elapsed_ms();
         let mut already_audible = false;
         let mut barge_terminal = false;
         let mut speech;
-        loop {
-            let tts = std::mem::replace(&mut rt.tts, lost_tts());
-            let barge_on = rt.barge_in;
-            let mut watch = if barge_on {
-                Some(BargeWatch::new(&rt.mic, &mut rt.wake))
-            } else {
-                None
-            };
-            speech = stream_reply(
-                tts,
-                units,
-                gap_samples,
-                turn,
-                already_audible,
-                &mut rt.audio,
-                &mut rt.output_events,
-                &cmd_rx,
-                &mut running,
-                &mut rt.picture,
-                &rt.mic,
-                watch.as_mut(),
-            );
-            rt.tts = speech.tts;
-            if speech.wait != PlaybackWait::BargedIn {
-                break;
-            }
-            turn_trace.mark("barge_in_pause", None);
-            tracing::info!(
-                %turn,
-                leftover = speech.remaining_units.len(),
-                "speech paused for barge-in"
-            );
-            match listen_after_barge(&mut rt, &cmd_rx, &mut running, will_await) {
-                Ok(BargeDecision::Resume) => {
-                    tracing::info!(%turn, "barge-in resume — leftover speech");
-                    turn_trace.mark("barge_in_resume", None);
-                    if let Err(error) = rt.audio.resume() {
-                        tracing::warn!(%turn, error = %error, "resume leftover speech failed");
-                        rt.audio.stop();
-                        speech.wait = PlaybackWait::Aborted;
-                        speech.error = Some(error.to_string());
-                        break;
+        // The committed answer already played while the agent wrapped up.
+        if let Some(done) = early.delivered.take() {
+            speech_trace_start_ms = think_trace_ms.saturating_add(early.delivered_after_ms);
+            turn_trace.mark_at("answer_streamed", speech_trace_start_ms, None, None);
+            speech = done;
+        } else if nothing_left {
+            // The whole reply was already heard during Thinking.
+            speech = speech::StreamedSpeech::nothing_left(lost_tts());
+        } else {
+            loop {
+                let tts = std::mem::replace(&mut rt.tts, lost_tts());
+                let barge_on = rt.barge_in;
+                let mut watch = if barge_on {
+                    Some(BargeWatch::new(&rt.mic, &mut rt.wake))
+                } else {
+                    None
+                };
+                speech = stream_reply(
+                    tts,
+                    speech::SpeechUnits::Fixed(units),
+                    gap_samples,
+                    turn,
+                    already_audible,
+                    &mut rt.audio,
+                    &mut rt.output_events,
+                    &cmd_rx,
+                    &mut running,
+                    &mut rt.picture,
+                    &rt.mic,
+                    watch.as_mut(),
+                );
+                rt.tts = speech.tts;
+                if speech.wait != PlaybackWait::BargedIn {
+                    break;
+                }
+                turn_trace.mark("barge_in_pause", None);
+                tracing::info!(
+                    %turn,
+                    leftover = speech.remaining_units.len(),
+                    "speech paused for barge-in"
+                );
+                match listen_after_barge(&mut rt, &cmd_rx, &mut running, will_await) {
+                    Ok(BargeDecision::Resume) => {
+                        tracing::info!(%turn, "barge-in resume — leftover speech");
+                        turn_trace.mark("barge_in_resume", None);
+                        if let Err(error) = rt.audio.resume() {
+                            tracing::warn!(%turn, error = %error, "resume leftover speech failed");
+                            rt.audio.stop();
+                            speech.wait = PlaybackWait::Aborted;
+                            speech.error = Some(error.to_string());
+                            break;
+                        }
+                        units = speech.remaining_units;
+                        already_audible = speech.played || already_audible;
+                        rt.picture.set_phase(Phase::Talking);
+                        continue;
                     }
-                    units = speech.remaining_units;
-                    already_audible = speech.played || already_audible;
-                    rt.picture.set_phase(Phase::Talking);
-                    continue;
-                }
-                Ok(BargeDecision::StopTalking) => {
-                    tracing::info!(%turn, "barge-in stop — discarding leftover");
-                    turn_trace.mark("barge_in_stop", None);
-                    rt.audio.stop();
-                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
-                    follow_up_depth = 0;
-                    await_reply = false;
-                    rt.picture.clear_activity();
-                    rt.picture.set_phase(Phase::Armed);
-                    barge_terminal = true;
-                    break;
-                }
-                Ok(BargeDecision::TakeTurn(text)) => {
-                    tracing::info!(%turn, %text, "barge-in new turn — discarding leftover");
-                    turn_trace.mark("barge_in_take_turn", None);
-                    rt.audio.stop();
-                    maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
-                    // `heard` still holds this turn's original utterance:
-                    // speech never overwrites it. Carry it so the next turn's
-                    // replacement quotes the real request, not nothing.
-                    let interrupted_text = rt.picture.heard.clone();
-                    pending_barge_turn = Some(PendingBargeTurn {
-                        user_text: text,
-                        interrupted_text,
-                    });
-                    follow_up_depth = 0;
-                    await_reply = false;
-                    rt.picture.clear_activity();
-                    speech.wait = PlaybackWait::Aborted;
-                    break;
-                }
-                Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
-                    follow_up_depth = 0;
-                    await_reply = false;
-                }) {
-                    LoopReact::Continue => {
+                    Ok(BargeDecision::StopTalking) => {
+                        tracing::info!(%turn, "barge-in stop — discarding leftover");
+                        turn_trace.mark("barge_in_stop", None);
                         rt.audio.stop();
                         maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                        follow_up_depth = 0;
+                        await_reply = false;
+                        rt.picture.clear_activity();
+                        rt.picture.set_phase(Phase::Armed);
+                        barge_terminal = true;
+                        break;
+                    }
+                    Ok(BargeDecision::TakeTurn(text)) => {
+                        tracing::info!(%turn, %text, "barge-in new turn — discarding leftover");
+                        turn_trace.mark("barge_in_take_turn", None);
+                        rt.audio.stop();
+                        maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                        // `heard` still holds this turn's original utterance:
+                        // speech never overwrites it. Carry it so the next turn's
+                        // replacement quotes the real request, not nothing.
+                        let interrupted_text = rt.picture.heard.clone();
+                        pending_barge_turn = Some(PendingBargeTurn {
+                            user_text: text,
+                            interrupted_text,
+                        });
+                        follow_up_depth = 0;
+                        await_reply = false;
+                        rt.picture.clear_activity();
                         speech.wait = PlaybackWait::Aborted;
                         break;
                     }
-                    LoopReact::Exit => return Ok(()),
-                },
+                    Err(e) => match on_hear_break(&mut rt, &mut sess, e, running, || {
+                        follow_up_depth = 0;
+                        await_reply = false;
+                    }) {
+                        LoopReact::Continue => {
+                            rt.audio.stop();
+                            maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
+                            speech.wait = PlaybackWait::Aborted;
+                            break;
+                        }
+                        LoopReact::Exit => return Ok(()),
+                    },
+                }
             }
         }
         maybe_unload_tts(rt.tts.as_mut(), turn, rt.residency);
@@ -1744,6 +2229,99 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<EngineCommand>();
         assert_send::<EngineHandle>();
+    }
+
+    #[test]
+    fn reminders_are_spoken_only_in_a_gap_between_turns() {
+        assert!(reminder_gap_open(Phase::Armed, false, false));
+        assert!(
+            !reminder_gap_open(Phase::Armed, true, false),
+            "pending confirm"
+        );
+        assert!(
+            !reminder_gap_open(Phase::Armed, false, true),
+            "queued barge turn"
+        );
+        for phase in [
+            Phase::Off,
+            Phase::Quiet,
+            // The user may already be answering: never talk over them.
+            Phase::AwaitingReply,
+            Phase::Hearing,
+            Phase::Reading,
+            Phase::Thinking,
+            Phase::Talking,
+            Phase::AwaitingConfirm,
+            Phase::AwaitingInput,
+        ] {
+            assert!(!reminder_gap_open(phase, false, false), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn a_due_reminder_waits_out_the_turn_and_is_taken_at_the_next_gap() {
+        let now = boris_agent::now_unix_ms();
+        let path = std::env::temp_dir().join(format!(
+            "boris-engine-reminder-gap-{}-{now}.json",
+            std::process::id()
+        ));
+        // Written before the store opens, so the item is already due.
+        let file = serde_json::json!({
+            "next_id": 2,
+            "items": [{
+                "id": 1,
+                "kind": "reminder",
+                "message": "call mum",
+                "due_unix_ms": now - 1_000,
+                "created_unix_ms": now - 60_000,
+            }],
+        });
+        std::fs::write(&path, file.to_string()).unwrap();
+        let store = boris_agent::ReminderStore::open(&path);
+
+        for phase in [
+            Phase::AwaitingReply,
+            Phase::Hearing,
+            Phase::Reading,
+            Phase::Thinking,
+            Phase::Talking,
+            Phase::AwaitingConfirm,
+            Phase::AwaitingInput,
+        ] {
+            let gap = reminder_gap_open(phase, false, false);
+            assert!(due_at_gap(&store, gap, now).is_empty(), "{phase:?}");
+            assert!(store.has_due(now), "still due after {phase:?}");
+        }
+        // Armed with an approval still pending: not yet, and the Armed wait
+        // does not yield for it (no busy loop).
+        let gap = reminder_gap_open(Phase::Armed, true, false);
+        assert!(due_at_gap(&store, gap, now).is_empty());
+        assert!(!reminders_ready(gap, None, store.has_due(now)));
+
+        // Armed: offered, but only removed once the line was heard.
+        let gap = reminder_gap_open(Phase::Armed, false, false);
+        assert!(reminders_ready(gap, None, store.has_due(now)));
+        let due = due_at_gap(&store, gap, now);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].spoken(now), "Reminder: call mum.");
+        assert!(store.has_due(now), "peeking does not remove");
+
+        // Not heard (TTS/playback failed): kept, and the wait backs off.
+        let mut retry_at = None;
+        assert!(settle_reminders(&store, false, now, &mut retry_at).is_empty());
+        assert!(store.has_due(now));
+        assert!(retry_at.is_some());
+        assert!(!reminders_ready(gap, retry_at, store.has_due(now)));
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(reminders_ready(gap, Some(past), store.has_due(now)));
+
+        // Heard: removed exactly once and the backoff clears.
+        let taken = settle_reminders(&store, true, now, &mut retry_at);
+        assert_eq!(taken, due);
+        assert!(retry_at.is_none());
+        assert!(!store.has_due(now));
+        assert!(due_at_gap(&store, gap, now).is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

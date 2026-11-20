@@ -151,6 +151,7 @@ impl DebugCapture {
                     MessageOrigin::TaskState => "task state",
                     MessageOrigin::RetrievedMemory => "retrieved memory",
                     MessageOrigin::DerivedContext => "derived context",
+                    MessageOrigin::ToolImage => "tool images",
                 };
                 let wire = message.dump();
                 let message_tokens = estimate_serialized_tokens(&wire.to_string());
@@ -265,6 +266,7 @@ impl DebugCapture {
                 json!({ "call_id": call_id, "tool_name": tool_name, "ok": ok, "duration_ms": duration_ms }),
             ),
             AgentEvent::ToolProgress { .. } | AgentEvent::Reasoning { .. } => return,
+            AgentEvent::Speech { signal } => ("speech", json!({ "signal": format!("{signal:?}") })),
             AgentEvent::NeedsConfirmation { pending } => {
                 ("confirmation", json!({ "tool": pending.name }))
             }

@@ -281,6 +281,10 @@ pub fn describe_tool(tool_name: &str, args_summary: &str, tense: Tense) -> Strin
             Tense::Present => "Reading clipboard".into(),
             Tense::Past => "Read clipboard".into(),
         },
+        "screen_capture" => match tense {
+            Tense::Present => "Looking at your screen".into(),
+            Tense::Past => "Looked at your screen".into(),
+        },
         "clipboard_set" => match tense {
             Tense::Present => "Copying to clipboard".into(),
             Tense::Past => "Copied to clipboard".into(),

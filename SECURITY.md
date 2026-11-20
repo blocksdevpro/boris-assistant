@@ -51,8 +51,30 @@ sandbox.
   easy to bypass with encoding, alternate spellings, or indirection.
 - On Windows, when Git Bash is missing, the tool may fall back to PowerShell
   with execution-policy bypass for usability. That is **not** a sandbox.
+- **Shell auto-allow** (`[agent] shell_auto_allow` prefixes, empty by default)
+  is an opt-in convenience that skips the yes/no for matching commands, **not
+  a security boundary**. An auto-allowed `git status` or `cargo check` runs
+  code the repository controls (git hooks and config such as
+  `core.fsmonitor`, build scripts, npm scripts). To limit that, auto-allow is
+  skipped when the command's working directory is inside (or contains) a
+  writable root, where the agent can write files without asking; when a
+  listed file-writing / code-running / directory-redirecting option follows
+  the prefix (`--output`, `-c`, `-C`, `--git-dir`, `--manifest-path`, ...);
+  and when the command contains shell syntax for bash *or* PowerShell
+  (`; & | $` backtick `> < ( ) @ { } % ^ ! ~ #`, control or unusual Unicode
+  characters), since the PowerShell fallback evaluates `(...)` and `@(...)`
+  inside arguments. These checks are best-effort; only add prefixes for
+  repositories you trust.
+- **Background shell jobs** are killed with their whole process tree on
+  session change and exit (on Windows a Job Object, joined before the process
+  is resumed); a job whose log passes 256 MB is killed.
 - **Web fetch** blocks common private/link-local/metadata hosts; residual
   DNS-rebinding and similar risks may remain.
+- **User hooks** (`[[hooks]]` in `~/.boris/config.toml`, off unless you add
+  them) run **arbitrary commands you configure**, with your rights, around
+  tool calls and at turn end (including subagent tool calls). A `pre_tool`
+  hook can block a call; hooks never widen policy, but anyone who can edit
+  `config.toml` can run code through them.
 
 **Do not claim or assume a fully sandboxed shell.** Prefer HITL for high-risk
 actions and keep capability presets appropriate to the user’s trust level.

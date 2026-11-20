@@ -6,15 +6,15 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::tool::{
-    truncate_tool_result_detailed, validate_args, Permission, Tool, ToolErrorKind, ToolMeta,
-    ToolObservation,
+    canonicalize_arg_aliases, truncate_tool_result_detailed, validate_args, Permission, Tool,
+    ToolErrorKind, ToolMeta, ToolObservation,
 };
 
 use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, NullAuditSink};
 use crate::tools::collect_input::parse_collect_args;
 
 use super::pending::{PendingInput, PendingToolCall};
-use super::policy::{decide, PolicyDecision, SandboxConfig};
+use super::policy::{decide_with_shell_cwd, PolicyDecision, SandboxConfig};
 use super::timeout::{is_timeout, run_with_timeout};
 
 // Re-export so `crate::runtime::invoke::{ToolInvocation, …}` stays valid.
@@ -47,6 +47,12 @@ pub struct ToolRuntime {
     output_store_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     gate: super::ConcurrencyGate,
     artifact_failures_this_turn: AtomicU64,
+    /// Images attached by tools this turn, drained by the loop before the
+    /// next model request.
+    images: crate::tool_context::ImageInbox,
+    /// User `[[hooks]]` (empty = no-op). `pre_tool` runs after policy and
+    /// HITL, right before execute.
+    hooks: crate::hooks::Hooks,
 }
 
 impl ToolRuntime {
@@ -63,7 +69,26 @@ impl ToolRuntime {
             output_store_dir: std::sync::Mutex::new(None),
             gate: super::ConcurrencyGate::new(16),
             artifact_failures_this_turn: AtomicU64::new(0),
+            images: Default::default(),
+            hooks: crate::hooks::Hooks::default(),
         }
+    }
+
+    /// Install user hooks (replaces any previous set).
+    pub fn set_hooks(&mut self, hooks: crate::hooks::Hooks) {
+        self.hooks = hooks;
+    }
+
+    pub fn hooks(&self) -> &crate::hooks::Hooks {
+        &self.hooks
+    }
+
+    /// Take every image tools attached since the last call (loop-only).
+    pub fn take_images(&self) -> Vec<crate::tool_context::ImageAttachment> {
+        self.images
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
     }
 
     /// Default in-memory policy + null audit (tests / early init).
@@ -97,6 +122,10 @@ impl ToolRuntime {
         self.shell_granted_this_turn.store(false, Ordering::Relaxed);
         self.shell_grant_turn.store(0, Ordering::Relaxed);
         self.artifact_failures_this_turn.store(0, Ordering::Relaxed);
+        // Undelivered images from an aborted turn never leak into the next.
+        if let Ok(mut images) = self.images.lock() {
+            images.clear();
+        }
     }
 
     /// Stop presentation repair after the initial failure and one corrected retry.
@@ -332,20 +361,53 @@ impl ToolRuntime {
                 reason: "tool args must be a JSON object".into(),
             };
         }
-        let args = args.clone();
+        let mut args = args.clone();
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(tool.name(), &args);
-        apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip)
+        // No call context while planning: a shell cwd that depends on it is
+        // unknown, so auto-allow waits for `invoke` (an extra ask at worst).
+        let shell_cwd = tool.shell_cwd(None, &args);
+        apply_skip_confirmation(
+            decide_with_shell_cwd(
+                &self.policy,
+                &meta,
+                &args,
+                opts.confirms_used,
+                shell_cwd.as_deref(),
+            ),
+            skip,
+        )
+    }
+
+    /// The tool's [`Tool::precheck`] alone (aliases canonicalized), with no
+    /// policy or execute. Batch approval planning uses it so a sibling that
+    /// would be refused anyway never joins a yes/no.
+    pub fn precheck_only(
+        &self,
+        tool: &dyn Tool,
+        ctx: &crate::tool_context::ToolCallContext,
+        args: &Value,
+    ) -> Result<(), crate::tool::ToolError> {
+        if !args.is_object() {
+            return Ok(());
+        }
+        let mut args = args.clone();
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
+        tool.precheck(ctx, &args)
     }
 
     /// Run policy + optional execute for one tool (async).
     pub async fn invoke(
         &self,
         tool: &dyn Tool,
-        inv: ToolInvocation,
+        mut inv: ToolInvocation,
         opts: InvokeOptions,
     ) -> InvokeResult {
         let meta = tool.meta();
+        // Unadvertised aliases (`cmd` → `command`) become canonical before
+        // validation, policy, the confirm prompt, and execute.
+        canonicalize_arg_aliases(tool.arg_aliases(), &mut inv.args);
         if let Some(mut obs) = reject_invalid_args(tool, &inv.args) {
             // Invalid args never reach policy/execute, but must still audit
             // (decision=rejected) so the audit trail has no silent drops.
@@ -375,13 +437,44 @@ impl ToolRuntime {
             }
             return InvokeResult::Observation(obs);
         }
+        // State checks a tool would fail anyway (read-before-edit) run before
+        // policy, so the user is never asked to approve a doomed call.
+        if let Err(e) = tool.precheck(&inv.call_context(), &inv.args) {
+            let kind = e.kind().as_str();
+            self.audit_event_full(
+                &inv,
+                &meta,
+                "rejected",
+                None,
+                Some(false),
+                Some(kind),
+                false,
+                0,
+            );
+            let bounded = bound_error_message(&e.message, MAX_ERROR_MESSAGE_CHARS);
+            // A distinct code (not the tool's `failed`) so interrupt salvage
+            // can tell a refused-before-run call from a real failure.
+            return InvokeResult::Observation(ToolObservation::err(
+                crate::tool::ObservationError::new(PRECHECK_REFUSED_CODE, true, bounded),
+                0,
+            ));
+        }
         let args = inv.args.clone();
 
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(&inv.name, &args);
-        let decision =
-            apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip);
+        let shell_cwd = tool.shell_cwd(Some(&inv.call_context()), &args);
+        let decision = apply_skip_confirmation(
+            decide_with_shell_cwd(
+                &self.policy,
+                &meta,
+                &args,
+                opts.confirms_used,
+                shell_cwd.as_deref(),
+            ),
+            skip,
+        );
 
         match decision {
             PolicyDecision::Deny { reason } => {
@@ -412,8 +505,57 @@ impl ToolRuntime {
                 }
             }
             PolicyDecision::Allow if meta.collects_input => self.pause_input(inv, meta, args),
-            PolicyDecision::Allow => self.execute_allowed(tool, inv, meta, args, opts).await,
+            PolicyDecision::Allow if self.hooks.is_empty() => {
+                self.execute_allowed(tool, inv, meta, args, opts).await
+            }
+            PolicyDecision::Allow => self.execute_hooked(tool, inv, meta, args, opts).await,
         }
+    }
+
+    /// Allowed call with user hooks: policy and HITL already passed, so
+    /// `pre_tool` may only block, never widen anything.
+    async fn execute_hooked(
+        &self,
+        tool: &dyn Tool,
+        inv: ToolInvocation,
+        meta: ToolMeta,
+        args: Value,
+        opts: InvokeOptions,
+    ) -> InvokeResult {
+        let name = inv.name.clone();
+        let call_id = inv.call_id.clone();
+        let session_id = inv.session_id.clone();
+        let turn_id = inv.turn_id.clone();
+        let call = crate::hooks::HookCall {
+            tool: &name,
+            call_id: &call_id,
+            args: &args,
+            session_id: session_id.as_deref(),
+            turn_id: turn_id.as_deref(),
+        };
+        if let Err(reason) = self.hooks.pre_tool(call).await {
+            self.audit_event(
+                &inv,
+                &meta,
+                "hook_blocked",
+                None,
+                Some(false),
+                Some("hook_blocked"),
+            );
+            return InvokeResult::Observation(ToolObservation::err(
+                crate::tool::ObservationError::new("hook_blocked", false, reason),
+                0,
+            ));
+        }
+        let result = self
+            .execute_allowed(tool, inv, meta, args.clone(), opts)
+            .await;
+        if let InvokeResult::Observation(obs) = &result {
+            self.hooks
+                .post_tool(call, obs.looks_ok(), &obs.to_provider_text())
+                .await;
+        }
+        result
     }
 
     fn pause_input(&self, inv: ToolInvocation, meta: ToolMeta, args: Value) -> InvokeResult {
@@ -452,7 +594,10 @@ impl ToolRuntime {
         } else {
             "allow"
         };
-        let ctx = inv.call_context();
+        let ctx = inv
+            .call_context()
+            .with_images(Some(std::sync::Arc::clone(&self.images)))
+            .with_hooks((!self.hooks.is_empty()).then(|| self.hooks.clone()));
         let _permits = self
             .gate
             .acquire(tool.name(), meta.effective_max_concurrency())
@@ -706,6 +851,13 @@ fn speak_confirm_prompt(pending: &PendingToolCall) -> String {
                 return format!("Edit {base}?");
             }
         }
+        "screen_capture" => {
+            return if short_arg("target").as_deref() == Some("window") {
+                "Take a screenshot of the active window?".into()
+            } else {
+                "Take a screenshot of your screen?".into()
+            };
+        }
         "file_write" => {
             if let Some(path) = short_arg("path") {
                 let base = basename(&path);
@@ -843,6 +995,10 @@ fn truncate_voice_chars(s: &str, max_chars: usize) -> String {
 
 /// Max chars for a tool error message (mirrors the Ok-path head+tail style).
 pub(crate) const MAX_ERROR_MESSAGE_CHARS: usize = 2_000;
+
+/// Observation code for a call its [`Tool::precheck`] refused before policy,
+/// HITL, or execute (e.g. `file_edit` of a file not read this session).
+pub(crate) const PRECHECK_REFUSED_CODE: &str = "precheck_refused";
 
 /// Bound an error message to [`MAX_ERROR_MESSAGE_CHARS`] chars with head+tail
 /// and a marker (char-safe). Policy/confirm logic is untouched.
@@ -1238,6 +1394,7 @@ mod tests {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         };
         let rt = ToolRuntime::new(policy, Box::new(MemoryAuditSink::new()));
         let inv = ToolInvocation::new(

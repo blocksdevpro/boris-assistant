@@ -1,11 +1,18 @@
 //! Per-request completion options (reasoning, token cap, stage).
 
-use crate::providers::openrouter::{ReasoningConfig, ReasoningEffort, DEFAULT_MAX_TOKENS};
+use crate::providers::openrouter::{ReasoningConfig, DEFAULT_MAX_TOKENS};
+
+/// Floor for `max_tokens` on any request that lists tools.
+///
+/// Reasoning and tool-call arguments share the completion pool on many
+/// models; a smaller cap truncates tool calls (or the answer) on a turn the
+/// router misjudged as simple. The OpenRouter request builder enforces it.
+pub const MIN_MAX_TOKENS_WITH_TOOLS: u32 = 2_048;
 
 /// Coarse request stage used to pick reasoning effort and output-token ceilings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestStage {
-    /// Greeting, time/date, or other short spoken reply.
+    /// High-confidence chit-chat (greeting, time/date) that needs no tools.
     SimpleVoice,
     /// First-pass tool planning / ordinary tool round.
     ToolPlanning,
@@ -18,8 +25,9 @@ impl RequestStage {
     ///
     /// # Budgets
     ///
-    /// - `SimpleVoice` → (`Minimal` + exclude, `768`).
-    /// - `ToolPlanning` → (`Medium` + include text, `4_096`).
+    /// - `SimpleVoice` → (`Low` + exclude, [`MIN_MAX_TOKENS_WITH_TOOLS`]).
+    /// - `ToolPlanning` → (`Medium` + include text, `8_192`). The default
+    ///   stage for anything that is not clearly chit-chat.
     /// - `Complex` → (`High` + include text, [`DEFAULT_MAX_TOKENS`]).
     ///
     /// Note the intentional divergence from [`ReasoningConfig::default`]:
@@ -29,19 +37,12 @@ impl RequestStage {
     /// See [`ReasoningConfig`] docs for the full discussion.
     pub fn budget(self) -> (ReasoningConfig, u32) {
         match self {
-            Self::SimpleVoice => (
-                ReasoningConfig {
-                    effort: ReasoningEffort::Minimal,
-                    exclude: true,
-                },
-                // WARNING: 768 tokens is deliberately tight for short spoken
-                // replies. A turn misclassified as `SimpleVoice` that grows
-                // tool calls (or a reasoning-heavy model that spends most of
-                // the pool thinking) can truncate its answer / tool_calls.
-                // Callers that are unsure should prefer `ToolPlanning`.
-                768,
-            ),
-            Self::ToolPlanning => (ReasoningConfig::medium().include_text(), 4_096),
+            // Low (not Minimal) effort and a tool-safe cap: a turn the router
+            // misjudged as chit-chat must still be able to call a tool and
+            // answer without truncation.
+            Self::SimpleVoice => (ReasoningConfig::low(), MIN_MAX_TOKENS_WITH_TOOLS),
+            // Room for reasoning plus a large tool argument (e.g. a file write).
+            Self::ToolPlanning => (ReasoningConfig::medium().include_text(), 8_192),
             Self::Complex => (ReasoningConfig::high().include_text(), DEFAULT_MAX_TOKENS),
         }
     }
@@ -150,13 +151,21 @@ pub fn clamp_to_context_window(max_tokens: u32, context_window: Option<u32>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::openrouter::ReasoningEffort;
 
     #[test]
-    fn simple_voice_uses_minimal_and_small_cap() {
+    fn simple_voice_uses_low_effort_and_a_tool_safe_cap() {
         let (r, n) = RequestStage::SimpleVoice.budget();
-        assert_eq!(r.effort, ReasoningEffort::Minimal);
+        assert_eq!(r.effort, ReasoningEffort::Low);
         assert!(r.exclude, "short voice replies keep reasoning off the wire");
-        assert!(n < 2_048);
+        assert!(n >= MIN_MAX_TOKENS_WITH_TOOLS);
+    }
+
+    #[test]
+    fn tool_planning_is_medium_with_headroom() {
+        let (r, n) = RequestStage::ToolPlanning.budget();
+        assert_eq!(r.effort, ReasoningEffort::Medium);
+        assert!(n >= 8_192);
     }
 
     #[test]

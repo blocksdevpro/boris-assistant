@@ -22,7 +22,12 @@
 //! - Prefer pure helpers in submodules with unit tests over growing `Context` methods.
 
 mod compact;
+pub mod followup;
+mod images;
+mod interrupt;
 mod message;
+#[cfg(test)]
+mod reasoning_tests;
 mod retrieval;
 mod role;
 mod task_state;
@@ -32,6 +37,9 @@ use serde_json::{json, Value};
 
 pub(crate) use compact::estimate_serialized_tokens;
 pub use compact::ContextBudget;
+pub(crate) use images::IMAGE_TOKEN_ESTIMATE;
+pub(crate) use interrupt::TurnEnd;
+pub(crate) use message::REASONING_DETAILS_KEY;
 pub use message::{split_sent_at, strip_sent_at_tags, Message, MessageOrigin, SENT_AT_KEY};
 pub use retrieval::RetrievedMemory;
 pub use role::Role;
@@ -89,6 +97,9 @@ impl Context {
 
     pub fn push(&mut self, role: Role, content: impl Into<Value>) {
         let message = Message::new(role, content);
+        if message.origin.is_human() {
+            self.drop_turn_scoped_payloads();
+        }
         if message.origin.is_history_event() {
             self.history.push(message.clone());
         }
@@ -98,6 +109,7 @@ impl Context {
 
     /// Start a real human turn stamped with its wall-clock send time.
     pub(crate) fn push_human(&mut self, content: impl Into<Value>, sent_at_ms: u64) {
+        self.drop_turn_scoped_payloads();
         let message = Message::human_at(content, sent_at_ms);
         self.history.push(message.clone());
         self.messages.push(message);
@@ -125,6 +137,7 @@ impl Context {
         human: impl Into<Value>,
         sent_at_ms: u64,
     ) {
+        self.drop_turn_scoped_payloads();
         let human = Message::human_at(human, sent_at_ms);
         self.history.push(human.clone());
         self.messages.push(human);
@@ -140,6 +153,19 @@ impl Context {
                 Message::with_origin(Role::User, MessageOrigin::HostControl, control),
             );
         }
+    }
+
+    /// Drop payloads scoped to one human turn: raw reasoning blocks on
+    /// assistant messages and tool images (replaced by `[image omitted]`).
+    ///
+    /// Both are preserved only across the tool rounds of the current human
+    /// turn; a new human turn (or a reload) ends that scope and frees the
+    /// potentially large blobs.
+    fn drop_turn_scoped_payloads(&mut self) {
+        for message in self.messages.iter_mut().chain(self.history.iter_mut()) {
+            message.strip_reasoning_details();
+        }
+        self.omit_tool_images("shown in an earlier turn");
     }
 
     /// Remove one exact ephemeral host instruction from the model view.
@@ -201,9 +227,92 @@ impl Context {
     }
 
     /// Start a new derived task capsule from the current human request.
+    ///
+    /// A follow-up ("continue", "Tss keep going", "did you finish the
+    /// task?") keeps the earlier objective instead of replacing it with the
+    /// follow-up text, and a turn-scoped host control restates that
+    /// objective, its status, open todos, and any interruption note.
+    ///
+    /// An acceptance ("yes do it", "go ahead") replying to an assistant
+    /// offer or question starts a new objective that names the offer, rather
+    /// than resuming the earlier one.
     pub fn begin_task(&mut self, user_text: &str) {
-        self.task_state.begin_turn(user_text);
         self.retrieved_memory.clear();
+        let last_assistant = task_state::last_assistant_text(&self.history);
+        let kind = followup::followup_kind_after(user_text, last_assistant);
+        if kind == Some(followup::FollowupKind::Affirm) {
+            if let Some(offer) = last_assistant.filter(|text| followup::ends_with_offer(text)) {
+                let objective = format!(
+                    "{user_text} (accepting the offer: \"{}\")",
+                    followup::last_sentence(offer)
+                );
+                self.task_state.begin_turn_as(user_text, &objective);
+                return;
+            }
+        }
+        if matches!(
+            kind,
+            Some(followup::FollowupKind::Resume | followup::FollowupKind::Status)
+        ) {
+            if let Some(control) = self.followup_control() {
+                if self.task_state.begin_followup() {
+                    self.push_control(control);
+                    return;
+                }
+            }
+        }
+        self.task_state.begin_turn(user_text);
+    }
+
+    /// Host control for a follow-up, built from host task state before the
+    /// new turn changes it. `None` when there is no real earlier objective.
+    fn followup_control(&self) -> Option<String> {
+        let state = &self.task_state;
+        let objective = state.objective.as_ref()?.text.clone();
+        if crate::task::classify_task(&objective).greeting {
+            return None;
+        }
+        let status = match state.status {
+            TaskStatus::Active => "unfinished: the last turn ended before the work was done",
+            TaskStatus::Failed => "interrupted or failed before finishing",
+            TaskStatus::WaitingForConfirmation => "waiting for the user's confirmation",
+            TaskStatus::WaitingForInput => "waiting for input from the user",
+            TaskStatus::Completed => "reported complete in the last reply",
+            TaskStatus::Idle => "not started",
+        };
+        let todos = state.open_todos();
+        let todos = if todos.is_empty() {
+            "none recorded".to_string()
+        } else {
+            todos
+                .iter()
+                .map(|t| format!("- {}", escape_envelope(t)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // The newest interruption note since the previous human turn.
+        let note = self
+            .history
+            .iter()
+            .rev()
+            .skip_while(|m| m.origin.is_human())
+            .take_while(|m| !m.origin.is_human())
+            .filter_map(|m| m.content.as_str())
+            .find(|text| text.starts_with(interrupt::TURN_NOTE_PREFIX))
+            .map(|text| format!("\nLast turn note: {}", escape_envelope(text)))
+            .unwrap_or_default();
+        Some(format!(
+            "<system-reminder>\n\
+             The user's message is a follow-up to the earlier task, not a new request.\n\
+             Earlier objective (verbatim): \"{}\"\n\
+             Status: {status}.\n\
+             Open todos:\n{todos}{note}\n\
+             If they want it continued, resume from where it stopped: check the current state \
+             with tools rather than redoing finished steps. If they ask whether it is done, \
+             answer from this state and the transcript.\n\
+             </system-reminder>",
+            escape_envelope(&objective)
+        ))
     }
 
     pub fn record_tool_result(&mut self, name: &str, call_id: &str, ok: bool, output: &str) {
@@ -220,6 +329,9 @@ impl Context {
         content: String,
         ok: bool,
     ) {
+        // Capped once, here, at a fixed size (keeping any saved-output hint),
+        // so later requests never rewrite this message.
+        let content = compact::cap_tool_text(&content, compact::TOOL_RESULT_CONTEXT_MAX_CHARS);
         let reminder = crate::reminder::reminder_for(tool_name, &content, ok);
         self.record_tool_result(tool_name, call_id, ok, &content);
         self.push(
@@ -391,6 +503,7 @@ impl Context {
                 self.messages.push(msg.clone());
             }
         }
+        self.drop_turn_scoped_payloads();
         self.task_state.rebuild_from_history(&self.history);
         self.retrieved_memory.clear();
         self.personal_context = None;
@@ -567,6 +680,96 @@ fn infer_transcript_origin(role: Role, content: &Value) -> MessageOrigin {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn followup_keeps_objective_and_restates_it_from_task_state() {
+        let mut ctx = Context::new(50);
+        ctx.push(Role::System, "sys");
+        let task = "refactor the parser in src/lib.rs and run the tests";
+        ctx.push(Role::User, task);
+        ctx.begin_task(task);
+        ctx.record_tool_result(
+            "todo_write",
+            "c1",
+            true,
+            "[x] read parser\n[ ] run cargo test",
+        );
+        ctx.push(
+            Role::Assistant,
+            "[Host note: turn interrupted after file_edit ran; cargo test did not run]",
+        );
+        ctx.finish_task(TaskStatus::Failed, "");
+
+        ctx.push(Role::User, "Tss continue");
+        ctx.begin_task("Tss continue");
+
+        let state = ctx.task_state();
+        assert_eq!(state.objective.as_ref().unwrap().text, task);
+        assert_eq!(state.status, TaskStatus::Active);
+        let control = ctx.messages().last().unwrap();
+        assert_eq!(control.origin, MessageOrigin::HostControl);
+        let text = control.content.as_str().unwrap();
+        assert!(text.contains(task), "{text}");
+        assert!(text.contains("interrupted or failed"), "{text}");
+        assert!(text.contains("- run cargo test"), "{text}");
+        assert!(text.contains("[Host note: turn interrupted"), "{text}");
+
+        // A status question also keeps the thread.
+        ctx.record_tool_result(
+            "todo_write",
+            "c2",
+            true,
+            "[x] read parser\n[x] run cargo test",
+        );
+        ctx.finish_task(TaskStatus::Completed, "Done: tests pass.");
+        ctx.push(Role::User, "did you finish the task?");
+        ctx.begin_task("did you finish the task?");
+        assert_eq!(ctx.task_state().objective.as_ref().unwrap().text, task);
+        let text = ctx.messages().last().unwrap().content.as_str().unwrap();
+        assert!(text.contains("reported complete"), "{text}");
+
+        // A new request with substance starts a new objective, no control.
+        let before = ctx.messages().len();
+        ctx.push(Role::User, "continue by searching for Rust news");
+        ctx.begin_task("continue by searching for Rust news");
+        assert_eq!(
+            ctx.task_state().objective.as_ref().unwrap().text,
+            "continue by searching for Rust news"
+        );
+        assert_eq!(ctx.messages().len(), before + 1);
+    }
+
+    #[test]
+    fn accepting_an_offer_starts_a_new_objective() {
+        let mut ctx = Context::new(50);
+        ctx.push(Role::System, "sys");
+        ctx.push_human("check my disk space", 1);
+        ctx.begin_task("check my disk space");
+        ctx.push(Role::Assistant, "C: is 95% full. Want me to clear temp?");
+        ctx.finish_task(
+            TaskStatus::Completed,
+            "C: is 95% full. Want me to clear temp?",
+        );
+
+        ctx.push_human("yes do it", 2);
+        let before = ctx.messages().len();
+        ctx.begin_task("yes do it");
+        let objective = ctx.task_state().objective.as_ref().unwrap().text.clone();
+        assert!(objective.starts_with("yes do it"), "{objective}");
+        assert!(objective.contains("Want me to clear temp?"), "{objective}");
+        assert_eq!(ctx.messages().len(), before, "no follow-up control");
+
+        // Without an offer, "go ahead" still resumes the earlier objective.
+        ctx.push(Role::Assistant, "Clearing temp files now.");
+        ctx.finish_task(TaskStatus::Active, "");
+        ctx.push_human("go ahead", 3);
+        ctx.begin_task("go ahead");
+        assert_eq!(ctx.task_state().objective.as_ref().unwrap().text, objective);
+        assert_eq!(
+            ctx.messages().last().unwrap().origin,
+            MessageOrigin::HostControl
+        );
+    }
 
     fn roles_of(ctx: &Context) -> Vec<&'static str> {
         ctx.messages

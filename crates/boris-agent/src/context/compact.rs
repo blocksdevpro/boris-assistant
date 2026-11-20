@@ -5,8 +5,17 @@
 //!
 //! Design goals (voice agent quality):
 //! - **Never gut the current research turn** — recent tool results stay large.
-//! - **Prefer truncate over drop** until the hard budget is hit.
-//! - **Only collapse** old tool_calls chains when we are truly over hard budget.
+//! - **Cache-stable prefix**: a tool observation is capped once, at a fixed
+//!   size, when it enters context ([`cap_tool_text`] is idempotent). Under the
+//!   hard budget nothing earlier is ever rewritten, so consecutive requests
+//!   within a human turn share a byte-identical serialized prefix and the
+//!   provider prompt cache stays warm. A new human turn rewrites the previous
+//!   turn once (turn-scoped reasoning blocks and images are dropped, one-turn
+//!   host controls removed).
+//! - **Rare, large restructuring**: only over the hard budget are old tool
+//!   chains collapsed, and then deep enough to land back under the soft
+//!   budget so the next rounds do not collapse again. Summary compaction (the
+//!   usual path) runs earlier, at the soft budget, with its own hysteresis.
 
 use serde_json::Value;
 
@@ -18,7 +27,10 @@ use super::{Context, Message, MessageOrigin, Role};
 /// Compaction only removes complete turns represented in this payload. If the
 /// oldest removable turn does not fit, summary compaction is skipped rather
 /// than silently discarding content the summarizer never saw.
-pub(crate) const SUMMARY_DIGEST_MAX_CHARS: usize = 20_000;
+///
+/// 60k characters (~15k tokens) lets one pass fold several long turns into a
+/// structured 2-4k token summary on the planning tier.
+pub(crate) const SUMMARY_DIGEST_MAX_CHARS: usize = 60_000;
 
 /// Input-side budget derived from a model's combined context window.
 ///
@@ -62,6 +74,38 @@ impl ContextBudget {
     }
 }
 
+/// Fixed per-observation cap applied once when a tool result enters context
+/// (and to reloaded history). Matches the largest runtime result budget, so
+/// it only bites on oversized or legacy observations.
+pub(crate) const TOOL_RESULT_CONTEXT_MAX_CHARS: usize = 24_000;
+
+const COMPACT_MARKER: &str = "\n…[compacted]…\n";
+const SAVED_OUTPUT_PREFIX: &str = "\n[Full output saved to ";
+
+/// Deterministic, idempotent head + tail cap. The result never exceeds
+/// `max_chars`, so capping again is a no-op (no later rewrite of the same
+/// message), and a trailing saved-output hint (`[Full output saved to …
+/// get_tool_output …]`) is kept verbatim so nothing becomes unreachable.
+pub(crate) fn cap_tool_text(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let (body, hint) = match s.rfind(SAVED_OUTPUT_PREFIX) {
+        Some(at) if s[at..].chars().count() <= max_chars / 4 => (&s[..at], &s[at..]),
+        _ => (s, ""),
+    };
+    let room = max_chars
+        .saturating_sub(hint.chars().count())
+        .saturating_sub(COMPACT_MARKER.chars().count());
+    let head_n = room / 2;
+    let tail_n = room - head_n;
+    let body_n = body.chars().count();
+    let head: String = body.chars().take(head_n).collect();
+    let tail: String = body.chars().skip(body_n.saturating_sub(tail_n)).collect();
+    format!("{head}{COMPACT_MARKER}{tail}{hint}")
+}
+
 /// Collapse a large tool observation to head + tail with a compact marker.
 pub(super) fn truncate_tool_text(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -100,7 +144,40 @@ impl Context {
 
     /// Conservative token estimate over the actual serialized wire messages.
     pub fn estimate_tokens(&self) -> usize {
-        estimate_serialized_tokens(&self.as_json().to_string())
+        self.message_tokens_estimate()
+    }
+
+    /// Message tokens with images counted at a fixed cost each (their
+    /// base64 data URLs are not text the model reads).
+    fn message_tokens_estimate(&self) -> usize {
+        let mut json = self.as_json_for_estimate();
+        let images = super::images::redact_image_data(&mut json);
+        estimate_serialized_tokens(&json.to_string())
+            .saturating_add(images.saturating_mul(super::IMAGE_TOKEN_ESTIMATE))
+    }
+
+    /// Wire messages with opaque encrypted reasoning payloads blanked.
+    ///
+    /// Encrypted `reasoning_details[].data` is returned to the provider
+    /// unmodified but is not prompt text; counting kilobytes of base64 at four
+    /// characters per token would trigger needless compaction or a false
+    /// input-too-large failure. Reasoning text and signatures still count.
+    pub(crate) fn as_json_for_estimate(&self) -> Value {
+        let mut json = self.as_json();
+        for message in json.as_array_mut().into_iter().flatten() {
+            let Some(details) = message
+                .get_mut(super::REASONING_DETAILS_KEY)
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for detail in details {
+                if let Some(data) = detail.get_mut("data").filter(|data| data.is_string()) {
+                    *data = Value::String(String::new());
+                }
+            }
+        }
+        json
     }
 
     /// Serialized request bytes including message framing and tool schemas.
@@ -113,7 +190,7 @@ impl Context {
     }
 
     pub fn estimate_request_tokens(&self, tools: &Value) -> usize {
-        let messages = estimate_serialized_tokens(&self.as_json().to_string());
+        let messages = self.message_tokens_estimate();
         let tools = (!tools.is_null())
             .then(|| estimate_serialized_tokens(&tools.to_string()))
             .unwrap_or_default();
@@ -130,6 +207,9 @@ impl Context {
     pub const KEEP_RECENT_TOOL_TURNS: usize = 6;
     /// At hard budget, still protect this many recent turns from collapse.
     pub const KEEP_RECENT_TOOL_TURNS_HARD: usize = 4;
+    /// Deeper collapse when the first pass leaves the request over the soft
+    /// budget (hysteresis: one large restructure instead of one per turn).
+    pub const KEEP_RECENT_TOOL_TURNS_MIN: usize = 2;
     /// Recent human turns retained verbatim by LLM summary compaction.
     pub(crate) const SUMMARY_KEEP_RECENT_TURNS: usize = 4;
     /// Avoid paying for a summary whose input is too small to materially help.
@@ -149,61 +229,76 @@ impl Context {
     }
 
     /// Apply mechanical reduction against a model/request-specific budget.
+    ///
+    /// Under the hard budget this never rewrites an earlier message: the only
+    /// change is the idempotent fixed cap, which is a no-op for observations
+    /// that entered through [`Context::push_tool_result`]. The budget tier no
+    /// longer picks truncation sizes, so crossing the soft budget cannot
+    /// rewrite old tool results and break the provider prompt cache.
     pub fn compact_mechanical_for_request_with_budget(
         &mut self,
         tools: &Value,
         budget: ContextBudget,
     ) {
-        let tokens = self.estimate_request_tokens(tools);
-        let (recent_cap, older_cap) = if tokens > budget.hard_input_tokens {
-            (12_000, 3_000)
-        } else if tokens > budget.soft_input_tokens {
-            (20_000, 6_000)
-        } else {
-            // Comfortable: barely touch recent tools; older can still be large.
-            (32_000, 12_000)
-        };
-        let keep_tool_turns = if tokens > budget.hard_input_tokens {
-            Self::KEEP_RECENT_TOOL_TURNS_HARD
-        } else {
-            Self::KEEP_RECENT_TOOL_TURNS
-        };
-
-        let body = body_start(&self.messages);
-        let turn_starts = user_turn_starts(&self.messages, body);
-        let keep_from = if turn_starts.len() > keep_tool_turns {
-            turn_starts[turn_starts.len() - keep_tool_turns]
-        } else {
-            body
-        };
-
-        // Tier 1: truncate large tool results — recent turns keep more.
-        for (idx, msg) in self.messages.iter_mut().enumerate() {
+        // Tier 0: fixed, idempotent cap (covers reloaded or directly pushed
+        // history; already-capped observations are untouched).
+        for msg in self.messages.iter_mut() {
             if !matches!(msg.role, Role::Tool) {
                 continue;
             }
-            let cap = if idx >= keep_from {
-                recent_cap
-            } else {
-                older_cap
-            };
             if let Some(content) = msg.content.get_mut("content") {
                 if let Some(s) = content.as_str() {
-                    if s.chars().count() > cap {
-                        *content = Value::String(truncate_tool_text(s, cap));
+                    if s.chars().count() > TOOL_RESULT_CONTEXT_MAX_CHARS {
+                        *content = Value::String(cap_tool_text(s, TOOL_RESULT_CONTEXT_MAX_CHARS));
                     }
                 }
             }
         }
 
-        // Re-measure after Tier 1. The original request size must not trigger
-        // destructive Tier 2 work when truncation already brought it under the
-        // hard limit.
         let mut current_tokens = self.estimate_request_tokens(tools);
 
-        // Tier 2: collapse old tool chains **only while over hard budget**.
-        // Soft budget prefers keeping structure so follow-ups still see research.
-        if current_tokens > budget.hard_input_tokens && turn_starts.len() > keep_tool_turns {
+        // Tier 2: collapse old tool chains **only while over hard budget**,
+        // and then deep enough (hysteresis) to land under the soft budget so
+        // the following rounds and turns keep a stable prefix.
+        if current_tokens > budget.hard_input_tokens {
+            for keep_turns in [
+                Self::KEEP_RECENT_TOOL_TURNS_HARD,
+                Self::KEEP_RECENT_TOOL_TURNS_MIN,
+            ] {
+                if !self.collapse_tool_chains_older_than(keep_turns) {
+                    continue;
+                }
+                current_tokens = self.estimate_request_tokens(tools);
+                if current_tokens <= budget.soft_input_tokens {
+                    break;
+                }
+            }
+        }
+
+        // Tier 3: a single current turn can contain enough tool output to exceed
+        // the hard limit, so progressively shrink all remaining observations.
+        // The request layer performs the final hard-limit check because user,
+        // system, or tool-schema content cannot be safely rewritten here.
+        for cap in [8_000, 4_000, 2_000, 1_000, 500, 200] {
+            if current_tokens <= budget.hard_input_tokens {
+                break;
+            }
+            self.truncate_tool_observations_to(cap);
+            current_tokens = self.estimate_request_tokens(tools);
+        }
+    }
+
+    /// Collapse every assistant tool-call chain older than the newest
+    /// `keep_turns` human turns into bounded user-role digests. Returns
+    /// whether anything was collapsed.
+    fn collapse_tool_chains_older_than(&mut self, keep_turns: usize) -> bool {
+        let body = body_start(&self.messages);
+        let turn_starts = user_turn_starts(&self.messages, body);
+        if turn_starts.len() <= keep_turns {
+            return false;
+        }
+        let keep_from = turn_starts[turn_starts.len() - keep_turns];
+        {
             // Replace each assistant tool-call row with bounded user-role data,
             // keeping untrusted tool evidence out of assistant speech. Also drop
             // matching tool messages so no orphan `role:tool` row remains after
@@ -229,6 +324,10 @@ impl Context {
                     )
                 })
                 .collect::<Vec<_>>();
+            let changed = !collapsed.is_empty()
+                || self.messages[body..keep_from]
+                    .iter()
+                    .any(|m| matches!(m.role, Role::Tool));
             for (index, summary) in collapsed {
                 self.messages[index].role = Role::User;
                 self.messages[index].origin = MessageOrigin::CompactedTool;
@@ -244,19 +343,7 @@ impl Context {
             // Tier2 prefix would otherwise grow unbounded across repeated
             // compactions: cap to newest digests + char budget.
             self.cap_compacted_prefix();
-            current_tokens = self.estimate_request_tokens(tools);
-        }
-
-        // Tier 3: a single current turn can contain enough tool output to exceed
-        // the hard limit, so progressively shrink all remaining observations.
-        // The request layer performs the final hard-limit check because user,
-        // system, or tool-schema content cannot be safely rewritten here.
-        for cap in [8_000, 4_000, 2_000, 1_000, 500, 200] {
-            if current_tokens <= budget.hard_input_tokens {
-                break;
-            }
-            self.truncate_tool_observations_to(cap);
-            current_tokens = self.estimate_request_tokens(tools);
+            changed
         }
     }
 
@@ -336,13 +423,23 @@ impl Context {
             let chunk_end = turn_starts[turn_index + 1];
             let mut chunk = String::new();
             for message in &self.messages[chunk_start..chunk_end] {
-                if matches!(message.role, Role::System) {
+                if matches!(message.role, Role::System) || message.origin == MessageOrigin::ToolImage
+                {
                     continue;
                 }
-                let row = serde_json::json!({
+                // Reasoning blocks are provider-private and never summarized.
+                let message = message.without_reasoning_details();
+                let mut row = serde_json::json!({
                     "role": message.role.to_string(),
                     "content": &message.content,
                 });
+                // Keep human send times so the summary can still place them.
+                if let Some(label) = message
+                    .wire_sent_at()
+                    .and_then(super::message::sent_at_label)
+                {
+                    row["sent_at"] = Value::String(label);
+                }
                 chunk.push_str(&row.to_string());
                 chunk.push('\n');
             }
@@ -757,6 +854,19 @@ mod tests {
     }
 
     #[test]
+    fn older_turns_digest_keeps_human_send_times() {
+        let mut ctx = Context::new(20);
+        ctx.push(Role::System, "sys");
+        ctx.push_human("old-user", 1_700_000_000_000);
+        ctx.push(Role::Assistant, "old-asst");
+        ctx.push_human("new-user", 1_700_000_100_000);
+        let dig = ctx.older_turns_digest(1);
+        let label = super::super::message::sent_at_label(1_700_000_000_000).unwrap();
+        assert!(dig.contains(&format!("\"sent_at\":\"{label}\"")), "{dig}");
+        assert_eq!(dig.matches("sent_at").count(), 1, "{dig}");
+    }
+
+    #[test]
     fn older_turns_digest_empty_when_nothing_to_drop() {
         let mut ctx = Context::new(20);
         ctx.push(Role::User, "only");
@@ -823,7 +933,10 @@ mod tests {
     #[test]
     fn summary_plan_skips_when_oldest_complete_turn_cannot_fit() {
         let mut ctx = Context::new(20);
-        ctx.push(Role::User, format!("too-large-{}", "x".repeat(25_000)));
+        ctx.push(
+            Role::User,
+            format!("too-large-{}", "x".repeat(SUMMARY_DIGEST_MAX_CHARS + 5_000)),
+        );
         ctx.push(Role::Assistant, "answer");
         ctx.push(Role::User, "recent");
         let before = ctx.messages.len();
@@ -1103,9 +1216,90 @@ mod tests {
             .iter()
             .find(|m| matches!(m.role, Role::Tool))
             .unwrap();
-        let s = tool.content["content"].as_str().unwrap();
+        let s = tool.content["content"].as_str().unwrap().to_string();
         assert!(s.contains("…[compacted]…"));
-        assert!(s.chars().count() < 80_000);
+        assert!(s.chars().count() <= TOOL_RESULT_CONTEXT_MAX_CHARS);
+        // Idempotent: a second pass leaves the capped text byte-identical.
+        ctx.compact_mechanical();
+        let again = ctx
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .unwrap();
+        assert_eq!(again.content["content"].as_str().unwrap(), s);
+    }
+
+    #[test]
+    fn cap_tool_text_is_idempotent_and_keeps_saved_output_hint() {
+        let hint = "\n[Full output saved to C:\\s\\tool_1.log — use get_tool_output to read more.]";
+        let text = format!("{}{}", "a".repeat(50_000), hint);
+        let capped = cap_tool_text(&text, 10_000);
+        assert!(capped.chars().count() <= 10_000);
+        assert!(
+            capped.ends_with(hint),
+            "hint lost: {}",
+            &capped[capped.len() - 120..]
+        );
+        assert_eq!(cap_tool_text(&capped, 10_000), capped);
+        assert_eq!(cap_tool_text("short", 10_000), "short");
+    }
+
+    /// Consecutive requests must share a byte-identical serialized prefix
+    /// (across human turns too here, as there are no turn-scoped reasoning
+    /// blocks, images, or host controls to drop), including when the request
+    /// grows past the soft budget (the old tiered caps rewrote every older
+    /// tool result at that point).
+    #[test]
+    fn consecutive_requests_share_an_identical_serialized_prefix() {
+        let mut ctx = Context::new(1_000);
+        ctx.push(Role::System, "sys");
+        let budget = ContextBudget::for_request(64_000, 4_096);
+        let mut previous: Option<Vec<String>> = None;
+        let mut crossed_soft = false;
+        for turn in 0..10 {
+            ctx.push(Role::User, format!("u{turn}"));
+            let id = format!("call_{turn}");
+            ctx.push(
+                Role::Assistant,
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": "file_read", "arguments": "{}" }
+                    }]
+                }),
+            );
+            ctx.push_tool_result("file_read", &id, "r".repeat(20_000), true);
+            ctx.push(Role::Assistant, format!("a{turn}"));
+
+            ctx.compact_mechanical_for_request_with_budget(&Value::Null, budget);
+            let tokens = ctx.estimate_request_tokens(&Value::Null);
+            assert!(
+                tokens <= budget.hard_input_tokens,
+                "test must stay under hard"
+            );
+            crossed_soft |= tokens > budget.soft_input_tokens;
+
+            let now: Vec<String> = ctx
+                .as_json()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(Value::to_string)
+                .collect();
+            if let Some(prev) = &previous {
+                assert!(now.len() >= prev.len());
+                assert_eq!(
+                    &now[..prev.len()],
+                    &prev[..],
+                    "turn {turn} rewrote an earlier message"
+                );
+            }
+            previous = Some(now);
+        }
+        assert!(crossed_soft, "the scenario must cross the soft budget");
     }
 
     #[test]

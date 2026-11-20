@@ -67,6 +67,14 @@ pub fn max_utterance_secs(kind: CaptureKind) -> u32 {
     }
 }
 
+/// True when a captured clip ended because it hit the length cap for `kind`
+/// (the speaker may still have been talking), not because of silence.
+pub fn clip_hit_cap(samples: usize, kind: CaptureKind) -> bool {
+    let cap = max_utterance_secs(kind) as usize * AUDIO_TARGET_RATE as usize;
+    // `exceeded_max` fires on the frame that crosses the cap.
+    samples + AUDIO_TARGET_RATE as usize / 10 >= cap
+}
+
 /// Pure parse + clamp for [`max_utterance_secs`] (unit-testable without env).
 fn resolve_max_secs(raw: Option<String>) -> u32 {
     match raw.and_then(|v| v.trim().parse::<u32>().ok()) {
@@ -93,6 +101,10 @@ pub enum HearBreak {
     /// Run the on-device self-check. Only [`wait_for_wake`] returns this;
     /// mid-turn helpers drop the request.
     RunSelfCheck,
+    /// A timer or reminder is due and the engine may speak it now. Only
+    /// [`wait_for_wake`] returns this, so due items never interrupt a turn
+    /// or a follow-up window.
+    RemindersDue,
 }
 
 /// Capture mode for utterance recording.
@@ -252,6 +264,8 @@ impl MicSilenceWatch {
 /// on the same samples. `on_mic` hears when the input goes digitally silent
 /// and when it comes back, so the UI can say why "Hey Boris" does nothing.
 /// Pass `mic_known_silent` when the last wait ended with the mic silent.
+/// `reminders_due` (checked once a second) must be true only when the engine
+/// will actually take the due items, or this wait returns in a loop.
 pub fn wait_for_wake(
     mic: &crossbeam_channel::Receiver<ArcAudioBuffer>,
     wake: &mut impl WakeWord,
@@ -259,6 +273,7 @@ pub fn wait_for_wake(
     running: &mut bool,
     mic_known_silent: bool,
     mut on_mic: impl FnMut(MicSignal),
+    mut reminders_due: impl FnMut() -> bool,
 ) -> Result<AudioBuffer, HearBreak> {
     tracing::info!(
         threshold = WAKEWORD_THRESHOLD,
@@ -276,9 +291,17 @@ pub fn wait_for_wake(
     let mut mic_samples: u64 = 0;
     let mut watch = MicSilenceWatch::new(mic_known_silent);
     const POLL: Duration = Duration::from_millis(40);
+    const REMINDER_CHECK_EVERY: Duration = Duration::from_secs(1);
+    let mut last_reminder_check: Option<std::time::Instant> = None;
 
     loop {
         poll_commands(cmd_rx, running, true)?;
+        if last_reminder_check.is_none_or(|at| at.elapsed() >= REMINDER_CHECK_EVERY) {
+            last_reminder_check = Some(std::time::Instant::now());
+            if reminders_due() {
+                return Err(HearBreak::RemindersDue);
+            }
+        }
         let frame = match mic.recv_timeout(POLL) {
             Ok(frame) => frame,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -1077,6 +1100,8 @@ mod tests {
 
     #[test]
     fn utterance_cap_defaults_parses_and_clamps() {
+        assert!(clip_hit_cap(16_000 * 8, CaptureKind::AwaitConfirm));
+        assert!(!clip_hit_cap(16_000 * 3, CaptureKind::AwaitConfirm));
         assert_eq!(resolve_max_secs(None), 30);
         assert_eq!(resolve_max_secs(Some("".into())), 30);
         assert_eq!(resolve_max_secs(Some("abc".into())), 30);
@@ -1187,5 +1212,34 @@ mod tests {
         // Device switch restarts the wait; a working new mic must clear the hint.
         let mut w = MicSilenceWatch::new(true);
         assert_eq!(w.on_frame(&[0.05; 320]), Some(MicSignal::Live));
+    }
+
+    struct NeverWake;
+    impl WakeWord for NeverWake {
+        fn predict(&mut self, _: &[f32]) -> boris_core::Result<f32> {
+            Ok(0.0)
+        }
+    }
+
+    #[test]
+    fn armed_wait_yields_for_due_reminders() {
+        let (_mic_tx, mic_rx) = crossbeam_channel::unbounded::<ArcAudioBuffer>();
+        let (_cmd_tx, cmd_rx) = mpsc::channel();
+        let mut running = true;
+        let mut checks = 0;
+        let result = wait_for_wake(
+            &mic_rx,
+            &mut NeverWake,
+            &cmd_rx,
+            &mut running,
+            false,
+            |_| {},
+            || {
+                checks += 1;
+                true
+            },
+        );
+        assert_eq!(result.unwrap_err(), HearBreak::RemindersDue);
+        assert_eq!(checks, 1, "checked on entry, not after a 1 s wait");
     }
 }

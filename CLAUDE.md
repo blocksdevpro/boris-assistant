@@ -31,6 +31,8 @@ cargo check -p boris-desktop
 
 Prefer `cargo test -p boris-core -p boris-ai -p boris-agent --lib` for a quick validation subset; run the rest locally on Windows when touching audio/sense/pipeline.
 
+Offline harness eval (mock LLM, no network): `cargo test -p boris-agent --test harness_eval`. Its live variant is `#[ignore]`d and gated on `BORIS_LIVE_EVAL=1`.
+
 Do **not** run `crates/boris-agent/tests/tool_live_smoke.rs` in routine local checks — it exercises a live environment.
 
 ### Desktop app
@@ -104,30 +106,43 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 **Security/policy model** (read `crates/boris-agent/README.md` before touching runtime/policy code):
 - `CapabilityPreset` (`VoiceSafe` / `LocalPower` / `Full`) filters which tools get registered and sets network/shell defaults.
 - `SandboxConfig` defines path roots (`allow_read`/`allow_write`), `NetworkPolicy`, `ShellPolicy`, HITL thresholds. All path-like tool args are checked under configured roots.
-- `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
+- `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. On top of `OpenConfirm`, user-managed `[agent] shell_auto_allow` prefixes skip the yes/no only for a single plain command (none of `; & | $ > < ( ) @ { } % ^ ! ~ #`, backticks, control characters, or non-alphanumeric non-ASCII anywhere) that starts with a prefix on a word boundary, has no file-writing / code-running / directory-switching option after it (`--output`, `-c`, `-C`, `--git-dir`, `--manifest-path`, …), and whose cwd does not overlap a write root (the agent can plant repo-controlled code there without a yes/no); hard gates still apply. An auto-allowed prefix still runs code the repository controls (git config/hooks, build scripts) — it is a convenience, not a security boundary. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
 - `NetworkPolicy::Open` still SSRF-blocks loopback/RFC1918/link-local/metadata hosts on `web_fetch`; residual DNS-rebinding risk is documented in code, not solved.
+- User `[[hooks]]` in `config.toml` (`boris-agent/src/hooks.rs`, off unless configured) run arbitrary user commands: `pre_tool` after policy + HITL and before execute (non-zero exit / timeout blocks the call as a failed `hook_blocked` observation), `post_tool`, and background `turn_end`. They can only block, never widen policy.
 - HITL (human-in-the-loop) pauses dangerous tool calls for yes/no; after approval the runtime still enforces hard path/shell/network gates.
+- `bash` keeps a per-session cwd and can start `run_in_background` jobs (`bash_output` / `bash_kill`, max 4 running). They are OS processes owned by the agent's `ShellSession`, not engine workers, and are killed with their process tree on session change, `unbind_session` (engine off / shutdown), and agent drop (Windows Job Object kill-on-close also covers crashes).
+- `file_edit`, and `file_write` over an existing file, require a `file_read` of it this session and refuse if it changed on disk since; `Tool::precheck` runs that before HITL.
 - **Wave scheduling** (default): one assistant turn can return many `tool_calls`; read-only tools run in parallel waves (`max_parallel_tools`, default 16), writes run sequentially. Falls back to `max_parallel_tools`-bounded legacy `join_all` or fully sequential HITL-safe mode depending on config/risk. Tunable via `BORIS_WAVE_SCHEDULING`, `BORIS_MAX_PARALLEL_TOOLS`, `BORIS_MAX_CONFIRMS`, `BORIS_TRUSTED`.
 
 ### `boris-pipeline` engine phases
 
-`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
+`Off → Quiet → Armed → (wake) → Hearing → Reading → Thinking → Talking → AwaitingReply` (plus `AwaitingConfirm` for HITL yes/no and `AwaitingInput` for typed input). Turn ordering is single-threaded: wake scoring, VAD capture, and STT run inline on the engine thread while TTS synthesis runs on a dedicated helper thread. During Thinking the agent turn runs on a scoped thread so the engine can still barge-in with wake + live-mic liveness (work keeps running until STT decides; an abandoned turn keeps tool work that already executed via `Agent::abandon_turn`, and only a turn where nothing ran is rolled back); confirm prompts and re-asks use the same barge watch and follow the agent `max_confirms_per_turn` budget (default 12). Status snapshots (`StatusPicture`, latest-wins by monotonic `seq`) are pushed to the UI, including a live reasoning tail while Thinking. Shutdown: prefer `Engine::shutdown_and_join`; `EngineHandle::shutdown` alone is fine if another owner joins later.
 
 Two helpers sit beside the engine thread without breaking the single-pipeline rule: `engine/device_watch` (owned by the engine loop) polls `AudioHealth` once a second and recovers from unplug/re-plug by sending the ordinary `SwitchInput`/`SwitchOutput` commands; `EngineHandle::send` records host switches as the user's pick. `RunSelfCheck` runs the on-device voice-chain check on the engine thread only while idle or Armed — mid-turn hear helpers drop it, and it must never cancel a turn or a pending confirmation.
 
-TTS loading overlaps agent work. Reply synthesis begins only after final-answer
-acceptance and speech sanitization; later sentence synthesis overlaps playback.
-The agent loop does not forward `ContentDelta` events to TTS. Speculative
-first-unit synthesis remains unimplemented.
+TTS loading overlaps agent work. The final answer streams into TTS sentence by
+sentence while it generates: the agent's `SpeechSegmenter` (`speech_stream.rs`)
+turns `ContentDelta`s into sanitized `AgentEvent::Speech` chunks, holding the
+first sentence until the stream has gone 900 ms past a sentence boundary with
+no tool call (or the response ends); a tool call that starts later sends
+`Cancel`, and acceptance sends the rest plus `Commit`. Content beside tool
+calls is never committed, and `[silent]`/markup/code is never streamed early.
+The engine plays chunks from a channel inside `run_thinking` (feed-mode
+`stream_reply`, same Talking barge watch); a committed, fully played answer
+skips the normal speech path. Confirm/input resumes go through the same path
+(`outcome::resume_thinking`: streamed answer, progress line, Talking barge
+watch). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
 
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 
 ```
 ~/.boris/
-  config.toml    # prefs: save_settings rewrites [models], [capability], [audio], [speech],
-                 #   [agent], [ui] unconditionally, and [logging] when a filter is set;
-                 #   unknown tables/keys outside those are preserved
+  config.toml    # prefs: save_settings merges [models], [capability], [audio], [speech],
+                 #   [agent], [ui] unconditionally; and [logging] when a filter is set,
+                 #   key by key (known keys set/removed; unknown keys + tables like [workspace]/[[hooks]] preserved;
+                 #   comments/formatting are NOT preserved — file is re-serialized)
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
+  BORIS.md       # optional user instructions (system prompt <user_instructions>)
   models/        # parakeet/, supertone/onnx/, supertone/voices/, optional livekit/ + silero/ seeds
   sessions/      # transcripts + per-session artifacts/
   memory/        # memory.sqlite canonical store + optional notes.jsonl
@@ -136,7 +151,11 @@ first-unit synthesis remains unimplemented.
   traces/        # turns.jsonl per-turn latency traces
   speaker/       # live.json — wake liveness enroll (acoustic takes)
   state/workspace/ # sandboxed agent workspace
+  state/projects.json # daily cache of discovered git repos (known projects)
+  state/reminders.json # timers + reminders (agent tools; spoken by the engine only while Armed, never mid-turn, in a follow-up window, or during approvals; removed and recorded as a `[Host event: ...]` note only once heard, else retried after 30 s)
 ```
+
+Optional hand-edited `[workspace]` in `config.toml` (`projects = [...]`, `discover_projects`) lists known projects; they become read roots only and are rendered into the system prompt with the sandbox, real shell, and roots.
 
 Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the repo's `assets/` (only the wake classifier + Silero graph are tracked there).
 
@@ -151,14 +170,18 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_TRUSTED` | `0` disables auto-allow for moderate-risk tools |
 | `BORIS_MEMORY` | `0` disables long-term memory |
 | `BORIS_WAVE_SCHEDULING` / `BORIS_MAX_PARALLEL_TOOLS` / `BORIS_MAX_CONFIRMS` | Tool runtime tuning |
+| `BORIS_DISCOVER_PROJECTS` | `0` disables git-repo discovery for the known-projects list |
 | `BORIS_VAD_THRESHOLD` | Silero speech-probability threshold in `(0, 1]` (default `0.5`) |
 | `BORIS_WAKE_LIVENESS` | `0` disables the taught wake filter (TV / speaker playback) |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
+| `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
+| `BORIS_PROGRESS_LINE` | `0` disables the one spoken progress line on long tool turns (`[speech] progress_line`) |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
 | `BORIS_TTS_VOICE` | TTS voice id |
+| `BORIS_LLM_FIRST_BYTE_SECS` / `BORIS_LLM_IDLE_SECS` | LLM stream stall budgets (default 20 / 30 s; `0` disables); a stall before any output is retried once; a stall mid-stream fails |
 | `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
 | `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` / `BORIS_PIN_PROVIDER` | OpenRouter host order / pinning |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |

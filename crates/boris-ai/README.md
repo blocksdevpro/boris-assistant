@@ -50,9 +50,29 @@ default-model constants, which stay `boris_ai`-only.
 
 - `complete` tries **SSE first**, then falls back to a single JSON response if
   the stream fails or yields an empty (no text, no tools) payload.
+- Stage budgets: `SimpleVoice` (high-confidence chit-chat only) is Low effort
+  with 2,048 tokens; `ToolPlanning` (the default) is Medium with 8,192;
+  `Complex` is High with the full headroom. Any request that lists tools gets
+  at least `MIN_MAX_TOKENS_WITH_TOOLS` (2,048) so a misrouted turn cannot
+  truncate its tool calls.
 - Tool-planning and complex stages send `reasoning.exclude = false` so thinking
   tokens arrive as `LlmStreamEvent::ReasoningDelta`. Simple voice still excludes
   them. Reasoning is never assembled into `content`.
+- The raw `reasoning_details` array (streamed fragments and full snapshots,
+  or the blocking JSON body) is attached to the returned assistant message
+  unmodified and in order, so the caller can send it back on the next tool
+  round (OpenRouter "preserving reasoning blocks"). Consecutive
+  `reasoning.text` fragments are joined into one block; encrypted blocks are
+  kept whole. Display-only `reasoning` / `reasoning_content` strings are not
+  kept on the message.
+- Streams have a first-byte budget (headers + first chunk, default 20 s) and an
+  idle budget between chunks (default 30 s); SSE keepalive comments count as
+  bytes. The first-byte budget is tripled when the request hides reasoning
+  (`exclude`) or asks for `high`/`xhigh` effort, since such models can be silent
+  for a long time. A stall before any delta reached the caller is retried once; a stall
+  mid-stream (after deltas), or a second stall, fails fast with a `Timeout` error and does not
+  fall back to the blocking request. `with_first_byte_timeout` /
+  `with_idle_timeout(None)` disable them. The 180 s total deadline still applies.
 - Assistant `content` is normalized to a **string** for the agent loop.
 - `CompleteOptions::tool_error` carries host-known current-turn tool failure
   evidence for internal routing. `Some(false)` prevents successful output

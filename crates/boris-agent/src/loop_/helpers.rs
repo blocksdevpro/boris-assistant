@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{Context, Role};
+use crate::context::Context;
 use crate::error::AgentError;
 use crate::runtime::{
     args_summary, filter_listed_tools, ActivationSet, EventProgressSink, InvokeResult,
@@ -42,7 +42,7 @@ pub(super) fn unknown_tool_observation(name: &str) -> String {
     )
 }
 
-/// Build listing context (progressive disclosure / force-list-all).
+/// Build listing context (builtins + activated extensions / force-list-all).
 pub(super) fn build_list_ctx(
     config: &AgentLoopConfig,
     activated: Option<&ActivationSet>,
@@ -60,7 +60,6 @@ pub(super) fn build_list_ctx(
         activated: Arc::new(activated_snap),
         features,
         task: config.task,
-        selection: config.tool_selection.clone(),
     }
 }
 
@@ -221,88 +220,6 @@ pub(super) fn tool_observation_json(call_id: &str, content: impl Into<String>) -
     json!({ "tool_call_id": call_id, "content": content.into() })
 }
 
-/// Legacy observations without trusted status use only conventional error prefixes.
-pub(super) fn observation_looks_ok(content: &str) -> bool {
-    let lower = content.trim_start().to_ascii_lowercase();
-    !(lower.starts_with("error:") || lower.starts_with("error ["))
-}
-
-/// Count useful web-search/fetch observations in the current user turn.
-///
-/// Tool names live on assistant `tool_calls` while results carry only call ids,
-/// so join the two here instead of treating raw call counts as evidence. Old
-/// turns and harness-injected reminder messages cannot satisfy the gate.
-pub(super) fn useful_research_observation_count(context: &Context) -> u32 {
-    let messages = context.messages();
-    let turn_start = messages
-        .iter()
-        .rposition(|m| {
-            matches!(m.role, Role::User)
-                && m.content
-                    .as_str()
-                    .is_some_and(|s| !is_control_user_message(s))
-        })
-        .map_or(0, |i| i.saturating_add(1));
-
-    let mut research_calls = HashSet::new();
-    for message in &messages[turn_start..] {
-        if !matches!(message.role, Role::Assistant) {
-            continue;
-        }
-        let Some(calls) = message.content.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for call in calls {
-            let name = call
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str);
-            if !matches!(name, Some("web_search" | "web_fetch")) {
-                continue;
-            }
-            if let Some(id) = call.get("id").and_then(Value::as_str) {
-                research_calls.insert(id.to_string());
-            }
-        }
-    }
-
-    let mut counted = HashSet::new();
-    messages[turn_start..]
-        .iter()
-        .filter(|m| matches!(m.role, Role::Tool))
-        .filter_map(|m| {
-            let id = m.content.get("tool_call_id")?.as_str()?;
-            let content = m.content.get("content")?.as_str()?;
-            (research_calls.contains(id)
-                && counted.insert(id.to_string())
-                && m.content
-                    .get("_tool_ok")
-                    .and_then(Value::as_bool)
-                    .unwrap_or_else(|| observation_looks_ok(content))
-                && observation_has_useful_evidence(content))
-            .then_some(())
-        })
-        .count() as u32
-}
-
-fn is_control_user_message(text: &str) -> bool {
-    let text = text.trim_start();
-    text.starts_with("<system-reminder>") || text.starts_with("<conversation_summary>")
-}
-
-fn observation_has_useful_evidence(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    !lower.starts_with("no search results")
-        && !lower.starts_with("no results")
-        && !lower.starts_with("search returned empty")
-        && !lower.starts_with("not found")
-        && !lower.contains("search backends returned empty")
-}
-
 /// Emit `ToolExecutionStart` for a raw call (uses standard args summary).
 pub(super) fn emit_tool_start(emit: &EmitFn, call: &RawToolCall) {
     emit(AgentEvent::ToolExecutionStart {
@@ -394,6 +311,23 @@ mod tests {
     struct LargeDefinitionTool {
         name: String,
         description: String,
+        extension: bool,
+    }
+
+    fn large(name: &str, description: String) -> Arc<dyn Tool> {
+        Arc::new(LargeDefinitionTool {
+            name: name.into(),
+            description,
+            extension: false,
+        })
+    }
+
+    fn large_extension(name: &str, description: String) -> Arc<dyn Tool> {
+        Arc::new(LargeDefinitionTool {
+            name: name.into(),
+            description,
+            extension: true,
+        })
     }
 
     #[async_trait]
@@ -414,6 +348,10 @@ mod tests {
             ToolMeta::safe_default()
         }
 
+        fn is_extension(&self) -> bool {
+            self.extension
+        }
+
         async fn execute(
             &self,
             _ctx: &crate::tool_context::ToolCallContext,
@@ -426,18 +364,9 @@ mod tests {
     #[test]
     fn tool_payload_prunes_low_priority_definitions_to_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "core".into(),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "activated_tool".into(),
-                description: "a".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "low_priority_tool".into(),
-                description: "z".repeat(40_000),
-            }),
+            large("remember_note", "core".into()),
+            large_extension("activated_tool", "a".repeat(40_000)),
+            large("low_priority_tool", "z".repeat(40_000)),
         ];
         let mut activated = HashSet::new();
         activated.insert("activated_tool".to_string());
@@ -461,7 +390,7 @@ mod tests {
         );
         assert!(
             names.contains(&"activated_tool"),
-            "actual-use activation must outrank an unselected tool"
+            "an activated extension must outrank a shared builtin"
         );
         assert!(!names.contains(&"low_priority_tool"));
         assert_eq!(
@@ -473,18 +402,9 @@ mod tests {
     #[test]
     fn schema_budget_keeps_discoveries_above_unused_shared_tools() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "n".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "activated_tool".into(),
-                description: "a".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "tool_search".into(),
-                description: "discovery".into(),
-            }),
+            large("remember_note", "n".repeat(40_000)),
+            large_extension("activated_tool", "a".repeat(40_000)),
+            large("tool_search", "discovery".into()),
         ];
         let ctx = ListToolsContext {
             activated: Arc::new(HashSet::from(["activated_tool".into()])),
@@ -505,14 +425,8 @@ mod tests {
     #[test]
     fn tool_payload_prunes_core_when_core_alone_exceeds_hard_budget() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(LargeDefinitionTool {
-                name: "remember_note".into(),
-                description: "t".repeat(40_000),
-            }),
-            Arc::new(LargeDefinitionTool {
-                name: "present_artifact".into(),
-                description: "d".repeat(40_000),
-            }),
+            large("remember_note", "t".repeat(40_000)),
+            large("present_artifact", "d".repeat(40_000)),
         ];
 
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
@@ -527,10 +441,11 @@ mod tests {
 
     #[test]
     fn individually_oversized_tool_search_is_omitted() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "tool_search".into(),
-            description: "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1),
-        })];
+        // An unactivated extension keeps discovery listed but is not listed itself.
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            large("tool_search", "s".repeat(MAX_TOOL_SCHEMA_CHARS + 1)),
+            large_extension("plugin__hidden", "hidden".into()),
+        ];
 
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(payload.is_null());
@@ -543,61 +458,6 @@ mod tests {
         let v = tool_observation_json("c1", "hello");
         assert_eq!(v["tool_call_id"], "c1");
         assert_eq!(v["content"], "hello");
-    }
-
-    #[test]
-    fn observation_looks_ok_checks_error_prefix() {
-        assert!(observation_looks_ok("ok result"));
-        assert!(!observation_looks_ok("Error: denied"));
-    }
-
-    #[test]
-    fn research_evidence_counts_only_useful_current_turn_results() {
-        let mut context = Context::new(20);
-        context.push(Role::User, "old research");
-        context.push(
-            Role::Assistant,
-            json!({"tool_calls":[{
-                "id":"old", "function":{"name":"web_search","arguments":"{}"}
-            }]}),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("old", "Search results for: old\n1. stale"),
-        );
-
-        context.push(Role::User, "research current topic");
-        context.push(
-            Role::Assistant,
-            json!({"tool_calls":[
-                {"id":"empty", "function":{"name":"web_search","arguments":"{}"}},
-                {"id":"failed", "function":{"name":"web_fetch","arguments":"{}"}},
-                {"id":"hit", "function":{"name":"web_search","arguments":"{}"}},
-                {"id":"local", "function":{"name":"file_read","arguments":"{}"}}
-            ]}),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("empty", "No search results for: current"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("failed", "Error: fetch HTTP 500"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("hit", "Search results for: current\n1. useful"),
-        );
-        context.push(
-            Role::Tool,
-            tool_observation_json("local", "local file content"),
-        );
-        context.push(
-            Role::User,
-            "<system-reminder>\nkeep researching\n</system-reminder>",
-        );
-
-        assert_eq!(useful_research_observation_count(&context), 1);
     }
 
     #[test]
@@ -667,15 +527,12 @@ mod tests {
     fn pruning_retains_tool_search_as_last_resort_and_reports_count() {
         // tool_search must survive pruning so the model can discover dropped
         // tools; the pruned count lets `complete_round` log a budget-aware warn.
-        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "tool_search".into(),
-            description: "search".into(),
-        })];
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            large("tool_search", "search".into()),
+            large_extension("plugin__hidden", "hidden".into()),
+        ];
         for i in 0..6 {
-            tools.push(Arc::new(LargeDefinitionTool {
-                name: format!("filler-{i}"),
-                description: "x".repeat(20_000),
-            }));
+            tools.push(large(&format!("filler-{i}"), "x".repeat(20_000)));
         }
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert!(pruned >= 1, "expected at least one prune, got {pruned}");
@@ -700,10 +557,7 @@ mod tests {
 
     #[test]
     fn no_prune_reports_zero() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LargeDefinitionTool {
-            name: "get_time".into(),
-            description: "core".into(),
-        })];
+        let tools: Vec<Arc<dyn Tool>> = vec![large("get_time", "core".into())];
         let (payload, pruned) = tools_json_for_llm(&tools, &ListToolsContext::default());
         assert_eq!(pruned, 0);
         assert!(payload.is_array());

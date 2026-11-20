@@ -122,6 +122,31 @@ pub fn optional_bool(obj: &Map<String, Value>, key: &str) -> Option<bool> {
     obj.get(key).and_then(coerce_bool)
 }
 
+/// Rename unadvertised alias keys to their canonical names in place.
+///
+/// `aliases` holds `(alias, canonical)` pairs (see [`crate::tool::Tool::arg_aliases`]).
+/// A canonical key that is absent, null, or a blank string takes the alias
+/// value; otherwise the alias is dropped and the canonical value wins. Non-object
+/// args are left alone for the validator to reject.
+pub fn canonicalize_arg_aliases(aliases: &[(&str, &str)], args: &mut Value) {
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    for (alias, canonical) in aliases {
+        let Some(value) = obj.remove(*alias) else {
+            continue;
+        };
+        let canonical_missing = match obj.get(*canonical) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.trim().is_empty(),
+            Some(_) => false,
+        };
+        if canonical_missing {
+            obj.insert((*canonical).to_string(), value);
+        }
+    }
+}
+
 /// First present string among `keys` (models alias Grok-style names).
 pub fn optional_string_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| optional_string(obj, k))

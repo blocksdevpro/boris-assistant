@@ -21,9 +21,9 @@ pub use concurrency::{clamp_parallel, partition_read_write, ConcurrencyGate};
 pub use invocation::{InvokeOptions, InvokeResult, ToolInvocation};
 pub use invoke::ToolRuntime;
 pub use listing::{
-    activate_tools, filter_listed_tools, is_core_name, new_activation_set, ActivationSet,
-    ListToolsContext, ToolRuntimeFeatures, DEFAULT_CORE_TOOL_NAMES, MAX_ACTIVATED,
-    MAX_TOOL_SCHEMA_CHARS,
+    activate_tools, activate_used_extensions, filter_listed_tools, is_core_name,
+    new_activation_set, ActivationSet, ListToolsContext, ToolRuntimeFeatures,
+    DEFAULT_CORE_TOOL_NAMES, MAX_ACTIVATED, MAX_TOOL_SCHEMA_CHARS, TOOL_SEARCH_NAME,
 };
 pub use pending::{InputKind, PendingInput, PendingToolCall, PendingTurn, RawToolCall};
 pub use policy::{
@@ -32,5 +32,4 @@ pub use policy::{
     NetworkPolicy, PolicyDecision, SandboxConfig, ShellPolicy,
 };
 pub use progress::{EventProgressSink, NullProgressSink, ProgressEvent, ProgressSink};
-pub use selection::ToolSelection;
 pub use timeout::{is_timeout, run_with_timeout};

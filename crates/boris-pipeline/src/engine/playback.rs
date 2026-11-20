@@ -120,6 +120,36 @@ pub(super) fn drain_output_events(
         }
     }
 }
+
+/// How long [`stop_and_settle`] waits for the flush to be applied. The output
+/// worker applies it within milliseconds; `Cleared` is advisory and can be
+/// dropped when the event queue is full, so this only bounds that case.
+const CLEARED_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Stop playback and wait (bounded) for the output worker's `Cleared`.
+/// `AudioService::stop` only queues the flush; a speech job started right
+/// after it would otherwise see the late `Cleared` and abort itself.
+pub(super) fn stop_and_settle(
+    audio: &AudioService,
+    output_events: &crossbeam_channel::Receiver<OutputEvent>,
+) {
+    drain_output_events(output_events);
+    audio.stop();
+    let deadline = std::time::Instant::now() + CLEARED_WAIT;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match output_events.recv_timeout(left) {
+            Ok(OutputEvent::Cleared) => return,
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                tracing::debug!("flush not confirmed before the next speech job");
+                return;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 /// Wait until the output worker has resampled + queued samples (about to be audible).
 ///
 /// `barge` (when `Some`) scores the live mic for the wake word while waiting;

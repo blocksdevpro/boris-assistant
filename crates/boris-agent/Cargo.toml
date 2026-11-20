@@ -28,6 +28,14 @@ open        = "5"
 arboard     = "3"
 htmd        = "0.1"
 rusqlite    = { version = "0.32", features = ["bundled"] }
+# Already in the tree via arboard (png only); used to downscale/encode images.
+image       = { version = "0.25", default-features = false, features = ["png"] }
+base64      = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+# GDI screen capture for screen_capture (bindings only; already in the tree).
+# Job Objects: background bash jobs die with their whole process tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util", "fs"] }

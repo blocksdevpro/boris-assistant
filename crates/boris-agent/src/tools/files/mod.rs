@@ -14,6 +14,7 @@
 mod edit;
 mod list;
 mod read;
+mod tracker;
 mod write;
 
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use crate::tools::fs_common::{read_roots, write_roots};
 pub use edit::EditFileTool;
 pub use list::ListDirTool;
 pub use read::ReadFileTool;
+pub use tracker::FileReadTracker;
 pub use write::WriteFileTool;
 
 // ── Shared limits ────────────────────────────────────────────────────────────

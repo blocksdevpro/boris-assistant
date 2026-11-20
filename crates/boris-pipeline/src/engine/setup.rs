@@ -50,6 +50,12 @@ pub(super) struct EngineRuntime {
     pub barge_in: bool,
     /// Pre-rendered "listening" chime at the output rate (`None` = off).
     pub wake_chime: Option<boris_core::AudioBuffer>,
+    /// Speak one short progress line when tool work runs long.
+    pub progress_line: bool,
+    /// Timers and reminders set by the agent tools (same shared store).
+    pub reminders: boris_agent::ReminderStore,
+    /// After a reminder line that was not heard: no retry before this.
+    pub reminder_retry_at: Option<std::time::Instant>,
     /// Voice HITL budget mirrored from agent policy (pipeline loop must not
     /// cap below what the policy allows — see `outcome::resolve_agent_outcome`).
     pub max_confirms_per_turn: u32,
@@ -218,6 +224,9 @@ pub(super) fn init_runtime(
         wake_chime: config
             .wake_chime
             .then(|| super::chime::wake_chime(play_rate)),
+        progress_line: config.progress_line,
+        reminders: boris_agent::ReminderStore::for_home(&paths::boris_home()),
+        reminder_retry_at: None,
         max_confirms_per_turn: config.max_confirms_per_turn.max(1),
         maintenance,
     })
@@ -477,6 +486,61 @@ pub(super) fn fault_picture(
     }
 }
 
+/// Workspace facts for the system prompt: sandbox, real shell, roots, known
+/// projects (configured + bounded cached discovery), and `~/.boris/BORIS.md`.
+fn workspace_profile(
+    (sandbox_root, allow_read, allow_write): (
+        std::path::PathBuf,
+        Vec<std::path::PathBuf>,
+        Vec<std::path::PathBuf>,
+    ),
+    settings: &crate::settings::WorkspaceSettings,
+    configured: Vec<std::path::PathBuf>,
+    power_tools: bool,
+) -> boris_agent::WorkspaceProfile {
+    use boris_agent::workspace::{discover_git_repos_cached, DiscoveryLimits};
+    let mut projects: Vec<boris_agent::KnownProject> = Vec::new();
+    // Without file tools, project paths would be unusable noise.
+    if power_tools {
+        projects.extend(
+            configured
+                .iter()
+                .map(|path| boris_agent::KnownProject::at(path, true)),
+        );
+        if settings.discover_projects {
+            let started = std::time::Instant::now();
+            let found = discover_git_repos_cached(
+                &paths::boris_home().join("state").join("projects.json"),
+                &allow_read,
+                std::time::Duration::from_secs(24 * 3600),
+                DiscoveryLimits::default(),
+            );
+            tracing::info!(
+                found = found.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "project discovery (cached daily)"
+            );
+            projects.extend(
+                found
+                    .iter()
+                    .map(|path| boris_agent::KnownProject::at(path, false)),
+            );
+        }
+    }
+    let mut write_roots = vec![sandbox_root.clone()];
+    write_roots.extend(allow_write);
+    let mut read_roots = vec![sandbox_root.clone()];
+    read_roots.extend(allow_read);
+    boris_agent::WorkspaceProfile {
+        sandbox_root: Some(sandbox_root),
+        shell: power_tools.then(boris_agent::tools::bash::shell_label),
+        read_roots,
+        write_roots,
+        projects,
+        user_instructions: boris_agent::workspace::load_user_instructions(&paths::boris_home()),
+    }
+}
+
 fn build_agent(config: &PipelineConfig) -> Agent {
     let started = std::time::Instant::now();
     tracing::info!("building OpenRouter client + Agent…");
@@ -586,10 +650,36 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     let max_confirms = config.max_confirms_per_turn.max(1);
     let sandbox = sandbox
         .with_trusted_auto_moderate(trusted)
-        .with_max_confirms_per_turn(max_confirms);
+        .with_max_confirms_per_turn(max_confirms)
+        // User-managed `[agent] shell_auto_allow` prefixes (single plain
+        // commands only); everything else still asks.
+        .with_shell_auto_allow(config.shell_auto_allow.clone());
     // Enforce the load-bearing order at the type level: preset lockdown threads
     // into `configure_runtime` below (VoiceSafe/LocalPower ⇒ Off/Denied).
     let mut sandbox = preset.apply_to_sandbox_owned(sandbox);
+    // Known projects from `[workspace]` become read roots (never write roots;
+    // writes stay policy- and HITL-gated).
+    let workspace_settings = crate::settings::load_workspace_settings();
+    let configured_projects: Vec<std::path::PathBuf> = workspace_settings
+        .projects
+        .iter()
+        .filter(|project| project.is_dir())
+        .cloned()
+        .collect();
+    for project in &configured_projects {
+        if !sandbox
+            .allow_read
+            .iter()
+            .any(|root| boris_agent::runtime::path_is_within(project, root))
+        {
+            sandbox.allow_read.push(project.clone());
+        }
+    }
+    let workspace_roots = (
+        sandbox.sandbox_root.clone(),
+        sandbox.allow_read.clone(),
+        sandbox.allow_write.clone(),
+    );
     let tool_paths = BuiltinToolPaths {
         notes_path: paths::notes_path(),
         profile_path: paths::profile_path(),
@@ -630,6 +720,13 @@ fn build_agent(config: &PipelineConfig) -> Agent {
     let loaded = boris_agent::load_skills(cwd.as_deref(), &paths::boris_home(), &[], true);
     let skill_count = loaded.skills.len();
     agent.enable_skills(loaded);
+
+    agent.set_workspace(workspace_profile(
+        workspace_roots,
+        &workspace_settings,
+        configured_projects,
+        power,
+    ));
 
     if config.long_term_memory {
         let legacy_paths = boris_agent::LegacyMemoryPaths {
@@ -693,6 +790,16 @@ fn build_agent(config: &PipelineConfig) -> Agent {
         }
     }
     agent.set_features(features.clone());
+    // User [[hooks]] (off unless configured). They run arbitrary user
+    // commands, after policy/HITL and before execute; see boris_agent::hooks.
+    let hook_specs = crate::settings::load_hook_settings();
+    if !hook_specs.is_empty() {
+        tracing::info!(count = hook_specs.len(), "user hooks enabled");
+        agent.set_hooks(boris_agent::Hooks::new(hook_specs).with_cwd(paths::workspace_dir()));
+    }
+    // Speak the final answer sentence by sentence while it generates.
+    // `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
+    agent.set_stream_speech(!env_flag_false("BORIS_STREAM_SPEECH"));
     if features.progressive_listing {
         agent.ensure_tool_search();
     }

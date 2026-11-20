@@ -36,7 +36,7 @@ pub use client::LlmClient;
 pub use error::{LlmError, LlmErrorKind};
 pub use model_pref::{parse_provider_list, split_model_and_provider};
 pub use providers::OpenRouterClient;
-pub use request::{CompleteOptions, RequestStage};
+pub use request::{CompleteOptions, RequestStage, MIN_MAX_TOKENS_WITH_TOOLS};
 pub use stream::LlmStreamEvent;
 pub use tool_name::{canonical_tool_name, is_valid_tool_name, normalize_tool_call_names};
 pub use usage::TokenUsage;

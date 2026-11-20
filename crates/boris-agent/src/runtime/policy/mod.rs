@@ -19,15 +19,15 @@
 
 mod paths;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::tool::{Permission, ToolMeta, ToolRisk};
 
-use paths::{args_path_strings, check_path_allowed, PathAccess};
+use paths::{args_path_strings, check_path_allowed, overlaps_write_roots, PathAccess};
 pub use paths::{
-    default_user_read_roots, normalize_path, path_is_within, path_within_root,
+    default_user_read_roots, describe_roots, normalize_path, path_is_within, path_within_root,
     re_resolve_after_open, resolve_in_roots, resolve_path_for_policy, resolve_under_roots,
 };
 
@@ -103,6 +103,12 @@ pub struct SandboxConfig {
     /// is set, and auto-allow Dangerous sandbox-only `FsWrite` tools (file_write /
     /// file_edit under write roots). Shell, network, and Critical still confirm.
     pub trusted_auto_moderate: bool,
+    /// User-managed command prefixes that skip the shell confirmation under
+    /// [`ShellPolicy::OpenConfirm`] (e.g. `git status`, `cargo check`). Only a
+    /// single plain command matches (see [`shell_auto_allowed`]), never in a
+    /// cwd that overlaps a write root; hard gates, the bash deny list, and cwd
+    /// roots still apply. Convenience, not a security boundary.
+    pub shell_auto_allow: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -119,6 +125,7 @@ impl Default for SandboxConfig {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 }
@@ -143,6 +150,7 @@ impl SandboxConfig {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -161,6 +169,16 @@ impl SandboxConfig {
     /// Enable trusted auto-allow for ≤ Moderate tools and Dangerous sandbox FsWrite.
     pub fn with_trusted_auto_moderate(mut self, on: bool) -> Self {
         self.trusted_auto_moderate = on;
+        self
+    }
+
+    /// User-managed shell auto-allow prefixes (blank entries are dropped).
+    pub fn with_shell_auto_allow(mut self, prefixes: Vec<String>) -> Self {
+        self.shell_auto_allow = prefixes
+            .into_iter()
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|p| !p.is_empty())
+            .collect();
         self
     }
 
@@ -192,6 +210,21 @@ pub fn decide(
     meta: &ToolMeta,
     args: &Value,
     confirms_used: u32,
+) -> PolicyDecision {
+    decide_with_shell_cwd(config, meta, args, confirms_used, None)
+}
+
+/// [`decide`] plus the directory a shell tool would run this call in
+/// ([`Tool::shell_cwd`](crate::tool::Tool::shell_cwd)). Shell auto-allow
+/// applies only when that cwd is known and does not overlap a write root:
+/// there the agent can plant repo-controlled code (`.git/config`, hooks,
+/// `build.rs`, npm scripts) without a yes/no, so the command asks instead.
+pub(crate) fn decide_with_shell_cwd(
+    config: &SandboxConfig,
+    meta: &ToolMeta,
+    args: &Value,
+    confirms_used: u32,
+    shell_cwd: Option<&Path>,
 ) -> PolicyDecision {
     // ── Hard gates (never skipped by HITL grant) ───────────────────────────
     if meta.permissions.contains(&Permission::Shell) {
@@ -271,6 +304,21 @@ pub fn decide(
     }
 
     // ── Soft gates (confirmation / risk) ───────────────────────────────────
+    // User-managed shell auto-allow on top of OpenConfirm: a single plain
+    // command starting with an allowed prefix skips the yes/no. Everything
+    // else still asks. The hard gates above, the bash deny list, and the cwd
+    // roots (checked by the tool) still apply. Never inside (or above) a
+    // write root, where trusted file writes need no yes/no.
+    if meta.permissions.contains(&Permission::Shell)
+        && config.shell == ShellPolicy::OpenConfirm
+        && meta.risk < ToolRisk::Critical
+        && args_command_string(args)
+            .is_some_and(|cmd| shell_auto_allowed(cmd, &config.shell_auto_allow))
+        && shell_cwd.is_some_and(|cwd| !overlaps_write_roots(config, cwd))
+    {
+        return PolicyDecision::Allow;
+    }
+
     // Trusted session: skip HITL for ≤ Moderate even when tool flags confirm.
     // Shell/network Dangerous+ still force confirm below (except sandbox writes).
     if config.trusted_auto_moderate
@@ -489,6 +537,109 @@ pub(crate) fn shell_command_allowed(command: &str, allowlist: &[String]) -> bool
         }
     }
     false
+}
+
+/// ASCII characters that disqualify a command from shell auto-allow anywhere
+/// in the string, quoted or not: chaining (`;` `&` `|`), substitution
+/// (backtick, `$`), redirection (`>` `<`), PowerShell subexpressions, arrays
+/// and script blocks (`(` `)` `@` `{` `}`), cmd/batch specials (`%` `^` `!`),
+/// and `~` / `#`. The `bash` tool falls back to `powershell -Command` when Git
+/// Bash is missing or fails to spawn, so the set covers both shells. Control
+/// characters (line breaks, tabs) and non-ASCII characters other than letters
+/// and digits (Unicode dashes, quotes, line separators that PowerShell may
+/// treat as syntax) are refused too; see [`auto_allow_char_ok`].
+const AUTO_ALLOW_DENIED_CHARS: &[char] = &[
+    ';', '&', '|', '`', '$', '>', '<', '(', ')', '@', '{', '}', '%', '^', '!', '~', '#',
+];
+
+/// Options after an auto-allowed prefix that write files outside the roots,
+/// run configured or external programs, or point the tool at another
+/// directory/repo (`-C`, `--git-dir`, `--manifest-path`, …) where the agent
+/// may have planted code. Matched as the whole token or `option=value`; the
+/// single-dash ones also with an attached value (`-ofile`). Defense in depth
+/// only: an unknown tool can have other such options.
+const AUTO_ALLOW_DENIED_OPTIONS: &[&str] = &[
+    "-o",
+    "--output",
+    "-c",
+    "--config",
+    "--config-env",
+    "-C",
+    "-O",
+    "--open-files-in-pager",
+    "--git-dir",
+    "--work-tree",
+    "--exec-path",
+    "--exec",
+    "--upload-pack",
+    "--receive-pack",
+    "--template",
+    "--ext-diff",
+    "--manifest-path",
+    "--target-dir",
+    "--out-dir",
+    "--prefix",
+];
+
+/// Plain printable ASCII (minus [`AUTO_ALLOW_DENIED_CHARS`]), a space, or a
+/// non-ASCII letter/digit (so paths with accented names still match).
+fn auto_allow_char_ok(c: char) -> bool {
+    if c.is_ascii() {
+        c == ' ' || (c.is_ascii_graphic() && !AUTO_ALLOW_DENIED_CHARS.contains(&c))
+    } else {
+        c.is_alphanumeric()
+    }
+}
+
+fn auto_allow_denied_option(token: &str) -> bool {
+    let token = token.trim_matches(|c| c == '"' || c == '\'');
+    AUTO_ALLOW_DENIED_OPTIONS.iter().any(|opt| {
+        token == *opt
+            || token
+                .strip_prefix(opt)
+                .is_some_and(|rest| rest.starts_with('=') || (opt.len() == 2 && !rest.is_empty()))
+            // `--output` also covers `--output-directory`.
+            || (*opt == "--output" && token.starts_with(opt))
+    })
+}
+
+/// Conservative match for user-managed shell auto-allow prefixes.
+///
+/// True only for a single command made of [`auto_allow_char_ok`] characters
+/// (no quote awareness: a metacharacter inside quotes still disqualifies)
+/// that equals an allowed prefix or continues it after whitespace, so
+/// `git status` allows `git status --short` but not `git statusx` or
+/// `git status; curl x`, and with no [`AUTO_ALLOW_DENIED_OPTIONS`] token after
+/// the prefix. Comparison is case-sensitive after collapsing runs of spaces.
+///
+/// An auto-allowed command still runs code the repository controls (git
+/// hooks/config, build scripts, npm scripts); the caller also refuses it when
+/// the cwd overlaps a write root. Opt-in convenience, not a security boundary.
+pub(crate) fn shell_auto_allowed(command: &str, prefixes: &[String]) -> bool {
+    let cmd = command.trim();
+    if cmd.is_empty() || prefixes.is_empty() || !cmd.chars().all(auto_allow_char_ok) {
+        return false;
+    }
+    let cmd = cmd
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
+        if prefix.is_empty() || !prefix.chars().all(auto_allow_char_ok) {
+            return false;
+        }
+        let rest = if cmd == prefix {
+            ""
+        } else {
+            match cmd.strip_prefix(prefix.as_str()) {
+                Some(rest) if rest.starts_with(' ') => rest,
+                _ => return false,
+            }
+        };
+        !rest.split(' ').any(auto_allow_denied_option)
+    })
 }
 
 /// Best-effort detection of shell metacharacters that could chain a second
@@ -745,6 +896,7 @@ mod tests {
             force_confirm_at_or_above: ToolRisk::Dangerous,
             max_confirms_per_turn: 12,
             trusted_auto_moderate: false,
+            shell_auto_allow: vec![],
         }
     }
 
@@ -984,6 +1136,140 @@ mod tests {
             .confirm(true);
         let d = decide(&c, &meta, &json!({}), 0);
         assert!(matches!(d, PolicyDecision::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn shell_auto_allow_matches_only_single_plain_commands() {
+        let list: Vec<String> = vec!["git status".into(), "git diff".into(), "cargo check".into()];
+        for ok in [
+            "git status",
+            "git status --short",
+            "  git   diff   src/lib.rs ",
+            "cargo check -p boris-agent",
+            "git diff \"a b.txt\"",
+        ] {
+            assert!(shell_auto_allowed(ok, &list), "{ok}");
+        }
+        for asks in [
+            "git statusx",
+            "git status; curl evil.example",
+            "git status && rm -rf x",
+            "git status || true",
+            "git diff | sh",
+            "git diff `whoami`",
+            "git diff $(whoami)",
+            "git diff \"$(whoami)\"",
+            "git diff > out.txt",
+            "git diff < in.txt",
+            "git status\nrm -rf x",
+            "git status & calc",
+            "GIT STATUS",
+            "cargo test",
+            "",
+            // PowerShell fallback: subexpressions, arrays, script blocks.
+            "git status (Start-Process calc)",
+            "git status @(calc)",
+            "git status {calc}",
+            "git diff %PATH%",
+            "git diff ^& calc",
+            "git diff !x",
+            "git status\tx",
+            "git status\u{2028}calc",
+            "git status\u{85}calc",
+            "git status \u{2013}x",
+            // File-writing / code-running / repo-redirecting options.
+            "git diff --output=C:/x/file",
+            "git diff --output C:/x/file",
+            "git diff \"--output=C:/x/file\"",
+            "git diff -o x",
+            "git diff -ox",
+            "git status -c core.fsmonitor=calc",
+            "git status --config-env=a=b",
+            "git status -C C:/x",
+            "git status --git-dir=x/.git",
+            "git status --work-tree x",
+            "git diff --ext-diff",
+            "cargo check --manifest-path x/Cargo.toml",
+            "cargo check --config build.rustc-wrapper=calc",
+        ] {
+            assert!(!shell_auto_allowed(asks, &list), "{asks}");
+        }
+        assert!(!shell_auto_allowed("git status", &[]));
+        // Non-ASCII letters (paths) still match; `-u`/`--cached` are fine.
+        assert!(shell_auto_allowed("git diff café.txt", &list));
+        assert!(shell_auto_allowed("git status -u --porcelain", &list));
+        assert!(shell_auto_allowed("git diff --cached", &list));
+    }
+
+    #[test]
+    fn shell_auto_allow_refused_when_cwd_overlaps_write_roots() {
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(crate::tool::ToolKind::Execute)
+            .permissions(&[Permission::Shell])
+            .confirm(true);
+        let base = std::env::temp_dir().join("boris-auto-allow-cwd");
+        let mut config = SandboxConfig {
+            sandbox_root: base.join("workspace"),
+            boris_data_roots: vec![base.join("memory")],
+            allow_read: vec![base.join("project")],
+            allow_write: vec![base.join("writable")],
+            shell: ShellPolicy::OpenConfirm,
+            ..SandboxConfig::default()
+        }
+        .with_shell_auto_allow(vec!["git status".into()]);
+        config.trusted_auto_moderate = true;
+        let args = json!({ "command": "git status" });
+        let run =
+            |cwd: Option<PathBuf>| decide_with_shell_cwd(&config, &meta, &args, 0, cwd.as_deref());
+        // Read-only project root: auto-allowed.
+        assert_eq!(run(Some(base.join("project"))), PolicyDecision::Allow);
+        assert_eq!(
+            run(Some(base.join("project").join("sub"))),
+            PolicyDecision::Allow
+        );
+        // Inside a write root, a dir that contains one, or unknown: asks.
+        for cwd in [
+            Some(base.join("workspace")),
+            Some(base.join("workspace").join("x")),
+            Some(base.join("writable").join("repo")),
+            Some(base.join("memory")),
+            Some(base.clone()),
+            None,
+        ] {
+            assert!(
+                matches!(run(cwd.clone()), PolicyDecision::NeedsConfirmation { .. }),
+                "{cwd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_auto_allow_skips_confirm_but_not_hard_gates() {
+        let meta = ToolMeta::with_risk(ToolRisk::Dangerous)
+            .kind(crate::tool::ToolKind::Execute)
+            .permissions(&[Permission::Shell])
+            .confirm(true);
+        let mut config = cfg();
+        config.shell = ShellPolicy::OpenConfirm;
+        config = config.with_shell_auto_allow(vec!["git status".into(), "  ".into()]);
+        assert_eq!(config.shell_auto_allow, vec!["git status".to_string()]);
+        let allowed = json!({ "command": "git status --short" });
+        let cwd = std::env::temp_dir().join("boris-auto-allow-project");
+        let decide = |config: &SandboxConfig, meta: &ToolMeta, args: &Value, used: u32| {
+            decide_with_shell_cwd(config, meta, args, used, Some(&cwd))
+        };
+        assert_eq!(decide(&config, &meta, &allowed, 0), PolicyDecision::Allow);
+        let chained = json!({ "command": "git status; rm -rf x" });
+        assert!(matches!(
+            decide(&config, &meta, &chained, 0),
+            PolicyDecision::NeedsConfirmation { .. }
+        ));
+        // Shell disabled stays a hard deny even for an allowed prefix.
+        config.shell = ShellPolicy::Denied;
+        assert!(matches!(
+            decide(&config, &meta, &allowed, 0),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]

@@ -6,9 +6,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use boris_agent::{Agent, AgentError, AgentOutcome, TurnReport};
 use boris_audio::output::OutputEvent;
@@ -20,11 +20,16 @@ use crate::hear::{self, CaptureKind, HearBreak};
 use crate::liveness::{WakeLiveness, WakeOrigin};
 use crate::status::Phase;
 
-use super::barge::{decide_thinking_barge_listen, BargeDecision, BargeWatch};
+use super::barge::{
+    decide_thinking_barge_listen, drain_mic, listen_after_pause, BargeDecision, BargeWatch,
+};
 use super::device_switch::{apply_input_switch, apply_output_switch};
-use super::models::SttBox;
+use super::early_speech::{SpeechFeed, SpokenLedger};
+use super::models::{lost_tts, SttBox, TtsBox, TtsSlot};
 use super::picture::Picture;
-use super::playback::poll_running;
+use super::playback::{poll_running, stop_and_settle, PlaybackWait};
+use super::speech::{stream_reply, SpeechUnits, StreamedSpeech};
+use super::util::speakable_reply_units;
 use super::EngineCommand;
 
 const THINK_POLL: Duration = Duration::from_millis(15);
@@ -70,6 +75,78 @@ pub(super) enum AgentWork<'a> {
     },
 }
 
+/// Speech that may start before the agent turn returns: the first Thinking
+/// pass of a turn and each confirm/input resume.
+pub(super) struct ThinkSpeech<'a> {
+    pub feed: &'a mut SpeechFeed,
+    pub tts: &'a mut TtsSlot,
+    pub progress_line: bool,
+    pub report: &'a mut EarlySpeech,
+}
+
+/// What early speech did during one Thinking pass. Times are measured from
+/// `started_at`.
+#[derive(Default)]
+pub(super) struct EarlySpeech {
+    /// When the Thinking pass began.
+    pub started_at: Option<Instant>,
+    /// The committed final answer played to the end. Its `tts` is a
+    /// placeholder; the model went back to the slot.
+    pub delivered: Option<StreamedSpeech>,
+    /// When the delivered job started, measured from the start of Thinking.
+    pub delivered_after_ms: u64,
+    pub progress_spoken: bool,
+    /// Anything (progress line or streamed answer) reached the speaker.
+    pub audible: bool,
+    /// When the progress line became audible, from the start of Thinking.
+    pub progress_audio_ms: Option<u64>,
+    /// When a streamed answer that was later cancelled became audible.
+    pub cancelled_audio_ms: Option<u64>,
+    /// Leading sentences of the latest streamed answer that played to the
+    /// end before it was cancelled or aborted. The normal speech path skips
+    /// them when the final reply starts with the same text.
+    pub spoken: Vec<String>,
+}
+
+/// Where the time of Thinking passes went, summed over passes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ThinkTiming {
+    /// Model + tools: the agent's own run time, without audio the engine
+    /// played after the agent was done.
+    pub agent_ms: u64,
+    /// Audio played during Thinking (streamed answer and progress line).
+    pub playback_ms: u64,
+}
+
+impl ThinkTiming {
+    pub fn add(&mut self, other: ThinkTiming) {
+        self.agent_ms = self.agent_ms.saturating_add(other.agent_ms);
+        self.playback_ms = self.playback_ms.saturating_add(other.playback_ms);
+    }
+}
+
+/// Agent time of one Thinking pass. Audio played while the agent kept
+/// working does not make it slower, so when the agent's finish time is known
+/// (`finished_ms`, from the pass start) that is the answer; otherwise the
+/// wall time minus the audio played while waiting.
+pub(super) fn agent_work_ms(wall_ms: u64, playback_ms: u64, finished_ms: Option<u64>) -> u64 {
+    match finished_ms {
+        Some(finished) => finished.min(wall_ms),
+        None => wall_ms.saturating_sub(playback_ms),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpeakKind {
+    Answer,
+    Progress,
+}
+
+enum SpeakStep {
+    Continue,
+    Resolve(ThinkResolve),
+}
+
 pub(super) struct ThinkCtx<'a> {
     pub agent: &'a mut Agent,
     pub agent_rt: &'a tokio::runtime::Runtime,
@@ -89,6 +166,9 @@ pub(super) struct ThinkCtx<'a> {
     pub running: &'a mut bool,
     pub work: AgentWork<'a>,
     pub turn: TurnId,
+    pub speech: Option<ThinkSpeech<'a>>,
+    /// This pass's agent and playback time is added here.
+    pub timing: &'a mut ThinkTiming,
 }
 
 pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
@@ -109,7 +189,15 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
         running,
         work,
         turn,
+        mut speech,
+        timing,
     } = ctx;
+    let think_started = Instant::now();
+    let agent_finished: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
+    let mut playback_ms = 0u64;
+    if let Some(sp) = speech.as_mut() {
+        sp.report.started_at = Some(think_started);
+    }
 
     let handle = agent_rt.handle().clone();
     let cancel = agent.arm_cancel();
@@ -137,8 +225,9 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let agent_done = std::sync::Arc::new(AtomicBool::new(false));
 
-    thread::scope(|s| {
+    let resolve = thread::scope(|s| {
         let agent_done_w = agent_done.clone();
+        let agent_finished_w = agent_finished.clone();
         s.spawn(move || {
             let result = handle.block_on(async move {
                 match job {
@@ -164,6 +253,7 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                     }
                 }
             });
+            let _ = agent_finished_w.set(Instant::now());
             agent_done_w.store(true, Ordering::Release);
             let _ = done_tx.send(result);
         });
@@ -181,6 +271,58 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                 cancel.cancel();
                 let _ = recv_done(&done_rx);
                 return ThinkResolve::Stopped;
+            }
+
+            // Streamed answer first (even if the agent just finished, so a
+            // committed answer is still played from here), then the one-time
+            // progress line on long tool work.
+            if let Some(sp) = speech.as_mut() {
+                let agent_finished = agent_done.load(Ordering::Acquire);
+                sp.feed.drain_all();
+                let kind = if sp.feed.has_units() && sp.report.delivered.is_none() {
+                    Some(SpeakKind::Answer)
+                } else if sp.progress_line
+                    && !agent_finished
+                    && !sp.report.progress_spoken
+                    && !sp.report.audible
+                    && sp.feed.progress_due(Instant::now())
+                {
+                    Some(SpeakKind::Progress)
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    if let Some(tts) = sp.tts.take_loaded() {
+                        let step = speak_while_thinking(
+                            kind,
+                            tts,
+                            sp,
+                            &agent_done,
+                            think_started,
+                            SpeakEnv {
+                                audio: &mut *audio,
+                                output_events: &mut *output_events,
+                                cmd_rx,
+                                running: &mut *running,
+                                picture: &mut *picture,
+                                mic,
+                                vad: &mut *vad,
+                                stt: &mut *stt,
+                                watch: watch.as_mut(),
+                                turn,
+                                playback_ms: &mut playback_ms,
+                            },
+                        );
+                        match step {
+                            SpeakStep::Continue => {}
+                            SpeakStep::Resolve(resolve) => {
+                                cancel.cancel();
+                                let _ = recv_done(&done_rx);
+                                return resolve;
+                            }
+                        }
+                    }
+                }
             }
 
             match done_rx.try_recv() {
@@ -243,7 +385,8 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
                         Err(
                             HearBreak::StartWakeEnroll { .. }
                             | HearBreak::ClearWakeProfile
-                            | HearBreak::RunSelfCheck,
+                            | HearBreak::RunSelfCheck
+                            | HearBreak::RemindersDue,
                         ) => {
                             activity_events_enabled.store(true, Ordering::Release);
                         }
@@ -253,7 +396,245 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
 
             thread::sleep(THINK_POLL);
         }
-    })
+    });
+    if let Some(sp) = speech.as_mut() {
+        // Sentences of the latest streamed round the user heard in full
+        // (repeats of an earlier round included); the normal speech path
+        // skips them when the final reply starts with the same text.
+        sp.feed.drain_all();
+        if sp.report.delivered.is_none() && !sp.feed.heard().is_empty() {
+            sp.report.spoken = sp.feed.heard().to_vec();
+        }
+    }
+    let pass = ThinkTiming {
+        agent_ms: agent_work_ms(
+            think_started.elapsed().as_millis() as u64,
+            playback_ms,
+            agent_finished
+                .get()
+                .map(|at| at.saturating_duration_since(think_started).as_millis() as u64),
+        ),
+        playback_ms,
+    };
+    tracing::debug!(%turn, agent_ms = pass.agent_ms, playback_ms, "thinking pass timing");
+    timing.add(pass);
+    resolve
+}
+
+struct SpeakEnv<'e, 'w> {
+    audio: &'e mut AudioService,
+    output_events: &'e mut crossbeam_channel::Receiver<OutputEvent>,
+    cmd_rx: &'e Receiver<EngineCommand>,
+    running: &'e mut bool,
+    picture: &'e mut Picture,
+    mic: &'e crossbeam_channel::Receiver<ArcAudioBuffer>,
+    vad: &'e mut SileroVad,
+    stt: &'e mut SttBox,
+    watch: Option<&'e mut BargeWatch<'w>>,
+    turn: TurnId,
+    /// Audio played by this job is added here.
+    playback_ms: &'e mut u64,
+}
+
+/// Play the streamed answer or the progress line while the agent keeps
+/// working. The job uses the Talking barge watch (lower wake threshold plus
+/// close-talk energy, AEC on the reference) exactly like normal replies, so
+/// Boris's own playback is treated the same way and a barge-in still pauses
+/// playback at once.
+fn speak_while_thinking(
+    kind: SpeakKind,
+    tts: TtsBox,
+    sp: &mut ThinkSpeech<'_>,
+    agent_done: &AtomicBool,
+    think_started: Instant,
+    env: SpeakEnv<'_, '_>,
+) -> SpeakStep {
+    let SpeakEnv {
+        audio,
+        output_events,
+        cmd_rx,
+        running,
+        picture,
+        mic,
+        vad,
+        stt,
+        mut watch,
+        turn,
+        playback_ms,
+    } = env;
+    let gap_samples = tts.inter_unit_silence_samples();
+    let started_after_ms = think_started.elapsed().as_millis() as u64;
+    let mut progress_units = match kind {
+        SpeakKind::Answer => Vec::new(),
+        SpeakKind::Progress => {
+            sp.report.progress_spoken = true;
+            let line = sp.feed.progress_text();
+            tracing::info!(%turn, %line, "speaking progress line during tool work");
+            speakable_reply_units(&line)
+        }
+    };
+    if let Some(w) = watch.as_deref_mut() {
+        w.reset();
+    }
+    let prev_activity = picture.activity.clone();
+    let mut tts = tts;
+    let mut already_audible = false;
+    let mut ledger = SpokenLedger::default();
+    let step = loop {
+        let units = match kind {
+            SpeakKind::Answer => SpeechUnits::Feed {
+                feed: &mut *sp.feed,
+                agent_done,
+            },
+            SpeakKind::Progress => SpeechUnits::Fixed(std::mem::take(&mut progress_units)),
+        };
+        let mut speech = stream_reply(
+            tts,
+            units,
+            gap_samples,
+            turn,
+            already_audible,
+            audio,
+            output_events,
+            cmd_rx,
+            running,
+            picture,
+            mic,
+            watch.as_deref_mut(),
+        );
+        tts = std::mem::replace(&mut speech.tts, lost_tts());
+        sp.report.audible |= speech.played;
+        *playback_ms = playback_ms.saturating_add(speech.played_ms());
+        ledger.record(
+            &speech.appended,
+            speech.play_origin_ms,
+            speech.stop_ms,
+            speech.wait == PlaybackWait::Finished,
+        );
+        if let Some(started) = speech.audio_started_ms {
+            let at = started_after_ms.saturating_add(started);
+            match kind {
+                SpeakKind::Progress => {
+                    sp.report.progress_audio_ms.get_or_insert(at);
+                }
+                SpeakKind::Answer if speech.feed_cancelled => {
+                    sp.report.cancelled_audio_ms.get_or_insert(at);
+                }
+                SpeakKind::Answer => {}
+            }
+        }
+        match speech.wait {
+            PlaybackWait::Finished => {
+                if kind == SpeakKind::Answer {
+                    if sp.feed.committed() {
+                        tracing::info!(%turn, "streamed answer delivered during thinking");
+                        sp.report.delivered = Some(speech);
+                        sp.report.delivered_after_ms = started_after_ms;
+                    }
+                    sp.feed.disable();
+                }
+                break SpeakStep::Continue;
+            }
+            PlaybackWait::Aborted => {
+                if kind == SpeakKind::Answer && !speech.feed_cancelled {
+                    // Device loss or a synthesis error: the normal path
+                    // speaks the full reply once the agent returns.
+                    tracing::warn!(%turn, error = ?speech.error, "streamed answer aborted");
+                    sp.feed.disable();
+                }
+                break SpeakStep::Continue;
+            }
+            PlaybackWait::Stopped => break SpeakStep::Resolve(ThinkResolve::Stopped),
+            PlaybackWait::BargedIn => {
+                tracing::info!(%turn, "barge-in during early speech");
+                match listen_after_pause(mic, vad, stt, picture, cmd_rx, running, false) {
+                    Ok(BargeDecision::Resume) if kind == SpeakKind::Answer => {
+                        // A late tool call during the listen cancelled this
+                        // answer: drop its paused audio instead of resuming it.
+                        sp.feed.drain();
+                        if sp.feed.take_cancelled() {
+                            tracing::info!(%turn, "streamed answer cancelled during barge-in listen");
+                            stop_and_settle(audio, output_events);
+                            picture.said = None;
+                            picture.publish();
+                            break SpeakStep::Continue;
+                        }
+                        if audio.resume().is_err() {
+                            stop_and_settle(audio, output_events);
+                            sp.feed.disable();
+                            break SpeakStep::Continue;
+                        }
+                        already_audible = true;
+                        picture.set_phase(Phase::Talking);
+                        continue;
+                    }
+                    Ok(BargeDecision::Resume) => {
+                        // The progress line is filler: drop its rest. The
+                        // answer job may start next, so let the flush land.
+                        stop_and_settle(audio, output_events);
+                        break SpeakStep::Continue;
+                    }
+                    Ok(BargeDecision::StopTalking) => {
+                        audio.stop();
+                        break SpeakStep::Resolve(ThinkResolve::StopTurn);
+                    }
+                    Ok(BargeDecision::TakeTurn(next)) => {
+                        audio.stop();
+                        break SpeakStep::Resolve(ThinkResolve::TakeTurn(next));
+                    }
+                    Err(error) => {
+                        stop_and_settle(audio, output_events);
+                        sp.feed.disable();
+                        match error {
+                            HearBreak::Stopped if !*running => {
+                                break SpeakStep::Resolve(ThinkResolve::Stopped)
+                            }
+                            HearBreak::Stopped => break SpeakStep::Resolve(ThinkResolve::StopTurn),
+                            HearBreak::Disconnected => {
+                                break SpeakStep::Resolve(ThinkResolve::Stopped)
+                            }
+                            HearBreak::SwitchInput { device_id } => {
+                                apply_input_switch(audio, picture, &device_id);
+                            }
+                            HearBreak::SwitchOutput { device_id } => {
+                                apply_output_switch(audio, output_events, picture, &device_id);
+                            }
+                            HearBreak::StartWakeEnroll { .. }
+                            | HearBreak::ClearWakeProfile
+                            | HearBreak::RunSelfCheck
+                            | HearBreak::RemindersDue => {}
+                        }
+                        break SpeakStep::Continue;
+                    }
+                }
+            }
+        }
+    };
+    sp.tts.give_back(tts);
+    if kind == SpeakKind::Answer && sp.report.delivered.is_none() {
+        // Reported before the feed reads past the Cancel (`drain` stops
+        // there), so the next round skips what this job already said.
+        let spoken = ledger.spoken();
+        if !spoken.is_empty() {
+            tracing::info!(%turn, sentences = spoken.len(), "streamed sentences heard before cancel");
+            sp.feed.note_spoken(spoken);
+        }
+    }
+    // Our own playback tail must not be scored as a wake once Thinking resumes.
+    drain_mic(mic);
+    if let Some(w) = watch.as_deref_mut() {
+        w.reset();
+    }
+    if matches!(step, SpeakStep::Continue)
+        && sp.report.delivered.is_none()
+        && !agent_done.load(Ordering::Acquire)
+    {
+        picture.activity = prev_activity
+            .filter(|activity| !activity.starts_with("barge-in"))
+            .or_else(|| Some("thinking…".into()));
+        picture.set_phase(Phase::Thinking);
+    }
+    step
 }
 
 fn recv_done(
@@ -360,5 +741,44 @@ fn transcribe_or_empty(stt: &mut SttBox, pcm: &[f32], turn: TurnId) -> String {
             tracing::warn!(error = %e, %turn, "thinking barge-in stt failed — resume");
             String::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_time_excludes_audio_played_after_the_agent_finished() {
+        // Agent done at 3 s; the engine kept playing the streamed answer
+        // until 9 s.
+        assert_eq!(agent_work_ms(9_000, 6_500, Some(3_000)), 3_000);
+        // A progress line played while tools kept running is not subtracted.
+        assert_eq!(agent_work_ms(20_000, 2_000, Some(19_990)), 19_990);
+        // Unknown finish: wall time minus playback, never below zero.
+        assert_eq!(agent_work_ms(9_000, 6_500, None), 2_500);
+        assert_eq!(agent_work_ms(1_000, 6_500, None), 0);
+        // A finish stamp can never exceed the pass itself.
+        assert_eq!(agent_work_ms(1_000, 0, Some(1_200)), 1_000);
+    }
+
+    #[test]
+    fn timing_sums_passes() {
+        let mut total = ThinkTiming::default();
+        total.add(ThinkTiming {
+            agent_ms: 1_000,
+            playback_ms: 300,
+        });
+        total.add(ThinkTiming {
+            agent_ms: 2_500,
+            playback_ms: 0,
+        });
+        assert_eq!(
+            total,
+            ThinkTiming {
+                agent_ms: 3_500,
+                playback_ms: 300,
+            }
+        );
     }
 }

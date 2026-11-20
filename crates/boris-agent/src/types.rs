@@ -21,6 +21,18 @@ pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 16;
 /// Higher cap when skills are enabled so multi-step playbooks can finish.
 pub const SKILLS_MAX_TOOL_ROUNDS: u32 = 28;
 
+/// Round cap for coding, multi-step, or complex turns (real dev work needs
+/// many read/edit/build rounds). The wall-clock budget still bounds them.
+pub const COMPLEX_MAX_TOOL_ROUNDS: u32 = 40;
+
+/// Hard safety ceiling: no configuration runs more tool rounds than this.
+pub const MAX_TOOL_ROUNDS_CEILING: u32 = 64;
+
+/// Default wall-clock budget for one loop invocation. When it runs out, tools
+/// are withheld and the model gives a short spoken progress check-in; the
+/// task stays open so "continue" resumes it.
+pub const DEFAULT_TURN_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Snapshot passed into each loop invocation (messages already include prompts).
 #[derive(Debug, Clone)]
 pub struct AgentContextSnapshot {
@@ -42,12 +54,15 @@ pub struct AgentLoopConfig {
     pub features: crate::runtime::ToolRuntimeFeatures,
     /// When true (subagent children), always dump full child tool list.
     pub force_list_all: bool,
-    /// Latest user-task traits for routing / listing / finish gates.
+    /// Latest user-task traits for request-stage routing.
     pub task: Option<crate::task::TaskTraits>,
-    /// Eager tool bundles chosen locally from the human objective.
-    pub tool_selection: Option<crate::runtime::ToolSelection>,
     /// Optional, process-local developer capture.
     pub debug: Option<std::sync::Arc<crate::debug::DebugCapture>>,
+    /// Wall-clock budget for this loop invocation (`None` = rounds only).
+    pub time_budget: Option<std::time::Duration>,
+    /// Stream the final answer's sentences as [`AgentEvent::Speech`] while it
+    /// generates (voice hosts). Off by default.
+    pub stream_speech: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -59,8 +74,9 @@ impl Default for AgentLoopConfig {
             features: crate::runtime::ToolRuntimeFeatures::default(),
             force_list_all: false,
             task: None,
-            tool_selection: None,
             debug: None,
+            time_budget: Some(DEFAULT_TURN_TIME_BUDGET),
+            stream_speech: false,
         }
     }
 }
@@ -75,6 +91,9 @@ pub struct LoopResult {
     pub pending_turn: Option<crate::runtime::PendingTurn>,
     /// Request estimates plus provider-reported usage observed this invocation.
     pub token_accounting: TokenAccounting,
+    /// The round cap or wall-clock budget stopped ongoing tool work; the reply
+    /// is a progress check-in and the task stays open for "continue".
+    pub budget_exhausted: bool,
 }
 
 /// Token accounting for one loop invocation.
@@ -246,6 +265,11 @@ pub enum AgentEvent {
     /// Live model reasoning preview (throttled; not spoken, not stored in context).
     Reasoning {
         preview: String,
+    },
+    /// Streamed speech for the final answer (see [`crate::speech_stream`]).
+    /// Content alongside tool calls is never sent; a late tool call cancels.
+    Speech {
+        signal: crate::speech_stream::SpeechSignal,
     },
     NeedsConfirmation {
         pending: PendingToolCall,

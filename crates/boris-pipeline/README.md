@@ -31,10 +31,43 @@ not a Session FSM.
 
 Wake scoring, VAD capture, and STT run inline on the engine thread. The agent
 turn runs on a scoped thread during Thinking so the engine can still service
-Stop and barge-in. TTS loading overlaps agent work, but reply synthesis starts
-only after the complete final answer is accepted and tool markup is removed.
-Streamed model content does not start synthesis or playback. Speculative
-first-unit synthesis during answer generation is not implemented.
+Stop and barge-in. TTS loading overlaps agent work (`TtsSlot`, polled without
+blocking), and the final answer streams into TTS while it generates: the agent
+emits sanitized sentence chunks (`AgentEvent::Speech`), the event subscriber
+forwards them into a channel, and `run_thinking` plays them through a
+feed-mode `stream_reply` once the model is loaded. The first sentence is held
+until no tool call has started for 900 ms past a boundary; a late tool call
+cancels that response's speech (playback stops and the overlay `said` clears,
+Thinking resumes), and acceptance commits the rest. Sentences the user already
+heard in full before a cancel are not said twice: `SpeechFeed::drain` stops at
+each Cancel so the engine first reports what the cancelled job played to the
+end (`note_spoken`), and the next round's leading sentences that repeat them
+(whole sentences, case-insensitive words) are skipped, across several cancels
+too; a sentence cut off part-way is spoken again. A Cancel that arrives during
+a barge-in listen stops the paused audio instead of resuming it, and every
+stop that can be followed by another speech job waits (≤ 300 ms) for the
+output worker's `Cleared` (`stop_and_settle`), so a late flush cannot abort
+the next job. A committed answer that played to the end skips
+the normal speech path; anything else (cancelled, device loss, barge-in that
+discards) falls back to speaking the accepted reply. Early speech uses the
+Talking barge watch, so a barge-in pauses it at once, and the mic tail is
+drained before Thinking's wake watch resumes. Confirm and typed-input resumes
+stream the same way (`resume_thinking` lends the resident TTS model to the
+pass and restarts the feed), and a committed resume answer that played to the
+end also skips the normal speech path. `BORIS_STREAM_SPEECH=0` turns streaming
+off.
+
+On a long tool turn, once tool work has run for 7 s, Boris speaks one short
+progress line: the model's latest progress note (the content it sent with its
+tool calls), sanitized and cut to one sentence of at most 120 characters, or
+"Still working on it." if no note is usable. It is spoken at most once per
+Thinking pass (the first pass and each confirm/input resume), never after
+anything else in that pass was already audible, and never once an approval or
+typed-input prompt has been raised in that pass.
+It plays through the same Talking barge watch as replies (AEC reference, no
+Armed liveness), so Boris's own voice is not scored as a wake; a barge-in that
+resumes drops the rest of the line. `[speech] progress_line` (default on, also
+in the desktop settings) or `BORIS_PROGRESS_LINE=0` turns it off.
 
 Sentence TTS synthesis runs on a dedicated `boris-tts-stream`
 helper thread fed by one turn-scoped producer;
@@ -46,7 +79,17 @@ a lower wake threshold plus close-talk energy can pause leftover PCM (Armed
  or “continue” resumes from the cut. While Thinking, the same toggle uses wake
  plus the Armed live-mic gate; work keeps running until STT decides. Silence
  or a rejected speaker is a no-op; “stop” / “wait” cancels the turn; a new
- request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). Confirm prompts
+ request replaces it (`voice_barge_in` / `BORIS_BARGE_IN`). An abandoned turn
+ keeps any tool work that already executed (its undelivered reply is dropped
+ and a host note records the interruption); a turn where nothing ran is
+ rolled back to its pre-turn checkpoint (`Agent::abandon_turn`). Before any
+ model call the host answers simple intents itself: a fresh-turn "stop",
+ "cancel", "never mind", "nothing", or "that's all" (closing phrases also in a
+ follow-up window) re-arms silently, and "new session" / "start over" ends the
+ session, starts a fresh one, and says so. Background or non-directed speech
+ can be answered by the model with `[silent]`, which the host keeps quiet. A
+ clip cut by the capture cap (`BORIS_MAX_UTTERANCE_SECS`) reaches the model
+ with a host note that it may be incomplete. Confirm prompts
  and re-asks use the same barge watch: a wake word mid-prompt stops playback
  and listens for the yes/no instead of auto-denying. Voice confirms follow
  the agent HITL budget (`max_confirms_per_turn`, default 12 via
@@ -73,10 +116,10 @@ The system prompt separates short speech from thorough tool work and detailed
 screen reports. Shared rules are stated once; research and retry depth follows
 unresolved evidence gaps rather than fixed query or tool-round quotas.
 
-Before each initial model request, the agent selects common tool bundles from
-the human objective. The prompt directs the model to use listed tools and
-discover a capability only when needed tools are absent. Short follow-ups such
-as "continue" retain the preceding objective's selection and discoveries.
+Every built-in tool is listed on every model request in a stable order, so a
+misheard or paraphrased request cannot hide a capability and the provider
+prompt-cache prefix stays warm. `tool_search` appears only when optional
+extension tools are registered (the Desktop host registers none).
 See [agent tool listing](../boris-agent/README.md#tool-listing) for details.
 
 Independent tools can use the explicit `parallel` API or native multi-tool calls.
@@ -100,6 +143,73 @@ session.
 Each voice turn is appended to `~/.boris/traces/turns.jsonl` on the durable
 maintenance lane. Generation latency excludes audible playback. Read the JSONL
 directly for local p50/p95 summaries.
+
+Every turn that ran the agent also carries top-level `agent_ms` (model + tools
+across the first Thinking pass and any confirm/input resumes: each pass counts
+until the agent itself finished, so audio played while the engine waited and
+the confirm dialog are excluded) and `thinking_playback_ms` (streamed answer
+and progress-line audio played during Thinking). The `agent` span uses the same
+`agent_ms`, next to a `thinking_playback` span.
+
+### Reading first-audio latency
+
+Each trace line carries three top-level fields for speech-end → first audio:
+
+| Field | Meaning |
+|-------|---------|
+| `speech_end_to_first_audio_ms` | User stopped talking → Boris first audible (progress line, a streamed answer later cancelled, or the answer) |
+| `speech_end_to_answer_audio_ms` | User stopped talking → the answer's own first audio (`audio_started`) |
+| `answer_speech` | `streamed` (answer played while the agent was still running) or `after_accept` |
+
+Matching events (`t_ms` from the turn start) are `speech_end`,
+`progress_audio_started`, `early_audio_started`, `answer_streamed`, and
+`audio_started`. Turns without a captured utterance (barge-in replacements,
+typed input) have no `speech_end` and leave the fields out; old lines parse
+with them absent. To compare before and after a change, take the p50 / p90 of
+`speech_end_to_first_audio_ms` over the same kind of turns, and split by
+`answer_speech` to see how often streaming applied, for example:
+
+```bash
+jq -s '[.[] | .speech_end_to_first_audio_ms // empty] | sort
+       | {n: length, p50: .[length/2|floor], p90: .[length*0.9|floor]}'    ~/.boris/traces/turns.jsonl
+```
+
+`boris_agent::summarize_traces` returns the same p50 / p90 as
+`first_audio_p50_ms` / `first_audio_p90_ms`.
+
+## Timers and reminders
+
+The agent's `timer_set`, `reminder_set`, `reminders_list`, and
+`reminder_cancel` tools (low risk, no confirmation, every preset) keep a
+schedule in `~/.boris/state/reminders.json`, which survives restarts. The
+engine shares the same in-process `ReminderStore`. While Armed,
+`wait_for_wake` checks it once a second on the engine thread and returns
+`HearBreak::RemindersDue`; the engine speaks every due item (earliest first)
+as one host line, shows it as `said` with a `reminder` activity chip, and
+re-arms. Items that come due during a turn wait for the next Armed wait;
+`reminder_gap_open` is the gate (Armed only: never
+Hearing/Reading/Thinking/Talking, AwaitingConfirm, AwaitingInput, a pending
+agent confirmation, or a queued barge-in turn). The follow-up window
+(AwaitingReply) is skipped on purpose: the user may already be answering and
+the line would talk over them; a window that ends without a reply re-arms, so
+the reminder follows within its 12 s start timeout. `wait_for_wake` yields
+only under the same gate, so a due item that cannot be taken never makes it
+spin.
+
+Playback is `speak_host_line`, shared with "Okay, fresh start." and the
+recovery lines: the TTS load runs on the loader thread and synthesis on the
+stream helper while host commands (Stop, device switches) are polled;
+playback has the Talking barge watch, and a barge-in resumes, stops, or
+starts a new turn exactly as during a reply. TTS residency follows the idle
+rule (`low_latency` keeps it loaded). Due items are only peeked; they leave
+the store (`take_due`) once the line was heard (finished, or barged/stopped
+after it became audible), and only then is the line added to the
+conversation with `Agent::record_host_event` (a persisted `[Host event:
+...]` note, not a human turn) and synced to the transcript, so "what was that
+reminder?" works. A line that failed (TTS load, synthesis, playback) stays
+due, is logged with its text, and is retried after 30 s. While Boris is off
+items wait for the next Start. An item more than two minutes late says when
+it was due ("Reminder from 3:15 PM: …").
 
 ## Devices
 
@@ -210,8 +320,9 @@ Override root with `BORIS_HOME`.
 
 ```text
 ~/.boris/
-  config.toml          # prefs: [models], [capability], [audio], [speech], [agent], [ui]; optional [logging]
+  config.toml          # prefs: [models], [capability], [audio], [speech], [agent], [ui]; optional [logging], [workspace]
   auth.json            # secrets: openrouter_api_key, exa_api_key
+  BORIS.md             # optional user instructions, injected into the system prompt
   models/
     parakeet/          # STT
     supertone/onnx/    # TTS graphs
@@ -226,6 +337,7 @@ Override root with `BORIS_HOME`.
   traces/              # turns.jsonl per-turn latency traces
   speaker/             # live.json — wake liveness enroll (acoustic takes)
   state/workspace/     # sandboxed agent workspace
+  state/projects.json  # daily cache of discovered git repositories
 ```
 
 `save_settings` unconditionally rewrites `[models]`, `[capability]`, `[audio]`, `[speech]`,
@@ -234,7 +346,32 @@ filter is set, so fresh installs don't get a stray empty section). All other roo
 unknown keys outside those managed sections are preserved on save (see `save_settings` /
 `apply_config_file` in `src/settings.rs`). There is currently no genuinely hand-edit-only
 managed table in `config.toml` — anything the desktop settings UI can persist ends up in one
-of the sections above.
+of the sections above. The optional, hand-edited `[workspace]` table is not managed, so it is
+preserved:
+
+```toml
+[workspace]
+projects = ['C:\Users\me\code\app']  # known project roots, added as read roots
+discover_projects = true                # bounded git-repo scan of read roots (BORIS_DISCOVER_PROJECTS=0 disables)
+```
+
+Optional, hand-edited `[[hooks]]` entries (also preserved on save) run user
+commands around tool calls and at turn end; they are off unless present and
+**run arbitrary commands** (see the agent README, "User hooks"):
+
+```toml
+[[hooks]]
+event = "pre_tool"                 # pre_tool | post_tool | turn_end
+tool = "bash"                      # optional tool-name glob
+command = "python C:/hooks/check.py"
+timeout_secs = 10                  # optional, 1-120
+```
+
+Hook commands start in `state/workspace/`.
+
+Known projects are rendered into the system prompt with the sandbox, the real `bash` shell,
+and the readable/writable roots. Configured projects become read roots only; write roots are
+never widened.
 
 ## Boris memory
 
@@ -288,6 +425,8 @@ still match the catalog hash.
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for downloads |
 | `BORIS_BARGE_IN` | `0` disables wake-word barge-in while Talking, Thinking, or confirming |
 | `BORIS_WAKE_CHIME` | `0` disables the chime played when a wake is accepted |
+| `BORIS_STREAM_SPEECH` | `0` speaks only after the final answer is accepted (no sentence streaming) |
+| `BORIS_PROGRESS_LINE` | `0` disables the one spoken progress line on long tool turns |
 | `BORIS_AUDIO_FRONTEND` | `0` bypasses capture HPF/AGC/AEC |
 | `BORIS_STT_PARTIALS` | `0` disables live STT partials during capture (default on when STT is warm) |
 | `BORIS_STT_PARTIAL_INTERVAL_MS` | Prefix re-decode cadence in ms, 200–5000 (default 900) |

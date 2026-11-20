@@ -43,13 +43,42 @@ impl Agent {
             .map(|m| m.prompt_hint())
             .or_else(|| self.long_term.as_ref().map(|m| m.prompt_hint()));
         let mut ctx = PromptContext::new(self.base_system_prompt.clone())
+            .with_workspace(self.workspace.as_ref().map(|w| w.render_block()))
             .with_time_policy(Some(crate::prompt_profile::TIME_AWARENESS_POLICY.to_string()))
             .with_skills_policy(skills_policy)
             .with_memory_hint(memory_hint);
         if self.include_user_info {
-            ctx = ctx.with_user_info(UserInfo::capture());
+            ctx = ctx.with_user_info(self.user_info());
         }
         ctx
+    }
+
+    /// Host facts for `<user_info>`. The process cwd (the install dir in
+    /// packaged builds) and `COMSPEC` are not what the tools use, so report
+    /// the sandbox root (default tool cwd) and the shell `bash` really runs.
+    fn user_info(&self) -> UserInfo {
+        let mut info = UserInfo::capture();
+        let sandbox = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.sandbox_root.clone())
+            .or_else(|| {
+                Some(self.sandbox_snapshot.sandbox_root.clone()).filter(|root| root.is_absolute())
+            });
+        if let Some(root) = sandbox {
+            info.working_directory = Some(root.display().to_string());
+        }
+        info.shell = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.shell.clone())
+            .or_else(|| {
+                self.tools
+                    .iter()
+                    .any(|tool| tool.name() == "bash")
+                    .then(crate::tools::bash::shell_label)
+            });
+        info
     }
 
     fn personal_context_data(&self) -> Option<String> {
@@ -70,6 +99,17 @@ impl Agent {
 
     pub(super) fn composed_system_prompt(&self) -> String {
         self.prompt_context().render()
+    }
+
+    /// Install workspace facts (sandbox, shell, roots, known projects, the
+    /// user's BORIS.md) rendered into the system prompt.
+    pub fn set_workspace(&mut self, profile: crate::workspace::WorkspaceProfile) {
+        self.workspace = Some(profile.normalized());
+        self.refresh_system_prompt();
+    }
+
+    pub fn workspace(&self) -> Option<&crate::workspace::WorkspaceProfile> {
+        self.workspace.as_ref()
     }
 
     pub fn set_base_system_prompt(&mut self, system_prompt: &str) {

@@ -344,6 +344,16 @@ export function SpeechSettings({
           )}
         </SettingsRow>
         {installing ? <DownloadProgressView progress={progress} /> : null}
+        <SettingsRow
+          label="Say when a task runs long"
+          subtitle="One short spoken update after a few seconds of tool work"
+        >
+          <Toggle
+            checked={settings.progress_line}
+            onChange={(v) => onPatch({ progress_line: v })}
+            aria-label="Say when a task runs long"
+          />
+        </SettingsRow>
       </SettingsGroup>
     </div>
   );

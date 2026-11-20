@@ -82,40 +82,51 @@ LLM HTTP lives in `boris-ai` (re-exported). Paths come from the host / pipeline.
 
 ## Tool listing
 
-The host selects builtin tool bundles from the user request before the first
-completion. Research gets web and recall tools; coding gets workspace and
-planning tools. Other requests add bundles for time, profile, clipboard,
-system, artifacts, opening URLs or paths, and skills. This local selection
-adds no model request and only lists tools registered by the host.
+Every builtin and host-registered tool is listed on every request, in
+registration order. The listing never depends on the request text, so
+mishearings, Hinglish, or paraphrases cannot hide a capability, and the
+serialized schema table stays byte-identical for the whole session (the
+provider prompt-cache prefix stays warm). Tools that become unusable mid-turn
+stay listed and refuse the call themselves; for example `present_artifact`
+returns a recovery hint once its delivery budget is spent.
 
-The shared set contains `tool_search`, `remember_note`, `present_artifact`, and
-`collect_input`. Matching plugin categories add at most four tools. Discovery
-adds specialized tools for the current objective, including short follow-ups
-such as "continue" and "try again". A new objective clears those activations;
-failed turns and checkpoint restores recover the preceding set. The existing
-32-tool activation cap and 15-minute expiry still apply. Schema order follows
-registration order, and the serialized table stays within 64 KiB.
+Extensions (MCP servers and plugins, `Tool::is_extension`) are the exception.
+They stay out of the default listing so a large registry cannot crowd the
+schema budget. `tool_search` is listed only when at least one extension is
+registered, and it activates matching extensions. Activations are
+session-scoped (32-entry LRU, 15-minute expiry), cleared on session bind and
+unbind, and recovered by failed turns and checkpoint restores. Discovery
+results include each extension's parameter schema, and a call to a registered
+extension executes (validated against that schema) even before it is listed,
+so a found tool can be called in the very next response.
 
-`force_list_all` and disabling `progressive_listing` retain full listing,
-subject to the schema budget. Explicit `should_list` opt-ins remain supported.
-When the schema budget is exceeded, activated tools take priority over unused
-shared tools; `tool_search` is removed last. Progressive turns ensure discovery
-is registered even after `Agent::set_tools` replaces the registry.
-
-`Agent::prompt` supplies selection automatically. Direct loop callers can set
-`AgentLoopConfig::tool_selection` with
-`boris_agent::runtime::ToolSelection::for_request`. Direct listing callers use
-`ListToolsContext::selection`. Both fields default to `None`; task traits still
-provide a fallback selection. Struct literals must include the new field or use
-`..Default::default()`.
+The serialized table stays within 64 KiB (`MAX_TOOL_SCHEMA_CHARS`). Over
+budget, unactivated opt-in extensions go first, then shared builtins, then the
+core set (`remember_note`, `present_artifact`, `collect_input`); activated
+extensions are kept longest and `tool_search` is removed last.
+`force_list_all` and disabling `progressive_listing` list every registered
+tool, extensions included.
 
 Run `cargo run -p boris-agent --example tool_selection_audit` for an offline
-comparison of full listing and task selection through `Agent::prompt`. It uses
-actual builtin schemas and scripted model replies, reporting estimated schema
-tokens and request counts. It executes no external model, web, or shell calls.
-Pass a request-event JSON export after `--` to use its `data.tools` schemas.
-The default audit excludes optional memory, profile, skill, and plugin tools.
-These estimates do not measure live model latency.
+check that the listing is identical across unrelated requests and fits the
+schema budget. It uses actual builtin schemas and scripted model replies and
+executes no external model, web, or shell calls. Pass a request-event JSON
+export after `--` to use its `data.tools` schemas.
+
+## Workspace awareness
+
+`Agent::set_workspace(WorkspaceProfile)` renders a stable `<workspace>` block
+into the system prompt: the Boris sandbox (default cwd for `bash` and file
+tools), the shell the `bash` tool really runs (`tools::bash::shell_label`),
+readable and writable roots, known projects, and the user's
+`~/.boris/BORIS.md` as trusted `<user_instructions>` (bounded to 8,000
+characters). `<user_info>` reports the sandbox root and real shell instead of
+the process cwd and `COMSPEC`. Projects come from the host; `workspace`
+provides bounded, cached git-repository discovery (`discover_git_repos_cached`)
+under existing read roots. A project with its own `BORIS.md` is marked
+`[has BORIS.md]` and the model reads it before working there. Listing a
+project never widens write roots. Path denials list the allowed roots
+(`describe_roots`) so the model can recover instead of guessing again.
 
 ## Canonical memory
 
@@ -143,12 +154,23 @@ behind the bundled version (legacy stock files without a version upgrade too;
 user forks are left alone). `load_skills` discovers project skills by walking
 up from the working directory through every `.boris/skills` to the git root,
 then user skills from `<boris_home>/skills`, followed by any explicit extra
-paths; the first skill with a given name wins.
+paths; user skills win a name clash. The walk skips the user skills directory
+itself (canonical-path compare), which a cwd under the home directory reaches.
 
 Only skill names and descriptions enter the prompt, as a bounded JSON
 `<skills_catalog_data>` user-role envelope paired with a small static trusted
 `SKILLS_SYSTEM_POLICY`. `load_skill` reads a
 full body on demand, so specialized guidance does not expand every turn.
+Loaded playbooks are framed by source: the user's own skills (installed or
+bundled under `<boris_home>/skills`, plus host-supplied extra paths) read as
+guidance to follow where it fits the request, with the current user message
+winning. Project skills found by walking up from the working directory stay
+framed as untrusted reference data, since a cloned repository could plant one,
+and are marked `"project": true` in the catalog. Every body keeps its
+`</skill>` closers escaped. `load_skill` takes only `name`
+(`additionalProperties: false`) and says it returns playbook text without
+running anything; extra keys such as an `args` task string are ignored with a
+short hint instead of failing the call.
 The redundant `list_skills` tool has been removed; the supplied catalog already
 contains names and descriptions. The bundled set includes task execution,
 research, daily briefs, remembering,
@@ -163,6 +185,12 @@ evidence rather than fixed search quotas; expected empty absence checks need no 
 
 ## Tool inputs and results
 
+Each schema advertises one canonical name per argument (`bash` takes a
+required `command` and `timeout`). Older names models still send (`cmd`,
+`shell`, `timeout_secs`; grep's `ignore_case`, `context`, `limit`) are declared
+in `Tool::arg_aliases`; the runtime renames them to the canonical key before
+validation and policy, and the canonical value wins when both are sent.
+
 `collect_input` supports exact values, secrets, large pastes, and numbered
 choices. A choice can include up to four short options for the host to speak;
 the returned number is resolved to its option before the agent resumes. Hosts
@@ -176,10 +204,60 @@ path and character offset instead of running the tool again. The store caps each
 file at 256K characters and removes files older than seven days on a best-effort
 basis.
 
+`file_edit`, and `file_write` over an existing file, require a `file_read` of
+that file in the same session and refuse when it changed on disk since (length
+and mtime, with a content-hash fallback so a touch does not count). The error
+tells the model to read it first. New files need no read, Boris's own writes
+refresh the record, and the check runs before HITL (`Tool::precheck`) so the
+user is never asked to approve a doomed edit. Batch approval planning runs it
+too (`ToolRuntime::precheck_only`): a sibling its precheck refuses never joins
+a batched yes/no and fails on its own, before any prompt. Path policy and HITL are
+unchanged. `file_edit` takes `replace_all: true` to change every occurrence.
+
 File tools offer close sibling-name suggestions when a path is not found. They
-do not choose a suggested path automatically. `file_read` recognizes common
-image and PDF formats, but it does not inspect image pixels or extract PDF
-text; the host can open the file on screen. `web_fetch` retries a likely
+do not choose a suggested path automatically. `file_read` attaches PNG (decoded
+and downscaled to 1568 px), JPEG, GIF, and WebP images (passed through up to
+~3.7 MB) so the model can see them; BMP and PDF get a text envelope (no PDF text
+extraction), and the host can open the file on screen.
+
+## Shell sessions and background jobs
+
+`bash`, `bash_output`, and `bash_kill` share the agent's `ShellSession`
+(`Agent::shell_session`). The last working directory a `bash` call used is
+reused by later calls in the same session until the model sets `cwd` again; a
+`cd` inside a command is not tracked (no robust way across Git Bash and the
+PowerShell fallback). `run_in_background: true` spawns the command with
+stdout and stderr redirected by the OS to `<session_dir>/jobs/<id>.log` and
+returns a job id at once, with no timeout. `bash_output` returns output written
+since the previous read (head and tail past 120 KB, older bytes stay in the
+log) plus the status; `bash_kill` stops the job's whole process tree. At most
+four jobs run at once. A small watchdog thread per running job checks the log
+size twice a second and kills a job whose log passes 256 MB, even if nobody
+polls it; the log files of finished jobs dropped from the kept list (16) are
+deleted. Jobs are killed on session change, `unbind_session` (session end,
+engine off, shutdown), and when the agent is dropped; on Windows each job
+starts suspended, joins a Job Object with kill-on-close, and only then
+resumes, so nothing it starts escapes the tree and the OS also kills the tree
+if Boris crashes. If the job cannot be tracked, it is killed and refused.
+They are OS processes owned by the tool runtime, not engine workers or a
+scheduler. Starting a job is a `bash` call with the same policy and HITL;
+`bash_output` is a safe read and `bash_kill` is moderate. Presets that drop
+`bash` drop both job tools.
+
+## Images and screen capture
+
+`screen_capture` (Windows, GDI) captures the primary monitor or the active
+window, downscales to 1568 px on the long side, and is privacy-gated: it is
+`Dangerous` with `requires_confirmation`, so every capture needs the user's
+yes, and `VoiceSafe` does not register it. Tools attach images through
+`ToolCallContext::attach_image`; the runtime queues them and the loop delivers
+them before the next request as a user-role message (text label plus an
+`image_url` data-URL part), because tool messages are text-only on many
+providers. The tool result says the image follows. Images are ephemeral
+(`MessageOrigin::ToolImage`): never persisted, replaced by `[image omitted]`
+text at the next human turn, skipped by compaction digests, and counted at a
+fixed ~1,600 tokens each instead of their base64 length. If the provider
+rejects image input, the loop omits the images and retries the round once. `web_fetch` retries a likely
 Cloudflare or bot-protection response once.
 
 Optional `list_dir` / `glob` / `grep` roots accept omission, null, or blank as
@@ -196,14 +274,126 @@ If saving also fails, the host still receives the full body for on-screen displa
 The runtime permits one corrected retry, then withholds presentation for the
 rest of the turn. Recovery cards remain available through list/get after restart.
 
-Tools selected for the current objective are listed within the schema budget.
-Use `tool_search` for a needed capability absent from that list. See
-[tool listing](#tool-listing) for bundles and activation lifetime.
-`tool_search` distinguishes actual current availability from new activations;
-debug capture includes a `tool_listing` event with names,
-estimated schema tokens, and availability changes for each model request.
-Discovery hits are keyword matches, not proof of a capability. Check their actual
-descriptions before using them, and repeat discovery only for a specific new lead.
+All builtins are listed within the schema budget; `tool_search` only finds
+extensions. See [tool listing](#tool-listing) for activation lifetime. Debug
+capture includes a `tool_listing` event with names, estimated schema tokens,
+and availability changes for each model request. Discovery hits are keyword
+matches, not proof of a capability.
+
+## Failed and interrupted turns
+
+Tool side effects are real, so a turn that errors or is cancelled after a tool
+executed is not rolled back. The human message, assistant tool calls, and tool
+results stay in context and history; any unrun call of the latest batch gets a
+failed `Error: not run: turn interrupted` result so the provider sequence stays
+valid; an undelivered final reply is dropped; and a short persisted
+assistant-role `[Host note: …]` names the tools that ran and how the turn
+ended. A turn where nothing executed is restored to its pre-turn snapshot
+exactly. Only calls that actually ran count: `_tool_ok: true` rows, or failed
+`Error [failed|timeout|…]` tool errors. Declined approvals, policy denials,
+`hook_blocked`, unknown tools, argument-validation errors, and synthetic
+cancellation rows do not (a read-before-edit precheck refusal shares the
+`failed` code and still counts). After a reload, a latest turn that ends in
+the host note restores as interrupted, not complete. Hosts handling a barge-in call
+`Agent::abandon_turn(checkpoint)`, which applies the same rule against a
+checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
+
+## Follow-ups ("continue")
+
+`context::followup` classifies short follow-ups without an LLM call. Fillers
+and STT noise ("uh", "okay so", "Tss", "boris") are dropped; a message whose
+remaining words all belong to a small follow-up vocabulary and that contains
+continue / resume / keep going / go ahead / finish (it) / try again is a
+resume, and a question such as "did you finish the task?" is a status check.
+Anything with other substance ("continue by searching for Rust news") is a new
+request. On a resume or status follow-up, the task state keeps the earlier
+objective instead of replacing it with "continue", and a turn-scoped host
+control restates that objective verbatim, its status (unfinished,
+interrupted, waiting, or reported complete), open todos, and the last
+`[Host note: …]` if the previous turn was interrupted. Routing uses the same
+classifier. "go ahead" / "do it" (and bare "yes" / "sure") right after an
+assistant reply that ended with a question or offer accept that offer instead:
+they start a new objective that quotes the offer's last sentence.
+"continue" / "keep going" / "resume" always resume. A history reload rebuilds
+the objective from the newest human request that is not a follow-up.
+
+## User hooks
+
+`Agent::set_hooks(Hooks::new(specs))` installs user hooks (`hooks.rs`); with
+none configured nothing changes and no process starts. **Hooks run arbitrary
+user commands.** Each `HookSpec` has an `event` (`pre_tool`, `post_tool`,
+`turn_end`), an optional tool-name glob `tool` (`*`, `?`), a `command` run
+through the `bash` tool's shell, and `timeout_secs` (default 10, 1–120). The
+hook gets one JSON object on stdin: `event`, `tool`, `call_id`, `args`,
+`session_id`, `turn_id`, plus `ok` and `output` (first 4,000 chars) for
+`post_tool`, or `user_text`, `outcome`, `reply`, `tools_used` for `turn_end`.
+
+`pre_tool` hooks run in order after policy and HITL approval and before
+execute (`ToolRuntime::execute_hooked`). The first that exits non-zero, times
+out, or cannot start blocks the call: the tool never runs and the model gets
+a failed `ToolObservation` (`hook_blocked`, the hook's stderr as the message).
+A call that needs a yes/no pauses for it before any hook runs. `post_tool`
+and `turn_end` are informational (failures are logged); `turn_end` runs in the
+background so it never delays the reply. A timed-out hook's whole process
+tree is killed (Job Object on Windows, process group elsewhere), and processes
+a hook leaves behind are stopped when it exits. On Windows the hook starts
+suspended and runs only once it is in its Job Object; if that fails the hook
+does not run (a `pre_tool` hook then blocks the call). Only the first 16 KB of
+stderr is kept. Hooks also run for `spawn_subagent` children's tool calls
+(the parent runtime passes them through `ToolCallContext::hooks`).
+
+## Timers and reminders
+
+`reminders::ReminderStore::for_home(boris_home)` is the process-wide store for
+`<boris_home>/state/reminders.json` (atomic writes, reloaded on open). Builtin
+registration adds `timer_set` (`duration`: "10m", "1h30m", "90s"),
+`reminder_set` (`when`: "in 20 minutes", "5pm", "tomorrow 9am",
+"2026-11-20 09:00", RFC 3339; a passed time of day means the next one),
+`reminders_list`, and `reminder_cancel` (`id` or `match`). They are `Safe`,
+`Plan` kind, never confirm, and stay in `VoiceSafe`. A bare clock time ("9",
+"at 9:30") means the sooner of h:MM and (h+12):MM (always within 12 hours);
+if that is under two minutes away, or the time follows "today"/"tomorrow",
+`parse_when` returns `WhenError::Ambiguous` and `reminder_set` fails telling
+the model to ask the user ("tonight 9" is 9 PM; "9pm", "21:30", "09:00" are
+never ambiguous). The host speaks due items via `take_due` between turns (see
+the pipeline README) and records each spoken line with
+`Agent::record_host_event(spoken_reminders_note(..))`: an assistant-role
+`[Host event: ...]` history message that persists in transcripts, is never a
+human turn (no `<sent_at>`), and is skipped while a confirmation is pending.
+`parse_duration` / `parse_when` are public for hosts.
+
+## Streamed speech
+
+`Agent::set_stream_speech(true)` (off by default; the desktop pipeline turns it
+on) feeds each response's content deltas into a `SpeechSegmenter`
+(`speech_stream.rs`) and emits `AgentEvent::Speech { signal }`:
+`Chunk(text)` (one sanitized sentence), `Cancel` (drop this response's queued
+or playing speech), and `Commit` (the chunks so far are the whole accepted
+answer). Content sent with tool calls is an on-screen note and is never
+committed. Because tool-call deltas can arrive after content, the first
+sentence is held until the stream has run `DEFAULT_RELEASE_GRACE` (900 ms) past
+a sentence boundary with no tool call, or until the response ends; a tool call
+after release sends `Cancel`. Text that may be `[silent]`, tool markup, JSON,
+or code is never released early. On acceptance the loop calls `finish`, which
+sends the unspoken rest plus `Commit`, or `Cancel` if the accepted reply no
+longer starts with what was streamed (the host then speaks the reply itself).
+Rejected rounds (markup re-prompt, todo gate) cancel at the next request.
+
+## Staying silent
+
+A model reply of exactly `[silent]` (`SILENCE_TOKEN`) becomes
+`AgentOutcome::Silent` when no tool ran this turn, so a host can stay quiet on
+background or non-directed speech. After tool work the agent always speaks.
+
+## Finish checks
+
+A content-only reply ends the turn unless one of three non-keyword checks
+applies: speech that contains tool markup is rejected with a protocol
+reminder (budget 2); two consecutive rounds of only unknown tools inject the
+available tool names; and open todos re-prompt (budget 3) only when the turn
+already used tools. No gate guesses from the request text that more research
+or local work is needed, and no research playbook is injected; skills load
+when the model calls `load_skill`.
 
 ## Tool execution status
 
@@ -258,12 +448,33 @@ kept separately as clarification candidates, not settled constraints.
 Tool observations arrive as raw text with
 pending `<system-reminder>` controls flushed as their own message only once
 the batch resolves. Token estimates run over serialized message JSON.
+Provider `reasoning_details` on assistant tool-call messages are sent back
+unmodified and in order across the tool rounds of the current human turn, so
+a reasoning model does not re-plan from scratch each round. A new human turn
+(or a history reload) strips them; they are never persisted, summarized, or
+spoken, and encrypted payloads are excluded from token estimates.
 Summary compaction is lossless — only complete oldest turns fold into a
 single `Summary` message and the unsummarized tail is never deleted — with
-hysteresis before LLM compaction and smaller mechanical fallbacks. Requests
+hysteresis before LLM compaction and smaller mechanical fallbacks.
+Mechanical compaction is cache-stable: each tool observation is capped once,
+at a fixed 24,000 characters, when it enters context (head and tail, keeping
+any saved-output hint, idempotent so it is never rewritten again). Below the
+hard budget no earlier message changes, so consecutive requests within a
+human turn share a byte-identical serialized prefix and the provider prompt
+cache stays warm. A new human turn rewrites the previous turn once: its
+reasoning blocks and images are dropped and one-turn host controls removed.
+Over the hard budget, old tool chains collapse in one deep pass (down to four,
+then two recent turns until under the soft budget) rather than a little more
+every round. Requests
 estimated past the input budget fail fast with `AgentErrorKind::InputTooLarge`
-before any provider call. Summary-maintenance turns are forced onto the fast
-tier with an explicit cap.
+before any provider call. The summary is structured working memory (the
+user's requests near verbatim, decisions, files and paths, artifacts, concrete
+findings, open todos including the current todo file, current state, and any
+interruption host notes), written on the strong route at the planning stage
+with an 8,192-token output cap from a digest of up to 60,000 characters (human
+rows keep their `sent_at` time). The transcript stays framed as untrusted
+data. A summary that does not reach its final `## Interruptions` section
+(truncated at the cap, or off-format) is discarded and history is kept.
 
 ## Security model
 
@@ -273,8 +484,10 @@ tier with an explicit cap.
 | **SandboxConfig** | Path roots (`sandbox_root`, `boris_data_roots`, `allow_read` / `allow_write`), `NetworkPolicy`, `ShellPolicy`, risk/HITL thresholds. |
 | **Path policy** | All path-like args checked under roots; best-effort canonicalize for symlink escapes; case-insensitive on Windows. Residual TOCTOU between check and open. |
 | **ShellPolicy** | `Denied` · `Allowlist` (binary/prefix) · `OpenConfirm`. Bash deny list is best-effort; **HITL is authoritative**. Windows prefers Git Bash (`bash -c`, no login profile); WSL `System32\bash.exe` is skipped. PowerShell fallback uses `-ExecutionPolicy Bypass` for usability only. |
+| **Shell auto-allow** | User-managed prefixes on top of `OpenConfirm` (`SandboxConfig::shell_auto_allow`; desktop `[agent] shell_auto_allow = ["git status", "cargo check"]`). Opt-in convenience, **not a security boundary**: an auto-allowed command runs code the repository controls (git hooks and config such as `core.fsmonitor`, `build.rs`, npm scripts). Skips the yes/no only for a single plain command that equals a prefix or continues it after a space. It still asks when, anywhere (even quoted): `;` `&` `|` backtick `$` `>` `<` `(` `)` `@` `{` `}` `%` `^` `!` `~` `#`, a control character, or a non-ASCII character other than a letter/digit appears (the `bash` tool falls back to `powershell -Command` when Git Bash is missing or fails to spawn, and PowerShell evaluates `(...)`, `@(...)`, and script blocks inside arguments); a token after the prefix is a listed file-writing / code-running / redirecting option (`-o`, `--output*`, `-c`, `--config`, `--config-env`, `-C`, `-O`, `--git-dir`, `--work-tree`, `--exec-path`, `--exec`, `--upload-pack`, `--receive-pack`, `--template`, `--ext-diff`, `--manifest-path`, `--target-dir`, `--out-dir`, `--prefix`; defense in depth, not complete); or the command's cwd (explicit `cwd`, else the session cwd, via `Tool::shell_cwd`) is inside or contains a write root, where trusted file writes can plant such code without a yes/no. Case-sensitive. Shell `Denied`/`Allowlist`, the bash deny list, and cwd roots still apply. |
 | **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backends (DuckDuckGo + Wikipedia, or Exa when a key is set) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
+| **User hooks** | `[[hooks]]` in config.toml (`Agent::set_hooks`, off by default) **run arbitrary user commands** with the user's rights. `pre_tool` runs after policy and HITL, right before execute; a non-zero exit, timeout, or spawn failure blocks the call with its stderr as a `hook_blocked` failed observation. Hooks can only block, never widen policy, and the hard gates still run first. Not a sandbox. |
 | **Tool meta** | Production tools set explicit `read_only` / `max_concurrency`; only Read/Search kinds default RO when meta is unset (and only when risk ≤ Moderate with no confirm flag). |
 
 Desktop MVP: `SandboxConfig::for_desktop_mvp` opens network + shell-with-confirm and grants common user document roots for read.
@@ -320,7 +533,13 @@ Developer capture records `parallel_expansion`, `parallel_batch_start`, and
 `parallel_batch_end` (IDs, scheduler limit, wall time, failures, pauses, cancellation).
 Home/overlay keep an explicit parallel batch activity label while child tools run.
 
-Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28).
+Per user turn, tool **rounds** are capped (`DEFAULT_MAX_TOOL_ROUNDS` = 16, skills = 28;
+coding, multi-step, or complex turns get `COMPLEX_MAX_TOOL_ROUNDS` = 40), every
+loop invocation also has a 10-minute wall-clock budget (`DEFAULT_TURN_TIME_BUDGET`),
+and nothing exceeds `MAX_TOOL_ROUNDS_CEILING` = 64. When the cap or the clock
+stops ongoing tool work, tools are withheld and the model gives a short spoken
+progress check-in; `LoopResult::budget_exhausted` keeps the task state open
+(`Active`) so a "continue" follow-up resumes it.
 HITL **confirm budget** defaults to **12** (`max_confirms_per_turn`; host may set via settings / `BORIS_MAX_CONFIRMS`).
 
 **Trusted session** (`trusted_auto_moderate`): auto-allows ≤ Moderate tools **and** Dangerous sandbox `FsWrite` (file_write/file_edit under write roots). Shell, open URL, and Critical still need yes.
@@ -350,6 +569,16 @@ src/
 
 ```bash
 cargo test -p boris-agent --lib
+cargo test -p boris-agent --test harness_eval   # offline harness eval
 ```
+
+`tests/harness_eval.rs` replays ten scripted scenarios through a mock
+`LlmClient` and real builtin registration, asserting harness behaviour only:
+a stable tool table across rounds, `reasoning_details` round-trip, executed
+work kept on interruption, "continue" restating the task, an unread edit
+refused before HITL, the round budget check-in, a reminder firing, a
+`pre_tool` hook blocking a call, tool notes never streamed as speech, and
+`[silent]`. Its `live_eval_tool_list_is_stable` variant is `#[ignore]`d and
+also needs `BORIS_LIVE_EVAL=1` plus `OPENROUTER_API_KEY`.
 
 Do not run `tests/tool_live_smoke.rs` in routine checks (live environment).

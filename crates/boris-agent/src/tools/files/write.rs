@@ -1,5 +1,7 @@
 //! `file_write` — create or overwrite files under write roots.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -9,6 +11,7 @@ use crate::tool::{
 };
 use crate::tools::fs_common::resolve_under_roots;
 
+use super::tracker::FileReadTracker;
 use super::{FsRoots, MAX_WRITE_BYTES};
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
@@ -33,11 +36,17 @@ pub(crate) fn format_write_result(created: bool, byte_len: usize, path_display: 
 #[derive(Debug, Clone)]
 pub struct WriteFileTool {
     roots: FsRoots,
+    tracker: Arc<FileReadTracker>,
 }
 
 impl WriteFileTool {
     pub fn new(roots: FsRoots) -> Self {
-        Self { roots }
+        Self::with_tracker(roots, FileReadTracker::global())
+    }
+
+    /// Check reads recorded in `tracker` before overwriting an existing file.
+    pub fn with_tracker(roots: FsRoots, tracker: Arc<FileReadTracker>) -> Self {
+        Self { roots, tracker }
     }
 }
 
@@ -50,7 +59,8 @@ impl Tool for WriteFileTool {
     fn description(&self) -> &str {
         "Write content to a file under the write sandbox (default ~/.boris/state/workspace), \
          creating parent directories as needed. Prefer file_edit for existing files. \
-         Overwrites by default. Requires confirmation."
+         Overwriting an existing file requires a file_read of it in this session \
+         (refused if unread or changed on disk since). Requires confirmation."
     }
 
     fn parameters(&self) -> Value {
@@ -79,9 +89,25 @@ impl Tool for WriteFileTool {
             .max_concurrency(1)
     }
 
+    fn precheck(
+        &self,
+        ctx: &crate::tool_context::ToolCallContext,
+        args: &Value,
+    ) -> Result<(), ToolError> {
+        let Some(raw) = args.get("path").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        match resolve_under_roots(raw, &self.roots.writers()) {
+            Ok(path) => self
+                .tracker
+                .require_fresh(ctx.session_id.as_deref(), &path, "overwrite"),
+            Err(_) => Ok(()),
+        }
+    }
+
     async fn execute(
         &self,
-        _ctx: &crate::tool_context::ToolCallContext,
+        ctx: &crate::tool_context::ToolCallContext,
         args: Value,
     ) -> Result<String, ToolError> {
         let obj = require_object(&args)?;
@@ -92,6 +118,9 @@ impl Tool for WriteFileTool {
 
         let path = resolve_under_roots(&raw, &self.roots.writers())?;
         let created = !path.exists();
+        let session = ctx.session_id.as_deref();
+        // New files need no read; an existing one must be read and unchanged.
+        self.tracker.require_fresh(session, &path, "overwrite")?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -100,6 +129,8 @@ impl Tool for WriteFileTool {
         tokio::fs::write(&path, content.as_bytes())
             .await
             .map_err(|e| ToolError::failed(format!("write {}: {e}", path.display())))?;
+        self.tracker
+            .record_written(session, &path, content.as_bytes());
 
         Ok(truncate_tool_result(format_write_result(
             created,
@@ -163,6 +194,7 @@ mod tests {
         let body = std::fs::read_to_string(dir.join("nested/hello.txt")).unwrap();
         assert_eq!(body, "hi boris\n");
 
+        // Boris created it, so overwriting needs no extra read.
         let msg2 = write
             .execute(
                 &crate::tool_context::ToolCallContext::new("t"),
@@ -177,6 +209,39 @@ mod tests {
 
         let body2 = std::fs::read_to_string(dir.join("nested/hello.txt")).unwrap();
         assert_eq!(body2, "overwrite");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn overwrite_of_unread_existing_file_is_refused() {
+        let (roots, dir) = crate::tools::files::test_util::temp_roots();
+        std::fs::write(dir.join("user.txt"), "user data").unwrap();
+        let tracker = Arc::new(FileReadTracker::default());
+        let write = WriteFileTool::with_tracker(roots.clone(), tracker.clone());
+        let ctx = crate::tool_context::ToolCallContext::new("t");
+        let args = json!({ "path": "user.txt", "content": "clobbered" });
+
+        let err = write.precheck(&ctx, &args).unwrap_err();
+        assert!(err.message.contains("file_read"), "{}", err.message);
+        assert!(write.execute(&ctx, args.clone()).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("user.txt")).unwrap(),
+            "user data"
+        );
+
+        crate::tools::files::ReadFileTool::with_tracker(roots, tracker)
+            .execute(&ctx, json!({ "path": "user.txt" }))
+            .await
+            .unwrap();
+        write
+            .execute(&ctx, args)
+            .await
+            .expect("overwrite after read");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("user.txt")).unwrap(),
+            "clobbered"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

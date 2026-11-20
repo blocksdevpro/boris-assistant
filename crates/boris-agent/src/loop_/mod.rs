@@ -17,6 +17,10 @@
 
 #[cfg(test)]
 mod batch_tests;
+#[cfg(test)]
+mod image_tests;
+#[cfg(test)]
+mod speech_tests;
 mod finish;
 mod helpers;
 mod message_parse;
@@ -41,14 +45,14 @@ use crate::types::{AgentEvent, AgentLoopConfig, EmitFn, LoopResult, TokenAccount
 use finish::{finish_paused, finish_with_speech, noop_emit};
 use helpers::{
     build_tool_invocation, find_tool, find_tool_opt, log_tool_done, parallel_batch_observation,
-    push_tool_result_messages, unknown_tool_observation, useful_research_observation_count,
+    push_tool_result_messages, unknown_tool_observation,
 };
 use message_parse::{
     extract_reply_text, extract_tool_note, normalize_tool_calls, parse_raw_tool_calls,
 };
 use round::{
-    cancelled, complete_round, ensure_spoken_reply_at_cap, should_reenter_finish_gate,
-    tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
+    cancelled, complete_round_streaming, ensure_spoken_reply_at_cap, is_image_rejection,
+    should_reenter_finish_gate, tool_calls_if_runnable, NUDGE_NEAR_TOOL_CAP,
 };
 use tool_batch::{process_tool_calls, ToolBatchResult};
 
@@ -93,7 +97,7 @@ pub(crate) fn listed_tools_json(
 ///
 /// Finish gates use split budgets (see [`FinishGateBudget`]): `markup`
 /// (default 2) for tool-markup re-prompts and `gate` (legacy
-/// `finish_gate_left`, default 3) for research/todo re-entries.
+/// `finish_gate_left`, default 3) for open-todo re-entries.
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_loop(
     state: LoopState<'_>,
@@ -127,7 +131,7 @@ pub async fn agent_loop(
 /// Budget-explicit ReAct loop (split markup vs research/todo gates).
 ///
 /// `budget.markup` guards markup-only re-prompts; `budget.gate` guards
-/// research/todo re-entries. `initial_accounting` seeds token accounting
+/// open-todo re-entries. `initial_accounting` seeds token accounting
 /// (fresh turns pass `default()`; resume paths restore the pre-pause
 /// accounting so HITL never discards cost).
 #[allow(clippy::too_many_arguments)]
@@ -151,17 +155,28 @@ pub async fn agent_loop_with_budget(
     let mut tool_rounds = tool_rounds;
     let mut confirms_used = confirms_used;
     let mut token_accounting = initial_accounting;
-    let max_rounds = config.max_tool_rounds as usize;
+    // Hard safety ceiling regardless of host or per-turn configuration.
+    let max_rounds = config
+        .max_tool_rounds
+        .min(crate::types::MAX_TOOL_ROUNDS_CEILING) as usize;
+    let started = std::time::Instant::now();
+    // Set when the round cap or wall-clock budget stops ongoing tool work.
+    let mut budget_exhausted = false;
     // Full path to todos.json (session-bound or sandbox fallback).
     let todos_file = todos_file
         .unwrap_or_else(|| crate::finish_gate::default_sandbox_guess().join("todos.json"));
-    // Split finish budgets: markup re-prompts vs research/todo gates.
+    // Split finish budgets: markup re-prompts vs open-todo gate.
     let mut markup_left = budget.markup;
     let mut gate_left = budget.gate;
     // Last non-empty spoken line this turn (finish-gate re-entry must not discard it).
     let mut last_speakable: Option<String> = None;
     // B11: consecutive unknown-tool-only rounds (no successful tools).
     let mut consecutive_unknown_rounds: u32 = 0;
+    // Streamed speech of the final answer (voice hosts opt in). One response
+    // at a time: a new request cancels whatever the previous one streamed.
+    let mut speech = config
+        .stream_speech
+        .then(crate::speech_stream::SpeechSegmenter::default);
 
     for round in 0..=max_rounds {
         if cancelled(&cancel) {
@@ -175,9 +190,26 @@ pub async fn agent_loop_with_budget(
             round: round as u32,
         });
 
-        // On the final allowed round, withhold tools so the model must speak.
-        let at_cap = round >= max_rounds;
-        let response = complete_round(
+        // On the final allowed round, or once the wall-clock budget is spent,
+        // withhold tools so the model must speak.
+        let out_of_time = round > 0
+            && config
+                .time_budget
+                .is_some_and(|budget| started.elapsed() >= budget);
+        let at_cap = round >= max_rounds || out_of_time;
+        if at_cap && tool_rounds > 0 && !budget_exhausted {
+            // Ongoing tool work hit the budget: ask for a progress check-in
+            // and keep the task open so "continue" resumes it.
+            budget_exhausted = true;
+            if out_of_time {
+                tracing::info!(round, "turn time budget spent; asking for a check-in");
+            }
+            state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
+        }
+        if let Some(seg) = speech.as_mut() {
+            emit_speech(&emit, seg.reset());
+        }
+        let response = match complete_round_streaming(
             &mut state,
             user_text,
             config,
@@ -185,8 +217,33 @@ pub async fn agent_loop_with_budget(
             &emit,
             &cancel,
             &mut token_accounting,
+            speech.as_mut(),
         )
-        .await?;
+        .await
+        {
+            // A model or route without image input: keep going text-only.
+            Err(error) if is_image_rejection(&error) && state.context.has_tool_images() => {
+                tracing::warn!(%error, "model rejected image input; retrying without images");
+                state
+                    .context
+                    .omit_tool_images("this model does not accept images");
+                if let Some(seg) = speech.as_mut() {
+                    emit_speech(&emit, seg.reset());
+                }
+                complete_round_streaming(
+                    &mut state,
+                    user_text,
+                    config,
+                    at_cap,
+                    &emit,
+                    &cancel,
+                    &mut token_accounting,
+                    speech.as_mut(),
+                )
+                .await?
+            }
+            other => other?,
+        };
 
         // Normalize only actual runnable API calls, never content or calls at cap.
         let response = if tool_calls_if_runnable(&response, at_cap).is_some() {
@@ -201,10 +258,11 @@ pub async fn agent_loop_with_budget(
             response
         };
         if let Some(batch) = tool_calls_if_runnable(&response, at_cap) {
-            // One round before cap: run tools, then inject a finish nudge and
-            // continue so the next iteration (at_cap) produces a spoken reply.
-            let force_finish_next = round + 1 >= max_rounds;
-
+            // Content beside tool calls is a progress note, never speech.
+            if let Some(seg) = speech.as_mut() {
+                emit_speech(&emit, seg.on_tool_call());
+            }
+            // The next iteration (at cap) pushes the check-in nudge itself.
             tool_rounds += 1;
             state.context.push(Role::Assistant, response.clone());
             emit(AgentEvent::MessageEnd {
@@ -242,16 +300,10 @@ pub async fn agent_loop_with_budget(
             )
             .await?;
             if let Some(activated) = state.activated {
-                crate::runtime::activate_tools(
+                crate::runtime::activate_used_extensions(
                     activated,
-                    tools_used[activation_start..]
-                        .iter()
-                        .filter(|name| {
-                            name.as_str() != "tool_search"
-                                && !crate::runtime::is_core_name(name, &config.features)
-                                && state.tools.iter().any(|tool| tool.name() == name.as_str())
-                        })
-                        .cloned(),
+                    state.tools,
+                    &tools_used[activation_start..],
                 );
             }
 
@@ -292,9 +344,6 @@ pub async fn agent_loop_with_budget(
                         // Any real tool execution resets the unknown streak.
                         // (Unknown soft-fails never count as success.)
                         consecutive_unknown_rounds = 0;
-                    }
-                    if force_finish_next {
-                        state.context.push_control(json!(NUDGE_NEAR_TOOL_CAP));
                     }
                     emit(AgentEvent::TurnEnd {
                         round: round as u32,
@@ -375,47 +424,20 @@ pub async fn agent_loop_with_budget(
             consecutive_unknown_rounds = 0;
         }
 
-        // Finish gate: research may re-enter with zero tools; open todos only
-        // when this turn already used tools (stale todos must not silence casual
-        // replies). Uses the split `gate_left` budget (markup has its own).
-        let useful_research_results = useful_research_observation_count(state.context);
-        if should_reenter_finish_gate(
-            at_cap,
-            gate_left,
-            &reply,
-            &tools_used,
-            useful_research_results,
-            &todos_file,
-            user_text,
-        ) {
+        // Open-todo reminder, only when this turn already used tools (stale
+        // todos must not silence casual replies). Uses the split `gate_left`
+        // budget (markup has its own). No keyword gates second-guess the reply.
+        if should_reenter_finish_gate(at_cap, gate_left, &reply, &tools_used, &todos_file) {
             gate_left = gate_left.saturating_sub(1);
-            let reminder = if crate::finish_gate::should_research_gate_with(
-                user_text,
-                &reply,
-                &tools_used,
-                useful_research_results,
-            ) {
-                tracing::info!(
-                    left = gate_left,
-                    "finish gate: weak research — continue tooling"
-                );
-                crate::finish_gate::research_gate_reminder()
-            } else if crate::finish_gate::should_local_work_gate(user_text, &tools_used) {
-                tracing::info!(
-                    left = gate_left,
-                    "finish gate: weak local work — continue tooling"
-                );
-                crate::finish_gate::local_work_gate_reminder()
-            } else {
-                let pending = crate::finish_gate::pending_todo_count(&todos_file);
-                tracing::info!(
-                    pending,
-                    left = gate_left,
-                    "finish gate: open todos — continue tooling"
-                );
-                crate::finish_gate::todo_gate_reminder(pending)
-            };
-            state.context.push_control(reminder);
+            let pending = crate::finish_gate::pending_todo_count(&todos_file);
+            tracing::info!(
+                pending,
+                left = gate_left,
+                "finish gate: open todos — continue tooling"
+            );
+            state
+                .context
+                .push_control(crate::finish_gate::todo_gate_reminder(pending));
             emit(AgentEvent::TurnEnd {
                 round: round as u32,
             });
@@ -429,14 +451,19 @@ pub async fn agent_loop_with_budget(
             }
         }
 
-        return finish_with_speech(
+        if let Some(seg) = speech.as_mut() {
+            emit_speech(&emit, seg.finish(&reply));
+        }
+        let mut result = finish_with_speech(
             &emit,
             round as u32,
             reply,
             tool_rounds,
             tools_used,
             token_accounting,
-        );
+        )?;
+        result.budget_exhausted = budget_exhausted;
+        return Ok(result);
     }
 
     // Unreachable with 0..=max_rounds + return inside, but keep a soft landing.
@@ -446,7 +473,14 @@ pub async fn agent_loop_with_budget(
         tools_used,
         pending_turn: None,
         token_accounting,
+        budget_exhausted: true,
     })
+}
+
+fn emit_speech(emit: &EmitFn, signals: Vec<crate::speech_stream::SpeechSignal>) {
+    for signal in signals {
+        emit(AgentEvent::Speech { signal });
+    }
 }
 
 /// Continue after the host collected (or cancelled) typed input, then remaining tools.
@@ -528,12 +562,10 @@ pub async fn resume_pending_input(
         tool_rounds = tool_rounds.saturating_add(1);
     }
     if let Some(activated) = state.activated {
-        crate::runtime::activate_tools(
+        crate::runtime::activate_used_extensions(
             activated,
-            tools_used[activation_start..]
-                .iter()
-                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
-                .cloned(),
+            state.tools,
+            &tools_used[activation_start..],
         );
     }
 
@@ -745,12 +777,10 @@ pub async fn resume_pending_tool(
         tool_rounds = tool_rounds.saturating_add(1);
     }
     if let Some(activated) = state.activated {
-        crate::runtime::activate_tools(
+        crate::runtime::activate_used_extensions(
             activated,
-            tools_used[activation_start..]
-                .iter()
-                .filter(|name| state.tools.iter().any(|tool| tool.name() == name.as_str()))
-                .cloned(),
+            state.tools,
+            &tools_used[activation_start..],
         );
     }
 
@@ -780,6 +810,7 @@ pub async fn resume_pending_tool(
                 tools_used,
                 pending_turn: Some(pending_turn),
                 token_accounting: restored_accounting,
+                budget_exhausted: false,
             });
         }
     }
@@ -909,11 +940,9 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool["function"]["name"] == "present_artifact"));
-        assert!(!schemas[2]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool["function"]["name"] == "present_artifact"));
+        // The listing stays stable (prompt-cache prefix); the runtime refuses
+        // further presentation instead of the tool disappearing mid-turn.
+        assert_eq!(schemas[0], schemas[2]);
         assert_eq!(
             events
                 .lock()
@@ -1073,6 +1102,10 @@ mod tests {
             fn meta(&self) -> ToolMeta {
                 ToolMeta::safe_default()
             }
+            // Only extensions use activation slots (builtins are always listed).
+            fn is_extension(&self) -> bool {
+                true
+            }
             async fn execute(
                 &self,
                 _ctx: &crate::tool_context::ToolCallContext,
@@ -1130,6 +1163,205 @@ mod tests {
         assert!(activated.lock().unwrap().contains("echo"));
         match result.outcome {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Done."),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_details_return_on_the_next_tool_round_and_never_speak() {
+        use crate::tool::{ToolError, ToolMeta};
+
+        struct Probe;
+        #[async_trait]
+        impl Tool for Probe {
+            fn name(&self) -> &str {
+                "probe"
+            }
+            fn description(&self) -> &str {
+                "probe"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{}})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().read_only(true)
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                _args: serde_json::Value,
+            ) -> Result<String, ToolError> {
+                Ok("probed".into())
+            }
+        }
+
+        struct Capturing {
+            requests: Mutex<Vec<Value>>,
+            responses: Mutex<Vec<Value>>,
+        }
+        #[async_trait]
+        impl LlmClient for Capturing {
+            async fn complete(&self, messages: Value, _: Value) -> Result<Value, LlmError> {
+                self.requests.lock().unwrap().push(messages);
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let details = json!([
+            {"type":"reasoning.text","text":"Probe first.","signature":"sig","index":0},
+            {"type":"reasoning.encrypted","data":"SECRET-BLOB","index":1}
+        ]);
+        let client = Capturing {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                json!({"role":"assistant","content":"","reasoning_details":details,
+                    "tool_calls":[{"id":"c1","type":"function",
+                        "function":{"name":"probe","arguments":"{}"}}]}),
+                json!({"role":"assistant","content":"All probed."}),
+            ]),
+        };
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "probe it");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Probe)];
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = agent_loop(
+            state,
+            "probe it",
+            &AgentLoopConfig::default(),
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        let requests = client.requests.lock().unwrap();
+        let replayed: Vec<&Value> = requests[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("reasoning_details"))
+            .collect();
+        assert_eq!(replayed, vec![&details], "sent back unmodified, in order");
+        match result.outcome {
+            AgentOutcome::Speak { text, .. } => {
+                assert_eq!(text, "All probed.");
+                assert!(!text.contains("Probe first") && !text.contains("SECRET"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unlisted_registered_extension_executes_with_schema_validation() {
+        use crate::tool::{ToolError, ToolMeta};
+
+        struct Ext;
+        #[async_trait]
+        impl Tool for Ext {
+            fn name(&self) -> &str {
+                "plugin__lookup"
+            }
+            fn description(&self) -> &str {
+                "lookup"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::safe_default().read_only(true)
+            }
+            fn is_extension(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _ctx: &crate::tool_context::ToolCallContext,
+                args: serde_json::Value,
+            ) -> Result<String, ToolError> {
+                Ok(format!("found {}", args["id"].as_str().unwrap_or_default()))
+            }
+        }
+
+        struct Capturing {
+            schemas: Mutex<Vec<Value>>,
+            responses: Mutex<Vec<Value>>,
+        }
+        #[async_trait]
+        impl LlmClient for Capturing {
+            async fn complete(&self, _: Value, tools: Value) -> Result<Value, LlmError> {
+                self.schemas.lock().unwrap().push(tools);
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let call = |id: &str, args: Value| {
+            json!({"role":"assistant","content":"","tool_calls":[{
+                "id":id,"type":"function",
+                "function":{"name":"plugin__lookup","arguments":args.to_string()}
+            }]})
+        };
+        let client = Capturing {
+            schemas: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                call("bad", json!({"id": 7})),
+                call("good", json!({"id": "abc"})),
+                json!({"role":"assistant","content":"Found it."}),
+            ]),
+        };
+        let mut context = Context::new(20);
+        context.push(Role::System, "sys");
+        context.push(Role::User, "look it up");
+        let runtime = ToolRuntime::null();
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![std::sync::Arc::new(Ext)];
+        let activated = crate::runtime::new_activation_set();
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: Some(&activated),
+        };
+        let result = agent_loop(
+            state,
+            "look it up",
+            &AgentLoopConfig::default(),
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        // The extension was not listed on the first request, yet calling it
+        // ran through the runtime: invalid args are rejected by its schema,
+        // valid args execute. Neither is treated as an unknown tool.
+        assert!(client.schemas.lock().unwrap()[0].is_null());
+        let observations: Vec<String> = context
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .map(|m| m.content["content"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(observations.len(), 2);
+        assert!(!observations[0].contains("not available in this session"));
+        assert!(observations[0].contains("id"), "{}", observations[0]);
+        assert_eq!(observations[1], "found abc");
+        assert!(activated.lock().unwrap().contains("plugin__lookup"));
+        match result.outcome {
+            AgentOutcome::Speak { text, .. } => assert_eq!(text, "Found it."),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1642,5 +1874,73 @@ mod tests {
             AgentOutcome::Speak { text, .. } => assert_eq!(text, "Finished."),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spent_time_budget_asks_for_check_in_and_flags_budget() {
+        struct Recording {
+            responses: Mutex<Vec<Value>>,
+            requests: Mutex<Vec<(Value, Value)>>,
+        }
+        #[async_trait]
+        impl LlmClient for Recording {
+            async fn complete(&self, messages: Value, tools: Value) -> Result<Value, LlmError> {
+                self.requests.lock().unwrap().push((messages, tools));
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+        }
+        let client = Recording {
+            responses: Mutex::new(vec![
+                json!({"role":"assistant", "content": null, "tool_calls":[
+                    {"id":"t1", "type":"function", "function":{"name":"get_time", "arguments":"{}"}}
+                ]}),
+                json!({"role":"assistant", "content":"Checked the clock; the rest is left. Say continue."}),
+            ]),
+            requests: Mutex::new(vec![]),
+        };
+        let tools: Vec<std::sync::Arc<dyn Tool>> =
+            vec![std::sync::Arc::new(crate::tools::time::GetTimeTool)];
+        let runtime = ToolRuntime::new(
+            crate::SandboxConfig::default(),
+            Box::new(crate::NullAuditSink),
+        );
+        let mut context = Context::new(20);
+        context.push(Role::System, "policy");
+        context.push(Role::User, "refactor the parser");
+        context.begin_task("refactor the parser");
+        let config = AgentLoopConfig {
+            max_tool_rounds: 40,
+            time_budget: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        };
+        let state = LoopState {
+            context: &mut context,
+            tools: &tools,
+            runtime: &runtime,
+            client: &client,
+            activated: None,
+        };
+        let result = agent_loop(
+            state,
+            "refactor the parser",
+            &config,
+            vec![],
+            0,
+            0,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.budget_exhausted);
+        assert_eq!(result.tool_rounds, 1);
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "one tool round, then the check-in");
+        let (messages, tools) = &requests[1];
+        assert!(tools.is_null() || tools.as_array().is_some_and(|t| t.is_empty()));
+        assert!(messages.to_string().contains("work budget is used up"));
     }
 }

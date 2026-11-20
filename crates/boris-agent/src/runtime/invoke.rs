@@ -14,7 +14,7 @@ use super::audit::{args_digest, args_summary, now_ms, AuditEvent, AuditSink, Nul
 use crate::tools::collect_input::parse_collect_args;
 
 use super::pending::{PendingInput, PendingToolCall};
-use super::policy::{decide, PolicyDecision, SandboxConfig};
+use super::policy::{decide_with_shell_cwd, PolicyDecision, SandboxConfig};
 use super::timeout::{is_timeout, run_with_timeout};
 
 // Re-export so `crate::runtime::invoke::{ToolInvocation, …}` stays valid.
@@ -365,7 +365,19 @@ impl ToolRuntime {
         canonicalize_arg_aliases(tool.arg_aliases(), &mut args);
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(tool.name(), &args);
-        apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip)
+        // No call context while planning: a shell cwd that depends on it is
+        // unknown, so auto-allow waits for `invoke` (an extra ask at worst).
+        let shell_cwd = tool.shell_cwd(None, &args);
+        apply_skip_confirmation(
+            decide_with_shell_cwd(
+                &self.policy,
+                &meta,
+                &args,
+                opts.confirms_used,
+                shell_cwd.as_deref(),
+            ),
+            skip,
+        )
     }
 
     /// The tool's [`Tool::precheck`] alone (aliases canonicalized), with no
@@ -440,8 +452,10 @@ impl ToolRuntime {
                 0,
             );
             let bounded = bound_error_message(&e.message, MAX_ERROR_MESSAGE_CHARS);
+            // A distinct code (not the tool's `failed`) so interrupt salvage
+            // can tell a refused-before-run call from a real failure.
             return InvokeResult::Observation(ToolObservation::err(
-                crate::tool::ObservationError::new(kind, true, bounded),
+                crate::tool::ObservationError::new(PRECHECK_REFUSED_CODE, true, bounded),
                 0,
             ));
         }
@@ -450,8 +464,17 @@ impl ToolRuntime {
         // Always evaluate hard gates; HITL grant only skips the confirm UI branch.
         let skip = self.effective_skip_confirmation(&meta, opts)
             || self.is_always_approved(&inv.name, &args);
-        let decision =
-            apply_skip_confirmation(decide(&self.policy, &meta, &args, opts.confirms_used), skip);
+        let shell_cwd = tool.shell_cwd(Some(&inv.call_context()), &args);
+        let decision = apply_skip_confirmation(
+            decide_with_shell_cwd(
+                &self.policy,
+                &meta,
+                &args,
+                opts.confirms_used,
+                shell_cwd.as_deref(),
+            ),
+            skip,
+        );
 
         match decision {
             PolicyDecision::Deny { reason } => {
@@ -573,7 +596,8 @@ impl ToolRuntime {
         };
         let ctx = inv
             .call_context()
-            .with_images(Some(std::sync::Arc::clone(&self.images)));
+            .with_images(Some(std::sync::Arc::clone(&self.images)))
+            .with_hooks((!self.hooks.is_empty()).then(|| self.hooks.clone()));
         let _permits = self
             .gate
             .acquire(tool.name(), meta.effective_max_concurrency())
@@ -971,6 +995,10 @@ fn truncate_voice_chars(s: &str, max_chars: usize) -> String {
 
 /// Max chars for a tool error message (mirrors the Ok-path head+tail style).
 pub(crate) const MAX_ERROR_MESSAGE_CHARS: usize = 2_000;
+
+/// Observation code for a call its [`Tool::precheck`] refused before policy,
+/// HITL, or execute (e.g. `file_edit` of a file not read this session).
+pub(crate) const PRECHECK_REFUSED_CODE: &str = "precheck_refused";
 
 /// Bound an error message to [`MAX_ERROR_MESSAGE_CHARS`] chars with head+tail
 /// and a marker (char-safe). Policy/confirm logic is untouched.

@@ -111,17 +111,29 @@ impl BashTool {
         ctx: &ToolCallContext,
         obj: &serde_json::Map<String, Value>,
     ) -> Result<PathBuf, ToolError> {
+        // With a context the answer is always known.
+        self.pick_cwd_from(Some(ctx), obj)
+            .unwrap_or_else(|| Ok(self.default_cwd.clone()))
+    }
+
+    /// [`Self::pick_cwd`] when `ctx` may be missing (policy planning): `None`
+    /// when the answer would depend on the context's cwd.
+    fn pick_cwd_from(
+        &self,
+        ctx: Option<&ToolCallContext>,
+        obj: &serde_json::Map<String, Value>,
+    ) -> Option<Result<PathBuf, ToolError>> {
         if let Some(raw) = optional_string(obj, "cwd") {
-            return resolve_under_roots(&raw, &self.cwd_roots);
+            return Some(resolve_under_roots(&raw, &self.cwd_roots));
         }
         let under_roots = |p: &PathBuf| self.cwd_roots.iter().any(|r| p.starts_with(r));
         if let Some(last) = self.shell.cwd().filter(|p| p.is_dir() && under_roots(p)) {
-            return Ok(last);
+            return Some(Ok(last));
         }
-        if let Some(session_cwd) = ctx.cwd.as_ref().filter(|p| under_roots(p)) {
-            return Ok(session_cwd.clone());
+        if let Some(session_cwd) = ctx?.cwd.as_ref().filter(|p| under_roots(p)) {
+            return Some(Ok(session_cwd.clone()));
         }
-        Ok(self.default_cwd.clone())
+        Some(Ok(self.default_cwd.clone()))
     }
 }
 
@@ -469,6 +481,12 @@ impl Tool for BashTool {
             .timeout(Duration::from_secs(130))
             .read_only(false)
             .max_concurrency(1)
+    }
+
+    /// The cwd [`Self::execute`] would pick, so policy can refuse shell
+    /// auto-allow inside write roots.
+    fn shell_cwd(&self, ctx: Option<&ToolCallContext>, args: &Value) -> Option<PathBuf> {
+        self.pick_cwd_from(ctx, args.as_object()?)?.ok()
     }
 
     async fn execute(&self, ctx: &ToolCallContext, args: Value) -> Result<String, ToolError> {

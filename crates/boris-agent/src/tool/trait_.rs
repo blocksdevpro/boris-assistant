@@ -123,6 +123,19 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Directory a shell tool would run this call in, resolved without side
+    /// effects. Policy applies user shell auto-allow only when this is known
+    /// and does not overlap a write root. `ctx` is `None` during batch
+    /// planning; return `None` when the answer would depend on it. Default:
+    /// `None` (auto-allow never applies).
+    fn shell_cwd(
+        &self,
+        _ctx: Option<&crate::tool_context::ToolCallContext>,
+        _args: &Value,
+    ) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Run the tool with the JSON args the LLM supplied.
     ///
     /// The returned string is sent back to the LLM as the tool result only —

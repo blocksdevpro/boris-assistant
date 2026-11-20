@@ -53,6 +53,9 @@ pub struct ToolCallContext {
     progress: Option<Arc<dyn ProgressSink>>,
     /// Image delivery to the model (set by the runtime; absent in bare tests).
     images: Option<ImageInbox>,
+    /// The runtime's user hooks, so a tool that runs its own child runtime
+    /// (`spawn_subagent`) applies them too. `None` when none are configured.
+    hooks: Option<crate::hooks::Hooks>,
 }
 
 impl std::fmt::Debug for ToolCallContext {
@@ -100,6 +103,16 @@ impl ToolCallContext {
     pub fn with_images(mut self, images: Option<ImageInbox>) -> Self {
         self.images = images;
         self
+    }
+
+    pub fn with_hooks(mut self, hooks: Option<crate::hooks::Hooks>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// User hooks of the runtime that invoked this call, if any.
+    pub fn hooks(&self) -> Option<&crate::hooks::Hooks> {
+        self.hooks.as_ref()
     }
 
     /// True when this host can deliver images to the model.

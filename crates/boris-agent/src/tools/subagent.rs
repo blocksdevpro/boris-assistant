@@ -310,11 +310,14 @@ impl Tool for SpawnSubagentTool {
         let session_binding = Arc::clone(&self.session_root);
         let bound_session_root = session_root.clone();
         let spawned_id = child_id.clone();
+        // The parent's user hooks also gate the child's tool calls.
+        let hooks = ctx.hooks().cloned();
         tokio::spawn(async move {
             run_child(
                 client,
                 child_tools,
                 sandbox,
+                hooks,
                 session_binding,
                 bound_session_root,
                 child_dir,
@@ -345,6 +348,7 @@ async fn run_child(
     client: SharedLlm,
     child_tools: Vec<Arc<dyn Tool>>,
     sandbox: SandboxConfig,
+    hooks: Option<crate::hooks::Hooks>,
     session_binding: SharedSessionRoot,
     bound_session_root: PathBuf,
     child_dir: PathBuf,
@@ -362,7 +366,10 @@ async fn run_child(
     context.push(Role::User, goal.as_str());
 
     let audit_path = child_dir.join("tool_calls.jsonl");
-    let runtime = ToolRuntime::new(sandbox, Box::new(JsonlAuditSink::new(audit_path)));
+    let mut runtime = ToolRuntime::new(sandbox, Box::new(JsonlAuditSink::new(audit_path)));
+    if let Some(hooks) = hooks {
+        runtime.set_hooks(hooks);
+    }
     let state = LoopState {
         context: &mut context,
         tools: &child_tools,
@@ -1173,6 +1180,97 @@ mod tests {
         .await
         .expect("session unbind should cancel its live child");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The parent runtime's `pre_tool` hooks (via the call context) also gate
+    /// the child's tool calls.
+    #[tokio::test]
+    async fn child_tool_calls_run_parent_hooks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingTool(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Tool for CountingTool {
+            fn name(&self) -> &str {
+                "list_dir"
+            }
+            fn description(&self) -> &str {
+                "list"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type": "object", "properties": {}})
+            }
+            fn meta(&self) -> ToolMeta {
+                ToolMeta::with_risk(ToolRisk::Safe)
+                    .kind(ToolKind::Read)
+                    .read_only(true)
+            }
+            async fn execute(&self, _: &ToolCallContext, _: Value) -> Result<String, ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok("ok".into())
+            }
+        }
+        struct ScriptedClient(Mutex<Vec<Value>>);
+        #[async_trait]
+        impl LlmClient for ScriptedClient {
+            async fn complete(&self, _: Value, _: Value) -> Result<Value, LlmError> {
+                let mut queue = self.0.lock().unwrap();
+                if queue.is_empty() {
+                    return Ok(json!({"role": "assistant", "content": "done"}));
+                }
+                Ok(queue.remove(0))
+            }
+            fn model(&self) -> &str {
+                "test-scripted"
+            }
+        }
+
+        async fn run(hooks: Option<crate::hooks::Hooks>) -> usize {
+            let root = std::env::temp_dir().join(format!(
+                "boris-subagent-hooks-{}-{}",
+                now_ms(),
+                generate_child_id()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let client = ScriptedClient(Mutex::new(vec![json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{}"}}]
+            })]));
+            let tool = SpawnSubagentTool::new(
+                Arc::new(client),
+                Arc::new(Mutex::new(vec![
+                    Arc::new(CountingTool(Arc::clone(&runs))) as Arc<dyn Tool>
+                ])),
+                SandboxConfig::default(),
+                Arc::new(Mutex::new(Some(root.clone()))),
+            );
+            let ctx = ToolCallContext::new("call-hooks").with_hooks(hooks);
+            let spawned = tool
+                .execute(&ctx, json!({ "goal": "list the folder" }))
+                .await
+                .unwrap();
+            let spawned: Value = serde_json::from_str(&spawned).unwrap();
+            let handle = spawned["handle"].as_str().unwrap();
+            tool.execute(&ctx, json!({ "action": "join", "handle": handle }))
+                .await
+                .unwrap();
+            let _ = fs::remove_dir_all(&root);
+            runs.load(Ordering::SeqCst)
+        }
+
+        assert_eq!(run(None).await, 1, "child ran its tool without hooks");
+        let blocking = crate::hooks::Hooks::new(vec![crate::hooks::HookSpec {
+            event: crate::hooks::HookEvent::PreTool,
+            tool: Some("list_dir".into()),
+            command: "exit 1".into(),
+            timeout_secs: 10,
+        }]);
+        assert_eq!(
+            run(Some(blocking)).await,
+            0,
+            "parent pre_tool hook must block"
+        );
     }
 
     #[test]

@@ -153,6 +153,21 @@ pub(super) fn check_path_allowed(
     ))
 }
 
+/// True when `cwd` and any write root (sandbox, Boris data, `allow_write`)
+/// overlap: `cwd` is inside one, or one is inside `cwd`. Shell auto-allow is
+/// refused there because trusted file writes can plant code that a command
+/// run in `cwd` would execute (`.git/config`, hooks, build scripts).
+pub(super) fn overlaps_write_roots(config: &SandboxConfig, cwd: &Path) -> bool {
+    let cwd = resolve_path_for_policy(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    std::iter::once(&config.sandbox_root)
+        .chain(&config.boris_data_roots)
+        .chain(&config.allow_write)
+        .any(|root| {
+            let root = resolve_path_for_policy(root).unwrap_or_else(|_| root.clone());
+            path_is_within(&cwd, &root) || path_is_within(&root, &cwd)
+        })
+}
+
 /// Bounded, model-readable list of roots for a denial, so the model can pick
 /// an allowed location instead of guessing again.
 pub fn describe_roots(roots: &[PathBuf]) -> String {

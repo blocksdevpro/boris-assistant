@@ -129,6 +129,28 @@ pub(crate) fn format_media_envelope(
 /// inline images around 5 MB; base64 adds a third).
 const MAX_PASSTHROUGH_IMAGE_BYTES: usize = 3_750_000;
 
+/// Largest image / PDF file read into memory at all; a bigger one gets the
+/// media envelope from its first bytes only.
+const MAX_MEDIA_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// PNG decode budget: total allocation and edge length, far below the
+/// `image` crate's 512 MB default (a small file can claim huge dimensions).
+const MAX_PNG_DECODE_ALLOC: u64 = 128 * 1024 * 1024;
+const MAX_PNG_EDGE: u32 = 16_384;
+
+fn decode_png(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_PNG_DECODE_ALLOC);
+    limits.max_image_width = Some(MAX_PNG_EDGE);
+    limits.max_image_height = Some(MAX_PNG_EDGE);
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|error| format!("PNG decode failed: {error}"))
+}
+
 /// Image bytes ready for the model: PNG is decoded and downscaled to the
 /// model edge; JPEG / GIF / WebP pass through when small enough (no extra
 /// decoders are compiled in); BMP is not attachable.
@@ -139,8 +161,7 @@ pub(crate) fn prepare_image(
     use base64::Engine as _;
     let mime = match kind {
         MediaKind::Png => {
-            let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-                .map_err(|error| format!("PNG decode failed: {error}"))?;
+            let image = decode_png(&bytes)?;
             let encoded = crate::tools::screen::encode_dynamic_scaled(
                 image,
                 crate::tools::screen::MAX_IMAGE_EDGE,
@@ -359,6 +380,22 @@ impl Tool for ReadFileTool {
         // Metadata before the read: if the file changes in between, the
         // stamp is stale and a later edit asks for a reread (safe direction).
         let meta = tokio::fs::metadata(&path).await.ok();
+        // A huge image / PDF is never read whole: sniff its first bytes and
+        // answer with the envelope.
+        if let Some(len) = meta
+            .as_ref()
+            .map(|m| m.len())
+            .filter(|l| *l > MAX_MEDIA_FILE_BYTES)
+        {
+            if let Some(kind) = sniff_media(&read_head(&path).await) {
+                return Ok(truncate_tool_result(format!(
+                    "{}\nNot attached: file is too large ({} MB; limit {} MB)",
+                    format_media_envelope(kind, &path.display().to_string(), len as usize),
+                    len / (1024 * 1024),
+                    MAX_MEDIA_FILE_BYTES / (1024 * 1024)
+                )));
+            }
+        }
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| ToolError::failed(format!("read {}: {e}", path.display())))?;
@@ -410,6 +447,16 @@ impl Tool for ReadFileTool {
         self.tracker.record(ctx.session_id.as_deref(), &path, stamp);
         Ok(truncate_tool_result(output))
     }
+}
+
+/// First bytes of a file for [`sniff_media`] (empty on error).
+async fn read_head(path: &std::path::Path) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut head = Vec::with_capacity(16);
+    if let Ok(file) = tokio::fs::File::open(path).await {
+        let _ = file.take(16).read_to_end(&mut head).await;
+    }
+    head
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -490,6 +537,13 @@ mod tests {
     #[test]
     fn oversized_or_unsupported_images_are_not_attached() {
         assert!(prepare_image(MediaKind::Bmp, b"BM....".to_vec()).is_err());
+        // A small PNG with an edge past the decode limit is refused.
+        let mut wide = std::io::Cursor::new(Vec::new());
+        image::GrayImage::new(MAX_PNG_EDGE + 1, 1)
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        let err = prepare_image(MediaKind::Png, wide.into_inner()).unwrap_err();
+        assert!(err.contains("PNG decode failed"), "{err}");
         assert!(prepare_image(MediaKind::Jpeg, vec![0; MAX_PASSTHROUGH_IMAGE_BYTES + 1]).is_err());
         let (mime, data) = prepare_image(MediaKind::Jpeg, b"\xff\xd8\xffjpeg".to_vec()).unwrap();
         assert_eq!(mime, "image/jpeg");

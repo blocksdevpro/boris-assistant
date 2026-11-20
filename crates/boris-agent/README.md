@@ -231,10 +231,14 @@ stdout and stderr redirected by the OS to `<session_dir>/jobs/<id>.log` and
 returns a job id at once, with no timeout. `bash_output` returns output written
 since the previous read (head and tail past 120 KB, older bytes stay in the
 log) plus the status; `bash_kill` stops the job's whole process tree. At most
-four jobs run at once, and a job whose log passes 256 MB is killed when polled.
-Jobs are killed on session change, `unbind_session` (session end, engine off,
-shutdown), and when the agent is dropped; on Windows each job sits in a Job
-Object with kill-on-close, so the OS also kills the tree if Boris crashes.
+four jobs run at once. A small watchdog thread per running job checks the log
+size twice a second and kills a job whose log passes 256 MB, even if nobody
+polls it; the log files of finished jobs dropped from the kept list (16) are
+deleted. Jobs are killed on session change, `unbind_session` (session end,
+engine off, shutdown), and when the agent is dropped; on Windows each job
+starts suspended, joins a Job Object with kill-on-close, and only then
+resumes, so nothing it starts escapes the tree and the OS also kills the tree
+if Boris crashes. If the job cannot be tracked, it is killed and refused.
 They are OS processes owned by the tool runtime, not engine workers or a
 scheduler. Starting a job is a `bash` call with the same policy and HITL;
 `bash_output` is a safe read and `bash_kill` is moderate. Presets that drop
@@ -284,8 +288,13 @@ results stay in context and history; any unrun call of the latest batch gets a
 failed `Error: not run: turn interrupted` result so the provider sequence stays
 valid; an undelivered final reply is dropped; and a short persisted
 assistant-role `[Host note: …]` names the tools that ran and how the turn
-ended. A turn where nothing executed (synthetic cancellation rows do not count)
-is restored to its pre-turn snapshot exactly. Hosts handling a barge-in call
+ended. A turn where nothing executed is restored to its pre-turn snapshot
+exactly. Only calls that actually ran count: `_tool_ok: true` rows, or failed
+`Error [failed|timeout|…]` tool errors. Declined approvals, policy denials,
+`hook_blocked`, unknown tools, argument-validation errors, and synthetic
+cancellation rows do not (a read-before-edit precheck refusal shares the
+`failed` code and still counts). After a reload, a latest turn that ends in
+the host note restores as interrupted, not complete. Hosts handling a barge-in call
 `Agent::abandon_turn(checkpoint)`, which applies the same rule against a
 checkpoint taken before the turn; `restore_checkpoint` remains a pure rollback.
 
@@ -302,7 +311,11 @@ objective instead of replacing it with "continue", and a turn-scoped host
 control restates that objective verbatim, its status (unfinished,
 interrupted, waiting, or reported complete), open todos, and the last
 `[Host note: …]` if the previous turn was interrupted. Routing uses the same
-classifier.
+classifier. "go ahead" / "do it" (and bare "yes" / "sure") right after an
+assistant reply that ended with a question or offer accept that offer instead:
+they start a new objective that quotes the offer's last sentence.
+"continue" / "keep going" / "resume" always resume. A history reload rebuilds
+the objective from the newest human request that is not a follow-up.
 
 ## User hooks
 
@@ -323,7 +336,11 @@ A call that needs a yes/no pauses for it before any hook runs. `post_tool`
 and `turn_end` are informational (failures are logged); `turn_end` runs in the
 background so it never delays the reply. A timed-out hook's whole process
 tree is killed (Job Object on Windows, process group elsewhere), and processes
-a hook leaves behind are stopped when it exits.
+a hook leaves behind are stopped when it exits. On Windows the hook starts
+suspended and runs only once it is in its Job Object; if that fails the hook
+does not run (a `pre_tool` hook then blocks the call). Only the first 16 KB of
+stderr is kept. Hooks also run for `spawn_subagent` children's tool calls
+(the parent runtime passes them through `ToolCallContext::hooks`).
 
 ## Timers and reminders
 
@@ -442,8 +459,10 @@ hysteresis before LLM compaction and smaller mechanical fallbacks.
 Mechanical compaction is cache-stable: each tool observation is capped once,
 at a fixed 24,000 characters, when it enters context (head and tail, keeping
 any saved-output hint, idempotent so it is never rewritten again). Below the
-hard budget no earlier message changes, so consecutive requests share a
-byte-identical serialized prefix and the provider prompt cache stays warm.
+hard budget no earlier message changes, so consecutive requests within a
+human turn share a byte-identical serialized prefix and the provider prompt
+cache stays warm. A new human turn rewrites the previous turn once: its
+reasoning blocks and images are dropped and one-turn host controls removed.
 Over the hard budget, old tool chains collapse in one deep pass (down to four,
 then two recent turns until under the soft budget) rather than a little more
 every round. Requests
@@ -452,8 +471,10 @@ before any provider call. The summary is structured working memory (the
 user's requests near verbatim, decisions, files and paths, artifacts, concrete
 findings, open todos including the current todo file, current state, and any
 interruption host notes), written on the strong route at the planning stage
-with a 6,144-token output cap from a digest of up to 60,000 characters. The
-transcript stays framed as untrusted data.
+with an 8,192-token output cap from a digest of up to 60,000 characters (human
+rows keep their `sent_at` time). The transcript stays framed as untrusted
+data. A summary that does not reach its final `## Interruptions` section
+(truncated at the cap, or off-format) is discarded and history is kept.
 
 ## Security model
 
@@ -463,7 +484,7 @@ transcript stays framed as untrusted data.
 | **SandboxConfig** | Path roots (`sandbox_root`, `boris_data_roots`, `allow_read` / `allow_write`), `NetworkPolicy`, `ShellPolicy`, risk/HITL thresholds. |
 | **Path policy** | All path-like args checked under roots; best-effort canonicalize for symlink escapes; case-insensitive on Windows. Residual TOCTOU between check and open. |
 | **ShellPolicy** | `Denied` · `Allowlist` (binary/prefix) · `OpenConfirm`. Bash deny list is best-effort; **HITL is authoritative**. Windows prefers Git Bash (`bash -c`, no login profile); WSL `System32\bash.exe` is skipped. PowerShell fallback uses `-ExecutionPolicy Bypass` for usability only. |
-| **Shell auto-allow** | User-managed prefixes on top of `OpenConfirm` (`SandboxConfig::shell_auto_allow`; desktop `[agent] shell_auto_allow = ["git status", "cargo check"]`). Skips the yes/no only for a single plain command that equals a prefix or continues it after a space; any `;` `&` `|` backtick `$` `>` `<` or line break anywhere (even quoted) means it still asks. Case-sensitive. Shell `Denied`/`Allowlist`, the bash deny list, and cwd roots still apply. This narrows prompts; it is not a sandbox. |
+| **Shell auto-allow** | User-managed prefixes on top of `OpenConfirm` (`SandboxConfig::shell_auto_allow`; desktop `[agent] shell_auto_allow = ["git status", "cargo check"]`). Opt-in convenience, **not a security boundary**: an auto-allowed command runs code the repository controls (git hooks and config such as `core.fsmonitor`, `build.rs`, npm scripts). Skips the yes/no only for a single plain command that equals a prefix or continues it after a space. It still asks when, anywhere (even quoted): `;` `&` `|` backtick `$` `>` `<` `(` `)` `@` `{` `}` `%` `^` `!` `~` `#`, a control character, or a non-ASCII character other than a letter/digit appears (the `bash` tool falls back to `powershell -Command` when Git Bash is missing or fails to spawn, and PowerShell evaluates `(...)`, `@(...)`, and script blocks inside arguments); a token after the prefix is a listed file-writing / code-running / redirecting option (`-o`, `--output*`, `-c`, `--config`, `--config-env`, `-C`, `-O`, `--git-dir`, `--work-tree`, `--exec-path`, `--exec`, `--upload-pack`, `--receive-pack`, `--template`, `--ext-diff`, `--manifest-path`, `--target-dir`, `--out-dir`, `--prefix`; defense in depth, not complete); or the command's cwd (explicit `cwd`, else the session cwd, via `Tool::shell_cwd`) is inside or contains a write root, where trusted file writes can plant such code without a yes/no. Case-sensitive. Shell `Denied`/`Allowlist`, the bash deny list, and cwd roots still apply. |
 | **NetworkPolicy** | `Off` · `Allowlist` (host/suffix) · `Open`. `Open` still runs SSRF host blocks on `web_fetch` (loopback, RFC1918, link-local, metadata, IPv6 ULA). Redirects re-validated. DNS rebinding residual documented in code. **`Allowlist` only constrains tools with an addressable URL arg** (e.g. `web_fetch`'s `url`) — it does **not** constrain `web_search`, which has no URL arg and always hits its fixed search backends (DuckDuckGo + Wikipedia, or Exa when a key is set) regardless of policy. |
 | **HITL** | Dangerous tools pause for user yes/no. After grant, runtime **still enforces** path/shell/network hard gates — only the confirmation UI is skipped. |
 | **User hooks** | `[[hooks]]` in config.toml (`Agent::set_hooks`, off by default) **run arbitrary user commands** with the user's rights. `pre_tool` runs after policy and HITL, right before execute; a non-zero exit, timeout, or spawn failure blocks the call with its stderr as a `hook_blocked` failed observation. Hooks can only block, never widen policy, and the hard gates still run first. Not a sandbox. |

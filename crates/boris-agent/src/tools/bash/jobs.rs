@@ -11,12 +11,16 @@
 //! - **Background jobs**: `bash` with `run_in_background: true` spawns the
 //!   command with stdout+stderr redirected by the OS to
 //!   `<session_dir>/jobs/<id>.log` and returns a job id at once. Status is
-//!   polled (`try_wait`) when the model asks; there is no reader thread or
-//!   task. At most [`MAX_RUNNING_JOBS`] run at a time.
+//!   polled (`try_wait`) when the model asks; a small watchdog thread per
+//!   running job only checks the log size and kills a job whose log passes
+//!   [`MAX_LOG_BYTES`], even if nobody reads it. At most [`MAX_RUNNING_JOBS`]
+//!   run at a time; a forgotten finished job's log file is deleted.
 //! - **Cleanup**: jobs are killed (whole process tree) on session change,
 //!   unbind, and drop of the session, which happens when the agent is dropped
 //!   at app exit. On Windows each job lives in a Job Object with
-//!   `KILL_ON_JOB_CLOSE`, so the OS also kills the tree if Boris crashes.
+//!   `KILL_ON_JOB_CLOSE`, so the OS also kills the tree if Boris crashes. The
+//!   process starts suspended and is resumed only after it joined the job,
+//!   so nothing it starts can escape the tree.
 //!
 //! These are OS processes managed by the tool runtime, not engine workers:
 //! nothing here touches the voice pipeline thread or adds a scheduler.
@@ -26,7 +30,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -45,6 +49,8 @@ pub const MAX_RUNNING_JOBS: usize = 4;
 const MAX_KEPT_JOBS: usize = 16;
 /// A job whose log grows past this is killed (runaway output guard).
 const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
+/// How often the watchdog checks a running job's log size.
+const LOG_WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JobExit {
@@ -85,6 +91,22 @@ impl Job {
         self.exit = Some(JobExit::Killed);
     }
 
+    /// Kill a running job whose log passed `cap` bytes. True if it did.
+    fn enforce_log_cap(&mut self, cap: u64) -> bool {
+        if self.poll().is_some() {
+            return false;
+        }
+        let len = std::fs::metadata(&self.log_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if len <= cap {
+            return false;
+        }
+        self.kill();
+        self.note = Some(format!("killed: log exceeded {} MB", cap / (1024 * 1024)));
+        true
+    }
+
     fn status_line(&self) -> String {
         let secs = self.started.elapsed().as_secs();
         match self.exit {
@@ -116,7 +138,8 @@ impl Inner {
 /// Shell state shared by the bash tools of one agent.
 #[derive(Default)]
 pub struct ShellSession {
-    inner: Mutex<Inner>,
+    /// `Arc` so a job's log watchdog can hold a [`Weak`] to it.
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl std::fmt::Debug for ShellSession {
@@ -259,6 +282,8 @@ impl ShellSession {
             },
         );
         prune_finished(&mut inner.jobs);
+        drop(inner);
+        watch_log(Arc::downgrade(&self.inner), id.clone(), MAX_LOG_BYTES);
         Ok(format!(
             "Started background job {id} (pid {pid}).\n\
              cwd: {}\n\
@@ -278,17 +303,10 @@ impl ShellSession {
             .jobs
             .get_mut(id)
             .ok_or_else(|| unknown_job(id, &known))?;
-        job.poll();
+        job.enforce_log_cap(MAX_LOG_BYTES);
         let len = std::fs::metadata(&job.log_path)
             .map(|m| m.len())
             .unwrap_or(0);
-        if job.exit.is_none() && len > MAX_LOG_BYTES {
-            job.kill();
-            job.note = Some(format!(
-                "killed: log exceeded {} MB",
-                MAX_LOG_BYTES / (1024 * 1024)
-            ));
-        }
         let (text, skipped) = read_from(&job.log_path, job.read_offset, len)?;
         job.read_offset = len.max(job.read_offset);
         let mut out = format!(
@@ -369,7 +387,7 @@ fn unknown_job(id: &str, known: &[String]) -> ToolError {
     }
 }
 
-/// Forget the oldest finished jobs past [`MAX_KEPT_JOBS`].
+/// Forget the oldest finished jobs past [`MAX_KEPT_JOBS`] and delete their logs.
 fn prune_finished(jobs: &mut HashMap<String, Job>) {
     while jobs.len() > MAX_KEPT_JOBS {
         let oldest = jobs
@@ -378,10 +396,41 @@ fn prune_finished(jobs: &mut HashMap<String, Job>) {
             .min();
         match oldest {
             Some((_, id)) => {
-                jobs.remove(&id);
+                if let Some(job) = jobs.remove(&id) {
+                    let _ = std::fs::remove_file(&job.log_path);
+                }
             }
             None => break,
         }
+    }
+}
+
+/// Kill job `id` once its log passes `cap`, without waiting for a
+/// `bash_output` call. Ends when the job finishes, is forgotten, or the
+/// session is dropped. Checks under the session lock, like `bash_output`.
+fn watch_log(inner: Weak<Mutex<Inner>>, id: String, cap: u64) {
+    let spawned = std::thread::Builder::new()
+        .name(format!("boris-{id}-log-watch"))
+        .spawn(move || loop {
+            std::thread::sleep(LOG_WATCH_INTERVAL);
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let mut inner = inner.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(job) = inner.jobs.get_mut(&id) else {
+                return;
+            };
+            if job.enforce_log_cap(cap) {
+                tracing::warn!(job = %id, "background job killed: log size cap");
+                return;
+            }
+            if job.poll().is_some() {
+                return;
+            }
+        });
+    if let Err(e) = spawned {
+        // `bash_output` still enforces the cap when it reads the job.
+        tracing::warn!(error = %e, "could not start background job log watchdog");
     }
 }
 
@@ -415,11 +464,16 @@ struct ProcessTree(windows_job::JobHandle);
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn prepare(_cmd: &mut std::process::Command) {}
+    fn prepare(cmd: &mut std::process::Command) {
+        windows_job::start_suspended(cmd);
+    }
 
+    /// Join the job, then resume the suspended child.
     fn attach(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
-        windows_job::JobHandle::for_process(child.as_raw_handle()).map(ProcessTree)
+        let job = windows_job::JobHandle::for_process(child.as_raw_handle())?;
+        windows_job::resume_process(child.id())?;
+        Ok(ProcessTree(job))
     }
 
     fn kill(&self, child: &mut Child) {
@@ -431,12 +485,64 @@ impl ProcessTree {
 
 #[cfg(windows)]
 mod windows_job {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    };
+
+    /// Same flags as the shell's `harden` (`CREATE_NO_WINDOW`) plus
+    /// `CREATE_SUSPENDED`, so the process cannot start children before it
+    /// joins its Job Object. Pair with [`resume_process`].
+    pub(super) fn start_suspended(cmd: &mut std::process::Command) {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+
+    /// Resume every thread of a process started with [`start_suspended`]
+    /// (only its main thread exists). Errors if none was resumed.
+    pub(super) fn resume_process(pid: u32) -> Result<(), String> {
+        // SAFETY: Toolhelp snapshot walk with a correctly sized entry; every
+        // handle opened here is closed here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "CreateToolhelp32Snapshot: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snap, &mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        if ResumeThread(thread) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(thread);
+                    }
+                }
+                more = Thread32Next(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+            if resumed == 0 {
+                return Err(format!("could not resume process {pid}"));
+            }
+            Ok(())
+        }
+    }
 
     /// Owned Job Object handle with `KILL_ON_JOB_CLOSE`.
     pub(super) struct JobHandle(HANDLE);
@@ -527,7 +633,8 @@ impl ProcessTree {
 
 /// Kills a short-lived process's whole tree when dropped (user hooks):
 /// a Job Object with kill-on-close on Windows, the process group elsewhere.
-/// Call [`TreeGuard::disarm`] once the process exited normally.
+/// Call [`TreeGuard::disarm`] once the process exited normally. On Windows
+/// the process starts suspended and resumes only inside its job.
 pub(crate) struct TreeGuard {
     #[cfg(windows)]
     job: Option<windows_job::JobHandle>,
@@ -536,7 +643,8 @@ pub(crate) struct TreeGuard {
 }
 
 impl TreeGuard {
-    /// Put the command in its own process group (no-op on Windows).
+    /// Own process group elsewhere; start suspended on Windows (the child
+    /// then runs only after [`TreeGuard::attach`]).
     pub(crate) fn prepare(cmd: &mut std::process::Command) {
         #[cfg(not(windows))]
         {
@@ -544,20 +652,23 @@ impl TreeGuard {
             cmd.process_group(0);
         }
         #[cfg(windows)]
-        let _ = cmd;
+        windows_job::start_suspended(cmd);
     }
 
-    pub(crate) fn attach(child: &tokio::process::Child) -> Self {
+    /// Track the child's tree (and resume it on Windows). On error the caller
+    /// must not run the hook: drop the child (kill-on-drop) and fail closed.
+    pub(crate) fn attach(child: &tokio::process::Child) -> Result<Self, String> {
         #[cfg(windows)]
         {
-            let job = child
-                .raw_handle()
-                .and_then(|handle| windows_job::JobHandle::for_process(handle).ok());
-            Self { job }
+            let handle = child.raw_handle().ok_or("hook process already exited")?;
+            let job = windows_job::JobHandle::for_process(handle)?;
+            let pid = child.id().ok_or("hook process already exited")?;
+            windows_job::resume_process(pid)?;
+            Ok(Self { job: Some(job) })
         }
         #[cfg(not(windows))]
         {
-            Self { pgid: child.id() }
+            Ok(Self { pgid: child.id() })
         }
     }
 
@@ -810,6 +921,38 @@ mod tests {
         assert!(killed.contains("Killed job job-1"), "{killed}");
         assert!(shell.read_new("job-1").unwrap().contains("killed"));
         assert_eq!(shell.running_jobs(), 0);
+        shell.unbind();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The watchdog kills a job past the log cap with no `bash_output` call.
+    #[test]
+    fn log_watchdog_kills_unread_job_past_cap() {
+        let dir = temp_dir("logcap");
+        let shell = ShellSession::default();
+        shell.bind("s", &dir);
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = std::process::Command::new("powershell.exe");
+            c.args([
+                "-NoProfile",
+                "-Command",
+                "Write-Output flood; Start-Sleep -Seconds 60",
+            ]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "echo flood; sleep 60"]);
+            c
+        };
+        cmd.current_dir(&dir);
+        shell.spawn(cmd, "flood", &dir, &dir).expect("spawn");
+        watch_log(Arc::downgrade(&shell.inner), "job-1".into(), 1);
+        assert!(wait_until(|| shell.running_jobs() == 0), "not killed");
+        let out = shell.read_new("job-1").unwrap();
+        assert!(out.contains("killed: log exceeded"), "{out}");
         shell.unbind();
         let _ = std::fs::remove_dir_all(&dir);
     }

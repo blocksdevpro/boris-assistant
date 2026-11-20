@@ -27,6 +27,8 @@ pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 10;
 pub const MAX_HOOK_TIMEOUT_SECS: u64 = 120;
 /// Longest hook stderr returned to the model.
 const MAX_HOOK_MESSAGE_CHARS: usize = 2_000;
+/// Most hook stderr bytes kept in memory; the rest is drained and dropped.
+const MAX_HOOK_STDERR_BYTES: u64 = 16 * 1024;
 /// Longest tool output passed to `post_tool` hooks.
 const MAX_HOOK_OUTPUT_CHARS: usize = 4_000;
 
@@ -220,7 +222,7 @@ impl Hooks {
 
     async fn run(&self, spec: &HookSpec, input: &Value) -> HookRun {
         use std::process::Stdio;
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let cwd = self.cwd.clone().unwrap_or_else(std::env::temp_dir);
         let mut std_cmd = crate::tools::bash::hook_command(&spec.command, &cwd);
@@ -234,10 +236,20 @@ impl Hooks {
             Ok(child) => child,
             Err(error) => return HookRun::SpawnFailed(error.to_string()),
         };
-        // A timed-out hook's whole tree dies, not just the shell.
-        let tree = crate::tools::bash::TreeGuard::attach(&child);
+        // A timed-out hook's whole tree dies, not just the shell. Without a
+        // tree handle the hook does not run (fail closed; on Windows it is
+        // still suspended and dropping it kills it).
+        let tree = match crate::tools::bash::TreeGuard::attach(&child) {
+            Ok(tree) => tree,
+            Err(error) => {
+                return HookRun::SpawnFailed(format!(
+                    "could not track the hook's processes: {error}"
+                ))
+            }
+        };
         let body = input.to_string();
         let mut stdin = child.stdin.take();
+        let stderr = child.stderr.take();
         let work = async move {
             if let Some(stdin) = stdin.as_mut() {
                 // A hook that ignores stdin may close it early; that is fine.
@@ -245,17 +257,27 @@ impl Hooks {
                 let _ = stdin.shutdown().await;
             }
             drop(stdin);
-            child.wait_with_output().await
+            // Keep a bounded prefix of stderr; drain the rest so the hook
+            // never blocks on a full pipe.
+            let mut err = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = (&mut stderr)
+                    .take(MAX_HOOK_STDERR_BYTES)
+                    .read_to_end(&mut err)
+                    .await;
+                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            }
+            child.wait().await.map(|status| (status, err))
         };
         // On timeout the future (and the child, kill_on_drop) is dropped and
         // the tree guard kills anything the hook started.
         match tokio::time::timeout(Duration::from_secs(spec.timeout_secs), work).await {
-            Ok(Ok(out)) => {
+            Ok(Ok((status, stderr))) => {
                 tree.disarm();
                 HookRun::Exited {
-                    success: out.status.success(),
-                    code: out.status.code(),
-                    stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    success: status.success(),
+                    code: status.code(),
+                    stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
                 }
             }
             Ok(Err(error)) => HookRun::SpawnFailed(error.to_string()),

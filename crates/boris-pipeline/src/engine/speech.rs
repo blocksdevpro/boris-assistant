@@ -71,6 +71,47 @@ pub(super) struct StreamedSpeech {
     /// A feed job stopped because the agent cancelled its speech (a late
     /// tool call, or the turn ended without committing the answer).
     pub feed_cancelled: bool,
+    /// Units appended to playback by this job, in order.
+    pub appended: Vec<AppendedUnit>,
+    /// When playback of this job began, relative to the job (0 when it
+    /// resumed already-audible leftover audio). `None`: nothing played.
+    pub play_origin_ms: Option<u64>,
+    /// When the job stopped feeding or watching playback, relative to the job.
+    pub stop_ms: u64,
+}
+
+/// One synthesized unit handed to the output device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AppendedUnit {
+    pub text: String,
+    /// When it was appended, relative to the speech job.
+    pub at_ms: u64,
+    /// Audio length, including the inter-unit gap in front of it.
+    pub dur_ms: u64,
+}
+
+impl StreamedSpeech {
+    /// A job that played nothing because nothing was left to say.
+    pub fn nothing_left(tts: TtsBox) -> Self {
+        Self {
+            tts,
+            wait: PlaybackWait::Finished,
+            error: None,
+            played: true,
+            tts_first_ms: 0,
+            audio_started_ms: None,
+            audio_drained_ms: None,
+            tts_ms: 0,
+            play_ms: 0,
+            speech_ms: 0,
+            queued_samples: 0,
+            remaining_units: Vec::new(),
+            feed_cancelled: false,
+            appended: Vec::new(),
+            play_origin_ms: None,
+            stop_ms: 0,
+        }
+    }
 }
 
 /// Where a speech job's sentences come from.
@@ -281,6 +322,9 @@ pub(super) fn stream_reply(
                         queued_samples: 0,
                         remaining_units: Vec::new(),
                         feed_cancelled: false,
+                        appended: Vec::new(),
+                        play_origin_ms: None,
+                        stop_ms: 0,
                     };
                 }
             }
@@ -300,6 +344,9 @@ pub(super) fn stream_reply(
                     queued_samples: 0,
                     remaining_units: Vec::new(),
                     feed_cancelled: false,
+                    appended: Vec::new(),
+                    play_origin_ms: None,
+                    stop_ms: 0,
                 };
             }
             // Resume after barge-in with only leftover PCM — no more sentences.
@@ -326,6 +373,9 @@ pub(super) fn stream_reply(
                         queued_samples: 0,
                         remaining_units: all_units,
                         feed_cancelled: false,
+                        appended: Vec::new(),
+                        play_origin_ms: None,
+                        stop_ms: 0,
                     };
                 }
             }
@@ -356,6 +406,7 @@ pub(super) fn stream_reply(
     let mut heard_started = already_audible;
     let mut wait = PlaybackWait::Finished;
     let mut done = false;
+    let mut appended = Vec::new();
 
     while !done {
         let poll = poll_running(cmd_rx, running, audio, output_events, picture);
@@ -460,6 +511,7 @@ pub(super) fn stream_reply(
                         }
                         let pcm = pace_unit(pcm, gap_samples, already_audible || queued_units > 0);
                         let samples = pcm.len();
+                        let at_ms = started_at.elapsed().as_millis() as u64;
                         if let Err(error) = audio.append(pcm) {
                             synthesis_error =
                                 Some(format!("append TTS unit {}: {error}", index + 1));
@@ -479,6 +531,12 @@ pub(super) fn stream_reply(
                         }
                         queued_units += 1;
                         queued_samples = queued_samples.saturating_add(samples);
+                        appended.push(AppendedUnit {
+                            text: all_units.get(index).cloned().unwrap_or_default(),
+                            at_ms,
+                            dur_ms: (samples as u64).saturating_mul(1000)
+                                / u64::from(source_rate.max(1)),
+                        });
                     }
                     Ok(SynthEvent::Failed { index, message }) => {
                         tracing::warn!(%turn, unit = index, error = %message, "TTS stream unit failed");
@@ -628,6 +686,8 @@ pub(super) fn stream_reply(
 
         thread::sleep(EVENT_POLL);
     }
+    // Measured before the synth join below, which can take a while.
+    let stop_ms = started_at.elapsed().as_millis() as u64;
 
     if wait != PlaybackWait::Finished {
         if let Some(cancel) = cancel.as_ref() {
@@ -723,6 +783,13 @@ pub(super) fn stream_reply(
         queued_samples,
         remaining_units,
         feed_cancelled,
+        appended,
+        play_origin_ms: if already_audible {
+            Some(0)
+        } else {
+            audio_started_ms
+        },
+        stop_ms,
     }
 }
 

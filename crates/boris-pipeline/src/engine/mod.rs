@@ -1643,6 +1643,21 @@ fn run(
         // (tool-call turns already finished above).
         let mut units = speakable_reply_units(&reply);
         let gap_samples = rt.tts.inter_unit_silence_samples();
+        // Sentences a cancelled or aborted streamed answer already played to
+        // the end are not said twice when the reply starts with them.
+        let mut nothing_left = false;
+        if early.delivered.is_none() && !early.spoken.is_empty() {
+            let skip = early_speech::skip_spoken_prefix(&units, &early.spoken);
+            if skip > 0 {
+                tracing::info!(%turn, skip, total = units.len(), "skipping already spoken sentences");
+                turn_trace.mark(
+                    "answer_prefix_skipped",
+                    Some(serde_json::json!({ "units": skip, "of": units.len() })),
+                );
+                units.drain(..skip);
+                nothing_left = units.is_empty();
+            }
+        }
 
         // Decide follow-up before playback. Balanced and low-latency retain
         // both models across an active follow-up chain; low-memory reloads STT
@@ -1657,6 +1672,9 @@ fn run(
             speech_trace_start_ms = think_trace_ms.saturating_add(early.delivered_after_ms);
             turn_trace.mark_at("answer_streamed", speech_trace_start_ms, None, None);
             speech = done;
+        } else if nothing_left {
+            // The whole reply was already heard during Thinking.
+            speech = speech::StreamedSpeech::nothing_left(lost_tts());
         } else {
             loop {
                 let tts = std::mem::replace(&mut rt.tts, lost_tts());

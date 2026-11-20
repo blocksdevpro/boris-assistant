@@ -24,7 +24,7 @@ use super::barge::{
     decide_thinking_barge_listen, drain_mic, listen_after_pause, BargeDecision, BargeWatch,
 };
 use super::device_switch::{apply_input_switch, apply_output_switch};
-use super::early_speech::SpeechFeed;
+use super::early_speech::{SpeechFeed, SpokenLedger};
 use super::models::{lost_tts, SttBox, TtsBox, TtsSlot};
 use super::picture::Picture;
 use super::playback::{poll_running, PlaybackWait};
@@ -99,6 +99,10 @@ pub(super) struct EarlySpeech {
     pub progress_audio_ms: Option<u64>,
     /// When a streamed answer that was later cancelled became audible.
     pub cancelled_audio_ms: Option<u64>,
+    /// Leading sentences of the latest streamed answer that played to the
+    /// end before it was cancelled or aborted. The normal speech path skips
+    /// them when the final reply starts with the same text.
+    pub spoken: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -408,6 +412,7 @@ fn speak_while_thinking(
     let prev_activity = picture.activity.clone();
     let mut tts = tts;
     let mut already_audible = false;
+    let mut ledger = SpokenLedger::default();
     let step = loop {
         let units = match kind {
             SpeakKind::Answer => SpeechUnits::Feed {
@@ -432,6 +437,12 @@ fn speak_while_thinking(
         );
         tts = std::mem::replace(&mut speech.tts, lost_tts());
         sp.report.audible |= speech.played;
+        ledger.record(
+            &speech.appended,
+            speech.play_origin_ms,
+            speech.stop_ms,
+            speech.wait == PlaybackWait::Finished,
+        );
         if let Some(started) = speech.audio_started_ms {
             let at = started_after_ms.saturating_add(started);
             match kind {
@@ -521,6 +532,13 @@ fn speak_while_thinking(
         }
     };
     sp.tts.give_back(tts);
+    if kind == SpeakKind::Answer && sp.report.delivered.is_none() {
+        let spoken = ledger.spoken();
+        if !spoken.is_empty() {
+            tracing::info!(%turn, sentences = spoken.len(), "streamed sentences heard before cancel");
+            sp.report.spoken = spoken;
+        }
+    }
     // Our own playback tail must not be scored as a wake once Thinking resumes.
     drain_mic(mic);
     if let Some(w) = watch.as_deref_mut() {

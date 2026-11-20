@@ -513,11 +513,14 @@ impl Agent {
             preview,
         });
 
+        // Stamp the human turn so the model can tell "now" from "yesterday"
+        // across a resumed session (rendered as `<sent_at>` on the wire only).
+        let sent_at_ms = crate::session::now_unix_ms();
         if let Some(control) = &replacement_control {
             self.context
-                .push_human_with_control(control.clone(), user_text);
+                .push_human_with_control(control.clone(), user_text, sent_at_ms);
         } else {
-            self.context.push(Role::User, user_text);
+            self.context.push_human(user_text, sent_at_ms);
         }
         self.context.begin_task(user_text);
         self.retrieve_memory_for_turn(user_text).await;
@@ -1243,14 +1246,20 @@ mod retrieval_tests {
                     .is_some_and(|text| text.starts_with("<turn_replacement>"))
             })
             .unwrap();
-        assert_eq!(messages[control_index + 1]["content"], new_objective);
+        // The human turn is sent with its host `<sent_at>` stamp; the text is unchanged.
+        let human_text = |message: &Value| {
+            let text = message["content"].as_str().unwrap();
+            assert!(text.starts_with("<sent_at>"), "{text}");
+            crate::context::strip_sent_at_tags(text)
+        };
+        assert_eq!(human_text(&messages[control_index + 1]), new_objective);
         assert_eq!(messages.last().unwrap()["role"], "user");
         // Mutable host reference data follows the unchanged human history.
         assert!(messages.last().unwrap()["content"]
             .as_str()
             .unwrap()
             .starts_with("<derived_context>"));
-        assert_eq!(messages[messages.len() - 2]["content"], new_objective);
+        assert_eq!(human_text(&messages[messages.len() - 2]), new_objective);
         let task_state = messages
             .iter()
             .find_map(|message| {

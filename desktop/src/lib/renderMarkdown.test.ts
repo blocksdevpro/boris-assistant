@@ -28,3 +28,30 @@ describe("splitInline", () => {
     ]);
   });
 });
+
+describe("parseMarkdown hard-wrapped lists", () => {
+  it("joins indented continuation lines into the list item", () => {
+    const nodes = parseMarkdown(
+      "- first item that\n  wraps here\n- second\n\n1. step one\n   continues\n2. step two\n",
+    );
+    expect(nodes).toEqual([
+      { type: "ul", items: ["first item that wraps here", "second"] },
+      { type: "ol", items: ["step one continues", "step two"] },
+    ]);
+  });
+
+  it("does not swallow an unindented paragraph after a list", () => {
+    const nodes = parseMarkdown("- item\nnext paragraph");
+    expect(nodes[0]).toEqual({ type: "ul", items: ["item"] });
+  });
+});
+
+describe("splitInline links", () => {
+  it("extracts label and href", () => {
+    expect(splitInline("see [notes](https://x.dev/a) now")).toEqual([
+      { t: "text", v: "see " },
+      { t: "link", v: "notes", href: "https://x.dev/a" },
+      { t: "text", v: " now" },
+    ]);
+  });
+});

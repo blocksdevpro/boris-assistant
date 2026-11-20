@@ -106,7 +106,7 @@ Also: `context/` (message history + compaction), `memory/` (profile + long-term 
 **Security/policy model** (read `crates/boris-agent/README.md` before touching runtime/policy code):
 - `CapabilityPreset` (`VoiceSafe` / `LocalPower` / `Full`) filters which tools get registered and sets network/shell defaults.
 - `SandboxConfig` defines path roots (`allow_read`/`allow_write`), `NetworkPolicy`, `ShellPolicy`, HITL thresholds. All path-like tool args are checked under configured roots.
-- `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. On top of `OpenConfirm`, user-managed `[agent] shell_auto_allow` prefixes skip the yes/no only for a single plain command (no `; & | $ > <`, backticks, or newlines anywhere) that starts with a prefix on a word boundary; hard gates still apply. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
+- `ShellPolicy` (`Denied` / `Allowlist` / `OpenConfirm`): the bash deny-list is **best-effort only** — HITL confirmation is the real control. On top of `OpenConfirm`, user-managed `[agent] shell_auto_allow` prefixes skip the yes/no only for a single plain command (none of `; & | $ > < ( ) @ { } % ^ ! ~ #`, backticks, control characters, or non-alphanumeric non-ASCII anywhere) that starts with a prefix on a word boundary, has no file-writing / code-running / directory-switching option after it (`--output`, `-c`, `-C`, `--git-dir`, `--manifest-path`, …), and whose cwd does not overlap a write root (the agent can plant repo-controlled code there without a yes/no); hard gates still apply. An auto-allowed prefix still runs code the repository controls (git config/hooks, build scripts) — it is a convenience, not a security boundary. Never document or market the agent as fully sandboxed (this is called out explicitly in `SECURITY.md`/`CONTRIBUTING.md`).
 - `NetworkPolicy::Open` still SSRF-blocks loopback/RFC1918/link-local/metadata hosts on `web_fetch`; residual DNS-rebinding risk is documented in code, not solved.
 - User `[[hooks]]` in `config.toml` (`boris-agent/src/hooks.rs`, off unless configured) run arbitrary user commands: `pre_tool` after policy + HITL and before execute (non-zero exit / timeout blocks the call as a failed `hook_blocked` observation), `post_tool`, and background `turn_end`. They can only block, never widen policy.
 - HITL (human-in-the-loop) pauses dangerous tool calls for yes/no; after approval the runtime still enforces hard path/shell/network gates.
@@ -137,9 +137,10 @@ watch). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
 
 ```
 ~/.boris/
-  config.toml    # prefs: save_settings rewrites [models], [capability], [audio], [speech],
-                 #   [agent], [ui] unconditionally, and [logging] when a filter is set;
-                 #   unknown tables/keys outside those are preserved
+  config.toml    # prefs: save_settings merges [models], [capability], [audio], [speech],
+                 #   [agent], [ui] unconditionally; and [logging] when a filter is set,
+                 #   key by key (known keys set/removed; unknown keys + tables like [workspace]/[[hooks]] preserved;
+                 #   comments/formatting are NOT preserved — file is re-serialized)
   auth.json      # secrets: openrouter_api_key, exa_api_key (plaintext — never commit)
   BORIS.md       # optional user instructions (system prompt <user_instructions>)
   models/        # parakeet/, supertone/onnx/, supertone/voices/, optional livekit/ + silero/ seeds
@@ -151,7 +152,7 @@ watch). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
   speaker/       # live.json — wake liveness enroll (acoustic takes)
   state/workspace/ # sandboxed agent workspace
   state/projects.json # daily cache of discovered git repos (known projects)
-  state/reminders.json # timers + reminders (agent tools; spoken by the engine between turns: Armed or right after Talking, never mid-turn or during approvals; recorded as a `[Host event: ...]` note)
+  state/reminders.json # timers + reminders (agent tools; spoken by the engine only while Armed, never mid-turn, in a follow-up window, or during approvals; removed and recorded as a `[Host event: ...]` note only once heard, else retried after 30 s)
 ```
 
 Optional hand-edited `[workspace]` in `config.toml` (`projects = [...]`, `discover_projects`) lists known projects; they become read roots only and are rendered into the system prompt with the sandbox, real shell, and roots.
@@ -180,7 +181,7 @@ Product runtime prefers `~/.boris/models` (downloaded/bootstrapped), not the rep
 | `BORIS_MODEL_BASE_URL`, `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Model download |
 | `BORIS_MODEL_RESIDENCY` | `low_memory` \| `balanced` \| `low_latency` model residency |
 | `BORIS_TTS_VOICE` | TTS voice id |
-| `BORIS_LLM_FIRST_BYTE_SECS` / `BORIS_LLM_IDLE_SECS` | LLM stream stall budgets (default 20 / 30 s; `0` disables); a stall is retried once |
+| `BORIS_LLM_FIRST_BYTE_SECS` / `BORIS_LLM_IDLE_SECS` | LLM stream stall budgets (default 20 / 30 s; `0` disables); a stall before any output is retried once; a stall mid-stream fails |
 | `BORIS_CONTEXT_WINDOW_TOKENS` | LLM context window override |
 | `BORIS_MODEL_PROVIDER` / `BORIS_STRONG_PROVIDER` / `BORIS_FAST_PROVIDER` / `BORIS_PIN_PROVIDER` | OpenRouter host order / pinning |
 | `BORIS_LOG` / `RUST_LOG` | Log filters |

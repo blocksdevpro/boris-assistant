@@ -37,6 +37,11 @@ impl TurnTraceGuard {
         self.clock.elapsed().as_millis() as u64
     }
 
+    /// `at` as milliseconds since the turn started.
+    pub(super) fn ms_at(&self, at: Instant) -> u64 {
+        at.saturating_duration_since(self.clock).as_millis() as u64
+    }
+
     pub(super) fn mark(&mut self, name: impl Into<String>, meta: Option<Value>) {
         if let Some(trace) = self.trace.as_mut() {
             trace.mark(self.clock, name, meta);

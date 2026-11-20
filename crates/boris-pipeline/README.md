@@ -42,16 +42,19 @@ acceptance commits the rest. A committed answer that played to the end skips
 the normal speech path; anything else (cancelled, device loss, barge-in that
 discards) falls back to speaking the accepted reply. Early speech uses the
 Talking barge watch, so a barge-in pauses it at once, and the mic tail is
-drained before Thinking's wake watch resumes. Only the first Thinking pass of a
-turn streams; confirm and typed-input resumes speak after acceptance.
-`BORIS_STREAM_SPEECH=0` turns streaming off.
+drained before Thinking's wake watch resumes. Confirm and typed-input resumes
+stream the same way (`resume_thinking` lends the resident TTS model to the
+pass and restarts the feed), and a committed resume answer that played to the
+end also skips the normal speech path. `BORIS_STREAM_SPEECH=0` turns streaming
+off.
 
 On a long tool turn, once tool work has run for 7 s, Boris speaks one short
 progress line: the model's latest progress note (the content it sent with its
 tool calls), sanitized and cut to one sentence of at most 120 characters, or
 "Still working on it." if no note is usable. It is spoken at most once per
-turn, never after anything else was already audible, never once an approval
-or typed-input prompt has been raised, and not during confirm/input resumes.
+Thinking pass (the first pass and each confirm/input resume), never after
+anything else in that pass was already audible, and never once an approval or
+typed-input prompt has been raised in that pass.
 It plays through the same Talking barge watch as replies (AEC reference, no
 Armed liveness), so Boris's own voice is not scored as a wake; a barge-in that
 resumes drops the rest of the line. `[speech] progress_line` (default on, also

@@ -62,6 +62,21 @@ impl SpeechFeed {
         )
     }
 
+    /// Start a new Thinking pass (a confirm/input resume): drop whatever the
+    /// previous pass left queued and forget its speech, tool, and approval
+    /// state.
+    pub fn restart(&mut self) {
+        while self.rx.try_recv().is_ok() {}
+        self.pending.clear();
+        self.committed = false;
+        self.cancelled = false;
+        self.disabled = false;
+        self.said.clear();
+        self.tool_started = None;
+        self.note = None;
+        self.approval = false;
+    }
+
     /// Apply every queued message. Returns true when new speech arrived.
     pub fn drain(&mut self) -> bool {
         let mut added = false;
@@ -317,6 +332,36 @@ mod tests {
         feed.drain();
         assert!(!feed.has_units());
         assert!(!feed.committed());
+    }
+
+    #[test]
+    fn restart_forgets_the_previous_pass() {
+        let (tx, mut feed) = feed();
+        for msg in [
+            FeedMsg::Speech(SpeechSignal::Chunk("Deleting it now.".into())),
+            FeedMsg::ToolStarted,
+            FeedMsg::Approval,
+        ] {
+            tx.send(msg).unwrap();
+        }
+        feed.drain();
+        feed.disable();
+        // Left in the channel after the last drain of the first pass.
+        tx.send(FeedMsg::Speech(SpeechSignal::Cancel)).unwrap();
+        feed.restart();
+        assert!(!feed.take_cancelled());
+        assert!(feed.said().is_empty());
+        assert!(!feed.progress_due(Instant::now() + PROGRESS_LINE_AFTER));
+
+        // The resume streams and may speak a progress line again.
+        tx.send(FeedMsg::Speech(SpeechSignal::Chunk("Done.".into())))
+            .unwrap();
+        tx.send(FeedMsg::Speech(SpeechSignal::Commit)).unwrap();
+        tx.send(FeedMsg::ToolStarted).unwrap();
+        feed.drain();
+        assert!(feed.has_units());
+        assert!(feed.committed());
+        assert!(feed.progress_due(Instant::now() + PROGRESS_LINE_AFTER));
     }
 
     #[test]

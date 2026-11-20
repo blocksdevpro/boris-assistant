@@ -446,6 +446,27 @@ fn apply_device_cmd(rt: &mut EngineRuntime, cmd: EngineCommand) {
     }
 }
 
+/// Trace when early speech of one Thinking pass became audible. `base_ms` is
+/// the pass start on the turn clock.
+fn trace_early_audio(turn_trace: &mut TurnTraceGuard, early: &EarlySpeech, base_ms: u64) {
+    if let Some(at) = early.progress_audio_ms {
+        turn_trace.mark_at(
+            "progress_audio_started",
+            base_ms.saturating_add(at),
+            None,
+            None,
+        );
+    }
+    if let Some(at) = early.cancelled_audio_ms {
+        turn_trace.mark_at(
+            "early_audio_started",
+            base_ms.saturating_add(at),
+            None,
+            None,
+        );
+    }
+}
+
 fn go_off_session(rt: &mut EngineRuntime, sess: &mut SessionRefs<'_>) {
     go_off(
         &mut rt.picture,
@@ -1352,7 +1373,7 @@ fn run(
         // their side effects are not redone or contradicted. A turn where
         // nothing executed is restored to this checkpoint exactly.
         let turn_checkpoint = rt.agent.checkpoint();
-        let think_trace_ms = turn_trace.elapsed_ms();
+        let mut think_trace_ms = turn_trace.elapsed_ms();
         let think = run_thinking(ThinkCtx {
             agent: &mut rt.agent,
             agent_rt: &rt.agent_rt,
@@ -1379,22 +1400,7 @@ fn run(
         });
         let (tts_owned, tts_load) = tts_slot.join();
         rt.tts = tts_owned;
-        if let Some(at) = early.progress_audio_ms {
-            turn_trace.mark_at(
-                "progress_audio_started",
-                think_trace_ms.saturating_add(at),
-                None,
-                None,
-            );
-        }
-        if let Some(at) = early.cancelled_audio_ms {
-            turn_trace.mark_at(
-                "early_audio_started",
-                think_trace_ms.saturating_add(at),
-                None,
-                None,
-            );
-        }
+        trace_early_audio(&mut turn_trace, &early, think_trace_ms);
 
         let (outcome, report) = match think {
             ThinkResolve::Stopped => {
@@ -1522,8 +1528,22 @@ fn run(
             max_confirms,
             residency: rt.residency,
             last_resume_report: None,
+            feed: &mut speech_feed,
+            progress_line: rt.progress_line,
+            resume_speech: Vec::new(),
         };
-        let outcome = match resolve_agent_outcome(outcome, &mut confirm) {
+        let resolved = resolve_agent_outcome(outcome, &mut confirm);
+        // Resumes stream like the first pass. The last one produced the final
+        // reply, so its early speech replaces the first pass's.
+        for pass in std::mem::take(&mut confirm.resume_speech) {
+            let base_ms = pass
+                .started_at
+                .map_or(think_trace_ms, |at| turn_trace.ms_at(at));
+            trace_early_audio(&mut turn_trace, &pass, base_ms);
+            think_trace_ms = base_ms;
+            early = pass;
+        }
+        let outcome = match resolved {
             OutcomeResolve::Stopped => {
                 unsub();
                 continue;

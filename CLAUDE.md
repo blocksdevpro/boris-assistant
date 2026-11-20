@@ -129,8 +129,9 @@ no tool call (or the response ends); a tool call that starts later sends
 calls is never committed, and `[silent]`/markup/code is never streamed early.
 The engine plays chunks from a channel inside `run_thinking` (feed-mode
 `stream_reply`, same Talking barge watch); a committed, fully played answer
-skips the normal speech path. Confirm/input resumes do not stream (their reply
-is spoken after acceptance). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
+skips the normal speech path. Confirm/input resumes go through the same path
+(`outcome::resume_thinking`: streamed answer, progress line, Talking barge
+watch). `BORIS_STREAM_SPEECH=0` restores speak-after-accept.
 
 ### `~/.boris` (product runtime data root, override with `BORIS_HOME`)
 

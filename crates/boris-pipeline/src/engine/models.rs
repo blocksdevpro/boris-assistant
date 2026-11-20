@@ -201,6 +201,17 @@ pub(super) enum TtsSlot {
 }
 
 impl TtsSlot {
+    /// Lend an already-resident model (confirm/input resumes). Early speech
+    /// takes it only when it is loaded; nothing loads on the engine thread.
+    pub fn resident(tts: TtsBox) -> Self {
+        let result = if tts.is_loaded() {
+            Ok(())
+        } else {
+            Err("tts not loaded".into())
+        };
+        Self::Ready(tts, result)
+    }
+
     fn poll(&mut self) {
         let (tts, result) = match self {
             Self::Loading(ModelLoadJob::Pending(rx)) => match rx.try_recv() {
@@ -387,7 +398,7 @@ impl TextToSpeech for NullTts {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelLoadJob, ModelLoader, ModelResidency};
+    use super::{ModelLoadJob, ModelLoader, ModelResidency, TtsSlot};
 
     #[test]
     fn residency_handoff_and_idle_policy_is_explicit() {
@@ -398,6 +409,40 @@ mod tests {
         assert!(ModelResidency::LowMemory.should_evict_idle());
         assert!(ModelResidency::Balanced.should_evict_idle());
         assert!(!ModelResidency::LowLatency.should_evict_idle());
+    }
+
+    #[test]
+    fn resident_slot_lends_only_a_loaded_model_and_returns_it() {
+        struct Fake(bool);
+        impl boris_inference::TextToSpeech for Fake {
+            fn synthesize(&mut self, _text: &str) -> boris_core::Result<boris_core::AudioBuffer> {
+                Ok(Vec::new())
+            }
+            fn is_loaded(&self) -> bool {
+                self.0
+            }
+            fn backend_id(&self) -> &str {
+                if self.0 {
+                    "loaded"
+                } else {
+                    "cold"
+                }
+            }
+        }
+
+        let mut cold = TtsSlot::resident(Box::new(Fake(false)));
+        assert!(
+            cold.take_loaded().is_none(),
+            "never loads on the engine thread"
+        );
+        assert_eq!(cold.join().0.backend_id(), "cold");
+
+        let mut warm = TtsSlot::resident(Box::new(Fake(true)));
+        let lent = warm.take_loaded().expect("loaded model is lent");
+        warm.give_back(lent);
+        let (tts, result) = warm.join();
+        assert!(result.is_ok());
+        assert_eq!(tts.backend_id(), "loaded");
     }
 
     #[test]

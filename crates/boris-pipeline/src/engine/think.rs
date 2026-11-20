@@ -75,8 +75,8 @@ pub(super) enum AgentWork<'a> {
     },
 }
 
-/// Speech that may start before the agent turn returns (first Thinking pass
-/// of a turn only; confirm/input resumes pass `None`).
+/// Speech that may start before the agent turn returns: the first Thinking
+/// pass of a turn and each confirm/input resume.
 pub(super) struct ThinkSpeech<'a> {
     pub feed: &'a mut SpeechFeed,
     pub tts: &'a mut TtsSlot,
@@ -84,9 +84,12 @@ pub(super) struct ThinkSpeech<'a> {
     pub report: &'a mut EarlySpeech,
 }
 
-/// What early speech did during Thinking.
+/// What early speech did during one Thinking pass. Times are measured from
+/// `started_at`.
 #[derive(Default)]
 pub(super) struct EarlySpeech {
+    /// When the Thinking pass began.
+    pub started_at: Option<Instant>,
     /// The committed final answer played to the end. Its `tts` is a
     /// placeholder; the model went back to the slot.
     pub delivered: Option<StreamedSpeech>,
@@ -159,6 +162,9 @@ pub(super) fn run_thinking(ctx: ThinkCtx<'_>) -> ThinkResolve {
         mut speech,
     } = ctx;
     let think_started = Instant::now();
+    if let Some(sp) = speech.as_mut() {
+        sp.report.started_at = Some(think_started);
+    }
 
     let handle = agent_rt.handle().clone();
     let cancel = agent.arm_cancel();

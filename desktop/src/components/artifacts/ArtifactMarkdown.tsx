@@ -115,6 +115,16 @@ function Inline({ text }: { text: string }) {
             </strong>
           );
         if (part.t === "em") return <em key={i}>{part.v}</em>;
+        if (part.t === "link")
+          return (
+            <span
+              key={i}
+              title={part.href}
+              className="underline decoration-white/25 underline-offset-2"
+            >
+              {part.v}
+            </span>
+          );
         return <span key={i}>{part.v}</span>;
       })}
     </>

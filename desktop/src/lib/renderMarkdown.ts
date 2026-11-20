@@ -41,8 +41,10 @@ export function parseMarkdown(src: string): MdNode[] {
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i] ?? "")) {
-        items.push((lines[i] ?? "").replace(/^\s*[-*]\s+/, ""));
+        const item = [(lines[i] ?? "").replace(/^\s*[-*]\s+/, "")];
         i += 1;
+        i = takeContinuation(lines, i, item);
+        items.push(item.join(" "));
       }
       out.push({ type: "ul", items });
       continue;
@@ -50,8 +52,10 @@ export function parseMarkdown(src: string): MdNode[] {
     if (/^\s*\d+\.\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i] ?? "")) {
-        items.push((lines[i] ?? "").replace(/^\s*\d+\.\s+/, ""));
+        const item = [(lines[i] ?? "").replace(/^\s*\d+\.\s+/, "")];
         i += 1;
+        i = takeContinuation(lines, i, item);
+        items.push(item.join(" "));
       }
       out.push({ type: "ol", items });
       continue;
@@ -74,17 +78,48 @@ export function parseMarkdown(src: string): MdNode[] {
   return out;
 }
 
-/** Split inline `code`, **bold**, *italic* — still text-only, no HTML. */
-export function splitInline(text: string): Array<{ t: "text" | "code" | "strong" | "em"; v: string }> {
-  const out: Array<{ t: "text" | "code" | "strong" | "em"; v: string }> = [];
-  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+/**
+ * Indented, non-blank lines after a list item are a hard-wrapped
+ * continuation of it (as in release notes wrapped at ~80 columns).
+ * Appends them to `item` and returns the next unread index.
+ */
+function takeContinuation(lines: string[], i: number, item: string[]): number {
+  while (i < lines.length) {
+    const next = lines[i] ?? "";
+    if (
+      !/^\s+\S/.test(next) ||
+      /^\s*[-*]\s+/.test(next) ||
+      /^\s*\d+\.\s+/.test(next)
+    ) {
+      break;
+    }
+    item.push(next.trim());
+    i += 1;
+  }
+  return i;
+}
+
+export type InlinePart =
+  | { t: "text" | "code" | "strong" | "em"; v: string }
+  | { t: "link"; v: string; href: string };
+
+/**
+ * Split inline `code`, **bold**, *italic*, [label](url) — still text-only,
+ * no HTML. Hosts decide whether a link is clickable.
+ */
+export function splitInline(text: string): InlinePart[] {
+  const out: InlinePart[] = [];
+  const re = /(`[^`]+`|\[[^\]]+\]\([^)\s]+\)|\*\*[^*]+\*\*|\*[^*]+\*)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push({ t: "text", v: text.slice(last, m.index) });
     const tok = m[0];
     if (tok.startsWith("`")) out.push({ t: "code", v: tok.slice(1, -1) });
-    else if (tok.startsWith("**")) out.push({ t: "strong", v: tok.slice(2, -2) });
+    else if (tok.startsWith("[")) {
+      const close = tok.indexOf("](");
+      out.push({ t: "link", v: tok.slice(1, close), href: tok.slice(close + 2, -1) });
+    } else if (tok.startsWith("**")) out.push({ t: "strong", v: tok.slice(2, -2) });
     else out.push({ t: "em", v: tok.slice(1, -1) });
     last = m.index + tok.length;
   }

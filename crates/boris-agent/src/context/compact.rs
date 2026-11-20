@@ -477,6 +477,7 @@ impl Context {
             content: Value::String(format!(
                 "<conversation_summary>\n{summary}\n</conversation_summary>"
             )),
+            sent_at_ms: None,
         });
         self.messages.extend(recent);
     }

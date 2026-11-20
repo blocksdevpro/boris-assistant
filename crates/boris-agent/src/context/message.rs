@@ -74,7 +74,20 @@ pub struct Message {
     /// For Tool: a JSON object `{ tool_call_id, content }`.
     /// For Assistant with tool_calls: the raw message object from the LLM.
     pub content: Value,
+    /// Wall-clock send time (Unix ms) of a human message, when the host knows it.
+    ///
+    /// Host metadata, never part of `content`: it is rendered as a leading
+    /// `<sent_at>` tag only on the provider wire ([`Message::dump`]) and
+    /// persisted beside the content ([`Message::persist_pair`]).
+    pub sent_at_ms: Option<u64>,
 }
+
+/// Host-only key carrying a human message's send time inside a persisted
+/// `(role, content)` pair: `{ "content": …, "_sent_at_ms": u64 }`.
+pub const SENT_AT_KEY: &str = "_sent_at_ms";
+
+const SENT_AT_OPEN: &str = "<sent_at>";
+const SENT_AT_CLOSE: &str = "</sent_at>";
 
 impl Message {
     pub fn new(role: Role, content: impl Into<Value>) -> Self {
@@ -82,6 +95,7 @@ impl Message {
             origin: MessageOrigin::for_role(role.clone()),
             role,
             content: content.into(),
+            sent_at_ms: None,
         }
     }
 
@@ -90,8 +104,98 @@ impl Message {
             role,
             origin,
             content: content.into(),
+            sent_at_ms: None,
         }
     }
+
+    /// A real human turn stamped with the time it was sent.
+    pub fn human_at(content: impl Into<Value>, sent_at_ms: u64) -> Self {
+        Self {
+            sent_at_ms: Some(sent_at_ms),
+            ..Self::new(Role::User, content)
+        }
+    }
+
+    /// Send time to render on the wire: human turns only.
+    fn wire_sent_at(&self) -> Option<u64> {
+        if self.origin == MessageOrigin::Human && matches!(self.role, Role::User) {
+            self.sent_at_ms
+        } else {
+            None
+        }
+    }
+
+    /// `(role, content)` for session persistence. A stamped human message
+    /// wraps its content as `{ "content": …, "_sent_at_ms": … }` so the send
+    /// time survives transcript rewrites; [`split_sent_at`] reverses it.
+    pub fn persist_pair(&self) -> (String, Value) {
+        let content = match self.wire_sent_at() {
+            Some(ms) => json!({ "content": self.content.clone(), SENT_AT_KEY: ms }),
+            None => self.content.clone(),
+        };
+        (self.role.to_string(), content)
+    }
+}
+
+/// Unwrap a persisted `{ "content", "_sent_at_ms" }` pair body. Anything else
+/// is returned unchanged with no time.
+pub fn split_sent_at(content: &Value) -> (Value, Option<u64>) {
+    if let Some(obj) = content.as_object() {
+        if let (Some(ms), Some(inner)) = (
+            obj.get(SENT_AT_KEY).and_then(Value::as_u64),
+            obj.get("content"),
+        ) {
+            return (inner.clone(), Some(ms));
+        }
+    }
+    (content.clone(), None)
+}
+
+/// Local wall-clock label for a send time, e.g. `Thu 2026-11-19 10:58`.
+fn sent_at_label(ms: u64) -> Option<String> {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(i64::try_from(ms).ok()?) {
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
+            Some(dt.format("%a %Y-%m-%d %H:%M").to_string())
+        }
+        chrono::LocalResult::None => None,
+    }
+}
+
+/// Prefix wire content with `<sent_at>…</sent_at>` (text or content parts).
+fn stamp_content(content: Value, ms: u64) -> Value {
+    let Some(label) = sent_at_label(ms) else {
+        return content;
+    };
+    let tag = format!("{SENT_AT_OPEN}{label}{SENT_AT_CLOSE}");
+    match content {
+        Value::String(text) => Value::String(format!("{tag}\n{text}")),
+        Value::Array(mut parts) => {
+            parts.insert(0, json!({ "type": "text", "text": tag }));
+            Value::Array(parts)
+        }
+        other => other,
+    }
+}
+
+/// Remove any `<sent_at>…</sent_at>` a model copied into its own reply so the
+/// host stamp is never spoken or persisted as assistant text.
+pub fn strip_sent_at_tags(text: &str) -> String {
+    if !text.contains(SENT_AT_OPEN) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(SENT_AT_OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + SENT_AT_OPEN.len()..];
+        rest = match after.find(SENT_AT_CLOSE) {
+            Some(end) => &after[end + SENT_AT_CLOSE.len()..],
+            None => after,
+        };
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 /// Raw provider reasoning blocks on an assistant message (OpenRouter
@@ -153,10 +257,16 @@ impl Message {
                 msg
             }
             // Everything else (system / user / plain assistant).
-            _ => json!({
-                "role":    self.role.to_string(),
-                "content": coerce_message_content(&self.content),
-            }),
+            _ => {
+                let mut content = coerce_message_content(&self.content);
+                if let Some(ms) = self.wire_sent_at() {
+                    content = stamp_content(content, ms);
+                }
+                json!({
+                    "role":    self.role.to_string(),
+                    "content": content,
+                })
+            }
         }
     }
 }
@@ -237,6 +347,7 @@ mod tests {
                 "role": "assistant",
                 "content": "[prior tool batch: 2 call(s) — details omitted]"
             }),
+            sent_at_ms: None,
         };
         let dumped = msg.dump();
         assert_eq!(dumped["role"], "assistant");
@@ -265,6 +376,7 @@ mod tests {
                     "function": { "name": "bash", "arguments": "{}" }
                 }]
             }),
+            sent_at_ms: None,
         };
         let dumped = msg.dump();
         assert_eq!(dumped["content"], json!(""));
@@ -277,10 +389,56 @@ mod tests {
             role: Role::Tool,
             origin: MessageOrigin::Tool,
             content: json!({ "tool_call_id": "call_9", "content": "ok" }),
+            sent_at_ms: None,
         };
         let dumped = msg.dump();
         assert_eq!(dumped["role"], "tool");
         assert_eq!(dumped["tool_call_id"], "call_9");
         assert_eq!(dumped["content"], "ok");
+    }
+
+    #[test]
+    fn stamped_human_dump_prefixes_sent_at_and_keeps_content_clean() {
+        let msg = Message::human_at("what are you doing?", 1_700_000_000_000);
+        let dumped = msg.dump();
+        let text = dumped["content"].as_str().unwrap();
+        assert!(text.starts_with("<sent_at>"), "{text}");
+        assert!(text.ends_with("</sent_at>\nwhat are you doing?"), "{text}");
+        assert_eq!(msg.content, json!("what are you doing?"));
+    }
+
+    #[test]
+    fn unstamped_and_non_human_dump_unchanged() {
+        assert_eq!(Message::new(Role::User, "hi").dump()["content"], json!("hi"));
+        let mut control = Message::with_origin(Role::User, MessageOrigin::HostControl, "note");
+        control.sent_at_ms = Some(1_700_000_000_000);
+        assert_eq!(control.dump()["content"], json!("note"));
+    }
+
+    #[test]
+    fn stamped_parts_get_leading_text_part() {
+        let msg = Message::human_at(json!([{ "type": "text", "text": "hi" }]), 1_700_000_000_000);
+        let parts = msg.dump()["content"].clone();
+        assert!(parts[0]["text"].as_str().unwrap().starts_with("<sent_at>"));
+        assert_eq!(parts[1]["text"], "hi");
+    }
+
+    #[test]
+    fn persist_pair_roundtrips_sent_at() {
+        let msg = Message::human_at("stop", 1_700_000_000_000);
+        let (role, body) = msg.persist_pair();
+        assert_eq!(role, "user");
+        assert_eq!(split_sent_at(&body), (json!("stop"), Some(1_700_000_000_000)));
+        let plain = Message::new(Role::Assistant, "ok").persist_pair().1;
+        assert_eq!(split_sent_at(&plain), (json!("ok"), None));
+    }
+
+    #[test]
+    fn strip_sent_at_tags_removes_echoed_stamp() {
+        assert_eq!(
+            strip_sent_at_tags("<sent_at>Thu 2026-11-19 10:58</sent_at>\nNothing right now."),
+            "Nothing right now."
+        );
+        assert_eq!(strip_sent_at_tags("plain"), "plain");
     }
 }

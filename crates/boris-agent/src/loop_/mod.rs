@@ -374,6 +374,8 @@ pub async fn agent_loop_with_budget(
 
         // Content-only response (or tools withheld / ignored at cap).
         let mut reply = extract_reply_text(&response);
+        // Host send-time stamps belong to human turns; never speak a copied one.
+        reply = crate::context::strip_sent_at_tags(&reply);
 
         // Never speak or persist tool XML / pseudo-tool text. Do not execute it.
         if crate::speech_sanitize::contains_tool_markup(&reply) {

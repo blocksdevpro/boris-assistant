@@ -128,12 +128,18 @@ impl TranscriptRecord {
                 })
             }
             role => {
-                // user (and any other text roles)
-                json!({
+                // user (and any other text roles). A stamped human row keeps
+                // its send time as `sent_at` beside the content blocks.
+                let (content, sent_at) = crate::context::split_sent_at(&self.content);
+                let mut row = json!({
                     "type": role,
-                    "content": content_to_blocks(&self.content),
+                    "content": content_to_blocks(&content),
                     "ts": ts,
-                })
+                });
+                if let Some(ms) = sent_at {
+                    row["sent_at"] = json!(ms_to_rfc3339(ms));
+                }
+                row
             }
         };
         serde_json::to_string(&v).map_err(|e| format!("serialize chat_history record: {e}"))
@@ -232,10 +238,21 @@ impl TranscriptRecord {
                     .get("content")
                     .cloned()
                     .ok_or_else(|| "missing content".to_string())?;
+                let mut content = blocks_to_content(content);
+                // Rebuild the `persist_pair` wrapper so the send time reaches
+                // `Context::messages_from_transcript` (missing/invalid → none).
+                if let Some(ms) = v
+                    .get("sent_at")
+                    .and_then(|x| x.as_str())
+                    .map(rfc3339_to_ms)
+                    .filter(|ms| *ms > 0)
+                {
+                    content = json!({ "content": content, crate::context::SENT_AT_KEY: ms });
+                }
                 Ok(Self {
                     ts_ms,
                     role: other.to_string(),
-                    content: blocks_to_content(content),
+                    content,
                 })
             }
         }
@@ -258,6 +275,23 @@ mod tests {
         assert_eq!(v["type"], "user");
         assert!(v["content"].is_array());
         assert_eq!(v["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn human_send_time_survives_transcript_roundtrip() {
+        let message = crate::context::Message::human_at("stop", 1_700_000_000_000);
+        let (role, content) = message.persist_pair();
+        let record = TranscriptRecord::from_role_content(&role, content);
+        let line = record.to_json_line().unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["content"][0]["text"], "stop");
+        assert_eq!(v["sent_at"], "2023-11-14T22:13:20.000Z");
+
+        let restored = TranscriptRecord::from_json_value(v).unwrap();
+        let messages =
+            crate::context::Context::messages_from_transcript(&[(restored.role, restored.content)]);
+        assert_eq!(messages[0].sent_at_ms, Some(1_700_000_000_000));
+        assert_eq!(messages[0].content, json!("stop"));
     }
 
     #[test]

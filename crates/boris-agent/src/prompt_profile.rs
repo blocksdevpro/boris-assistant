@@ -9,12 +9,16 @@
 //! | [`UserInfo`] | Host facts for the `<user_info>` block |
 //! | [`PromptContext`] | Inspectable sections + stable `render()` order |
 //!
-//! Render order is fixed: base → user_info → workspace → skills policy → memory hint.
+//! Render order is fixed: base → user_info → workspace → time policy →
+//! skills policy → memory hint.
 //! Empty / whitespace-only optional sections are omitted.
 
 use serde::{Deserialize, Serialize};
 
 const MAX_USER_INFO_VALUE_CHARS: usize = 512;
+
+/// How the model should read the host's per-message `<sent_at>` stamps.
+pub const TIME_AWARENESS_POLICY: &str = "Time awareness: the host starts each human message with <sent_at>local day, date and time</sent_at>. The newest stamp is the current time. Use the stamps to judge how long ago earlier requests, answers, and interruptions happened: something asked or stopped yesterday is not happening now, and a long gap usually means a new topic. Do not write <sent_at> tags yourself, and only mention times when they matter to the answer.";
 
 /// Snapshot of environment facts for the `<user_info>` block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -108,6 +112,8 @@ pub struct PromptContext {
     /// Pre-rendered workspace block (sandbox, shell, roots, known projects,
     /// user BORIS.md); see [`crate::workspace::WorkspaceProfile`].
     pub workspace: Option<String>,
+    /// Static guidance for reading `<sent_at>` stamps on human messages.
+    pub time_policy: Option<String>,
     /// Static host-authored policy for using the separately injected catalog.
     pub skills_policy: Option<String>,
     /// Optional memory / RAG hint when long-term memory is enabled.
@@ -129,6 +135,11 @@ impl PromptContext {
 
     pub fn with_workspace(mut self, block: Option<String>) -> Self {
         self.workspace = block.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    pub fn with_time_policy(mut self, policy: Option<String>) -> Self {
+        self.time_policy = policy.filter(|s| !s.trim().is_empty());
         self
     }
 
@@ -159,6 +170,12 @@ impl PromptContext {
 
         if let Some(w) = &self.workspace {
             let t = w.trim();
+            if !t.is_empty() {
+                parts.push(t);
+            }
+        }
+        if let Some(t) = &self.time_policy {
+            let t = t.trim();
             if !t.is_empty() {
                 parts.push(t);
             }

@@ -39,8 +39,8 @@ pub(crate) use compact::estimate_serialized_tokens;
 pub use compact::ContextBudget;
 pub(crate) use images::IMAGE_TOKEN_ESTIMATE;
 pub(crate) use interrupt::TurnEnd;
-pub use message::{Message, MessageOrigin};
 pub(crate) use message::REASONING_DETAILS_KEY;
+pub use message::{split_sent_at, strip_sent_at_tags, Message, MessageOrigin, SENT_AT_KEY};
 pub use retrieval::RetrievedMemory;
 pub use role::Role;
 pub use task_state::{TaskStateCapsule, TaskStateEntry, TaskStatus};
@@ -107,6 +107,14 @@ impl Context {
         self.prune();
     }
 
+    /// Start a real human turn stamped with its wall-clock send time.
+    pub(crate) fn push_human(&mut self, content: impl Into<Value>, sent_at_ms: u64) {
+        let message = Message::human_at(content, sent_at_ms);
+        self.history.push(message.clone());
+        self.messages.push(message);
+        self.prune();
+    }
+
     /// Add an ephemeral harness instruction without creating a human turn.
     pub fn push_control(&mut self, content: impl Into<Value>) {
         self.messages.push(Message::with_origin(
@@ -126,9 +134,10 @@ impl Context {
         &mut self,
         control: impl Into<Value>,
         human: impl Into<Value>,
+        sent_at_ms: u64,
     ) {
         self.drop_turn_scoped_payloads();
-        let human = Message::new(Role::User, human);
+        let human = Message::human_at(human, sent_at_ms);
         self.history.push(human.clone());
         self.messages.push(human);
         self.prune();
@@ -188,6 +197,7 @@ impl Context {
                 role: Role::System,
                 origin: MessageOrigin::System,
                 content: content.clone(),
+                sent_at_ms: None,
             };
             self.messages.insert(0, message);
         }
@@ -209,6 +219,7 @@ impl Context {
                     role: Role::System,
                     origin: MessageOrigin::System,
                     content,
+                    sent_at_ms: None,
                 },
             );
         }
@@ -461,6 +472,7 @@ impl Context {
             role: Role::System,
             origin: MessageOrigin::System,
             content: Value::String(system_prompt.to_string()),
+            sent_at_ms: None,
         };
         self.messages.push(current_system.clone());
         self.history = history
@@ -531,16 +543,24 @@ impl Context {
     ///
     /// Skips unknown roles. Prefer this over importing session transcript types
     /// so `context` stays free of a dependency cycle with `session`.
+    ///
+    /// Human rows persisted by [`Message::persist_pair`] carry their send time
+    /// as `{ "content", "_sent_at_ms" }`; it is restored to `sent_at_ms`.
     pub fn messages_from_transcript(records: &[(String, Value)]) -> Vec<Message> {
         records
             .iter()
             .filter_map(|(role, content)| {
                 let role = Role::from_role_str(role)?;
-                let origin = infer_transcript_origin(role.clone(), content);
+                let (content, sent_at_ms) = match role {
+                    Role::User => split_sent_at(content),
+                    _ => (content.clone(), None),
+                };
+                let origin = infer_transcript_origin(role.clone(), &content);
                 Some(Message {
                     role,
+                    sent_at_ms: sent_at_ms.filter(|_| origin.is_human()),
                     origin,
-                    content: content.clone(),
+                    content,
                 })
             })
             .collect()
@@ -733,16 +753,19 @@ mod tests {
                 role: Role::System,
                 origin: MessageOrigin::System,
                 content: json!("history-sys"),
+                sent_at_ms: None,
             },
             Message {
                 role: Role::User,
                 origin: MessageOrigin::Human,
                 content: json!("hello"),
+                sent_at_ms: None,
             },
             Message {
                 role: Role::Assistant,
                 origin: MessageOrigin::Assistant,
                 content: json!("hi"),
+                sent_at_ms: None,
             },
         ];
         ctx.load_history("fresh-sys", history);
@@ -769,6 +792,17 @@ mod tests {
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
         assert!(matches!(msgs[2].role, Role::Tool));
+    }
+
+    #[test]
+    fn messages_from_transcript_restores_human_send_time() {
+        let stamped = Message::human_at("stop", 1_700_000_000_000);
+        let records = vec![stamped.persist_pair(), ("user".into(), json!("legacy row"))];
+        let messages = Context::messages_from_transcript(&records);
+        assert_eq!(messages[0].content, json!("stop"));
+        assert_eq!(messages[0].sent_at_ms, Some(1_700_000_000_000));
+        assert_eq!(messages[0].origin, MessageOrigin::Human);
+        assert_eq!(messages[1].sent_at_ms, None);
     }
 
     #[test]

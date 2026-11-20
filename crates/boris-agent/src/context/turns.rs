@@ -164,6 +164,7 @@ mod tests {
                 role: Role::User,
                 origin: MessageOrigin::Human,
                 content: json!("u"),
+                sent_at_ms: None,
             }]),
             0
         );
@@ -172,6 +173,7 @@ mod tests {
                 role: Role::System,
                 origin: MessageOrigin::System,
                 content: json!("s"),
+                sent_at_ms: None,
             }]),
             1
         );
@@ -184,21 +186,25 @@ mod tests {
                 role: Role::System,
                 origin: MessageOrigin::System,
                 content: json!("s"),
+                sent_at_ms: None,
             },
             Message {
                 role: Role::User,
                 origin: MessageOrigin::Human,
                 content: json!("u1"),
+                sent_at_ms: None,
             },
             Message {
                 role: Role::Assistant,
                 origin: MessageOrigin::Assistant,
                 content: json!("a1"),
+                sent_at_ms: None,
             },
             Message {
                 role: Role::User,
                 origin: MessageOrigin::Human,
                 content: json!("u2"),
+                sent_at_ms: None,
             },
         ];
         assert_eq!(user_turn_starts(&msgs, 1), vec![1, 3]);

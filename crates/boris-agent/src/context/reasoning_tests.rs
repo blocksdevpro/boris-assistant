@@ -74,7 +74,7 @@ fn next_human_turn_strips_reasoning_from_context_and_history() {
         "c2",
         json!([{"type": "reasoning.encrypted", "data": "BLOB"}]),
     );
-    ctx.push_human_with_control("<turn_replacement>x</turn_replacement>", "new ask");
+    ctx.push_human_with_control("<turn_replacement>x</turn_replacement>", "new ask", 0);
     assert!(wire_details(&ctx).is_empty());
 }
 

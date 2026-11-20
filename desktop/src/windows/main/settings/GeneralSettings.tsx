@@ -14,6 +14,7 @@ import {
   selectCompactClass,
   type UpdateUiState,
 } from "../mainWindowShared";
+import { ReleaseNotes } from "./ReleaseNotes";
 
 /** Startup, performance, and updates — the "how Boris runs" page. */
 export function GeneralSettings({
@@ -241,11 +242,7 @@ export function GeneralSettings({
           </div>
         ) : null}
         {hasUpdate && availableUpdate?.body ? (
-          <div className="border-t border-white/[0.06] px-4 py-3">
-            <p className="whitespace-pre-wrap text-[12px] leading-snug text-white/45">
-              {availableUpdate.body}
-            </p>
-          </div>
+          <ReleaseNotes body={availableUpdate.body} advanced={advanced} />
         ) : null}
       </SettingsGroup>
     </div>

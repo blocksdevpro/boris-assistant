@@ -44,6 +44,7 @@ impl Agent {
             .or_else(|| self.long_term.as_ref().map(|m| m.prompt_hint()));
         let mut ctx = PromptContext::new(self.base_system_prompt.clone())
             .with_workspace(self.workspace.as_ref().map(|w| w.render_block()))
+            .with_time_policy(Some(crate::prompt_profile::TIME_AWARENESS_POLICY.to_string()))
             .with_skills_policy(skills_policy)
             .with_memory_hint(memory_hint);
         if self.include_user_info {

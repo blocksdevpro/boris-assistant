@@ -344,6 +344,7 @@ impl OpenRouterClient {
         // First-byte budget spans the headers and the first body chunk.
         let first_deadline = self
             .first_byte_timeout
+            .map(|budget| scaled_first_byte(budget, &body["reasoning"]))
             .map(|budget| (tokio::time::Instant::now() + budget, budget));
         let response = match first_deadline {
             Some((deadline, budget)) => tokio::time::timeout_at(deadline, req.send())
@@ -474,6 +475,20 @@ fn should_fallback_for_error(err: &LlmError) -> bool {
     // A stalled stream was already retried; the blocking path would hang on
     // the same request for up to the full 180 s deadline.
     !matches!(err.kind(), LlmErrorKind::Provider) && !is_stream_stall(err)
+}
+
+/// Hidden or high-effort reasoning can legitimately produce no bytes for a
+/// long time on hosts that send no keepalives, so the first-byte budget is
+/// tripled (capped by the 180 s total deadline) in those cases.
+fn scaled_first_byte(budget: std::time::Duration, reasoning: &Value) -> std::time::Duration {
+    let on = reasoning["enabled"].as_bool().unwrap_or(false);
+    let hidden = reasoning["exclude"].as_bool().unwrap_or(false);
+    let high = matches!(reasoning["effort"].as_str(), Some("high" | "xhigh"));
+    if on && (hidden || high) {
+        budget * 3
+    } else {
+        budget
+    }
 }
 
 const STREAM_STALL: &str = "LLM stream stalled";
@@ -635,6 +650,19 @@ fn ingest_sse_data(assembler: &mut StreamAssembler, data: &str) -> StreamDelta {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_byte_budget_scales_for_hidden_or_high_reasoning() {
+        use serde_json::json;
+        use std::time::Duration;
+        let b = Duration::from_secs(20);
+        let f = super::scaled_first_byte;
+        assert_eq!(f(b, &json!({"effort":"low","exclude":true,"enabled":true})), b * 3);
+        assert_eq!(f(b, &json!({"effort":"high","exclude":false,"enabled":true})), b * 3);
+        assert_eq!(f(b, &json!({"effort":"low","exclude":false,"enabled":true})), b);
+        assert_eq!(f(b, &json!({"effort":"none","exclude":true,"enabled":false})), b);
+        assert_eq!(f(b, &serde_json::Value::Null), b);
+    }
+
     use super::*;
     use crate::providers::openrouter::sse::ToolDelta;
     use serde_json::json;

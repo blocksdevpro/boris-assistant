@@ -193,6 +193,10 @@ pub struct RoutingClient {
     /// Last selected route, retained only for the legacy `route()` / `model()`
     /// inspection surface. Request dispatch never reads this value.
     last_route: AtomicU8,
+    /// Model id of the previous completion; reasoning blocks from a different
+    /// model are stripped from outgoing messages (signed/encrypted blocks are
+    /// model-specific and can be rejected by another model).
+    last_model: std::sync::Mutex<Option<String>>,
 }
 
 impl RoutingClient {
@@ -207,6 +211,7 @@ impl RoutingClient {
             strong,
             model_label,
             last_route: AtomicU8::new(RouteMode::Strong as u8),
+            last_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -224,6 +229,21 @@ impl RoutingClient {
             0 => RouteMode::Fast,
             _ => RouteMode::Strong,
         }
+    }
+
+    /// Messages for a call on `client`: when its model differs from the
+    /// previous call's, drop `reasoning_details` / `reasoning` from assistant
+    /// messages. Same model leaves them untouched.
+    fn messages_for(&self, client: &dyn LlmClient, mut messages: Value) -> Value {
+        let model = client.model().to_string();
+        let prev = match self.last_model.lock() {
+            Ok(mut g) => g.replace(model.clone()),
+            Err(_) => None,
+        };
+        if prev.is_some_and(|p| p != model) {
+            strip_reasoning(&mut messages);
+        }
+        messages
     }
 
     fn client_for(&self, mode: RouteMode) -> &dyn LlmClient {
@@ -297,7 +317,22 @@ impl RoutingClient {
         tools: Value,
         opts: CompleteOptions,
     ) -> Result<Value, LlmError> {
+        let messages = self.messages_for(client, messages);
         client.complete_with_options(messages, tools, opts).await
+    }
+}
+
+fn strip_reasoning(messages: &mut Value) {
+    let Some(arr) = messages.as_array_mut() else {
+        return;
+    };
+    for m in arr {
+        if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+            if let Some(o) = m.as_object_mut() {
+                o.remove("reasoning_details");
+                o.remove("reasoning");
+            }
+        }
     }
 }
 
@@ -404,8 +439,9 @@ impl LlmClient for RoutingClient {
         let routed = Self::merge_options(inferred, opts);
         self.set_route(mode);
         let primary = self.client_for(mode);
+        let sent = self.messages_for(primary, messages.clone());
         match primary
-            .complete_stream(messages.clone(), tools.clone(), routed.clone(), on_event)
+            .complete_stream(sent, tools.clone(), routed.clone(), on_event)
             .await
         {
             Ok(v) => Ok(v),
@@ -417,6 +453,7 @@ impl LlmClient for RoutingClient {
                 if fallback.model() == primary.model() {
                     return Err(e);
                 }
+                let messages = self.messages_for(fallback, messages);
                 fallback
                     .complete_stream(messages, tools, routed, on_event)
                     .await
@@ -900,6 +937,32 @@ mod tests {
     struct RecordingClient {
         model: &'static str,
         calls: std::sync::Mutex<u32>,
+    }
+
+    #[test]
+    fn reasoning_stripped_only_when_model_changes() {
+        let mk = |m| RecordingClient {
+            model: m,
+            calls: std::sync::Mutex::new(0),
+        };
+        let client = RoutingClient::new(Box::new(mk("fast-model")), Box::new(mk("strong-model")));
+        let msgs = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "x", "reasoning_details": [{"type": "reasoning.encrypted"}], "reasoning": "t"}
+        ]);
+        let fast = client.client_for(RouteMode::Fast);
+        let strong = client.client_for(RouteMode::Strong);
+        // first call: no previous model, untouched
+        assert_eq!(client.messages_for(fast, msgs.clone()), msgs);
+        // same model again: untouched
+        assert_eq!(client.messages_for(fast, msgs.clone()), msgs);
+        // switch: stripped
+        let out = client.messages_for(strong, msgs.clone());
+        assert!(out[1].get("reasoning_details").is_none());
+        assert!(out[1].get("reasoning").is_none());
+        assert_eq!(out[1]["content"], "x");
+        // now on strong again: untouched
+        assert_eq!(client.messages_for(strong, msgs.clone()), msgs);
     }
 
     #[test]

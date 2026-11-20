@@ -688,8 +688,12 @@ fn parse_hook_settings(raw: &str) -> Vec<boris_agent::HookSpec> {
 /// Persist prefs to `config.toml` and secrets to `auth.json`.
 ///
 /// **Merge policy:** managed sections (`models`, `capability`, `audio`,
-/// `speech`, `agent`, `ui`, `logging`) are rewritten from [`AppSettings`].
-/// Unknown root tables and unknown keys *outside* those sections are preserved.
+/// `speech`, `agent`, `ui`, `logging`) are merged key by key: every key the
+/// section struct knows is set from [`AppSettings`] (or removed if the struct
+/// serializes none, so stale values never persist), while unknown keys inside
+/// a managed section and unknown root tables (`[[hooks]]`, `[workspace]`, ...)
+/// are preserved. The file is re-serialized, so hand-written comments and
+/// formatting are NOT preserved.
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
     paths::migrate_home_if_needed();
     let home = boris_home();
@@ -767,15 +771,15 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     let table = root
         .as_table_mut()
         .ok_or_else(|| PipelineError::settings("config.toml root is not a table"))?;
-    table.insert("models".into(), models_val);
-    table.insert("capability".into(), capability_val);
-    table.insert("audio".into(), audio_val);
-    table.insert("speech".into(), speech_val);
-    table.insert("agent".into(), agent_val);
-    table.insert("ui".into(), ui_val);
+    merge_section(table, "models", MODELS_KEYS, models_val);
+    merge_section(table, "capability", CAPABILITY_KEYS, capability_val);
+    merge_section(table, "audio", AUDIO_KEYS, audio_val);
+    merge_section(table, "speech", SPEECH_KEYS, speech_val);
+    merge_section(table, "agent", AGENT_KEYS, agent_val);
+    merge_section(table, "ui", UI_KEYS, ui_val);
     // Only write [logging] when the user set a filter (avoid noise on fresh installs).
     if !settings.logging_filter.trim().is_empty() {
-        table.insert("logging".into(), logging_val);
+        merge_section(table, "logging", LOGGING_KEYS, logging_val);
     }
 
     let toml_body = toml::to_string_pretty(&root)
@@ -806,6 +810,60 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         "settings saved (config.toml + auth.json)"
     );
     Ok(())
+}
+
+// Keys each managed section's struct owns. A save sets or removes exactly these
+// (a test checks they match the serialized structs); other keys are preserved.
+const MODELS_KEYS: &[&str] = &["strong", "fast", "provider", "fast_provider", "pin_provider"];
+const CAPABILITY_KEYS: &[&str] = &["preset"];
+const AUDIO_KEYS: &[&str] = &["input_device", "output_device"];
+const SPEECH_KEYS: &[&str] = &[
+    "tts_voice_id",
+    "model_residency",
+    "voice_barge_in",
+    "ignore_speaker_playback",
+    "wake_chime",
+    "progress_line",
+];
+const AGENT_KEYS: &[&str] = &[
+    "long_term_memory",
+    "trusted_auto_moderate",
+    "max_confirms_per_turn",
+    "shell_auto_allow",
+];
+const UI_KEYS: &[&str] = &[
+    "show_overlay_on_wake",
+    "overlay_caption_mode",
+    "overlay_position",
+    "overlay_scale_percent",
+    "typed_input_submit",
+    "start_engine_on_launch",
+    "start_with_windows",
+    "update_channel",
+    "onboarding_complete",
+    "show_advanced_settings",
+];
+const LOGGING_KEYS: &[&str] = &["filter"];
+
+/// Key-level merge: start from the existing `name` table, drop every known key,
+/// then write the serialized struct's keys. Unknown keys survive.
+fn merge_section(
+    root: &mut toml::map::Map<String, toml::Value>,
+    name: &str,
+    known: &[&str],
+    new: toml::Value,
+) {
+    let mut merged = match root.remove(name) {
+        Some(toml::Value::Table(t)) => t,
+        _ => toml::map::Map::new(),
+    };
+    for k in known {
+        merged.remove(*k);
+    }
+    if let toml::Value::Table(n) = new {
+        merged.extend(n);
+    }
+    root.insert(name.to_string(), toml::Value::Table(merged));
 }
 
 /// Load existing config as a TOML value for merge, or an empty table.
@@ -1438,6 +1496,98 @@ mod tests {
         assert!(!legacy_settings_path().is_file());
         assert!(dir.join("settings.json.bak").is_file());
 
+        std::env::remove_var(paths::BORIS_HOME_ENV);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn keys_of<T: Serialize>(v: &T) -> Vec<String> {
+        let mut k: Vec<String> = toml::Value::try_from(v)
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        k.sort();
+        k
+    }
+
+    fn sorted(k: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = k.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn managed_key_lists_match_section_structs() {
+        assert_eq!(keys_of(&ModelsSection::default()), sorted(MODELS_KEYS));
+        assert_eq!(keys_of(&CapabilitySection::default()), sorted(CAPABILITY_KEYS));
+        assert_eq!(keys_of(&AudioSection::default()), sorted(AUDIO_KEYS));
+        assert_eq!(keys_of(&SpeechSection::default()), sorted(SPEECH_KEYS));
+        assert_eq!(keys_of(&AgentSection::default()), sorted(AGENT_KEYS));
+        assert_eq!(keys_of(&UiSection::default()), sorted(UI_KEYS));
+        assert_eq!(keys_of(&LoggingSection::default()), sorted(LOGGING_KEYS));
+    }
+
+    #[test]
+    fn merge_section_keeps_unknown_and_removes_stale_known() {
+        let mut root = toml::map::Map::new();
+        root.insert(
+            "agent".into(),
+            toml::from_str::<toml::Value>("future = 7
+long_term_memory = false
+stale = 1
+")
+                .unwrap(),
+        );
+        let new = toml::from_str::<toml::Value>("trusted_auto_moderate = true").unwrap();
+        // `long_term_memory` is known but absent from `new` (like an Option None).
+        merge_section(&mut root, "agent", AGENT_KEYS, new);
+        let a = root["agent"].as_table().unwrap();
+        assert_eq!(a["future"].as_integer(), Some(7));
+        assert_eq!(a["stale"].as_integer(), Some(1));
+        assert!(!a.contains_key("long_term_memory"));
+        assert_eq!(a["trusted_auto_moderate"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn save_preserves_unknown_keys_workspace_and_roundtrips_agent() {
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boris-settings-merge-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(paths::BORIS_HOME_ENV, &dir);
+        fs::write(
+            config_path(),
+            "[agent]
+future_key = \"keep\"
+
+[workspace]
+projects = ['C:/code/x']
+",
+        )
+        .unwrap();
+        let mut s = AppSettings::default();
+        s.shell_auto_allow = vec!["git status".into()];
+        s.progress_line = false;
+        save_settings(&s).expect("save");
+        let text = fs::read_to_string(config_path()).unwrap();
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(v["agent"]["future_key"].as_str(), Some("keep"));
+        assert_eq!(
+            v["workspace"]["projects"][0].as_str(),
+            Some("C:/code/x"),
+            "[workspace] must survive a save"
+        );
+        let loaded = load_settings().expect("load");
+        assert_eq!(loaded.shell_auto_allow, vec!["git status".to_string()]);
+        assert!(!loaded.progress_line);
         std::env::remove_var(paths::BORIS_HOME_ENV);
         let _ = fs::remove_dir_all(&dir);
     }

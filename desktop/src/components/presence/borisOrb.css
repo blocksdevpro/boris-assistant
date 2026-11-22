@@ -43,3 +43,12 @@
   .boris-orb .boris-orb__canvas { display: none; }
   .boris-orb .boris-orb__fallback { visibility: visible; border-color: CanvasText; }
 }
+.boris-orb { transition: opacity 360ms cubic-bezier(0.32, 0.72, 0, 1); }
+.boris-orb__layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+@media (prefers-reduced-motion: reduce) {
+  .boris-orb { transition: none; }
+}

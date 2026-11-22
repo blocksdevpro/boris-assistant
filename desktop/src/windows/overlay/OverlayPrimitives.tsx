@@ -1,10 +1,10 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { animate, motion } from "framer-motion";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { animate, motion, useMotionValue } from "framer-motion";
 import { AlertCircle, Mic, Volume2 } from "lucide-react";
 import type { StatusPicture } from "@/bridge";
 import type { Caption } from "@/lib/statusPresentation";
 import { cn } from "@/lib/utils";
-import { overlayContentMotion, overlayFade } from "@/lib/overlayMotion";
+import { overlayContentMotion } from "@/lib/overlayMotion";
 import { OverlayText } from "./OverlayText";
 
 export function OverlayThoughts({
@@ -16,26 +16,41 @@ export function OverlayThoughts({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
+  // One long-lived value drives scrollTop. Re-targeting a running spring keeps
+  // its velocity, so a token stream reads as one continuous glide instead of
+  // an ease-out that restarts (and lurches) on every token.
+  const scrollTop = useMotionValue(0);
+  const scrollTarget = useRef(0);
+
+  useEffect(
+    () =>
+      scrollTop.on("change", (value) => {
+        if (scroller.current) scroller.current.scrollTop = value;
+      }),
+    [scrollTop],
+  );
 
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
 
-    let stopScroll: (() => void) | undefined;
     const followTail = () => {
       const nextOverflowing = element.scrollHeight > element.clientHeight + 1;
       setOverflowing((current) =>
         current === nextOverflowing ? current : nextOverflowing,
       );
       const target = Math.max(0, element.scrollHeight - element.clientHeight);
-      stopScroll?.();
-      if (reducedMotion) element.scrollTop = target;
-      else {
-        const animation = animate(element.scrollTop, target, {
-          ...overlayFade,
-          onUpdate: (value) => { element.scrollTop = value; },
+      if (reducedMotion) {
+        scrollTarget.current = target;
+        scrollTop.jump(target);
+        element.scrollTop = target;
+      } else if (target !== scrollTarget.current) {
+        scrollTarget.current = target;
+        animate(scrollTop, target, {
+          type: "spring",
+          visualDuration: 0.55,
+          bounce: 0,
         });
-        stopScroll = () => animation.stop();
       }
     };
 
@@ -47,9 +62,10 @@ export function OverlayThoughts({
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
-      stopScroll?.();
     };
-  }, [text, reducedMotion]);
+  }, [text, reducedMotion, scrollTop]);
+
+  useEffect(() => () => scrollTop.stop(), [scrollTop]);
 
   return (
     <motion.div

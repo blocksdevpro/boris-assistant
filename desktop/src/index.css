@@ -271,10 +271,10 @@
   overflow: visible;
 }
 .overlay-island .boris-orb {
-  transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 360ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 .overlay-island :is(input, textarea) {
-  transition: border-color 180ms ease, background-color 180ms ease, opacity 180ms ease;
+  transition: border-color 240ms ease, background-color 240ms ease, opacity 240ms ease;
 }
 @media (prefers-reduced-motion: reduce) {
   .overlay-surface *, .overlay-surface *::before, .overlay-surface *::after {
@@ -329,9 +329,10 @@
     0 0 12px color-mix(in srgb, var(--overlay-glow) 30%, transparent);
   backdrop-filter: blur(28px) saturate(1.22);
   -webkit-backdrop-filter: blur(28px) saturate(1.22);
+  /* State colour changes dissolve at the same pace as the shell morph. */
   transition:
-    border-color var(--boris-duration-normal) var(--boris-ease-standard),
-    box-shadow var(--boris-duration-slow) var(--boris-ease-spring);
+    border-color 420ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 420ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .overlay-island::before {
@@ -352,7 +353,7 @@
   content: "";
   opacity: 0;
   pointer-events: none;
-  transition: opacity 180ms var(--boris-ease-out), background-color 180ms var(--boris-ease-out);
+  transition: opacity 420ms cubic-bezier(0.32, 0.72, 0, 1), background-color 420ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .overlay-details,
@@ -382,8 +383,8 @@
     inset 0 0 0 1px rgba(255, 255, 255, 0.055),
     inset 0 1px 0 rgba(255, 255, 255, 0.035);
   transition:
-    background-color var(--boris-duration-normal) var(--boris-ease-standard),
-    box-shadow var(--boris-duration-normal) var(--boris-ease-standard);
+    background-color 360ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 360ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .overlay-caption--confirm {

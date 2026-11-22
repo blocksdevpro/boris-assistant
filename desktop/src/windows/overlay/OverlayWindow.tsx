@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, MotionConfig, animate, motion, useMotionValue, useReducedMotion, type MotionValue } from "framer-motion";
 import { CollectInputField } from "@/components/CollectInputField";
 import { OverlayArtifactCard } from "@/components/artifacts";
 import {
@@ -13,7 +13,14 @@ import {
 import { isTauriRuntime } from "@/lib/runtime";
 import { cn } from "@/lib/utils";
 import { toneFor } from "@/lib/phaseVisual";
-import { overlayContentMotion, overlayFade, overlaySpring } from "@/lib/overlayMotion";
+import {
+  OVERLAY_MIN_DWELL_MS,
+  overlayContentMotion,
+  overlayExit,
+  overlayFade,
+  overlaySpring,
+} from "@/lib/overlayMotion";
+import { usePacedValue } from "@/lib/usePacedValue";
 import { OverlayText } from "./OverlayText";
 import {
   isConfirmContext,
@@ -85,7 +92,16 @@ export function OverlayWindow({
   debugReadyCaptionMs?: number;
   debugReducedMotion?: boolean;
 } = {}) {
-  const status = useStatus();
+  const liveStatus = useStatus();
+  // The engine can hop Listening -> Transcribing -> Thinking -> Working inside
+  // a few hundred ms. Rendering every hop is what reads as jank, so each
+  // visual shape is held briefly; streamed text within a shape stays live.
+  const status = usePacedValue(
+    liveStatus,
+    OVERLAY_MIN_DWELL_MS,
+    overlayShapeKey,
+    isUrgentStatus,
+  );
   const tauriRuntime = isTauriRuntime();
   const reduceMotion = debugReducedMotion ?? Boolean(useReducedMotion());
   const [preferences, setPreferences] =
@@ -152,7 +168,15 @@ export function OverlayWindow({
   );
   const surfaceReady =
     preferencesReady &&
-    (!tauriRuntime || status.engine !== "Off" || status.phase !== "Off");
+    (!tauriRuntime || liveStatus.engine !== "Off" || liveStatus.phase !== "Off");
+  const hidden = hostHiding || !surfaceReady;
+  const islandRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const { width: islandWidth, height: islandHeight } = useIslandMorph(
+    islandRef,
+    contentRef,
+    reduceMotion || hidden,
+  );
 
   useEffect(() => {
     if (!tauriRuntime) return;
@@ -222,7 +246,7 @@ export function OverlayWindow({
   // Any newer snapshot invalidates the host's generation-guarded hide timer.
   useEffect(() => {
     setHostHiding(false);
-  }, [status]);
+  }, [liveStatus]);
 
   // The host hides the window shortly after this. Collapsing first makes the
   // disappearance feel deliberate and fixes the former 9s + 12s timer chain.
@@ -282,67 +306,79 @@ export function OverlayWindow({
           } as CSSProperties}
         >
           <motion.div
+            ref={islandRef}
             data-tauri-drag-region
             data-phase={status.phase.toLowerCase()}
             data-state={visualState}
-            layout={!reduceMotion}
-            className={cn(
-              "overlay-island overlay-island--premium relative flex select-none overflow-hidden",
-              overlayIslandClass({
-                orbOnly,
-                status,
-                stageMode,
-                displayCard,
-              }),
-            )}
-            style={
-              {
+            className="overlay-island overlay-island--premium relative flex select-none items-start justify-start overflow-hidden"
+            style={{
+              ...({
                 ["--overlay-accent" as string]: tone.accent,
                 ["--overlay-glow" as string]: tone.glow,
                 transformOrigin: "50% 0%",
-              } as CSSProperties
-            }
-            initial={reduceMotion ? false : { opacity: 0, scale: 0.94, y: -8 }}
+              } as CSSProperties),
+              width: islandWidth,
+              height: islandHeight,
+            }}
+            initial={reduceMotion ? false : { opacity: 0, scale: 0.92, y: -10, filter: "blur(6px)" }}
             animate={{
-              opacity: hostHiding || !surfaceReady ? 0 : 1,
-              scale: (hostHiding || !surfaceReady) && !reduceMotion ? 0.96 : 1,
-              y: (hostHiding || !surfaceReady) && !reduceMotion ? -6 : 0,
+              opacity: hidden ? 0 : 1,
+              scale: hidden && !reduceMotion ? 0.94 : 1,
+              y: hidden && !reduceMotion ? -6 : 0,
+              filter: hidden && !reduceMotion ? "blur(6px)" : "blur(0px)",
               borderRadius: orbOnly ? 24 : 20,
+              transitionEnd: hidden ? undefined : { filter: "none" },
             }}
             transition={
               reduceMotion
                 ? { duration: 0 }
-                : {
-                  default: hostHiding ? overlayFade : overlaySpring,
-                  opacity: overlayFade,
-                  borderRadius: overlaySpring,
-                  layout: overlaySpring,
-                }
+                : hostHiding
+                  ? overlayExit
+                  : {
+                    default: overlaySpring,
+                    opacity: overlayFade,
+                    filter: overlayFade,
+                  }
             }
-            aria-hidden={!surfaceReady || hostHiding ? true : undefined}
-            inert={!surfaceReady || hostHiding}
+            aria-hidden={hidden ? true : undefined}
+            inert={hidden}
           >
-            <motion.div
-              layout={reduceMotion ? false : "position"}
+            {/* Content lays out at its final size immediately; the shell
+                morphs its real width/height toward it (no transform scale, so
+                border, shadow, blur and text never stretch) and clips while
+                it travels. Content stays pinned to the shell's leading edge. */}
+            <div
+              ref={contentRef}
+              data-tauri-drag-region
+              className={cn(
+                "overlay-island__content relative flex shrink-0",
+                overlayContentClass({
+                  orbOnly,
+                  status,
+                  stageMode,
+                  displayCard,
+                }),
+              )}
+            >
+            <div
               data-tauri-drag-region
               className={cn(
                 "overlay-details flex min-h-0 w-full min-w-0 flex-col",
                 (displayCard || overlayInputUsesCard(status)) && "h-full",
               )}
             >
-              <motion.div
-                layout={reduceMotion ? false : "position"}
+              <div
                 data-tauri-drag-region
                 className="overlay-status-row flex min-h-8 items-center gap-2"
               >
-                <motion.div layout={reduceMotion ? false : "position"} className="flex shrink-0 items-center">
+                <div className="flex shrink-0 items-center">
                   <BorisOrb
                     state={orbStateFromStatus(status)}
                     active={surfaceReady && !hostHiding}
                     accent={tone.accent}
                     reducedMotion={reduceMotion}
                   />
-                </motion.div>
+                </div>
 
                 <div
                   data-tauri-drag-region
@@ -352,13 +388,12 @@ export function OverlayWindow({
                     data-tauri-drag-region
                     className="relative flex min-w-0 flex-1 items-baseline gap-2"
                   >
-                    <motion.span
-                      layout={reduceMotion ? false : "position"}
+                    <span
                       data-tauri-drag-region
                       className="overlay-status-primary shrink-0 truncate text-[13px] font-semibold leading-[1.15] tracking-[-0.025em] text-white/95"
                     >
                       <OverlayText text={orbOnly ? "Ready" : primary} />
-                    </motion.span>
+                    </span>
                     <AnimatePresence mode="popLayout" initial={false}>
                       {!orbOnly && secondary ? (
                         <motion.span
@@ -384,20 +419,21 @@ export function OverlayWindow({
                     />
                   ) : null}
                 </AnimatePresence>
-              </motion.div>
+              </div>
 
-              {/* Exiting cards leave layout immediately so the island spring
-                  measures the compact target while their fade finishes. */}
+              {/* Exiting content leaves layout immediately so the shell
+                  springs toward the compact size while the fade finishes
+                  under its clip. */}
               <AnimatePresence mode="popLayout" initial={false}>
                 {status.input ? (
-                  <motion.div key={`input-${status.input.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                  <motion.div key={`input-${status.input.id}`} className="relative flex min-h-0 flex-1 flex-col" {...overlayContentMotion(reduceMotion)}>
                     <CollectInputField
                       input={status.input}
                       compact
                     />
                   </motion.div>
                 ) : displayCard && status.artifact ? (
-                  <motion.div key={`card-${status.artifact.id}`} className="relative flex min-h-0 flex-1 flex-col" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                  <motion.div key={`card-${status.artifact.id}`} className="relative flex min-h-0 flex-1 flex-col" {...overlayContentMotion(reduceMotion)}>
                     <OverlayArtifactCard
                       peek={status.artifact}
                       fallback={status.fallback_report}
@@ -406,7 +442,6 @@ export function OverlayWindow({
                 ) : !orbOnly && caption ? (
                   <motion.div
                     key={`caption-${status.turn}-${caption.kind}`}
-                    layout={reduceMotion ? false : "position"}
                     data-tauri-drag-region
                     className={cn(
                       "overlay-caption mt-2 min-w-0 max-w-[324px] overflow-hidden rounded-[12px] px-2.5 py-2",
@@ -426,7 +461,7 @@ export function OverlayWindow({
 
               <AnimatePresence mode="popLayout" initial={false}>
                 {!orbOnly && displayThought ? (
-                  <motion.div key={`thought-${status.turn}`} className="relative min-w-0" layout={reduceMotion ? false : "position"} {...overlayContentMotion(reduceMotion)}>
+                  <motion.div key={`thought-${status.turn}`} className="relative min-w-0" {...overlayContentMotion(reduceMotion)}>
                     <OverlayThoughts
                       text={displayThought}
                       reducedMotion={reduceMotion}
@@ -434,7 +469,8 @@ export function OverlayWindow({
                   </motion.div>
                 ) : null}
               </AnimatePresence>
-            </motion.div>
+            </div>
+            </div>
           </motion.div>
           <p
             className="sr-only"
@@ -455,7 +491,7 @@ export function OverlayWindow({
   );
 }
 
-function overlayIslandClass({
+function overlayContentClass({
   orbOnly,
   status,
   stageMode,
@@ -466,17 +502,115 @@ function overlayIslandClass({
   stageMode: OverlayStageMode;
   displayCard: boolean;
 }): string {
+  // Sizes never depend on the shell (it is animating toward them), and are
+  // 2px under the former island box so the 1px border lands on the same
+  // outer geometry.
   if (orbOnly) return "w-max flex-col px-3 py-2";
   if (overlayInputUsesCard(status) || (stageMode === "card" && displayCard)) {
-    return "h-[264px] max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3";
+    return "h-[262px] max-h-[298px] w-[358px] flex-col overflow-hidden px-3.5 py-3";
   }
   if (status.input) {
-    return "max-h-full w-full max-w-[360px] flex-col overflow-hidden px-3.5 py-3";
+    return "max-h-[298px] w-[358px] flex-col overflow-hidden px-3.5 py-3";
   }
   if (stageMode === "thought") {
-    return "max-h-full w-max min-w-[228px] max-w-[356px] flex-col overflow-hidden px-3.5 py-3";
+    return "max-h-[298px] w-max min-w-[226px] max-w-[354px] flex-col overflow-hidden px-3.5 py-3";
   }
-  return "w-max min-w-[228px] max-w-[356px] flex-col px-3.5 py-3";
+  return "w-max min-w-[226px] max-w-[354px] flex-col px-3.5 py-3";
+}
+
+/** What the overlay *looks like* — changes here are paced; text inside is not. */
+function overlayShapeKey(status: StatusPicture): string {
+  const tone = toneFor(status.phase, status.engine);
+  const { primary } = pickOverlayPresence(status, tone.label, tone.hint);
+  return [
+    status.engine,
+    status.phase,
+    primary,
+    pickCaption(status)?.kind ?? "-",
+    status.input?.id ?? "-",
+    shouldShowOverlayCard(status) ? (status.artifact?.id ?? "card") : "-",
+    status.listen_hint ?? "-",
+    orbStateFromStatus(status),
+  ].join("|");
+}
+
+/** States the user must act on are never held back. */
+function isUrgentStatus(status: StatusPicture): boolean {
+  return (
+    status.engine === "Fault" ||
+    Boolean(status.input) ||
+    isConfirmContext(status)
+  );
+}
+
+/**
+ * Drive the island shell's real width/height toward its content's natural
+ * size with one interruptible spring. Retargeting mid-flight keeps velocity,
+ * so a burst of size changes reads as one continuous morph.
+ */
+function useIslandMorph(
+  island: RefObject<HTMLDivElement | null>,
+  content: RefObject<HTMLDivElement | null>,
+  instant: boolean,
+): { width: MotionValue<number>; height: MotionValue<number> } {
+  const width = useMotionValue(0);
+  const height = useMotionValue(0);
+  const target = useRef<{ w: number; h: number } | null>(null);
+  const instantRef = useRef(instant);
+  instantRef.current = instant;
+
+  useLayoutEffect(() => {
+    const shell = island.current;
+    const inner = content.current;
+    if (!shell || !inner) return;
+
+    const measure = () => {
+      const box = window.getComputedStyle(inner);
+      const frame = window.getComputedStyle(shell);
+      const w =
+        parseFloat(box.width) +
+        parseFloat(frame.borderLeftWidth) +
+        parseFloat(frame.borderRightWidth);
+      const h =
+        parseFloat(box.height) +
+        parseFloat(frame.borderTopWidth) +
+        parseFloat(frame.borderBottomWidth);
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
+      const first = target.current === null;
+      if (!first && target.current!.w === w && target.current!.h === h) return;
+      target.current = { w, h };
+      if (first || instantRef.current) {
+        width.jump(w);
+        height.jump(h);
+        // Motion values render on the next frame; paint the first size now
+        // so the island never shows a collapsed frame.
+        shell.style.width = `${w}px`;
+        shell.style.height = `${h}px`;
+        return;
+      }
+      animate(width, w, overlaySpring);
+      animate(height, h, overlaySpring);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(inner);
+    return () => {
+      observer.disconnect();
+      width.stop();
+      height.stop();
+    };
+  }, [island, content, width, height]);
+
+  // Hidden or reduced motion: settle immediately so the next reveal starts
+  // at the right size instead of morphing in from a stale one.
+  useEffect(() => {
+    if (!instant || !target.current) return;
+    width.jump(target.current.w);
+    height.jump(target.current.h);
+  }, [instant, width, height]);
+
+  return { width, height };
 }
 
 function filterCaption(

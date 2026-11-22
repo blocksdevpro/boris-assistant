@@ -1,5 +1,5 @@
 import { Component, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ThinkingOrb } from "thinking-orbs";
 import { cn } from "@/lib/utils";
 import { isWorkingOrbState, ORB_PRESENTATIONS, type BorisOrbState } from "./orbState";
@@ -22,6 +22,9 @@ class OrbBoundary extends Component<{ children: ReactNode; onFailure: () => void
   componentDidCatch() { this.props.onFailure(); }
   render() { return this.state.failed ? null : this.props.children; }
 }
+
+const ORB_ENTER = { duration: 0.46, ease: [0.32, 0.72, 0, 1] } as const;
+const ORB_EXIT = { duration: 0.34, ease: [0.32, 0.72, 0, 1] } as const;
 
 /** Decorative canvas plus a persistent DOM fallback; surrounding UI owns live announcements. */
 export function BorisOrb({
@@ -90,7 +93,8 @@ export function BorisOrb({
 
   const visualState = isWorkingOrbState(state) && isWorkingOrbState(stableState) ? stableState : state;
   const visual = ORB_PRESENTATIONS[visualState];
-  const freeze = paused || !active || !visible || !pageVisible || reducedMotion || prefersReducedMotion || Boolean(visual.paused);
+  const still = reducedMotion || prefersReducedMotion;
+  const freeze = paused || !active || !visible || !pageVisible || still || Boolean(visual.paused);
 
   return (
     <span
@@ -107,15 +111,31 @@ export function BorisOrb({
       <span className="boris-orb__fallback" aria-hidden="true" />
       {!failed ? (
         <OrbBoundary onFailure={() => setFailed(true)}>
-          <ThinkingOrb
-            state={visual.animation}
-            size={size === "sm" || size === "md" ? 20 : 64}
-            speed={visual.speed}
-            theme="dark"
-            paused={freeze}
-            aria-hidden="true"
-            className="boris-orb__canvas"
-          />
+          {/* The canvas cuts between animations and phase-jumps when its
+              speed changes, so each look gets its own layer and the two
+              dissolve into each other like Siri's orb changing mood. */}
+          <AnimatePresence initial={false}>
+            <motion.span
+              key={`${visual.animation}:${visual.speed}`}
+              className="boris-orb__layer"
+              initial={still ? false : { opacity: 0, scale: 0.72, filter: "blur(1.5px)" }}
+              animate={{ opacity: 1, scale: 1, filter: "blur(0px)", transitionEnd: { filter: "none" } }}
+              exit={still
+                ? { opacity: 0, transition: { duration: 0 } }
+                : { opacity: 0, scale: 1.18, filter: "blur(1.5px)", transition: ORB_EXIT }}
+              transition={still ? { duration: 0 } : ORB_ENTER}
+            >
+              <ThinkingOrb
+                state={visual.animation}
+                size={size === "sm" || size === "md" ? 20 : 64}
+                speed={visual.speed}
+                theme="dark"
+                paused={freeze}
+                aria-hidden="true"
+                className="boris-orb__canvas"
+              />
+            </motion.span>
+          </AnimatePresence>
         </OrbBoundary>
       ) : null}
     </span>
